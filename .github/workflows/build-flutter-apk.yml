@@ -1,0 +1,106 @@
+name: Build Flutter APK
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'lib/**'
+      - 'rust/**'
+      - 'pubspec.yaml'
+      - '.github/workflows/build-flutter-apk.yml'
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ── Rust yadrosini Android uchun kompilyatsiya qilish ──────
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "rust -> target"
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - name: Build rust_core for all Android ABIs
+        working-directory: rust
+        run: |
+          cargo ndk \
+            -t arm64-v8a \
+            -t armeabi-v7a \
+            -t x86_64 \
+            -o ../jniLibs-out \
+            build --release
+
+      # ── Flutter ─────────────────────────────────────────────────
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Generate android folder (agar yo'q bo'lsa)
+        run: |
+          if [ ! -f "android/app/build.gradle" ]; then
+            flutter create --platforms=android --org uz.fulutter .
+          fi
+
+      # Kompilyatsiya qilingan .so fayllarni Android loyihasiga joylash —
+      # flutter APK build vaqtida ularni avtomatik jniLibs sifatida qo'shadi.
+      - name: Copy librust_core.so into jniLibs
+        run: |
+          mkdir -p android/app/src/main/jniLibs/arm64-v8a
+          mkdir -p android/app/src/main/jniLibs/armeabi-v7a
+          mkdir -p android/app/src/main/jniLibs/x86_64
+          cp jniLibs-out/arm64-v8a/librust_core.so android/app/src/main/jniLibs/arm64-v8a/
+          cp jniLibs-out/armeabi-v7a/librust_core.so android/app/src/main/jniLibs/armeabi-v7a/
+          cp jniLibs-out/x86_64/librust_core.so android/app/src/main/jniLibs/x86_64/
+          echo "✅ Rust .so fayllar joylashtirildi:"
+          find android/app/src/main/jniLibs -name "*.so"
+
+      - name: INTERNET ruxsatini qo'shish (agar yo'q bo'lsa)
+        run: |
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          if ! grep -q "android.permission.INTERNET" "$MANIFEST"; then
+            sed -i '/<manifest /a\    <uses-permission android:name="android.permission.INTERNET" />' "$MANIFEST"
+            echo "✅ INTERNET ruxsati qo'shildi"
+          else
+            echo "✅ INTERNET ruxsati allaqachon bor"
+          fi
+
+      - name: Kotlin va compileSdk versiyalarini eng yangisiga moslash
+        run: |
+          if [ -f "android/build.gradle" ]; then
+            sed -i "s/ext.kotlin_version = '[0-9.]*'/ext.kotlin_version = '1.9.24'/" android/build.gradle || true
+          fi
+          if [ -f "android/app/build.gradle" ]; then
+            sed -i "s/compileSdkVersion flutter.compileSdkVersion/compileSdkVersion 35/" android/app/build.gradle || true
+            sed -i "s/compileSdk = flutter.compileSdkVersion/compileSdk = 35/" android/app/build.gradle || true
+          fi
+          echo "✅ Gradle sozlamalari yangilandi"
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Build APK (Release)
+        run: flutter build apk --release
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fulutter-app-release
+          path: build/app/outputs/flutter-apk/app-release.apk
+          retention-days: 30
+
+      - name: Done
+        run: echo "✅ APK (Rust yadrosi bilan) tayyor! Artifacts bo'limidan yuklab ol."

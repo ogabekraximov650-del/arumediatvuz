@@ -1,0 +1,63 @@
+name: Deploy Cloudflare Worker (Rust WASM)
+
+on:
+  # Faqat qo'lda ishga tushadi — GitHub Actions sahifasida "Run workflow" tugmasi
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # MUHIM: "Environment secrets" ga kirish uchun job aynan shu
+    # environment nomini e'lon qilishi shart — aks holda secrets bo'sh bo'ladi.
+    environment: secret
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "worker -> target"
+
+      - name: Install worker-build
+        run: cargo install worker-build --locked
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install wrangler
+        run: npm install -g wrangler
+
+      - name: Build Rust Worker (→ WASM)
+        working-directory: worker
+        run: worker-build --release
+
+      - name: Upload Worker Secrets
+        working-directory: worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          echo "${{ secrets.TURSO_URL }}" | wrangler secret put TURSO_URL --env production
+          echo "${{ secrets.TURSO_TOKEN }}" | wrangler secret put TURSO_TOKEN --env production
+          echo "${{ secrets.B2_KEY_ID }}" | wrangler secret put B2_KEY_ID --env production
+          echo "${{ secrets.B2_APPLICATION_KEY }}" | wrangler secret put B2_APPLICATION_KEY --env production
+
+      - name: Deploy to Cloudflare Workers
+        working-directory: worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: wrangler deploy --env production
+
+      - name: Done
+        run: echo "✅ Rust WASM Worker deployed!"
