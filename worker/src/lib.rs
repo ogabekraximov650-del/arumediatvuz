@@ -306,8 +306,22 @@ fn season_fields(b: &Value) -> (i64, String, String, String, String, String, Str
 
 // ── Router ────────────────────────────────────────────────────
 
+// MUHIM: `#[event(fetch)]` makrosi `respond_with_errors`siz har qanday
+// Err'ni sababidan qat'iy nazar oddiy "INTERNAL SERVER ERROR" matniga
+// aylantiradi (CORS'siz, JSON'siz) — shuning uchun B2/Turso'dagi aniq
+// xato xabarlari (masalan "B2 bucket topilmadi") Flutter'ga yetib bormay,
+// foydalanuvchi hech narsa tushunolmaydigan umumiy xabar ko'rar edi.
+// Shu yerda xatoni o'zimiz ushlab, haqiqiy sababini CORS bilan JSON
+// qilib qaytaramiz.
 #[event(fetch)]
-async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
+async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
+    match route(req, env, ctx).await {
+        Ok(resp) => Ok(resp),
+        Err(e) => err500(&e.to_string()),
+    }
+}
+
+async fn route(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let url = req.url()?;
     let path = url.path();
     let method = req.method();
