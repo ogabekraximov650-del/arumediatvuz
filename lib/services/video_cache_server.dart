@@ -232,6 +232,23 @@ class _CacheEngine {
 
   static const int chunkSize = 1024 * 1024;
 
+  // MUHIM (real qurilmada aniqlangan tuzatish): worker'ga qilinadigan
+  // BARCHA so'rovlar (bo'lak yuklash, meta-probe) SHU BITTA doimiy
+  // HttpClient orqali amalga oshiriladi va u HECH QACHON yopilmaydi.
+  // Avval har bir bo'lak uchun ALOHIDA "HttpClient()" yaratilib, ishdan
+  // so'ng "close(force: true)" bilan majburan yopilar edi — bu esa har
+  // bir bo'lak uchun QAYTA-QAYTA yangi TCP+TLS handshake talab qilardi.
+  // Tez sinov muhitida bu sezilarsiz (~0.6s) edi, lekin haqiqiy mobil
+  // tarmoqda handshake o'zi soniyalab vaqt olib, ketma-ket bir nechta
+  // bo'lakni 15 soniyalik ctrl.initialize() oynasi ichida yuklab
+  // ulgurmaslikka (va shu bilan "faqat qayta bosganda bittadan bo'lak
+  // yuklanish" holatiga) sabab bo'lgan. Bitta HttpClient'ni qayta
+  // ishlatish (Dart standart holatda ulanishlarni keep-alive bilan
+  // saqlaydi) bu handshake xarajatini deyarli yo'q qiladi.
+  final HttpClient _sharedClient = HttpClient()
+    ..idleTimeout = const Duration(seconds: 60)
+    ..maxConnectionsPerHost = 6;
+
   final Map<String, Future<Uint8List>> _inFlightChunks = {};
   final Map<String, Future<_CacheMeta>> _inFlightMeta = {};
   int _activeRequests = 0;
@@ -344,6 +361,7 @@ class _CacheEngine {
         final chunkBytes = await _readOrFetchChunk(
             key, dir, originalUrl, chunkIndex, chunkStart, chunkEnd, expectedLen);
         _log('Bo\'lak #$chunkIndex tayyor (${chunkBytes.length} bayt)');
+        _prefetchAhead(key, dir, originalUrl, chunkIndex + 1, total);
 
         final sliceStart = cursor - chunkStart;
         final sliceEndExclusive =
@@ -406,9 +424,8 @@ class _CacheEngine {
     }
 
     _log('Bo\'lak #$index worker\'dan yuklanmoqda ($start-$end)...');
-    final client = HttpClient();
     try {
-      final req = await client
+      final req = await _sharedClient
           .getUrl(Uri.parse(url))
           .timeout(const Duration(seconds: 10));
       req.headers.set(HttpHeaders.rangeHeader, 'bytes=$start-$end');
@@ -485,8 +502,46 @@ class _CacheEngine {
     } catch (e) {
       _log('XATO: bo\'lak #$index yuklanmadi — $e');
       rethrow;
-    } finally {
-      client.close(force: true);
+    }
+    // MUHIM: bu yerda client.close() ATAYLAB chaqirilmaydi — _sharedClient
+    // butun server umri davomida ochiq qoladi, shunda keyingi bo'lak
+    // so'rovlari mavjud (keep-alive) ulanishni qayta ishlatadi.
+  }
+
+  // Joriy bo'lak muvaffaqiyatli olingandan keyin, undan KEYINGI (hali
+  // diskda yo'q va hali yuklanmayotgan) bir nechta bo'lakni FON'DA,
+  // hech kimni kutmasdan oldindan yuklab qo'yadi. Shu bilan pleyer
+  // ularga yetib kelguncha ular allaqachon diskda tayyor turadi — endi
+  // har bir bo'lak uchun alohida "qayta bos" kerak bo'lmaydi.
+  void _prefetchAhead(
+      String key, Directory dir, String url, int fromIndex, int total) {
+    const lookahead = 3;
+    for (var i = fromIndex; i < fromIndex + lookahead; i++) {
+      final chunkStart = i * chunkSize;
+      if (chunkStart >= total) break;
+      final chunkEndMax = chunkStart + chunkSize - 1;
+      final chunkEnd = chunkEndMax < total - 1 ? chunkEndMax : total - 1;
+      final expectedLen = chunkEnd - chunkStart + 1;
+      final flightKey = '$key#$i';
+      if (_inFlightChunks.containsKey(flightKey)) continue;
+      final finalFile = File('${dir.path}/${_chunkName(i)}');
+      finalFile.exists().then((exists) async {
+        if (exists) {
+          final onDisk = await finalFile.readAsBytes();
+          if (onDisk.length == expectedLen) return;
+        }
+        if (_inFlightChunks.containsKey(flightKey)) return;
+        _log('Bo\'lak #$i oldindan (fon\'da) yuklab qo\'yilyapti...');
+        final future = _fetchAndStoreChunk(dir, url, i, chunkStart, chunkEnd)
+            .whenComplete(() => _inFlightChunks.remove(flightKey));
+        _inFlightChunks[flightKey] = future;
+        try {
+          await future;
+        } catch (_) {
+          // Fon'dagi oldindan-yuklash xatosi jim yutiladi — kerak
+          // bo'lganda asosiy so'rov o'zi qayta urinib ko'radi.
+        }
+      });
     }
   }
 
@@ -530,6 +585,15 @@ class _CacheEngine {
       }
     }
 
+    // MUHIM: bu yerda ATAYLAB _sharedClient EMAS, ALOHIDA, bir martalik
+    // HttpClient ishlatiladi — sabab pastdagi "bytes=0-0" so'rovi javob
+    // tanasini o'qimasdan (drain qilmasdan) finally blokida MAJBURAN
+    // yopib tashlanadi (agar manba Range'ni e'tiborsiz qoldirib butun
+    // faylni yubora boshlasa, ulanishni to'xtatishning yagona yo'li).
+    // Bu ulanishni _sharedClient orqali qilsak, forced-close BARCHA
+    // boshqa parallel bo'lak yuklashlarini ham to'xtatib qo'yar edi.
+    // Meta faqat video boshida (bir marta, keyin meta.json'dan) so'ralgani
+    // uchun bu yerdagi qo'shimcha TLS handshake xarajati arzimas.
     final client = HttpClient();
     try {
       int size = -1;
