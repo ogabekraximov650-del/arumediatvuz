@@ -1,0 +1,11 @@
+secrets.toml
+*.secrets.toml
+.env
+.env.*
+*.pem
+*.key
+build/
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+node_modules/

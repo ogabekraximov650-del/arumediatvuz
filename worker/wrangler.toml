@@ -1,0 +1,17 @@
+name = "aniraxuzapp"
+main = "build/worker/shim.mjs"
+compatibility_date = "2024-01-01"
+workers_dev = true
+
+[build]
+command = "cargo install -q worker-build && worker-build --release"
+
+[env.production]
+name = "aniraxuzapp"
+workers_dev = true
+
+# Secrets (GitHub Actions orqali o'rnatiladi):
+# wrangler secret put TURSO_URL --env production
+# wrangler secret put TURSO_TOKEN --env production
+# wrangler secret put B2_KEY_ID --env production
+# wrangler secret put B2_APPLICATION_KEY --env production

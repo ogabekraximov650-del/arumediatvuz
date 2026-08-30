@@ -1,0 +1,1114 @@
+import 'dart:async';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
+import 'dart:convert';
+import 'package:cached_network_image/cached_network_image.dart';
+import 'package:video_player/video_player.dart';
+import '../widgets/glass.dart';
+import '../theme/app_background.dart';
+
+const String _apiBase = 'https://aniraxuzapp.ogabekraximov650.workers.dev';
+
+class VideoPlayerScreen extends StatefulWidget {
+  final Map<String, dynamic> season;
+  const VideoPlayerScreen({super.key, required this.season});
+
+  @override
+  State<VideoPlayerScreen> createState() => _VideoPlayerScreenState();
+}
+
+class _VideoPlayerScreenState extends State<VideoPlayerScreen>
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
+  late final TabController _tabCtrl;
+
+  List<Map<String, dynamic>> _episodes = [];
+  List<Map<String, dynamic>> _seasons = [];
+  bool _loadingEps = true;
+  bool _loadingSeasons = true;
+
+  // ── BITTA umumiy player ──────────────────────────────────────
+  VideoPlayerController? _controller;
+  Map<String, dynamic>? _currentEp;
+  String? _selectedQuality;
+  bool _playerLoading = false;
+  int _playToken = 0;
+  bool _disposingOld = false;
+
+  bool _isFullscreen = false;
+  bool _showControls = true;
+  Timer? _hideTimer;
+
+  DateTime _lastPlayPauseTap = DateTime.fromMillisecondsSinceEpoch(0);
+
+  // ── Ikki marta bosib sek qilish (double-tap seek) ─────────────
+  int _leftSeekAccum = 0;
+  int _rightSeekAccum = 0;
+  bool _showLeftSeek = false;
+  bool _showRightSeek = false;
+  Timer? _leftSeekHideTimer;
+  Timer? _rightSeekHideTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _tabCtrl = TabController(length: 3, vsync: this);
+    _loadEpisodes();
+    _loadSeasons();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _tabCtrl.dispose();
+    _hideTimer?.cancel();
+    _leftSeekHideTimer?.cancel();
+    _rightSeekHideTimer?.cancel();
+    _restoreSystemUI();
+    _controller?.pause();
+    _controller?.dispose();
+    _controller = null;
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Ilova fonga ketganda video ijrosini to'xtatamiz — orqa fonda
+    // bir nechta video parallel ijro bo'lib qolishining oldini oladi.
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive) {
+      _controller?.pause();
+    }
+  }
+
+  // ── Ma'lumot yuklash ──────────────────────────────────────────
+  Future<void> _loadEpisodes() async {
+    final animeId = widget.season['anime_id']?.toString() ?? '';
+    final seasonId = widget.season['season_id']?.toString() ?? '';
+    try {
+      final res = await http
+          .get(Uri.parse('$_apiBase/api/epizods/$animeId/$seasonId'))
+          .timeout(const Duration(seconds: 10));
+      if (res.statusCode == 200 && mounted) {
+        setState(() {
+          _episodes = (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
+          _loadingEps = false;
+        });
+      } else {
+        if (mounted) setState(() => _loadingEps = false);
+      }
+    } catch (_) {
+      if (mounted) setState(() => _loadingEps = false);
+    }
+  }
+
+  Future<void> _loadSeasons() async {
+    final animeId = widget.season['anime_id']?.toString() ?? '';
+    try {
+      final res = await http
+          .get(Uri.parse('$_apiBase/api/seasons/anime/$animeId'))
+          .timeout(const Duration(seconds: 10));
+      if (res.statusCode == 200 && mounted) {
+        setState(() {
+          _seasons = (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
+          _loadingSeasons = false;
+        });
+      } else {
+        if (mounted) setState(() => _loadingSeasons = false);
+      }
+    } catch (_) {
+      if (mounted) setState(() => _loadingSeasons = false);
+    }
+  }
+
+  // ── Player yordamchilari ───────────────────────────────────────
+  String _getUrl(Map<String, dynamic> ep) {
+    if (_selectedQuality != null) {
+      final u = (ep['url_$_selectedQuality'] as String?) ?? '';
+      if (u.isNotEmpty) return u;
+    }
+    for (final k in ['url_1080p', 'url_720p', 'url_480p', 'url_360p']) {
+      final v = (ep[k] as String?) ?? '';
+      if (v.isNotEmpty) return v;
+    }
+    return '';
+  }
+
+  String _qualityLabel(Map<String, dynamic> ep) {
+    if (_selectedQuality != null) return _selectedQuality!;
+    for (final k in ['1080p', '720p', '480p', '360p']) {
+      if (((ep['url_$k'] as String?) ?? '').isNotEmpty) return k;
+    }
+    return 'HQ';
+  }
+
+  List<String> _availableQualities(Map<String, dynamic> ep) {
+    final q = <String>[];
+    for (final k in ['1080p', '720p', '480p', '360p']) {
+      if (((ep['url_$k'] as String?) ?? '').isNotEmpty) q.add(k);
+    }
+    return q;
+  }
+
+  // MUHIM: bir vaqtning o'zida faqat BITTA controller yashaydi.
+  // Eskisi to'liq to'xtatilib (pause) va dispose qilinib bo'lgandan
+  // keyingina yangisi yaratiladi — orqa fonda bir nechta video
+  // parallel ijro bo'lib qolishining oldini oladi.
+  Future<void> _playEpisode(Map<String, dynamic> ep) async {
+    final url = _getUrl(ep);
+    if (url.isEmpty) return;
+
+    final myToken = ++_playToken;
+    setState(() {
+      _currentEp = ep;
+      _showControls = true;
+      _playerLoading = true;
+    });
+
+    final old = _controller;
+    _controller = null;
+    if (old != null) {
+      await old.pause();
+      await old.dispose();
+    }
+
+    if (!mounted || myToken != _playToken) return;
+
+    final ctrl = VideoPlayerController.networkUrl(Uri.parse(url));
+
+    try {
+      await ctrl.initialize();
+    } catch (_) {
+      if (mounted && myToken == _playToken) {
+        setState(() => _playerLoading = false);
+      }
+      await ctrl.dispose();
+      return;
+    }
+
+    if (!mounted || myToken != _playToken) {
+      await ctrl.dispose();
+      return;
+    }
+
+    ctrl.setLooping(false);
+    await ctrl.play();
+    if (!mounted || myToken != _playToken) {
+      await ctrl.dispose();
+      return;
+    }
+    setState(() {
+      _controller = ctrl;
+      _playerLoading = false;
+    });
+    _scheduleHide();
+  }
+
+  void _scheduleHide() {
+    _hideTimer?.cancel();
+    _hideTimer = Timer(const Duration(seconds: 3), () {
+      if (mounted) setState(() => _showControls = false);
+    });
+  }
+
+  void _onTapVideo() {
+    setState(() => _showControls = !_showControls);
+    if (_showControls) _scheduleHide();
+  }
+
+  // Ketma-ket tez-tez bosishda play/pause "qotib qolishi"ning oldini
+  // oladi: 280ms ichida takroriy taplarni e'tiborsiz qoldiradi.
+  void _togglePlayPause() {
+    final ctrl = _controller;
+    if (ctrl == null || !ctrl.value.isInitialized) return;
+    final now = DateTime.now();
+    if (now.difference(_lastPlayPauseTap).inMilliseconds < 280) return;
+    _lastPlayPauseTap = now;
+
+    if (ctrl.value.isPlaying) {
+      ctrl.pause();
+    } else {
+      ctrl.play();
+    }
+    _scheduleHide();
+  }
+
+  void _seekRelative(int seconds) {
+    final ctrl = _controller;
+    if (ctrl == null || !ctrl.value.isInitialized) return;
+    final pos = ctrl.value.position;
+    final dur = ctrl.value.duration;
+    var t = pos + Duration(seconds: seconds);
+    if (t < Duration.zero) t = Duration.zero;
+    if (dur > Duration.zero && t > dur) t = dur;
+    ctrl.seekTo(t);
+    HapticFeedback.lightImpact();
+  }
+
+  // Ekranning chap/o'ng yarmiga ikki marta bosilganda 5 sonyaga
+  // orqaga/oldinga suradi. Tez-tez bosilsa jamlanadi (+5, +10, +15...)
+  // va 5 soniyadan keyin ko'rsatkich avtomatik yo'qoladi.
+  void _handleDoubleTapSeek(bool isLeft) {
+    if (_currentEp == null) return;
+    final ctrl = _controller;
+    if (ctrl == null || !ctrl.value.isInitialized) return;
+
+    setState(() {
+      if (isLeft) {
+        _leftSeekAccum += 5;
+        _showLeftSeek = true;
+      } else {
+        _rightSeekAccum += 5;
+        _showRightSeek = true;
+      }
+    });
+
+    _seekRelative(isLeft ? -5 : 5);
+    _scheduleHide();
+
+    if (isLeft) {
+      _leftSeekHideTimer?.cancel();
+      _leftSeekHideTimer = Timer(const Duration(seconds: 5), () {
+        if (mounted) {
+          setState(() {
+            _showLeftSeek = false;
+            _leftSeekAccum = 0;
+          });
+        }
+      });
+    } else {
+      _rightSeekHideTimer?.cancel();
+      _rightSeekHideTimer = Timer(const Duration(seconds: 5), () {
+        if (mounted) {
+          setState(() {
+            _showRightSeek = false;
+            _rightSeekAccum = 0;
+          });
+        }
+      });
+    }
+  }
+
+  String _fmt(Duration d) {
+    final h = d.inHours;
+    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+    return h > 0 ? '$h:$m:$s' : '$m:$s';
+  }
+
+  // ── Fullscreen: alohida sahifaga o'tmaydi — xuddi shu controller
+  // joyida (soat mili bo'ylab) landscape rejimga aylanadi ─────────
+  void _toggleFullscreen() {
+    setState(() => _isFullscreen = !_isFullscreen);
+    if (_isFullscreen) {
+      SystemChrome.setPreferredOrientations([
+        DeviceOrientation.landscapeLeft,
+        DeviceOrientation.landscapeRight,
+      ]);
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    } else {
+      _restoreSystemUI();
+    }
+    _scheduleHide();
+  }
+
+  void _restoreSystemUI() {
+    SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+  }
+
+  void _showQualityDialog() {
+    final ep = _currentEp;
+    if (ep == null) return;
+    final have = _availableQualities(ep);
+    final ordered = ['1080p', '720p', '480p', '360p'].where(have.contains).toList();
+
+    showDialog(
+      context: context,
+      builder: (ctx) => Dialog(
+        backgroundColor: const Color(0xFF15151F),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
+        insetPadding: const EdgeInsets.symmetric(horizontal: 24),
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Sifatni tanlang',
+                  style: TextStyle(color: Colors.white, fontSize: 19, fontWeight: FontWeight.w800)),
+              const SizedBox(height: 16),
+              ...ordered.map((q) {
+                final sel = _selectedQuality == q ||
+                    (_selectedQuality == null && q == _qualityLabel(ep));
+                final size = (ep['size_$q'] as String?) ?? '';
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 10),
+                  child: GestureDetector(
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      setState(() => _selectedQuality = q);
+                      _playEpisode(ep);
+                    },
+                    child: Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                      decoration: BoxDecoration(
+                        color: sel ? AppColors.accent : Colors.white.withOpacity(0.06),
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(q.toUpperCase(),
+                                    style: TextStyle(
+                                        color: sel ? Colors.black : Colors.white,
+                                        fontWeight: FontWeight.w800,
+                                        fontSize: 15)),
+                                if (size.isNotEmpty) ...[
+                                  const SizedBox(height: 2),
+                                  Text(size,
+                                      style: TextStyle(
+                                          color: sel ? Colors.black87 : Colors.white54,
+                                          fontSize: 12)),
+                                ],
+                              ],
+                            ),
+                          ),
+                          if (sel) const Icon(Icons.check_rounded, color: Colors.black),
+                        ],
+                      ),
+                    ),
+                  ),
+                );
+              }),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  List<Map<String, dynamic>> get _playableEps => _episodes
+      .where((ep) => ['url_1080p', 'url_720p', 'url_480p', 'url_360p']
+          .any((k) => (ep[k] ?? '').toString().isNotEmpty))
+      .toList();
+
+  // ── UI ──────────────────────────────────────────────────────────
+  @override
+  Widget build(BuildContext context) {
+    return WillPopScope(
+      onWillPop: () async {
+        if (_isFullscreen) {
+          _toggleFullscreen();
+          return false;
+        }
+        return true;
+      },
+      child: _isFullscreen ? _buildFullscreenPlayer() : _buildNormalScreen(),
+    );
+  }
+
+  Widget _buildNormalScreen() {
+    final name = widget.season['nomi'] ?? '';
+    final bolimId = widget.season['bolim_id'] ?? widget.season['season_id'] ?? '';
+    final turi = widget.season['turi'] ?? '';
+    final yili = widget.season['yili'] ?? '';
+    final janri = widget.season['janri'] ?? '';
+    final tavsif = widget.season['tavsif'] ?? '';
+
+    return AppBackground(
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        body: SafeArea(
+          child: Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+                child: Row(
+                  children: [
+                    GlassTappable(
+                      onTap: () => Navigator.of(context).pop(),
+                      child: const Glass(
+                        borderRadius: 14, blur: 14, padding: EdgeInsets.all(8),
+                        child: Icon(Icons.arrow_back_rounded, color: Colors.white),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              fontSize: 17, fontWeight: FontWeight.w700, color: Colors.white)),
+                    ),
+                  ],
+                ),
+              ),
+
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(16),
+                  child: _buildInlinePlayer(),
+                ),
+              ),
+
+              const SizedBox(height: 8),
+
+              SizedBox(
+                height: 28,
+                child: ListView(
+                  scrollDirection: Axis.horizontal,
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  children: [
+                    if (bolimId.toString().isNotEmpty) _Badge('$bolimId-bo\'lim'),
+                    if (turi.toString().isNotEmpty) ...[const SizedBox(width: 6), _Badge(turi.toString())],
+                    if (yili.toString().isNotEmpty) ...[const SizedBox(width: 6), _Badge(yili.toString())],
+                    if (janri.toString().isNotEmpty) ...[const SizedBox(width: 6), _Badge(janri.toString())],
+                  ],
+                ),
+              ),
+
+              const SizedBox(height: 8),
+
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Glass(
+                  borderRadius: 16, blur: 12, padding: const EdgeInsets.all(4),
+                  child: TabBar(
+                    controller: _tabCtrl,
+                    indicator: BoxDecoration(color: AppColors.accent, borderRadius: BorderRadius.circular(12)),
+                    labelColor: Colors.white,
+                    unselectedLabelColor: Colors.white54,
+                    labelStyle: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+                    unselectedLabelStyle: const TextStyle(fontSize: 13),
+                    dividerColor: Colors.transparent,
+                    tabs: const [
+                      Tab(text: 'Epizodlar'),
+                      Tab(text: 'Bo\'limlar'),
+                      Tab(text: 'Ma\'lumot'),
+                    ],
+                  ),
+                ),
+              ),
+
+              const SizedBox(height: 8),
+
+              Expanded(
+                child: TabBarView(
+                  controller: _tabCtrl,
+                  children: [
+                    _buildEpisodeTab(),
+                    _buildSeasonsTab(),
+                    _buildInfoTab(tavsif.toString()),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildFullscreenPlayer() {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: SizedBox.expand(
+        child: _buildPlayerCore(isFullscreen: true),
+      ),
+    );
+  }
+
+  // ── Player core: video + gesture layer + controls. Bir xil widget
+  // ham inline, ham fullscreen holatida ishlatiladi — controller hech
+  // qachon qayta yaratilmaydi. ─────────────────────────────────────
+  Widget _buildInlinePlayer() {
+    final width = MediaQuery.of(context).size.width - 32;
+    final height = width * 9 / 16;
+    return SizedBox(
+      width: double.infinity,
+      height: height,
+      child: _buildPlayerCore(isFullscreen: false),
+    );
+  }
+
+  Widget _buildPlayerCore({required bool isFullscreen}) {
+    final ctrl = _controller;
+    return Container(
+      color: Colors.black,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          RepaintBoundary(
+            child: ctrl != null && ctrl.value.isInitialized
+                ? Center(
+                    child: AspectRatio(
+                      aspectRatio: ctrl.value.aspectRatio,
+                      child: VideoPlayer(ctrl),
+                    ),
+                  )
+                : const SizedBox.shrink(),
+          ),
+
+          if (_currentEp == null)
+            const Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.play_circle_outline_rounded, color: Colors.white24, size: 52),
+                  SizedBox(height: 8),
+                  Text('Epizodni tanlang', style: TextStyle(color: Colors.white38, fontSize: 13)),
+                ],
+              ),
+            ),
+
+          if (_currentEp != null && _playerLoading)
+            const Center(child: CircularProgressIndicator(color: Colors.white54)),
+
+          // ── Chap/o'ng yarim: bitta tap — kontrollarni ko'rsatish/
+          // yashirish, ikki marta ketma-ket tap — 5 sonyaga sek ────
+          Positioned.fill(
+            child: Row(
+              children: [
+                Expanded(
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.translucent,
+                    onTap: _currentEp != null ? _onTapVideo : null,
+                    onDoubleTapDown: _currentEp != null
+                        ? (_) => _handleDoubleTapSeek(true)
+                        : null,
+                  ),
+                ),
+                Expanded(
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.translucent,
+                    onTap: _currentEp != null ? _onTapVideo : null,
+                    onDoubleTapDown: _currentEp != null
+                        ? (_) => _handleDoubleTapSeek(false)
+                        : null,
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          if (_currentEp != null)
+            AnimatedOpacity(
+              opacity: _showControls ? 1.0 : 0.0,
+              duration: const Duration(milliseconds: 200),
+              child: IgnorePointer(
+                ignoring: !_showControls,
+                child: RepaintBoundary(child: _buildControls(isFullscreen: isFullscreen)),
+              ),
+            ),
+
+          // ── Sek ko'rsatkichlari — asosiy kontrollardan mustaqil,
+          // faqat bosilgan tarafda chiqadi va 5s dan keyin yo'qoladi.
+          // MUHIM: play/pause tugmasi (markaz) bilan video cheti
+          // o'rtasidagi nuqtaga joylashtirilgan — chetga emas.
+          if (_showLeftSeek)
+            Align(
+              alignment: const Alignment(-0.5, 0),
+              child: IgnorePointer(
+                child: _SeekBadge(seconds: _leftSeekAccum, isLeft: true),
+              ),
+            ),
+          if (_showRightSeek)
+            Align(
+              alignment: const Alignment(0.5, 0),
+              child: IgnorePointer(
+                child: _SeekBadge(seconds: _rightSeekAccum, isLeft: false),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildControls({required bool isFullscreen}) {
+    return Container(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [
+            Colors.black.withOpacity(0.60),
+            Colors.transparent,
+            Colors.transparent,
+            Colors.black.withOpacity(0.85),
+          ],
+          stops: const [0.0, 0.3, 0.68, 1.0],
+        ),
+      ),
+      child: SafeArea(
+        child: Column(
+          children: [
+            // ── Yuqori qator: orqaga (faqat fullscreen) + sarlavha ──
+            if (isFullscreen)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 6, 12, 0),
+                child: Row(
+                  children: [
+                    GestureDetector(
+                      onTap: _toggleFullscreen,
+                      child: const Padding(
+                        padding: EdgeInsets.all(8),
+                        child: Icon(Icons.arrow_back_rounded, color: Colors.white, size: 24),
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    Expanded(
+                      child: Text(
+                        (_currentEp?['epizod_name'] ?? widget.season['nomi'] ?? '').toString(),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 14),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+            const Spacer(),
+
+            // ── O'rta qator: faqat play/pause markazda ──────────────
+            // Sek tugmalari olib tashlandi — ularning o'rniga video
+            // ustida ikki marta bosish orqali ishlaydigan gesture bor.
+            Center(child: _playPauseReactive(size: isFullscreen ? 46 : 40)),
+
+            const Spacer(),
+
+            _bottomBarReactive(isFullscreen: isFullscreen),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // Faqat play/pause ikonkasini eng tor ko'lamda yangilaydi.
+  Widget _playPauseReactive({required double size}) {
+    final ctrl = _controller;
+    if (ctrl == null) {
+      return GestureDetector(
+        onTap: _togglePlayPause,
+        child: _playPauseIcon(playing: false, size: size),
+      );
+    }
+    return ValueListenableBuilder<VideoPlayerValue>(
+      valueListenable: ctrl,
+      builder: (_, value, __) => GestureDetector(
+        onTap: _togglePlayPause,
+        child: _playPauseIcon(playing: value.isPlaying, size: size),
+      ),
+    );
+  }
+
+  Widget _playPauseIcon({required bool playing, required double size}) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.black.withOpacity(0.42),
+        shape: BoxShape.circle,
+      ),
+      child: Icon(playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
+          color: Colors.white, size: size),
+    );
+  }
+
+  // Faqat slayder/vaqtni eng tor ko'lamda yangilaydi.
+  Widget _bottomBarReactive({required bool isFullscreen}) {
+    final ctrl = _controller;
+    Widget bar(VideoPlayerValue? value) => _BottomBar(
+          position: value?.position ?? Duration.zero,
+          duration: value?.duration ?? Duration.zero,
+          fmt: _fmt,
+          onSeek: (d) { ctrl?.seekTo(d); _scheduleHide(); },
+          onQualityTap: _showQualityDialog,
+          onFullscreen: _toggleFullscreen,
+          isFullscreen: isFullscreen,
+        );
+    if (ctrl == null) return bar(null);
+    return ValueListenableBuilder<VideoPlayerValue>(
+      valueListenable: ctrl,
+      builder: (_, value, __) => bar(value),
+    );
+  }
+
+  Widget _buildEpisodeTab() {
+    if (_loadingEps) {
+      return Center(child: CircularProgressIndicator(valueColor: AlwaysStoppedAnimation(AppColors.accent)));
+    }
+    final eps = _playableEps;
+    if (eps.isEmpty) {
+      return Center(child: Text('Epizodlar topilmadi', style: TextStyle(color: Colors.white.withOpacity(0.5))));
+    }
+    return ListView.builder(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 120),
+      itemCount: eps.length,
+      itemBuilder: (_, i) {
+        final ep = eps[i];
+        final epNum = ep['epizod_number'] ?? i;
+        final epName = (ep['epizod_name'] ?? '').toString();
+        final isCurrent = _currentEp != null && _currentEp!['epizod_id'] == ep['epizod_id'];
+        String qLabel = '';
+        for (final k in ['1080p', '720p', '480p', '360p']) {
+          if (((ep['url_$k'] as String?) ?? '').isNotEmpty) { qLabel = k; break; }
+        }
+        return GlassTappable(
+          onTap: () => _playEpisode(ep),
+          child: Container(
+            margin: const EdgeInsets.only(bottom: 10),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            decoration: BoxDecoration(
+              color: isCurrent ? AppColors.accent.withOpacity(0.14) : Colors.white.withOpacity(0.07),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: isCurrent ? AppColors.accent.withOpacity(0.5) : Colors.white12),
+            ),
+            child: Row(
+              children: [
+                Container(
+                  width: 42, height: 42,
+                  decoration: BoxDecoration(
+                    color: isCurrent ? AppColors.accent.withOpacity(0.28) : Colors.white.withOpacity(0.08),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Icon(
+                    isCurrent ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                    color: isCurrent ? AppColors.accent : Colors.white54,
+                    size: 22,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(epName.isNotEmpty ? epName : '$epNum-epizod',
+                          style: TextStyle(color: isCurrent ? AppColors.accent : Colors.white, fontWeight: FontWeight.w600, fontSize: 14)),
+                      Text('$epNum-epizod', style: TextStyle(color: Colors.white.withOpacity(0.45), fontSize: 12)),
+                    ],
+                  ),
+                ),
+                if (qLabel.isNotEmpty)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(color: AppColors.accent.withOpacity(0.85), borderRadius: BorderRadius.circular(6)),
+                    child: Text(qLabel, style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.w700)),
+                  ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildSeasonsTab() {
+    if (_loadingSeasons) {
+      return Center(child: CircularProgressIndicator(valueColor: AlwaysStoppedAnimation(AppColors.accent)));
+    }
+    if (_seasons.isEmpty) {
+      return Center(child: Text('Bo\'limlar topilmadi', style: TextStyle(color: Colors.white.withOpacity(0.5))));
+    }
+    return ListView.builder(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 120),
+      itemCount: _seasons.length,
+      itemBuilder: (_, i) {
+        final s = _seasons[i];
+        final bolimId = s['bolim_id'] ?? s['season_id'] ?? '';
+        final nomi = (s['nomi'] ?? '').toString();
+        final photoUrl = s['photo_url'] as String?;
+        final isCur = s['season_id']?.toString() == widget.season['season_id']?.toString();
+        return GlassTappable(
+          onTap: () {
+            if (!isCur) {
+              Navigator.of(context).pushReplacement(PageRouteBuilder(
+                transitionDuration: const Duration(milliseconds: 300),
+                pageBuilder: (_, a, __) => VideoPlayerScreen(season: s),
+                transitionsBuilder: (_, a, __, child) => FadeTransition(opacity: a, child: child),
+              ));
+            }
+          },
+          child: Container(
+            margin: const EdgeInsets.only(bottom: 10),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: BoxDecoration(
+              color: isCur ? AppColors.accent.withOpacity(0.12) : Colors.white.withOpacity(0.07),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: isCur ? AppColors.accent.withOpacity(0.4) : Colors.white12),
+            ),
+            child: Row(
+              children: [
+                if (photoUrl != null && photoUrl.isNotEmpty)
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: CachedNetworkImage(imageUrl: photoUrl, width: 50, height: 50, fit: BoxFit.cover,
+                        errorWidget: (_, __, ___) => Container(width: 50, height: 50, color: Colors.white10, child: const Icon(Icons.movie_outlined, color: Colors.white38))),
+                  )
+                else
+                  Container(width: 50, height: 50, decoration: BoxDecoration(color: Colors.white10, borderRadius: BorderRadius.circular(8)), child: const Icon(Icons.movie_outlined, color: Colors.white38)),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(nomi.isNotEmpty ? nomi : '$bolimId-bo\'lim',
+                          style: TextStyle(color: isCur ? AppColors.accent : Colors.white, fontWeight: FontWeight.w600, fontSize: 14)),
+                      Text('$bolimId-bo\'lim', style: TextStyle(color: Colors.white.withOpacity(0.45), fontSize: 12)),
+                    ],
+                  ),
+                ),
+                if (isCur) Icon(Icons.play_arrow_rounded, color: AppColors.accent),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildInfoTab(String tavsif) {
+    final studio = (widget.season['studio'] ?? '').toString();
+    final tarjimon = (widget.season['tarjimon'] ?? '').toString();
+    final holati = (widget.season['holati'] ?? '').toString();
+    final turi = (widget.season['turi'] ?? '').toString();
+    final yili = (widget.season['yili'] ?? '').toString();
+    final janri = (widget.season['janri'] ?? '').toString();
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 120),
+      child: Glass(
+        borderRadius: 18, blur: 14, padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _infoRow('Turi', turi),
+            _infoRow('Yili', yili),
+            _infoRow('Janri', janri),
+            _infoRow('Studio', studio),
+            _infoRow('Tarjimon', tarjimon),
+            _infoRow('Holati', holati),
+            if (tavsif.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              const Text('Tavsif', style: TextStyle(color: Colors.white60, fontSize: 12, fontWeight: FontWeight.w500)),
+              const SizedBox(height: 6),
+              Text(tavsif, style: TextStyle(color: Colors.white.withOpacity(0.8), fontSize: 14, height: 1.6)),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _infoRow(String label, String value) {
+    if (value.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(width: 90, child: Text(label, style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 13))),
+          Expanded(child: Text(value, style: const TextStyle(color: Colors.white, fontSize: 13))),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Widgetlar ──────────────────────────────────────────────────────
+
+class _Badge extends StatelessWidget {
+  final String label;
+  const _Badge(this.label);
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      decoration: BoxDecoration(color: Colors.white.withOpacity(0.1), borderRadius: BorderRadius.circular(8), border: Border.all(color: Colors.white24)),
+      child: Text(label, style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w500)),
+    );
+  }
+}
+
+// Ikki marta bosib sek qilingandagi ko'rsatkich — TIK (vertikal) pill
+// shaklida: 3 ta kichik uchburchak yuqorida qator bo'lib ketma-ket
+// miltillaydi, ularning tagida "Ns" matni turadi. Play/pause tugmasi
+// bilan video cheti o'rtasiga joylashtiriladi (build metodida Align
+// orqali) — eniga tor, bo'yiga cho'zilgan, chetga tegib turmaydi.
+class _SeekBadge extends StatefulWidget {
+  final int seconds;
+  final bool isLeft;
+  const _SeekBadge({required this.seconds, required this.isLeft});
+
+  @override
+  State<_SeekBadge> createState() => _SeekBadgeState();
+}
+
+class _SeekBadgeState extends State<_SeekBadge> with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(vsync: this, duration: const Duration(milliseconds: 900))..repeat();
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final icon = widget.isLeft ? Icons.arrow_left_rounded : Icons.arrow_right_rounded;
+    final chevrons = _buildChevrons(icon);
+    final text = Text('${widget.seconds}s',
+        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 14));
+
+    return Container(
+      width: 68,
+      padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 8),
+      decoration: BoxDecoration(
+        color: Colors.black.withOpacity(0.55),
+        borderRadius: BorderRadius.circular(22),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [chevrons, const SizedBox(height: 8), text],
+      ),
+    );
+  }
+
+  // Uchburchaklar chapda chapga, o'ngda o'ngga qaragan bo'ladi va bir
+  // xil tezlikda ketma-ket yonib-o'chadi (foydalanuvchiga sek
+  // ketayotganini bildirish uchun).
+  Widget _buildChevrons(IconData icon) {
+    final order = widget.isLeft ? [2, 1, 0] : [0, 1, 2];
+    return AnimatedBuilder(
+      animation: _ctrl,
+      builder: (_, __) {
+        return Row(
+          mainAxisSize: MainAxisSize.min,
+          children: List.generate(3, (i) {
+            final idx = order[i];
+            final start = idx * 0.15;
+            final t = ((_ctrl.value - start) % 1.0 + 1.0) % 1.0;
+            final opacity = t < 0.5 ? (0.3 + 0.7 * (t / 0.5)) : (1.0 - 0.7 * ((t - 0.5) / 0.5));
+            return Opacity(
+              opacity: opacity.clamp(0.3, 1.0),
+              child: Icon(icon, color: Colors.white, size: 20),
+            );
+          }),
+        );
+      },
+    );
+  }
+}
+
+// ── Progress chizig'i: BITTA muhim tuzatish shu yerda ────────────
+// Avval Slider.onChanged HAR bir drag harakatida ctrl.seekTo() ni
+// chaqirar edi — barmoq bilan surganda soniyasiga o'nlab tarmoq
+// seek so'rovi ketib, ular navbatga to'planib 9-12 soniyagacha
+// qotib qolishga sabab bo'lgan. Endi drag paytida faqat mahalliy
+// _dragValue yangilanadi (hech qanday tarmoq so'rovisiz, darhol),
+// video esa faqat barmoq QO'YIB YUBORILGANDA (onChangeEnd) BITTA
+// marta sek qilinadi.
+class _BottomBar extends StatefulWidget {
+  final Duration position;
+  final Duration duration;
+  final String Function(Duration) fmt;
+  final ValueChanged<Duration> onSeek;
+  final VoidCallback onQualityTap;
+  final VoidCallback onFullscreen;
+  final bool isFullscreen;
+
+  const _BottomBar({
+    required this.position,
+    required this.duration,
+    required this.fmt,
+    required this.onSeek,
+    required this.onQualityTap,
+    required this.onFullscreen,
+    required this.isFullscreen,
+  });
+
+  @override
+  State<_BottomBar> createState() => _BottomBarState();
+}
+
+class _BottomBarState extends State<_BottomBar> {
+  double? _dragValue;
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = AppColors.accent;
+    final liveRatio = widget.duration.inMilliseconds > 0
+        ? (widget.position.inMilliseconds / widget.duration.inMilliseconds).clamp(0.0, 1.0)
+        : 0.0;
+    final ratio = _dragValue ?? liveRatio;
+    final shownPosition = _dragValue != null && widget.duration.inMilliseconds > 0
+        ? Duration(milliseconds: (_dragValue! * widget.duration.inMilliseconds).round())
+        : widget.position;
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(4, 0, 8, 10),
+      child: Row(
+        children: [
+          Expanded(
+            child: SliderTheme(
+              data: SliderThemeData(
+                trackHeight: 2.5,
+                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5),
+                overlayShape: const RoundSliderOverlayShape(overlayRadius: 10),
+                thumbColor: accent, activeTrackColor: accent,
+                inactiveTrackColor: Colors.white.withOpacity(0.28),
+                overlayColor: accent.withOpacity(0.2),
+              ),
+              child: Slider(
+                value: ratio,
+                onChangeStart: (v) {
+                  setState(() => _dragValue = v);
+                },
+                onChanged: (v) {
+                  setState(() => _dragValue = v);
+                },
+                onChangeEnd: (v) {
+                  if (widget.duration.inMilliseconds > 0) {
+                    widget.onSeek(Duration(milliseconds: (v * widget.duration.inMilliseconds).round()));
+                  }
+                  setState(() => _dragValue = null);
+                },
+              ),
+            ),
+          ),
+          Text(widget.fmt(shownPosition), style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w500)),
+          Text('/${widget.fmt(widget.duration)}', style: const TextStyle(color: Colors.white, fontSize: 11)),
+          const SizedBox(width: 6),
+          GestureDetector(
+            onTap: widget.onQualityTap,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+              decoration: BoxDecoration(color: Colors.white.withOpacity(0.15), borderRadius: BorderRadius.circular(5), border: Border.all(color: Colors.white30)),
+              child: const Text('HQ', style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.w700)),
+            ),
+          ),
+          const SizedBox(width: 4),
+          GestureDetector(
+            onTap: widget.onFullscreen,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 5),
+              child: Icon(widget.isFullscreen ? Icons.fullscreen_exit_rounded : Icons.fullscreen_rounded, color: Colors.white, size: 20),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
