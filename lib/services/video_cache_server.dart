@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
 // ── Videoni doimiy, bayt-darajasida diskka keshlaydigan mahalliy proksi ──
@@ -41,19 +42,46 @@ class VideoCacheServer {
   final Map<String, Future<Uint8List>> _inFlightChunks = {};
   final Map<String, Future<_CacheMeta>> _inFlightMeta = {};
 
+  // ── Diagnostika jurnali ──────────────────────────────────────────
+  // Mahalliy server nima uchun ishlamayotganini QURILMANING O'ZIDA,
+  // ekranda ko'rish uchun (adb/logcat kerak bo'lmasdan). video_player_
+  // screen.dart shu ro'yxatni tinglab, so'nggi qatorlarni ekranda kichik
+  // panel sifatida ko'rsatadi.
+  static final ValueNotifier<List<String>> logs = ValueNotifier<List<String>>([]);
+
+  // video_player_screen.dart kabi tashqi fayllar ham shu umumiy
+  // (xronologik) jurnalga yozishi uchun ochiq wrapper.
+  static void log(String msg) => _log(msg);
+
+  static void _log(String msg) {
+    final now = DateTime.now();
+    final ts =
+        '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}';
+    final line = '[$ts] $msg';
+    final list = List<String>.from(logs.value)..add(line);
+    if (list.length > 60) list.removeRange(0, list.length - 60);
+    logs.value = list;
+  }
+
   Future<void> _ensureStarted() async {
     if (_server != null) return;
     if (_starting != null) return _starting;
     final completer = Completer<void>();
     _starting = completer.future;
+    _log('Server ishga tushirilmoqda...');
     try {
       final support = await getApplicationSupportDirectory();
       final root = Directory('${support.path}/video_byte_cache');
       await root.create(recursive: true);
       _cacheRoot = root;
+      _log('Kesh papkasi: ${root.path}');
       final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
       server.listen(_handleRequest);
       _server = server;
+      _log('Server ishga tushdi: 127.0.0.1:${server.port}');
+    } catch (e) {
+      _log('XATO: server ishga tushmadi — $e');
+      rethrow;
     } finally {
       completer.complete();
       _starting = null;
@@ -72,27 +100,35 @@ class VideoCacheServer {
   // to'g'ri o'ynatishga qaytadi. Shu bilan kesh ishlamasa ham video
   // pleyer HECH QACHON abadiy "yuklanmoqda" holatida qotib qolmaydi.
   Future<Uri> proxyUri(String originalUrl) async {
+    _log('proxyUri chaqirildi: ${_shortUrl(originalUrl)}');
     await _ensureStarted().timeout(const Duration(seconds: 5));
     return Uri.parse(
         'http://127.0.0.1:${_server!.port}/v?u=${Uri.encodeQueryComponent(originalUrl)}');
   }
 
   Future<void> _handleRequest(HttpRequest request) async {
+    final rangeHdr = request.headers.value(HttpHeaders.rangeHeader) ?? '(hammasi)';
     try {
       final originalUrl = request.uri.queryParameters['u'];
       if (originalUrl == null || originalUrl.isEmpty) {
+        _log('So\'rov: u parametri yo\'q — 400');
         request.response.statusCode = HttpStatus.badRequest;
         await request.response.close();
         return;
       }
+      _log('So\'rov keldi: Range=$rangeHdr');
       await _serve(request, originalUrl);
-    } catch (_) {
+    } catch (e) {
+      _log('XATO (_handleRequest): $e');
       try {
         request.response.statusCode = HttpStatus.internalServerError;
         await request.response.close();
       } catch (_) {}
     }
   }
+
+  static String _shortUrl(String url) =>
+      url.length > 70 ? '...${url.substring(url.length - 70)}' : url;
 
   Future<void> _serve(HttpRequest request, String originalUrl) async {
     final key = _hashUrl(originalUrl);
@@ -101,10 +137,12 @@ class VideoCacheServer {
 
     final meta = await _ensureMeta(dir, originalUrl);
     final total = meta.totalSize;
+    _log('Meta: hajm=$total, tur=${meta.contentType}');
 
     if (total <= 0) {
       // Hajmi aniqlanmadi (masalan manba Range'ni qo'llab-quvvatlamaydi
       // yoki jonli oqim) — keshlamasdan to'g'ridan-to'g'ri o'tkazamiz.
+      _log('Hajm aniqlanmadi (total<=0) — to\'g\'ridan-to\'g\'ri o\'tkazish');
       await _passthrough(request, originalUrl);
       return;
     }
@@ -160,6 +198,7 @@ class VideoCacheServer {
 
         final chunkBytes = await _readOrFetchChunk(
             key, dir, originalUrl, chunkIndex, chunkStart, chunkEnd, expectedLen);
+        _log('Bo\'lak #$chunkIndex tayyor (${chunkBytes.length} bayt)');
 
         final sliceStart = cursor - chunkStart;
         final sliceEndExclusive =
@@ -168,9 +207,13 @@ class VideoCacheServer {
         await request.response.flush();
         cursor = chunkStart + sliceEndExclusive;
       }
-    } catch (_) {
-      // Klient uzildi (masalan foydalanuvchi yangi joyga sek qildi va
-      // pleyer eski so'rovni bekor qildi) — jim tugatamiz, xato emas.
+      _log('So\'rov muvaffaqiyatli yakunlandi ($start-$end)');
+    } catch (e) {
+      // Klient uzilgan bo'lishi mumkin (masalan foydalanuvchi yangi
+      // joyga sek qildi va pleyer eski so'rovni bekor qildi) — bu holat
+      // klientga xato sifatida qaytarilmaydi, lekin diagnostika uchun
+      // baribir jurnalga yoziladi.
+      _log('So\'rov uzildi/xato ($start-$end): $e');
     }
     try {
       await request.response.close();
@@ -207,6 +250,7 @@ class VideoCacheServer {
       if (onDisk.length == expectedLen) return onDisk;
     }
 
+    _log('Bo\'lak #$index worker\'dan yuklanmoqda ($start-$end)...');
     final client = HttpClient();
     try {
       final req = await client
@@ -214,6 +258,7 @@ class VideoCacheServer {
           .timeout(const Duration(seconds: 10));
       req.headers.set(HttpHeaders.rangeHeader, 'bytes=$start-$end');
       final res = await req.close().timeout(const Duration(seconds: 10));
+      _log('Bo\'lak #$index javob: status=${res.statusCode}');
       if (res.statusCode != HttpStatus.partialContent &&
           res.statusCode != HttpStatus.ok) {
         throw HttpException('Yuklab olishda xato: ${res.statusCode}');
@@ -256,6 +301,7 @@ class VideoCacheServer {
         if (collected >= expectedLen) break;
       }
       final bytes = builder.takeBytes();
+      _log('Bo\'lak #$index yig\'ildi: ${bytes.length}/$expectedLen bayt');
 
       // Ulanish o'rtada uzilib, KUTILGANDAN QISQAROQ bayt kelishi mumkin
       // (masalan tarmoq muammosi) — bunday chala natijani DISKKA
@@ -281,6 +327,9 @@ class VideoCacheServer {
         }
       }
       return bytes;
+    } catch (e) {
+      _log('XATO: bo\'lak #$index yuklanmadi — $e');
+      rethrow;
     } finally {
       client.close(force: true);
     }
@@ -324,7 +373,10 @@ class VideoCacheServer {
         if (headRes.contentLength > 0) size = headRes.contentLength;
         final ct = headRes.headers.value(HttpHeaders.contentTypeHeader);
         if (ct != null && ct.isNotEmpty) contentType = ct;
-      } catch (_) {}
+        _log('HEAD javobi: status=${headRes.statusCode}, hajm=$size');
+      } catch (e) {
+        _log('HEAD ishlamadi: $e — zaxira GET urinib ko\'riladi');
+      }
 
       if (size <= 0) {
         // MUHIM: agar server HEAD'ni qo'llab-quvvatlamasa, zaxira sifatida
@@ -355,14 +407,20 @@ class VideoCacheServer {
         }
         final ct = res.headers.value(HttpHeaders.contentTypeHeader);
         if (ct != null && ct.isNotEmpty) contentType = ct;
+        _log('GET bytes=0-0 javobi: status=${res.statusCode}, hajm=$size');
       }
 
       final meta = _CacheMeta(size, contentType);
       if (size > 0) {
         await metaFile.writeAsString(
             jsonEncode({'totalSize': size, 'contentType': contentType}));
+      } else {
+        _log('XATO: video hajmini aniqlab bo\'lmadi (HEAD ham, GET ham)');
       }
       return meta;
+    } catch (e) {
+      _log('XATO: meta probe umuman ishlamadi — $e');
+      rethrow;
     } finally {
       client.close(force: true);
     }

@@ -356,8 +356,18 @@ async fn b2_fetch_range(env: &Env, file_name: &str, start: u64, end: u64) -> Res
 /// standart headerlar bilan klientga qaytarish uchun tayyorlaydi.
 /// Bu yo'l faqat KESH MISS holatida, kichik hajmli javob uchun
 /// ishlatiladi — xotiraga to'liq yig'ish xavfsiz.
-async fn finalize_b2_response(mut b2_resp: Response) -> Result<Response> {
-    let status = b2_resp.status_code();
+///
+/// MUHIM: B2'ga qilingan ICHKI so'rov har doim aniq Range bilan
+/// yuboriladi (shu sabab B2 har doim 206 qaytaradi) — lekin agar
+/// ASL MIJOZ (masalan oddiy rasm so'ragan <img>/CachedNetworkImage)
+/// umuman Range header YUBORMAGAN bo'lsa, unga ham 200 (TO'LIQ
+/// kontent) qaytarishimiz kerak, B2'dan kelgan 206 emas — aks holda
+/// ko'plab HTTP klientlar (jumladan Flutter'ning NetworkImage'i)
+/// kutilmagan 206 statusni xato deb hisoblab, rasm/faylni yuklolmay
+/// qoladi. `has_range` — aynan ASL mijoz so'rovida Range header
+/// bo'lgan-bo'lmaganini bildiradi.
+async fn finalize_b2_response(mut b2_resp: Response, has_range: bool) -> Result<Response> {
+    let status = if has_range { b2_resp.status_code() } else { 200 };
     let ct = b2_resp.headers().get("Content-Type")?.unwrap_or_else(|| "application/octet-stream".to_string());
     let content_range = b2_resp.headers().get("Content-Range")?;
     let content_length = b2_resp.headers().get("Content-Length")?;
@@ -368,7 +378,9 @@ async fn finalize_b2_response(mut b2_resp: Response) -> Result<Response> {
     rh.set("Content-Type", &ct)?;
     rh.set("Accept-Ranges", "bytes")?;
     rh.set("Cache-Control", "public, max-age=86400")?;
-    if let Some(cr) = content_range { rh.set("Content-Range", &cr)?; }
+    if has_range {
+        if let Some(cr) = content_range { rh.set("Content-Range", &cr)?; }
+    }
     if let Some(cl) = content_length { rh.set("Content-Length", &cl)?; }
     Ok(resp)
 }
@@ -388,13 +400,19 @@ async fn finalize_b2_response(mut b2_resp: Response) -> Result<Response> {
 ///
 /// Endi kesh javobining status/Content-Range'iga ISHONMAYDI — o'rniga
 /// keshdagi to'liq baytlardan mijoz haqiqatda so'ragan `rel_start..=rel_end`
-/// oralig'ini QO'LDA kesib olib, har doim TO'G'RI 206 Partial Content
-/// javobini (aniq Content-Range va Content-Length bilan) qaytaradi.
+/// oralig'ini QO'LDA kesib oladi.
+///
+/// MUHIM: `has_range` — ASL mijoz so'rovida Range header bo'lgan-
+/// bo'lmaganini bildiradi (`finalize_b2_response`dagi bilan bir xil
+/// sabab — 200/206 farqi ko'plab HTTP klientlar, jumladan Flutter'ning
+/// rasm yuklovchisi, uchun muhim). Range bo'lmasa — TO'LIQ kontent
+/// 200 status bilan, Content-Range'siz qaytariladi.
 async fn finalize_cached_response(
     mut cached: Response,
     chunk_abs_start: u64,
     rel_start: u64,
     rel_end: u64,
+    has_range: bool,
 ) -> Result<Response> {
     let ct = cached.headers().get("Content-Type")?.unwrap_or_else(|| "application/octet-stream".to_string());
     let total_size = cached.headers().get("X-Total-Size")?.and_then(|s| s.parse::<u64>().ok());
@@ -404,6 +422,19 @@ async fn finalize_cached_response(
     if avail == 0 {
         let mut resp = Response::from_bytes(Vec::new())?.with_status(204);
         set_cors(&mut resp);
+        return Ok(resp);
+    }
+
+    if !has_range {
+        // Mijoz Range so'ramagan (masalan oddiy rasm yuklash) —
+        // butun keshlangan tanani 200 bilan, kesmasdan qaytaramiz.
+        let mut resp = Response::from_bytes(bytes.clone())?.with_status(200);
+        set_cors(&mut resp);
+        let rh = resp.headers_mut();
+        rh.set("Content-Type", &ct)?;
+        rh.set("Accept-Ranges", "bytes")?;
+        rh.set("Cache-Control", "public, max-age=86400")?;
+        rh.set("Content-Length", &avail.to_string())?;
         return Ok(resp);
     }
 
@@ -438,6 +469,10 @@ async fn finalize_cached_response(
 /// qiladi; Cloudflare Cache API Range so'rovlarni o'zi avtomatik
 /// kesib beradi.
 async fn b2_proxy(env: &Env, file_name: &str, range: Option<String>) -> Result<Response> {
+    // Asl mijoz so'rovida Range header bo'lgan-bo'lmaganini eslab
+    // qolamiz — bu keshdan/B2'dan qaytariladigan javobning 200 (to'liq)
+    // yoki 206 (qisman) bo'lishini belgilaydi (pastdagi izohlarga qarang).
+    let has_range = range.is_some();
     let (req_start, req_end_opt) = range
         .as_deref()
         .and_then(parse_range)
@@ -473,7 +508,7 @@ async fn b2_proxy(env: &Env, file_name: &str, range: Option<String>) -> Result<R
     // kerak — CacheKey faqat From<&Request> ni amalga oshiradi, egalik
     // qilingan Request emas (workers-rs 0.8.5).
     if let Some(cached) = cache.get(&lookup_req, false).await? {
-        return finalize_cached_response(cached, chunk_abs_start, rel_start, rel_end).await;
+        return finalize_cached_response(cached, chunk_abs_start, rel_start, rel_end, has_range).await;
     }
 
     // ── KESH MISS: bo'lakni B2'dan bitta marta STREAM orqali olib,
@@ -483,12 +518,17 @@ async fn b2_proxy(env: &Env, file_name: &str, range: Option<String>) -> Result<R
         let cr = b2_full.headers().get("Content-Range")?.unwrap_or_default();
         parse_content_range(&cr).map(|(s, e, _)| e - s + 1).unwrap_or(0)
     };
+    // B2'ning HAQIQIY Content-Type'ini saqlab qolamiz (masalan
+    // "image/jpeg", "video/mp4") — avval bu yerga doim
+    // "application/octet-stream" yozib qo'yilardi, shu sabab keshdan
+    // qaytgan javoblarning Content-Type'i har doim noto'g'ri edi.
+    let real_ct = b2_full.headers().get("Content-Type")?.unwrap_or_else(|| "application/octet-stream".to_string());
 
     let stream = b2_full.stream()?;
     let mut to_cache = Response::from_stream(stream)?;
     {
         let ch = to_cache.headers_mut();
-        ch.set("Content-Type", "application/octet-stream")?;
+        ch.set("Content-Type", &real_ct)?;
         ch.set("Content-Length", &chunk_len.to_string())?;
         ch.set("Cache-Control", &format!("public, max-age={CHUNK_CACHE_SECONDS}"))?;
         ch.set("Accept-Ranges", "bytes")?;
@@ -502,7 +542,7 @@ async fn b2_proxy(env: &Env, file_name: &str, range: Option<String>) -> Result<R
     let last_byte = if total_size > 0 { total_size - 1 } else { chunk_abs_start + chunk_len.max(1) - 1 };
     let req_end = req_end_opt.unwrap_or(last_byte).min(last_byte);
     let (client_resp, _) = b2_fetch_range(env, file_name, req_start, req_end).await?;
-    finalize_b2_response(client_resp).await
+    finalize_b2_response(client_resp, has_range).await
 }
 
 /// B2'dan bitta faylni o'chirish. Qiymat bare fayl nomi (yangi format)

@@ -218,7 +218,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     bool viaProxy = true;
     try {
       proxied = await VideoCacheServer.instance.proxyUri(url);
-    } catch (_) {
+    } catch (e) {
+      VideoCacheServer.log('proxyUri xato berdi, asl URL ishlatiladi: $e');
       proxied = Uri.parse(url);
       viaProxy = false;
     }
@@ -233,13 +234,18 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       try {
         await c.initialize().timeout(const Duration(seconds: 15));
         return c;
-      } catch (_) {
+      } catch (e) {
+        VideoCacheServer.log('ctrl.initialize() muvaffaqiyatsiz ($u): $e');
         await c.dispose();
         return null;
       }
     }
 
+    VideoCacheServer.log(viaProxy
+        ? 'Proksi orqali initialize sinalyapti...'
+        : 'To\'g\'ridan-to\'g\'ri (proksisiz) initialize sinalyapti...');
     var ctrl = await tryInit(proxied);
+    var usedProxy = viaProxy;
 
     // Mahalliy kesh-proksi orqali ishga tushmadi (server javob
     // bermayapti yoki qurilmada bloklangan) — kesh bo'lmasa ham video
@@ -247,7 +253,13 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // qayta urinib ko'ramiz.
     if (ctrl == null && viaProxy) {
       if (!mounted || myToken != _playToken) return;
+      VideoCacheServer.log('Zaxira: asl URL bilan qayta urinilyapti...');
       ctrl = await tryInit(Uri.parse(url));
+      usedProxy = false;
+    }
+    if (ctrl != null) {
+      VideoCacheServer.log(
+          'Video muvaffaqiyatli ochildi (${usedProxy ? 'proksi orqali' : 'to\'g\'ridan-to\'g\'ri'})');
     }
 
     if (ctrl == null) {
@@ -846,6 +858,21 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                 ),
               ),
             ),
+
+          // ── VAQTINCHALIK DIAGNOSTIKA PANELI: mahalliy kesh-server
+          // nima uchun ishlamayotganini to'g'ridan-to'g'ri ekranda,
+          // adb/logcat'siz ko'rish uchun. VideoCacheServer.logs'dagi
+          // so'nggi qatorlarni ko'rsatadi. Muammo topilgach olib
+          // tashlanishi mumkin.
+          if (_currentEp != null)
+            Positioned(
+              left: 6,
+              right: 6,
+              top: 6,
+              child: IgnorePointer(
+                child: _DebugLogPanel(),
+              ),
+            ),
         ],
       ),
     );
@@ -1181,6 +1208,50 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
 }
 
 // ── Widgetlar ──────────────────────────────────────────────────────
+
+// VAQTINCHALIK: mahalliy kesh-server (VideoCacheServer) diagnostika
+// jurnalining so'nggi qatorlarini to'g'ridan-to'g'ri video ustida
+// ko'rsatadi — muammoni adb/logcat'siz, qurilmaning o'zida ko'rish
+// uchun. Muammo aniqlangach bu widget va uni chaqirgan joy olib
+// tashlanishi mumkin.
+class _DebugLogPanel extends StatelessWidget {
+  const _DebugLogPanel();
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<List<String>>(
+      valueListenable: VideoCacheServer.logs,
+      builder: (context, lines, __) {
+        final last = lines.length > 7 ? lines.sublist(lines.length - 7) : lines;
+        if (last.isEmpty) return const SizedBox.shrink();
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+          decoration: BoxDecoration(
+            color: Colors.black.withOpacity(0.62),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: last
+                .map((l) => Text(
+                      l,
+                      style: const TextStyle(
+                        color: Colors.greenAccent,
+                        fontSize: 9,
+                        fontFamily: 'monospace',
+                        height: 1.3,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ))
+                .toList(),
+          ),
+        );
+      },
+    );
+  }
+}
 
 class _Badge extends StatelessWidget {
   final String label;
