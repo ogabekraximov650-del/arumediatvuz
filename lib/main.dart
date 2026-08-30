@@ -22,16 +22,22 @@ Future<void> main() async {
 
   // fvp: video_player uchun ichki pleyer mexanizmi (decoding/render).
   // API o'zgarmaydi — bitta VideoPlayerController orqali ishlaydi.
-  // MUHIM: 'buffer.range' — "minMs+maxMs" formatida. Video ijro
-  // boshlanishidan oldin kamida 30000ms (30 soniya) buferlanishini
-  // kutadi, maksimal buferlangan hajm 300000ms (300 soniya) bilan
-  // cheklanadi (mdk backend player property "buffer"/"buffer.range").
+  // MUHIM: 'buffer.range' — "minMs+maxMs" formatida.
+  // MIN (2000ms) — ijroni boshlash/davom ettirishdan oldin talab
+  // qilinadigan eng kam bufer. Bu qiymat past ushlanadi, chunki u HAR
+  // safar (video birinchi ochilganda, sek qilinganda, sifat
+  // almashtirilganda) qayta qo'llanadi — katta bo'lsa, aynan shu
+  // holatlarda video uzoq "qotib qolar" edi (avval 30000ms edi).
+  // MAX (600000ms = 10 daqiqa) — pleyer oldinga qancha video keshlab
+  // qo'yishi mumkinligi chegarasi. Bu qiymat qasddan katta ushlanadi —
+  // tarmoq vaqtincha sekinlashganda ham oldindan yig'ilgan katta zaxira
+  // tufayli video kamroq uziladi.
   // MUHIM TUZATISH: 'lowLatency' olib tashlandi — u ASAP dekodlashga
   // undab, katta oldindan-bufer maqsadiga zid edi.
   fvp.registerWith(options: {
     'fastSeek': true,
     'player': {
-      'buffer.range': '30000+300000',
+      'buffer.range': '2000+600000',
     },
   });
   // Ichki mexanizm (kesh, qidiruv, validatsiya) shu yerda yuklanadi —

@@ -34,6 +34,14 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   bool _playerLoading = false;
   int _playToken = 0;
   bool _disposingOld = false;
+  String? _playerError;
+
+  // ── Ikki marta bosib sek qilishda tarmoqqa yuboriladigan seekTo
+  // so'rovini debounce qilish uchun: tez-tez ketma-ket bosilganda
+  // faqat OXIRGI holatga BITTA marta sek qilinadi.
+  Timer? _seekDebounceTimer;
+  Duration? _pendingSeekBase;
+  int _pendingSeekDeltaSeconds = 0;
 
   bool _isFullscreen = false;
   bool _showControls = true;
@@ -65,6 +73,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _hideTimer?.cancel();
     _leftSeekHideTimer?.cancel();
     _rightSeekHideTimer?.cancel();
+    _seekDebounceTimer?.cancel();
     _restoreSystemUI();
     _controller?.pause();
     _controller?.dispose();
@@ -155,7 +164,15 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   // Eskisi to'liq to'xtatilib (pause) va dispose qilinib bo'lgandan
   // keyingina yangisi yaratiladi — orqa fonda bir nechta video
   // parallel ijro bo'lib qolishining oldini oladi.
-  Future<void> _playEpisode(Map<String, dynamic> ep) async {
+  // resumeAt/resumePlaying — sifat almashtirilganda joriy pozitsiya va
+  // play/pause holatini saqlab qolish uchun (video boshidan boshlanib
+  // qolmasligi kerak). Oddiy epizod tanlashda ikkalasi ham null/true
+  // bo'lib, video 0-sekunddan avtomatik boshlanadi.
+  Future<void> _playEpisode(
+    Map<String, dynamic> ep, {
+    Duration? resumeAt,
+    bool resumePlaying = true,
+  }) async {
     final url = _getUrl(ep);
     if (url.isEmpty) return;
 
@@ -164,6 +181,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       _currentEp = ep;
       _showControls = true;
       _playerLoading = true;
+      _playerError = null;
     });
 
     final old = _controller;
@@ -181,7 +199,10 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       await ctrl.initialize();
     } catch (_) {
       if (mounted && myToken == _playToken) {
-        setState(() => _playerLoading = false);
+        setState(() {
+          _playerLoading = false;
+          _playerError = 'Videoni yuklab bo\'lmadi';
+        });
       }
       await ctrl.dispose();
       return;
@@ -193,7 +214,12 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     }
 
     ctrl.setLooping(false);
-    await ctrl.play();
+    if (resumeAt != null && resumeAt > Duration.zero) {
+      await ctrl.seekTo(resumeAt);
+    }
+    if (resumePlaying) {
+      await ctrl.play();
+    }
     if (!mounted || myToken != _playToken) {
       await ctrl.dispose();
       return;
@@ -234,16 +260,37 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _scheduleHide();
   }
 
-  void _seekRelative(int seconds) {
+  // Ketma-ket tez-tez bosilgan double-tap seklarni yig'ib, faqat OXIRGI
+  // holatga BITTA marta ctrl.seekTo() chaqiradi (debounce ~220ms).
+  // Bu tarmoqqa ortiqcha seek so'rovlari ketib, ularning navbatga
+  // to'planib video "qotib qolishi"ning oldini oladi. Vizual jamlanish
+  // (_leftSeekAccum/_rightSeekAccum va ularning ko'rsatkichi) darhol,
+  // hech qanday kechikishsiz yangilanadi — foydalanuvchi taplarning
+  // "his qilinishini" yo'qotmaydi, faqat haqiqiy tarmoq/dekod so'rovi
+  // kechiktiriladi.
+  void _scheduleSeek(int deltaSeconds) {
     final ctrl = _controller;
     if (ctrl == null || !ctrl.value.isInitialized) return;
-    final pos = ctrl.value.position;
-    final dur = ctrl.value.duration;
-    var t = pos + Duration(seconds: seconds);
-    if (t < Duration.zero) t = Duration.zero;
-    if (dur > Duration.zero && t > dur) t = dur;
-    ctrl.seekTo(t);
-    HapticFeedback.lightImpact();
+
+    _pendingSeekBase ??= ctrl.value.position;
+    _pendingSeekDeltaSeconds += deltaSeconds;
+
+    _seekDebounceTimer?.cancel();
+    _seekDebounceTimer = Timer(const Duration(milliseconds: 220), () {
+      final base = _pendingSeekBase;
+      final delta = _pendingSeekDeltaSeconds;
+      _pendingSeekBase = null;
+      _pendingSeekDeltaSeconds = 0;
+      _seekDebounceTimer = null;
+
+      final c = _controller;
+      if (base == null || c == null || !c.value.isInitialized) return;
+      final dur = c.value.duration;
+      var t = base + Duration(seconds: delta);
+      if (t < Duration.zero) t = Duration.zero;
+      if (dur > Duration.zero && t > dur) t = dur;
+      c.seekTo(t);
+    });
   }
 
   // Ekranning chap/o'ng yarmiga ikki marta bosilganda 5 sonyaga
@@ -264,7 +311,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       }
     });
 
-    _seekRelative(isLeft ? -5 : 5);
+    HapticFeedback.lightImpact();
+    _scheduleSeek(isLeft ? -5 : 5);
     _scheduleHide();
 
     if (isLeft) {
@@ -348,8 +396,15 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                   child: GestureDetector(
                     onTap: () {
                       Navigator.pop(ctx);
+                      final ctrl = _controller;
+                      final resumeAt = ctrl?.value.position;
+                      final resumePlaying = ctrl?.value.isPlaying ?? true;
                       setState(() => _selectedQuality = q);
-                      _playEpisode(ep);
+                      _playEpisode(
+                        ep,
+                        resumeAt: resumeAt,
+                        resumePlaying: resumePlaying,
+                      );
                     },
                     child: Container(
                       width: double.infinity,
@@ -571,6 +626,15 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
           if (_currentEp != null && _playerLoading)
             const Center(child: CircularProgressIndicator(color: Colors.white54)),
 
+          // ── Runtime buferlash indikatori: controller allaqachon
+          // initialize bo'lgan va ijro boshlangan, lekin tarmoq
+          // sekinlashib pleyer qayta buferlanayotganda (masalan sek
+          // qilingandan keyin) ko'rinadi. _playerLoading dan farqli —
+          // bu holat controller yashab turganda ham qayta-qayta
+          // yoqilib-o'chib turishi mumkin.
+          if (_currentEp != null && !_playerLoading && _playerError == null)
+            _bufferingReactive(),
+
           // ── Chap/o'ng yarim: bitta tap — kontrollarni ko'rsatish/
           // yashirish, ikki marta ketma-ket tap — 5 sonyaga sek ────
           Positioned.fill(
@@ -597,6 +661,37 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
               ],
             ),
           ),
+
+          // ── Xato holati: gesture qatlamidan KEYIN joylashtirilgan —
+          // aks holda "Qayta urinish" tugmasi tepasidagi translucent
+          // gesture qatlami tapni tutib qolib, tugma bosilmay qolar edi.
+          if (_currentEp != null && _playerError != null)
+            Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.error_outline_rounded, color: Colors.white38, size: 40),
+                  const SizedBox(height: 10),
+                  Text(_playerError!, style: const TextStyle(color: Colors.white70, fontSize: 13)),
+                  const SizedBox(height: 14),
+                  GestureDetector(
+                    onTap: () {
+                      final ep = _currentEp;
+                      if (ep != null) _playEpisode(ep);
+                    },
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: AppColors.accent,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: const Text('Qayta urinish',
+                          style: TextStyle(color: Colors.black, fontWeight: FontWeight.w700, fontSize: 13)),
+                    ),
+                  ),
+                ],
+              ),
+            ),
 
           if (_currentEp != null)
             AnimatedOpacity(
@@ -688,6 +783,26 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
           ],
         ),
       ),
+    );
+  }
+
+  // Faqat isBuffering holatini eng tor ko'lamda kuzatadi — tarmoq
+  // sekinlashib pleyer qayta buferlanayotganda kichik spinner ko'rsatadi.
+  Widget _bufferingReactive() {
+    final ctrl = _controller;
+    if (ctrl == null) return const SizedBox.shrink();
+    return ValueListenableBuilder<VideoPlayerValue>(
+      valueListenable: ctrl,
+      builder: (_, value, __) {
+        if (!value.isBuffering) return const SizedBox.shrink();
+        return const Center(
+          child: SizedBox(
+            width: 34,
+            height: 34,
+            child: CircularProgressIndicator(color: Colors.white54, strokeWidth: 2.5),
+          ),
+        );
+      },
     );
   }
 
