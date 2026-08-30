@@ -133,7 +133,13 @@ class VideoCacheServer {
   Future<void> _serve(HttpRequest request, String originalUrl) async {
     final key = _hashUrl(originalUrl);
     final dir = Directory('${_cacheRoot!.path}/$key');
-    await dir.create(recursive: true);
+    _log('Papka yaratilmoqda: ${dir.path}');
+    await dir.create(recursive: true).timeout(const Duration(seconds: 5),
+        onTimeout: () {
+      _log('XATO: papka yaratish 5s ichida tugamadi!');
+      return dir;
+    });
+    _log('Papka tayyor');
 
     final meta = await _ensureMeta(dir, originalUrl);
     final total = meta.totalSize;
@@ -222,10 +228,20 @@ class VideoCacheServer {
 
   Future<Uint8List> _readOrFetchChunk(String key, Directory dir, String url,
       int index, int start, int end, int expectedLen) async {
+    _log('Bo\'lak #$index diskda bor-yo\'qligi tekshirilmoqda...');
     final finalFile = File('${dir.path}/${_chunkName(index)}');
-    if (await finalFile.exists()) {
-      final onDisk = await finalFile.readAsBytes();
-      if (onDisk.length == expectedLen) return onDisk;
+    final exists = await finalFile.exists().timeout(
+        const Duration(seconds: 5), onTimeout: () {
+      _log('XATO: bo\'lak #$index exists() 5s ichida tugamadi!');
+      return false;
+    });
+    if (exists) {
+      final onDisk =
+          await finalFile.readAsBytes().timeout(const Duration(seconds: 5));
+      if (onDisk.length == expectedLen) {
+        _log('Bo\'lak #$index diskdan o\'qildi (${onDisk.length} bayt)');
+        return onDisk;
+      }
     }
 
     final flightKey = '$key#$index';
@@ -347,15 +363,26 @@ class VideoCacheServer {
 
   Future<_CacheMeta> _loadOrProbeMeta(Directory dir, String url) async {
     final metaFile = File('${dir.path}/meta.json');
-    if (await metaFile.exists()) {
+    _log('meta.json bor-yo\'qligi tekshirilmoqda...');
+    final metaExists = await metaFile.exists().timeout(
+        const Duration(seconds: 5), onTimeout: () {
+      _log('XATO: meta.json exists() 5s ichida tugamadi!');
+      return false;
+    });
+    _log('meta.json mavjud: $metaExists');
+    if (metaExists) {
       try {
-        final map = jsonDecode(await metaFile.readAsString()) as Map<String, dynamic>;
+        final map = jsonDecode(await metaFile.readAsString().timeout(
+                const Duration(seconds: 5))) as Map<String, dynamic>;
         final size = map['totalSize'] as int?;
         final ct = map['contentType'] as String?;
         if (size != null && size > 0) {
+          _log('meta.json diskdan o\'qildi: hajm=$size');
           return _CacheMeta(size, ct ?? 'video/mp4');
         }
-      } catch (_) {}
+      } catch (e) {
+        _log('meta.json o\'qishda xato (e\'tiborsiz qoldiriladi): $e');
+      }
     }
 
     final client = HttpClient();
@@ -412,8 +439,20 @@ class VideoCacheServer {
 
       final meta = _CacheMeta(size, contentType);
       if (size > 0) {
-        await metaFile.writeAsString(
-            jsonEncode({'totalSize': size, 'contentType': contentType}));
+        _log('meta.json yozilmoqda...');
+        try {
+          await metaFile
+              .writeAsString(
+                  jsonEncode({'totalSize': size, 'contentType': contentType}))
+              .timeout(const Duration(seconds: 5));
+          _log('meta.json yozildi');
+        } catch (e) {
+          // Diskka yozish muvaffaqiyatsiz/tomonidan kechiktirilgan bo'lsa
+          // ham, hajm allaqachon bilinganidan keyin video ijrosini
+          // to'xtatib qo'ymaslik uchun bu xato jim yutiladi — kesh
+          // shunchaki keyingi safar qayta yozishga urinadi.
+          _log('XATO: meta.json yozib bo\'lmadi — $e');
+        }
       } else {
         _log('XATO: video hajmini aniqlab bo\'lmadi (HEAD ham, GET ham)');
       }
