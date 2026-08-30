@@ -28,7 +28,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::raw::c_char;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -36,7 +36,12 @@ use std::time::{Duration, Instant};
 use crate::ffi_utils::{cstr_to_str, string_to_cptr};
 
 const CHUNK_SIZE: u64 = 1024 * 1024;
-const LOOKAHEAD: u64 = 2;
+
+/// Bir vaqtda ochiq bo'lishi mumkin bo'lgan eng ko'p ulanish soni.
+/// Har bir ulanish bitta OS ish oqimi + ~1 MiB bufer degani, shu sabab
+/// bu chegara xotira sarfini bashorat qilinadigan darajada ushlab
+/// turadi (tez-tez sek qilishda ilova o'chib qolishining oldini oladi).
+const MAX_CONNS: usize = 6;
 
 // ── Umumiy holat ─────────────────────────────────────────────────────
 
@@ -49,11 +54,16 @@ struct Shared {
     in_flight: Mutex<HashSet<String>>,
     logs: Mutex<Vec<String>>,
     agent: ureq::Agent,
+    // Hozir ko'rilayotgan video kaliti — fon to'ldiruvchisi (filler)
+    // faqat shu video uchun ishlaydi va boshqa video ochilganda
+    // o'z-o'zini to'xtatadi.
+    active_video: Mutex<Option<String>>,
 }
 
 static SHARED: OnceLock<Shared> = OnceLock::new();
 static PORT: OnceLock<u16> = OnceLock::new();
 static REQ_COUNTER: AtomicU64 = AtomicU64::new(0);
+static ACTIVE_CONNS: AtomicUsize = AtomicUsize::new(0);
 
 fn log(msg: impl Into<String>) {
     if let Some(s) = SHARED.get() {
@@ -103,6 +113,7 @@ pub extern "C" fn rust_video_cache_start(cache_dir_ptr: *const c_char) -> i32 {
         in_flight: Mutex::new(HashSet::new()),
         logs: Mutex::new(Vec::new()),
         agent,
+        active_video: Mutex::new(None),
     };
     let _ = SHARED.set(shared);
     log("Rust kesh-server ishga tushirilmoqda...".to_string());
@@ -127,14 +138,36 @@ pub extern "C" fn rust_video_cache_start(cache_dir_ptr: *const c_char) -> i32 {
             for stream in listener.incoming() {
                 match stream {
                     Ok(stream) => {
-                        thread::Builder::new()
+                        // MUHIM (qurilmada aniqlangan crash sababi): pleyer
+                        // tez-tez sek qilinganda mdk-sdk eski ulanishni
+                        // tashlab, yangisini ochadi. Har bir ulanish uchun
+                        // cheklovsiz OS ish oqimi ochilsa, ular (har biri
+                        // 1 MiB'lik bo'lak buferi bilan) to'planib, Android
+                        // ilovani xotira yetishmovchiligi sabab o'ldirardi.
+                        // Shu sabab bir vaqtda ochiq ulanishlar soni QAT'IY
+                        // cheklanadi — chegaradan oshgani darhol rad
+                        // etiladi (pleyer bunday holatda qayta ulanadi).
+                        let active = ACTIVE_CONNS.fetch_add(1, Ordering::SeqCst);
+                        if active >= MAX_CONNS {
+                            ACTIVE_CONNS.fetch_sub(1, Ordering::SeqCst);
+                            log(format!(
+                                "Ulanish rad etildi — chegara ({MAX_CONNS}) to'ldi"
+                            ));
+                            drop(stream);
+                            continue;
+                        }
+                        let spawned = thread::Builder::new()
                             .name("video-cache-conn".into())
                             .spawn(move || {
                                 if let Err(e) = handle_connection(stream) {
                                     log(format!("XATO (ulanish): {e}"));
                                 }
-                            })
-                            .ok();
+                                ACTIVE_CONNS.fetch_sub(1, Ordering::SeqCst);
+                            });
+                        if spawned.is_err() {
+                            ACTIVE_CONNS.fetch_sub(1, Ordering::SeqCst);
+                            log("XATO: ulanish uchun ish oqimi ochilmadi".to_string());
+                        }
                     }
                     Err(e) => {
                         log(format!("XATO: ulanish qabul qilinmadi — {e}"));
@@ -177,6 +210,14 @@ struct ParsedRequest {
 
 fn read_request_line_and_headers(stream: &mut TcpStream) -> std::io::Result<ParsedRequest> {
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    // MUHIM (crash sababi): agar klient (mdk-sdk) sek qilib javobni
+    // o'qishni to'xtatsa, TCP oqimi to'lib, write_all() ABADIY bloklanib
+    // qolardi — ish oqimi hech qachon tugamay, o'zining 1 MiB buferi
+    // bilan xotirada qolib ketardi. Tez-tez sek qilinganda bunday
+    // "o'lik" ish oqimlari to'planib, ilova o'chib qolardi. Yozish
+    // timeout'i bunday oqimni majburan xatoga uchratib, tozalanishini
+    // kafolatlaydi.
+    stream.set_write_timeout(Some(Duration::from_secs(20)))?;
     let mut buf = Vec::with_capacity(4096);
     let mut byte = [0u8; 1];
     // Sarlavhalar tugashini ("\r\n\r\n") ko'rguncha, bayt-bayt o'qiymiz —
@@ -564,49 +605,69 @@ fn is_current_generation(shared: &Shared, key: &str, my_generation: u64) -> bool
     gens.get(key).copied() == Some(my_generation)
 }
 
-fn prefetch_ahead(
-    shared: &'static Shared,
-    key: String,
-    dir: PathBuf,
-    url: String,
-    from_index: u64,
-    total: u64,
-    my_generation: u64,
-) {
-    for i in from_index..(from_index + LOOKAHEAD) {
-        let chunk_start = i * CHUNK_SIZE;
-        if chunk_start >= total {
-            break;
-        }
-        if !is_current_generation(shared, &key, my_generation) {
+// ── Fon to'ldiruvchisi (background filler) ─────────────────────────
+//
+// Avval har bir bo'lak uchun ALOHIDA ish oqimi ochilardi ("lookahead"),
+// bu esa tez-tez sek qilinganda o'nlab ish oqimi (har biri 1 MiB bufer
+// bilan) to'planib ketishiga sabab bo'lardi.
+//
+// Endi har bir video uchun ENG KO'PI BILAN BITTA fon ish oqimi ochiladi.
+// U videoning YETISHMAYOTGAN bo'laklarini boshidan oxirigacha ketma-ket
+// (bittalab) yuklab, diskka yozib boradi va faqat BOSHQA video
+// ochilgandagina to'xtaydi. Natijada:
+//   - video bir marta ochilgach, butun fayl fon'da keshga tushadi, shu
+//     sabab keyingi ochishda (yoki sek qilinganda) tarmoqqa umuman
+//     chiqilmaydi — "qayta yuklab olish" muammosi yo'qoladi;
+//   - ish oqimlari soni hech qachon o'smaydi (video uchun aniq bitta),
+//     shu sabab xotira sarfi bashorat qilinadigan bo'lib qoladi.
+fn ensure_filler(shared: &'static Shared, key: &str, dir: &PathBuf, url: &str, total: u64) {
+    {
+        // Faqat joriy (eng oxirgi so'ralgan) video to'ldiriladi.
+        let mut active = shared.active_video.lock().unwrap();
+        if active.as_deref() == Some(key) {
+            // Shu video uchun to'ldiruvchi allaqachon ishlayapti.
             return;
         }
-        let chunk_end = ((chunk_start + CHUNK_SIZE - 1).min(total - 1)) as u64;
-        let flight_key = format!("{key}#{i}");
-        if shared.in_flight.lock().unwrap().contains(&flight_key) {
-            continue;
-        }
-        let final_path = dir.join(chunk_name(i));
-        if let Ok(bytes) = fs::read(&final_path) {
-            if bytes.len() == (chunk_end - chunk_start + 1) as usize {
-                continue;
-            }
-        }
-        let (key2, dir2, url2) = (key.clone(), dir.clone(), url.clone());
-        thread::Builder::new()
-            .name("video-cache-prefetch".into())
-            .spawn(move || {
-                if !is_current_generation(shared, &key2, my_generation) {
-                    return;
-                }
-                log(format!("Bo'lak #{i} oldindan (fon'da) yuklab qo'yilyapti..."));
-                let _ = fetch_and_store_chunk(
-                    shared, &key2, &dir2, &url2, i, chunk_start, chunk_end,
-                    (chunk_end - chunk_start + 1) as usize,
-                );
-            })
-            .ok();
+        *active = Some(key.to_string());
     }
+
+    let (key2, dir2, url2) = (key.to_string(), dir.clone(), url.to_string());
+    thread::Builder::new()
+        .name("video-cache-filler".into())
+        .spawn(move || {
+            let chunk_count = total.div_ceil(CHUNK_SIZE);
+            for i in 0..chunk_count {
+                // Boshqa video ochilgan bo'lsa — darhol to'xtaymiz.
+                {
+                    let active = shared.active_video.lock().unwrap();
+                    if active.as_deref() != Some(key2.as_str()) {
+                        return;
+                    }
+                }
+                let chunk_start = i * CHUNK_SIZE;
+                let chunk_end = (chunk_start + CHUNK_SIZE - 1).min(total - 1);
+                let expected_len = (chunk_end - chunk_start + 1) as usize;
+
+                let final_path = dir2.join(chunk_name(i));
+                if let Ok(bytes) = fs::read(&final_path) {
+                    if bytes.len() == expected_len {
+                        continue; // allaqachon keshda
+                    }
+                }
+                log(format!("Bo'lak #{i} fon'da oldindan yuklanmoqda..."));
+                if fetch_and_store_chunk(
+                    shared, &key2, &dir2, &url2, i, chunk_start, chunk_end, expected_len,
+                )
+                .is_err()
+                {
+                    // Tarmoq xatosi — biroz kutib, keyingisiga o'tamiz
+                    // (keyingi ochishda qaytadan urinib ko'riladi).
+                    thread::sleep(Duration::from_millis(500));
+                }
+            }
+            log(format!("Fon to'ldiruvchi yakunlandi ({chunk_count} bo'lak)"));
+        })
+        .ok();
 }
 
 // ── Asosiy servis funksiyasi: Range'ni tahlil qilib, javobni yozadi ──
@@ -627,6 +688,11 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
     };
     let total = meta.total_size;
     log(format!("Meta: hajm={total}, tur={}", meta.content_type));
+
+    // Butun videoni fon'da (bitta ish oqimida, ketma-ket) keshga
+    // to'ldirishni boshlaymiz — shu bilan video bir marta ochilgach,
+    // keyingi ochish/sek qilishlarda tarmoqqa umuman chiqilmaydi.
+    ensure_filler(shared, &key, &dir, url, total);
 
     let (start, mut end, is_range) = match range_header {
         Some(h) if h.starts_with("bytes=") => {
@@ -706,18 +772,6 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
             }
         };
         log(format!("Bo'lak #{chunk_index} tayyor ({} bayt)", chunk_bytes.len()));
-
-        if is_current_generation(shared, &key, my_generation) {
-            prefetch_ahead(
-                shared,
-                key.clone(),
-                dir.clone(),
-                url.to_string(),
-                chunk_index + 1,
-                total,
-                my_generation,
-            );
-        }
 
         let slice_start = (cursor - chunk_start) as usize;
         let wanted_end_exclusive = ((end.min(chunk_end)) - chunk_start + 1) as usize;

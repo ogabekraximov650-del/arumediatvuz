@@ -69,6 +69,7 @@ class RustCore {
 
   bool _loaded = false;
   String? _cacheFilePath;
+  String? _cacheDirPath;
   int? _videoCachePort;
 
   /// Ilova ishga tushganda bir marta chaqiriladi (main() ichida).
@@ -97,6 +98,7 @@ class RustCore {
         'rust_video_cache_pull_logs');
 
     final dir = await getApplicationDocumentsDirectory();
+    _cacheDirPath = dir.path;
     _cacheFilePath = '${dir.path}/anime_cache.rustbin';
 
     _loaded = true;
@@ -161,6 +163,53 @@ class RustCore {
       _cacheClear(pathPtr);
     } finally {
       malloc.free(pathPtr);
+    }
+  }
+
+  // ── Umumiy (kalit bo'yicha) ro'yxat keshi ────────────────────
+  //
+  // Epizodlar/bo'limlar ro'yxati kabi har qanday JSON ro'yxatni diskka
+  // saqlaydi va OFFLINE holatda ham qaytaradi (muddatidan qat'i nazar).
+  // Shu bilan internet bo'lmaganda ham epizod tugmalari ko'rinib
+  // turadi — allaqachon keshlangan videolarni oflayn ko'rish mumkin.
+
+  String? _pathForKey(String key) {
+    final dir = _cacheDirPath;
+    if (dir == null) return null;
+    // Kalitni fayl nomi uchun xavfsiz holatga keltiramiz.
+    final safe = key.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_');
+    return '$dir/list_$safe.rustbin';
+  }
+
+  List<Map<String, dynamic>>? getCachedList(String key) {
+    if (!_loaded) return null;
+    final path = _pathForKey(key);
+    if (path == null) return null;
+    final pathPtr = path.toNativeUtf8();
+    try {
+      final json = _readAndFree(_cacheGet(pathPtr));
+      if (json == null) return null;
+      return (jsonDecode(json) as List).cast<Map<String, dynamic>>();
+    } catch (_) {
+      return null;
+    } finally {
+      malloc.free(pathPtr);
+    }
+  }
+
+  bool saveListCache(String key, List<Map<String, dynamic>> data) {
+    if (!_loaded) return false;
+    final path = _pathForKey(key);
+    if (path == null) return false;
+    final pathPtr = path.toNativeUtf8();
+    final jsonPtr = jsonEncode(data).toNativeUtf8();
+    try {
+      return _cacheSave(pathPtr, jsonPtr) == 1;
+    } catch (_) {
+      return false;
+    } finally {
+      malloc.free(pathPtr);
+      malloc.free(jsonPtr);
     }
   }
 

@@ -6,6 +6,7 @@ import 'dart:convert';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:video_player/video_player.dart';
 import '../services/video_cache_server.dart';
+import '../services/rust_bridge.dart';
 import '../widgets/glass.dart';
 import '../theme/app_background.dart';
 
@@ -103,43 +104,76 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   }
 
   // ── Ma'lumot yuklash ──────────────────────────────────────────
+  // MUHIM (oflayn rejim): ro'yxat AVVAL diskdagi keshdan (Rust yadrosi
+  // orqali) o'qib darhol ko'rsatiladi — shu sabab internet bo'lmasa
+  // ham epizod tugmalari ko'rinib turadi va allaqachon keshlangan
+  // videolarni oflayn ko'rish mumkin. Keyin tarmoqdan yangilanadi;
+  // tarmoq ishlamasa, keshdagi ro'yxat joyida qoladi (o'chirilmaydi).
   Future<void> _loadEpisodes() async {
     final animeId = widget.season['anime_id']?.toString() ?? '';
     final seasonId = widget.season['season_id']?.toString() ?? '';
+    final cacheKey = 'eps_${animeId}_$seasonId';
+
+    final cached = RustCore.instance.getCachedList(cacheKey);
+    if (cached != null && cached.isNotEmpty && mounted) {
+      setState(() {
+        _episodes = cached;
+        _loadingEps = false;
+      });
+    }
+
     try {
       final res = await http
           .get(Uri.parse('$_apiBase/api/epizods/$animeId/$seasonId'))
           .timeout(const Duration(seconds: 10));
-      if (res.statusCode == 200 && mounted) {
-        setState(() {
-          _episodes = (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
-          _loadingEps = false;
-        });
-      } else {
-        if (mounted) setState(() => _loadingEps = false);
+      if (res.statusCode == 200) {
+        final fresh = (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
+        RustCore.instance.saveListCache(cacheKey, fresh);
+        if (mounted) {
+          setState(() {
+            _episodes = fresh;
+            _loadingEps = false;
+          });
+        }
+        return;
       }
     } catch (_) {
-      if (mounted) setState(() => _loadingEps = false);
+      // Tarmoq yo'q/xato — keshdagi ro'yxat (agar bo'lsa) saqlanib qoladi.
     }
+    if (mounted && _loadingEps) setState(() => _loadingEps = false);
   }
 
   Future<void> _loadSeasons() async {
     final animeId = widget.season['anime_id']?.toString() ?? '';
+    final cacheKey = 'seasons_$animeId';
+
+    final cached = RustCore.instance.getCachedList(cacheKey);
+    if (cached != null && cached.isNotEmpty && mounted) {
+      setState(() {
+        _seasons = cached;
+        _loadingSeasons = false;
+      });
+    }
+
     try {
       final res = await http
           .get(Uri.parse('$_apiBase/api/seasons/anime/$animeId'))
           .timeout(const Duration(seconds: 10));
-      if (res.statusCode == 200 && mounted) {
-        setState(() {
-          _seasons = (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
-          _loadingSeasons = false;
-        });
-      } else {
-        if (mounted) setState(() => _loadingSeasons = false);
+      if (res.statusCode == 200) {
+        final fresh = (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
+        RustCore.instance.saveListCache(cacheKey, fresh);
+        if (mounted) {
+          setState(() {
+            _seasons = fresh;
+            _loadingSeasons = false;
+          });
+        }
+        return;
       }
     } catch (_) {
-      if (mounted) setState(() => _loadingSeasons = false);
+      // Tarmoq yo'q/xato — keshdagi ro'yxat saqlanib qoladi.
     }
+    if (mounted && _loadingSeasons) setState(() => _loadingSeasons = false);
   }
 
   // ── Player yordamchilari ───────────────────────────────────────
@@ -366,8 +400,11 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _pendingSeekBase ??= ctrl.value.position;
     _pendingSeekDeltaSeconds += deltaSeconds;
 
+    // Debounce 220ms dan 110ms ga tushirildi — bo'laklar endi fon'da
+    // diskka oldindan keshlangani uchun (Rust filler) sek deyarli
+    // darhol bajariladi va uzoq kutish shart emas.
     _seekDebounceTimer?.cancel();
-    _seekDebounceTimer = Timer(const Duration(milliseconds: 220), () {
+    _seekDebounceTimer = Timer(const Duration(milliseconds: 110), () {
       final base = _pendingSeekBase;
       final delta = _pendingSeekDeltaSeconds;
       _pendingSeekBase = null;
@@ -438,8 +475,16 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   // va har keyingi shu tarafdagi tap (yana 300ms ichida bo'lsa) jamlanib
   // boradi. 300ms ichida ikkinchi tap kelmasa, birinchi tap oddiy tap
   // sifatida hisoblanib kontrollarni ko'rsatadi/yashiradi.
-  void _handleVideoTap(double dx, double center, double deadHalf) {
-    if (dx >= center - deadHalf && dx <= center + deadHalf) {
+  // O'lik zona endi butun balandlik bo'ylab cho'zilgan VERTIKAL YO'LAK
+  // emas, balki aynan play/pause tugmasi turgan joydagi DOIRA — shu
+  // bilan ekranning chap/o'ng tarafidagi deyarli HAR QANDAY nuqta
+  // (jumladan yuqori va pastki markaz) sek uchun ishlaydi, faqat
+  // tugmaning o'zi bosilganda sek ishga tushmaydi.
+  void _handleVideoTap(
+      double dx, double dy, double center, double centerY, double deadRadius) {
+    final ddx = dx - center;
+    final ddy = dy - centerY;
+    if (ddx * ddx + ddy * ddy <= deadRadius * deadRadius) {
       _pendingSingleTapTimer?.cancel();
       _lastTapTime = null;
       _onTapVideo();
@@ -770,20 +815,27 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
           // tizimi ATAYLAB ishlatilmaydi — u taplar orasidagi masofani ham
           // cheklaydi va shu sabab har xil nuqtalarga bosilganda sek
           // ishonchsiz ishlar edi; buning o'rniga taplar orasidagi VAQT
-          // (300ms) qo'lda tekshiriladi. O'RTADA play/pause tugmasi
-          // o'lchamidagi + har ikki chetidan 10px "o'lik zona" bor — bu
-          // yerda tap faqat kontrollarni ko'rsatish/yashirish uchun
-          // ishlaydi, sek ishga tushmaydi.
+          // (300ms) qo'lda tekshiriladi. O'lik zona — aynan play/pause
+          // tugmasi turgan joydagi DOIRA (tugma radiusi + 10px), butun
+          // balandlik bo'ylab cho'zilgan yo'lak EMAS — shu sabab
+          // ekranning chap/o'ng tarafidagi deyarli har qanday nuqta
+          // (yuqori/pastki markaz ham) sek uchun ishlaydi.
           Positioned.fill(
             child: LayoutBuilder(
               builder: (context, constraints) {
                 final center = constraints.maxWidth / 2;
-                final deadHalf = _playPauseDiameter(isFullscreen) / 2 + 10;
+                final centerY = constraints.maxHeight / 2;
+                final deadRadius = _playPauseDiameter(isFullscreen) / 2 + 10;
                 return GestureDetector(
                   behavior: HitTestBehavior.translucent,
                   onTapUp: _currentEp != null
-                      ? (details) =>
-                          _handleVideoTap(details.localPosition.dx, center, deadHalf)
+                      ? (details) => _handleVideoTap(
+                            details.localPosition.dx,
+                            details.localPosition.dy,
+                            center,
+                            centerY,
+                            deadRadius,
+                          )
                       : null,
                 );
               },
@@ -833,7 +885,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
 
           // ── Sek ko'rsatkichlari — asosiy kontrollardan mustaqil,
           // faqat bosilgan tarafda chiqadi va 2s dan keyin yo'qoladi.
-          // Doiraviy shaklda, play/pause tugmasidan 2 barobar katta.
+          // Doiraviy shaklda, play/pause tugmasidan biroz kattaroq
+          // (avval 2 barobar edi — portret rejimda ekranni to'sib
+          // qo'yadigan darajada katta ko'rinardi).
           // MUHIM: play/pause tugmasi (markaz) bilan video cheti
           // o'rtasidagi nuqtaga joylashtirilgan — chetga emas.
           if (_showLeftSeek)
@@ -843,7 +897,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                 child: _SeekBadge(
                   seconds: _leftSeekAccum,
                   isLeft: true,
-                  diameter: _playPauseDiameter(isFullscreen) * 2,
+                  diameter: _playPauseDiameter(isFullscreen) * 1.3,
                 ),
               ),
             ),
@@ -854,7 +908,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                 child: _SeekBadge(
                   seconds: _rightSeekAccum,
                   isLeft: false,
-                  diameter: _playPauseDiameter(isFullscreen) * 2,
+                  diameter: _playPauseDiameter(isFullscreen) * 1.3,
                 ),
               ),
             ),
