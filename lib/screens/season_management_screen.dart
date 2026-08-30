@@ -5,6 +5,7 @@ import '../theme/app_background.dart';
 import '../widgets/glass.dart';
 import 'add_season_screen.dart';
 import 'epizod_management_screen.dart';
+import 'package:cached_network_image/cached_network_image.dart';
 
 const String API_BASE = 'https://aniraxuzapp.ogabekraximov650.workers.dev';
 
@@ -191,7 +192,7 @@ class _SeasonManagementScreenState extends State<SeasonManagementScreen> {
                         decoration: BoxDecoration(
                           borderRadius: BorderRadius.circular(12),
                           image: DecorationImage(
-                            image: NetworkImage(animePhoto ?? ''),
+                            image: CachedNetworkImageProvider(animePhoto ?? ''),
                             fit: BoxFit.cover,
                             onError: (_, __) {},
                           ),
@@ -280,7 +281,7 @@ class _SeasonManagementScreenState extends State<SeasonManagementScreen> {
                                                 borderRadius: BorderRadius.circular(12),
                                                 image: DecorationImage(
                                                   image:
-                                                      NetworkImage(s['photo_url'] ?? ''),
+                                                      CachedNetworkImageProvider(s['photo_url'] ?? ''),
                                                   fit: BoxFit.cover,
                                                   onError: (_, __) {},
                                                 ),

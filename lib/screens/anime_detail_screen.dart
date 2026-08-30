@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../theme/app_background.dart';
 import '../widgets/glass.dart';
+import 'package:cached_network_image/cached_network_image.dart';
 
 class AnimeDetailScreen extends StatelessWidget {
   final Map<String, dynamic> anime;
@@ -46,7 +47,7 @@ class AnimeDetailScreen extends StatelessWidget {
                       decoration: BoxDecoration(
                         borderRadius: BorderRadius.circular(22),
                         image: DecorationImage(
-                          image: NetworkImage(
+                          image: CachedNetworkImageProvider(
                             anime['photo_url'] ?? '',
                           ),
                           fit: BoxFit.cover,

@@ -4,6 +4,7 @@ import 'dart:convert';
 import '../widgets/glass.dart';
 import '../services/rust_bridge.dart';
 import 'anime_detail_screen.dart';
+import 'package:cached_network_image/cached_network_image.dart';
 
 const String API_BASE = 'https://aniraxuzapp.ogabekraximov650.workers.dev';
 
@@ -205,7 +206,7 @@ class _SeasonSearchCard extends StatelessWidget {
                 decoration: BoxDecoration(
                   borderRadius: const BorderRadius.vertical(top: Radius.circular(18)),
                   image: DecorationImage(
-                    image: NetworkImage(season['photo_url'] ?? ''),
+                    image: CachedNetworkImageProvider(season['photo_url'] ?? ''),
                     fit: BoxFit.cover,
                     onError: (_, __) {},
                   ),

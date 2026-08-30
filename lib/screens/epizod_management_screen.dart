@@ -4,6 +4,7 @@ import 'dart:convert';
 import '../theme/app_background.dart';
 import '../widgets/glass.dart';
 import 'add_epizod_screen.dart';
+import 'package:cached_network_image/cached_network_image.dart';
 
 const String _apiBase = 'https://aniraxuzapp.ogabekraximov650.workers.dev';
 
@@ -186,7 +187,7 @@ class _EpizodManagementScreenState extends State<EpizodManagementScreen> {
                           borderRadius: BorderRadius.circular(12),
                           image: seasonPhoto != null && seasonPhoto.isNotEmpty
                               ? DecorationImage(
-                                  image: NetworkImage(seasonPhoto),
+                                  image: CachedNetworkImageProvider(seasonPhoto),
                                   fit: BoxFit.cover,
                                   onError: (_, __) {},
                                 )

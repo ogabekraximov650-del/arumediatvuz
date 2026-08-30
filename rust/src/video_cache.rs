@@ -952,6 +952,14 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
         }
         cursor = chunk_start + slice_end_exclusive as u64;
     }
-    log(format!("So'rov yakunlandi ({start}-{end})"));
+    // MUHIM DIAGNOSTIKA: har bir so'rov oxirida ilova ishga tushgandan
+    // beri TARMOQDAN olingan umumiy hajm ko'rsatiladi. Bu son o'smay
+    // tursa — demak video uchun tarmoqqa UMUMAN chiqilmayapti va
+    // qurilmada ko'rinayotgan trafik BOSHQA manbadan (boshqa ilova yoki
+    // ilovaning boshqa qismi) ketayotgan bo'ladi.
+    let net_mb = NET_BYTES.load(Ordering::Relaxed) as f64 / (1024.0 * 1024.0);
+    log(format!(
+        "So'rov yakunlandi ({start}-{end}) | jami tarmoq: {net_mb:.2} MB"
+    ));
     Ok(())
 }

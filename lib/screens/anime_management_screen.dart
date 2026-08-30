@@ -5,6 +5,7 @@ import '../theme/app_background.dart';
 import '../widgets/glass.dart';
 import 'add_anime_screen.dart';
 import 'season_management_screen.dart';
+import 'package:cached_network_image/cached_network_image.dart';
 
 const String API_BASE = 'https://aniraxuzapp.ogabekraximov650.workers.dev';
 
@@ -262,7 +263,7 @@ class _AnimeManagementScreenState extends State<AnimeManagementScreen> {
                                                     borderRadius:
                                                         BorderRadius.circular(14),
                                                     image: DecorationImage(
-                                                      image: NetworkImage(
+                                                      image: CachedNetworkImageProvider(
                                                           anime['photo_url'] ?? ''),
                                                       fit: BoxFit.cover,
                                                       onError: (_, __) {},
