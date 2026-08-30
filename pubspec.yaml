@@ -20,6 +20,9 @@ dependencies:
   # Video pleyr: video_player (ochiq API) + fvp (ichki mexanizm/decoding backend)
   video_player: ^2.9.2
   fvp: ^0.38.1
+  # SINOV: o'zimiz yozgan mahalliy kesh-proksi (video_cache_server.dart)
+  # o'rniga tayyor, keng sinalgan mahalliy proksi paketi.
+  flutter_video_caching: ^1.1.6
 
 dev_dependencies:
   flutter_test:

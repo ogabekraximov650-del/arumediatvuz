@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:fvp/fvp.dart' as fvp;
+import 'package:flutter_video_caching/flutter_video_caching.dart';
 import 'screens/root_screen.dart';
 import 'services/rust_bridge.dart';
 
@@ -64,6 +65,14 @@ Future<void> main() async {
       'cache.disk.io': 0,
     },
   });
+  // SINOV: o'zimiz yozgan mahalliy kesh-proksi (video_cache_server.dart)
+  // o'rniga tayyor, keng sinalgan `flutter_video_caching` paketining
+  // mahalliy HTTP proksisi. U ham xuddi o'zimizniki kabi 127.0.0.1'da
+  // ishlaydi, video bo'laklarini diskka saqlaydi va tugallanmagan
+  // yuklashlarni davom ettiradi — lekin ko'plab qurilmalarda allaqachon
+  // sinalgan (haftasiga 2000+ marta o'rnatiladi).
+  await VideoProxy.init(logPrint: true);
+
   // Ichki mexanizm (kesh, qidiruv, validatsiya) shu yerda yuklanadi —
   // undan keyin butun ilova Rust yadrosiga murojaat qila oladi.
   await RustCore.instance.init();

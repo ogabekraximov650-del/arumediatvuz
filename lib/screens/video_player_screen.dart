@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:video_player/video_player.dart';
+import 'package:flutter_video_caching/flutter_video_caching.dart';
 import '../services/video_cache_server.dart';
 import '../widgets/glass.dart';
 import '../theme/app_background.dart';
@@ -204,22 +205,23 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
 
     if (!mounted || myToken != _playToken) return;
 
-    // Videoni to'g'ridan-to'g'ri masofaviy URL'dan emas, mahalliy
-    // (127.0.0.1) kesh-proksidan o'ynatamiz: diskda mavjud bo'lgan
-    // baytlar to'g'ridan-to'g'ri fayldan o'qiladi, faqat yetishmayotgan
-    // qismi worker'dan yuklab olinadi (video_cache_server.dart).
+    // SINOV: o'zimiz yozgan mahalliy kesh-proksi (VideoCacheServer)
+    // o'rniga `flutter_video_caching` paketining tayyor mahalliy HTTP
+    // proksisidan (VideoProxy, main.dart'da ishga tushirilgan)
+    // foydalanamiz — u ham 127.0.0.1'da ishlaydi, video bo'laklarini
+    // diskka saqlaydi, lekin ko'plab qurilmalarda allaqachon sinalgan.
     //
-    // MUHIM ZAXIRA YO'L: ba'zi qurilmalarda mahalliy HTTP server ochish
-    // muammoli bo'lishi mumkin (masalan tarmoq cheklovlari). Bunday
-    // holatda kesh-proksisiz, TO'G'RIDAN-TO'G'RI asl URL bilan
-    // o'ynatishga o'tamiz — kesh (doimiy saqlash) ishlamaydi, lekin
-    // video HECH QACHON abadiy "yuklanmoqda" holatida qotib qolmaydi.
+    // MUHIM ZAXIRA YO'L: agar biror sababga ko'ra proksi ishlamasa,
+    // kesh-proksisiz, TO'G'RIDAN-TO'G'RI asl URL bilan o'ynatishga
+    // o'tamiz — video HECH QACHON abadiy "yuklanmoqda" holatida qotib
+    // qolmasligi kerak.
     Uri proxied;
     bool viaProxy = true;
     try {
-      proxied = await VideoCacheServer.instance.proxyUri(url);
+      proxied = Uri.parse(url).toLocalUri();
+      VideoCacheServer.log('flutter_video_caching proksi: $proxied');
     } catch (e) {
-      VideoCacheServer.log('proxyUri xato berdi, asl URL ishlatiladi: $e');
+      VideoCacheServer.log('toLocalUri xato berdi, asl URL ishlatiladi: $e');
       proxied = Uri.parse(url);
       viaProxy = false;
     }
