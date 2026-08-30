@@ -21,7 +21,7 @@
 //     cheklangan — shu sabab har bir ulanish qisqa umr ko'radi va
 //     tez-tez sek qilinganda ulanishlar to'planib qolmaydi.
 //   - Oldindan yuklash SURILUVCHI OYNA bilan: ijro nuqtasidan keyin
-//     eng ko'pi 10 ta bo'lak (PREFETCH_WINDOW) keshga olinadi.
+//     eng ko'pi 5 ta bo'lak (PREFETCH_WINDOW) keshga olinadi.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -67,9 +67,9 @@ const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 /// qadar bo'lak keshga olinadi. Avval butun fayl fon'da yuklab olinardi
 /// — bu foydalanuvchining trafigini keraksiz "so'rib" olardi (u videoni
 /// bir necha soniya ko'rib chiqib qo'ysa ham) va xotirani tez to'ldirardi.
-/// Endi faqat oldinda turgan 10 ta bo'lak saqlanadi; pleyer oldinga
+/// Endi faqat oldinda turgan 5 ta bo'lak saqlanadi; pleyer oldinga
 /// siljigan sari (yoki sek qilinganda) oyna ham u bilan birga suriladi.
-const PREFETCH_WINDOW: u64 = 10;
+const PREFETCH_WINDOW: u64 = 5;
 
 // ── Umumiy holat ─────────────────────────────────────────────────────
 
@@ -524,26 +524,15 @@ fn ensure_meta(shared: &Shared, dir: &PathBuf, url: &str) -> Result<CacheMeta, S
     let mut size: u64 = 0;
     let mut content_type = "video/mp4".to_string();
 
-    // Avval HEAD sinaladi (ba'zi manbalar buni qo'llab-quvvatlamaydi —
-    // bizning worker'imiz ham 404 qaytaradi, bu normal, keyingi zaxira
-    // yo'lga o'tiladi).
-    match shared.agent.head(url).call() {
-        Ok(resp) => {
-            if let Some(len) = resp.header("Content-Length").and_then(|v| v.parse().ok()) {
-                size = len;
-            }
-            if let Some(ct) = resp.header("Content-Type") {
-                content_type = ct.to_string();
-            }
-            log(format!("HEAD javobi: status={}, hajm={size}", resp.status()));
-        }
-        Err(e) => {
-            log(format!("HEAD ishlamadi: {e} — zaxira GET urinib ko'riladi"));
-        }
-    }
-
-    if size == 0 {
-        // Zaxira: "bytes=0-0" bilan GET. Javob tanasi HECH QACHON
+    // MUHIM TEZLASHTIRISH (jurnal tahlilidan): avval bu yerda HEAD
+    // so'rovi yuborilardi, lekin bizning worker'imiz HEAD'ni umuman
+    // qo'llab-quvvatlamaydi — u HAR DOIM 404 qaytarardi. Ya'ni har bir
+    // yangi video ochilganda BEHUDA bitta tarmoq so'rovi ketib, ~800 ms
+    // vaqt yo'qotilardi (jurnalda: 202ms da so'rov keldi -> 996ms da
+    // "HEAD ishlamadi"). Endi to'g'ridan-to'g'ri ishlaydigan yo'ldan —
+    // "bytes=0-0" GET orqali — hajm aniqlanadi.
+    {
+        // "bytes=0-0" bilan GET. Javob tanasi HECH QACHON
         // o'qilmaydi (into_reader() chaqirilmaydi) — shu bilan manba
         // Range'ni e'tiborsiz qoldirib butun faylni yubora boshlagan
         // taqdirda ham, biz shunchaki ulanishni tashlab, hech narsa
@@ -575,7 +564,7 @@ fn ensure_meta(shared: &Shared, dir: &PathBuf, url: &str) -> Result<CacheMeta, S
     }
 
     if size == 0 {
-        log("XATO: video hajmini aniqlab bo'lmadi (HEAD ham, GET ham)".to_string());
+        log("XATO: video hajmini aniqlab bo'lmadi".to_string());
         return Err("hajm aniqlanmadi".to_string());
     }
 
@@ -799,7 +788,32 @@ fn fetch_and_store_chunk(
 // Butun tizimda ENG KO'PI BILAN BITTA to'ldiruvchi ish oqimi bo'ladi:
 // yangi video ochilganda vazifa (FillerJob) almashadi, eski video uchun
 // yuklash esa darhol to'xtaydi.
+/// Faylning BARCHA bo'laklari diskda bor-yo'qligini tekshiradi.
+/// Bor bo'lsa — bu fayl to'liq yuklab olingan va unga BOSHQA HECH QACHON
+/// tarmoq so'rovi yuborilmaydi (xuddi Telegram'da faylni bir marta
+/// yuklab olgandan keyin qayta so'ralmagani kabi).
+fn is_fully_cached(dir: &PathBuf, total: u64) -> bool {
+    let chunk_count = total.div_ceil(CHUNK_SIZE);
+    for i in 0..chunk_count {
+        let chunk_start = i * CHUNK_SIZE;
+        let chunk_end = (chunk_start + CHUNK_SIZE - 1).min(total - 1);
+        let expected_len = (chunk_end - chunk_start + 1) as usize;
+        match fs::metadata(dir.join(chunk_name(i))) {
+            Ok(m) if m.len() as usize == expected_len => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
 fn ensure_filler(shared: &'static Shared, key: &str, dir: &PathBuf, url: &str, total: u64) {
+    // Fayl butunlay keshda bo'lsa, oldindan yuklovchini UMUMAN ishga
+    // tushirmaymiz — hech qanday ish oqimi ochilmaydi va worker'ga
+    // birorta ham so'rov ketmaydi.
+    if is_fully_cached(dir, total) {
+        return;
+    }
+
     {
         let mut job = shared.filler_job.lock().unwrap();
         let changed = job.as_ref().map(|j| j.key.as_str()) != Some(key);
