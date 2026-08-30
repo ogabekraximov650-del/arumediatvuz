@@ -279,28 +279,47 @@ class VideoCacheServer {
       int size = -1;
       String contentType = 'video/mp4';
 
+      // HEAD so'rovida javob TANASI umuman bo'lmaydi — shu sabab bu yerda
+      // hech narsani "drain" qilish shart emas.
       try {
-        final headReq = await client.headUrl(Uri.parse(url));
-        final headRes = await headReq.close();
-        await headRes.drain<void>();
+        final headReq = await client
+            .headUrl(Uri.parse(url))
+            .timeout(const Duration(seconds: 10));
+        final headRes = await headReq.close().timeout(const Duration(seconds: 10));
         if (headRes.contentLength > 0) size = headRes.contentLength;
         final ct = headRes.headers.value(HttpHeaders.contentTypeHeader);
         if (ct != null && ct.isNotEmpty) contentType = ct;
       } catch (_) {}
 
       if (size <= 0) {
-        final req = await client.getUrl(Uri.parse(url));
+        // MUHIM: agar server HEAD'ni qo'llab-quvvatlamasa, zaxira sifatida
+        // "bytes=0-0" bilan GET yuboramiz — LEKIN javob tanasini HECH
+        // QACHON o'qib (drain qilib) chiqmaymiz! Agar server Range'ni
+        // e'tiborsiz qoldirib TO'LIQ videoni 200 status bilan yubora
+        // boshlagan bo'lsa, uni oxirigacha o'qish shunchaki hajmini
+        // bilish uchun BUTUN VIDEONI behuda yuklab olishga (va shu
+        // paytda pleyerning umuman ochilmasligiga) sabab bo'lardi.
+        // Sarlavhalarni o'qib bo'lgach, ulanish pastdagi finally blokida
+        // client.close(force: true) orqali MAJBURAN yopib tashlanadi —
+        // tana hech qachon yuklanmaydi.
+        final req = await client
+            .getUrl(Uri.parse(url))
+            .timeout(const Duration(seconds: 10));
         req.headers.set(HttpHeaders.rangeHeader, 'bytes=0-0');
-        final res = await req.close();
+        final res = await req.close().timeout(const Duration(seconds: 10));
         final contentRange = res.headers.value(HttpHeaders.contentRangeHeader);
         if (contentRange != null && contentRange.contains('/')) {
+          // Server Range'ga hurmat qilib, chindan ham 206 (qisman) javob
+          // qaytargan — "Content-Range: bytes 0-0/<umumiy hajm>".
           size = int.tryParse(contentRange.split('/').last) ?? -1;
-        } else if (res.contentLength > 0) {
+        } else if (res.statusCode == HttpStatus.ok && res.contentLength > 0) {
+          // Server Range'ni e'tiborsiz qoldirib, TO'LIQ tanani 200 status
+          // bilan yubormoqchi — bu holatda Content-Length aynan UMUMIY
+          // hajmning o'zi (tanani o'qimasdan ham buni bilib olamiz).
           size = res.contentLength;
         }
         final ct = res.headers.value(HttpHeaders.contentTypeHeader);
         if (ct != null && ct.isNotEmpty) contentType = ct;
-        await res.drain<void>();
       }
 
       final meta = _CacheMeta(size, contentType);
