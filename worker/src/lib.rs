@@ -373,33 +373,59 @@ async fn finalize_b2_response(mut b2_resp: Response) -> Result<Response> {
     Ok(resp)
 }
 
-/// Keshdan (bo'lak ichidan) kelgan javobni — bo'lakka NISBIY
-/// Content-Range'ni faylga NISBATAN ABSOLYUT Content-Range'ga
-/// o'girib — klientga qaytarish uchun tayyorlaydi.
-async fn finalize_cached_response(mut cached: Response, chunk_abs_start: u64) -> Result<Response> {
-    let status = cached.status_code();
+/// Keshdan (bo'lak ichidan) kelgan javobni klientga qaytarish uchun
+/// tayyorlaydi.
+///
+/// MUHIM TUZATISH: avval bu funksiya Cloudflare Cache API'ning "Range
+/// so'rovini o'zi avtomatik kesib beradi" degan (NOTO'G'RI chiqqan)
+/// taxminga tayangan edi — amalda esa `cache.get()` lookup so'roviga
+/// Range header qo'yilgan bo'lsa ham, u har doim TO'LIQ keshlangan
+/// bo'lakni (butun faylni, agar u 450MB'dan kichik bo'lsa) status 200
+/// bilan qaytarardi — mijoz (video pleyer) atigi 1MB so'ragan bo'lsa
+/// ham. Bu esa mijoz tomonida yoki butun faylni behuda yuklashga, yoki
+/// pleyer buni tushunolmay "yuklanmoqda" holatida abadiy qotib
+/// qolishiga sabab bo'lardi.
+///
+/// Endi kesh javobining status/Content-Range'iga ISHONMAYDI — o'rniga
+/// keshdagi to'liq baytlardan mijoz haqiqatda so'ragan `rel_start..=rel_end`
+/// oralig'ini QO'LDA kesib olib, har doim TO'G'RI 206 Partial Content
+/// javobini (aniq Content-Range va Content-Length bilan) qaytaradi.
+async fn finalize_cached_response(
+    mut cached: Response,
+    chunk_abs_start: u64,
+    rel_start: u64,
+    rel_end: u64,
+) -> Result<Response> {
     let ct = cached.headers().get("Content-Type")?.unwrap_or_else(|| "application/octet-stream".to_string());
-    let cr = cached.headers().get("Content-Range")?;
-    let cl = cached.headers().get("Content-Length")?;
     let total_size = cached.headers().get("X-Total-Size")?.and_then(|s| s.parse::<u64>().ok());
     let bytes = cached.bytes().await?;
-    let mut resp = Response::from_bytes(bytes)?.with_status(status);
+    let avail = bytes.len() as u64;
+
+    if avail == 0 {
+        let mut resp = Response::from_bytes(Vec::new())?.with_status(204);
+        set_cors(&mut resp);
+        return Ok(resp);
+    }
+
+    let s = rel_start.min(avail - 1);
+    let e = rel_end.min(avail - 1);
+    let sliced: Vec<u8> = if s <= e {
+        bytes[s as usize..=e as usize].to_vec()
+    } else {
+        Vec::new()
+    };
+
+    let mut resp = Response::from_bytes(sliced.clone())?.with_status(206);
     set_cors(&mut resp);
     let rh = resp.headers_mut();
     rh.set("Content-Type", &ct)?;
     rh.set("Accept-Ranges", "bytes")?;
     rh.set("Cache-Control", "public, max-age=86400")?;
-    if let Some(cr) = cr {
-        if let Some((s, e, _)) = parse_content_range(&cr) {
-            let abs_s = chunk_abs_start + s;
-            let abs_e = chunk_abs_start + e;
-            let total_str = total_size.map(|t| t.to_string()).unwrap_or_else(|| "*".to_string());
-            rh.set("Content-Range", &format!("bytes {abs_s}-{abs_e}/{total_str}"))?;
-        }
-    }
-    if let Some(cl) = cl {
-        rh.set("Content-Length", &cl)?;
-    }
+    let abs_s = chunk_abs_start + s;
+    let abs_e = chunk_abs_start + e;
+    let total_str = total_size.map(|t| t.to_string()).unwrap_or_else(|| (chunk_abs_start + avail).to_string());
+    rh.set("Content-Range", &format!("bytes {abs_s}-{abs_e}/{total_str}"))?;
+    rh.set("Content-Length", &sliced.len().to_string())?;
     Ok(resp)
 }
 
@@ -447,7 +473,7 @@ async fn b2_proxy(env: &Env, file_name: &str, range: Option<String>) -> Result<R
     // kerak — CacheKey faqat From<&Request> ni amalga oshiradi, egalik
     // qilingan Request emas (workers-rs 0.8.5).
     if let Some(cached) = cache.get(&lookup_req, false).await? {
-        return finalize_cached_response(cached, chunk_abs_start).await;
+        return finalize_cached_response(cached, chunk_abs_start, rel_start, rel_end).await;
     }
 
     // ── KESH MISS: bo'lakni B2'dan bitta marta STREAM orqali olib,
