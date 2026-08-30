@@ -1,7 +1,14 @@
 name: Deploy Cloudflare Worker (Rust WASM)
 
 on:
-  # Faqat qo'lda ishga tushadi — GitHub Actions sahifasida "Run workflow" tugmasi
+  # worker/ papkasiga o'zgartirish push qilinganda AVTOMATIK deploy
+  # qiladi (masalan main branchga). Qo'lda ham ishga tushirish mumkin —
+  # GitHub Actions sahifasida "Run workflow" tugmasi orqali.
+  push:
+    branches: [main]
+    paths:
+      - 'worker/**'
+      - '.github/workflows/deploy-worker.yml'
   workflow_dispatch:
 
 jobs:
