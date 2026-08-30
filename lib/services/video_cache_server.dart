@@ -201,26 +201,53 @@ class VideoCacheServer {
 
     final client = HttpClient();
     try {
-      final req = await client.getUrl(Uri.parse(url));
+      final req = await client
+          .getUrl(Uri.parse(url))
+          .timeout(const Duration(seconds: 10));
       req.headers.set(HttpHeaders.rangeHeader, 'bytes=$start-$end');
-      final res = await req.close();
+      final res = await req.close().timeout(const Duration(seconds: 10));
       if (res.statusCode != HttpStatus.partialContent &&
           res.statusCode != HttpStatus.ok) {
         throw HttpException('Yuklab olishda xato: ${res.statusCode}');
       }
 
-      final builder = BytesBuilder(copy: false);
-      await for (final part in res) {
-        builder.add(part);
-      }
-      var bytes = builder.takeBytes();
+      // MUHIM: server Range so'rovini e'tiborsiz qoldirib TO'LIQ faylni
+      // (0-baytdan boshlab) 200 status bilan yuborayotgan bo'lishi mumkin.
+      // Bunday holatda bizga kerakli [start,end] qismi javob TANASINING
+      // BOSHIDA emas, "start" bayt ichkariroqda joylashgan bo'ladi — shu
+      // sabab avval "start" ta baytni tashlab yuboramiz (skip), keyin
+      // kerakli "expectedLen" baytni yig'amiz. ENG MUHIMI: kerakli
+      // baytlar to'planishi bilanoq pastda "break" bilan o'qishni
+      // TO'XTATAMIZ — aks holda (ayniqsa faylning keyingi bo'laklari
+      // uchun) qolgan BUTUN faylni oxirigacha behuda yuklab olar edik,
+      // bu esa aynan pleyer umuman ochilmay, tarmoq esa sekin-sekin
+      // ishlab turishining sababi edi.
+      final ignoresRange = res.statusCode == HttpStatus.ok;
+      final skipBytes = ignoresRange ? start : 0;
 
-      // Server Range so'rovini e'tiborsiz qoldirib TO'LIQ faylni
-      // qaytargan bo'lishi mumkin (status 200) — kerakli qismini kesamiz.
-      if (res.statusCode == HttpStatus.ok && bytes.length > expectedLen) {
-        final upper = end + 1 > bytes.length ? bytes.length : end + 1;
-        bytes = Uint8List.sublistView(bytes, start < bytes.length ? start : 0, upper);
+      final builder = BytesBuilder(copy: false);
+      var skipped = 0;
+      var collected = 0;
+      await for (final part in res) {
+        var piece = part;
+        if (skipped < skipBytes) {
+          final toSkip = skipBytes - skipped;
+          if (piece.length <= toSkip) {
+            skipped += piece.length;
+            continue;
+          }
+          piece = piece.sublist(toSkip);
+          skipped = skipBytes;
+        }
+        final remaining = expectedLen - collected;
+        if (piece.length > remaining) {
+          piece = piece.sublist(0, remaining);
+        }
+        builder.add(piece);
+        collected += piece.length;
+        if (collected >= expectedLen) break;
       }
+      final bytes = builder.takeBytes();
 
       // Ulanish o'rtada uzilib, KUTILGANDAN QISQAROQ bayt kelishi mumkin
       // (masalan tarmoq muammosi) — bunday chala natijani DISKKA
