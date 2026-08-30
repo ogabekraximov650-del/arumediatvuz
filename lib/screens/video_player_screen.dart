@@ -208,32 +208,55 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // (127.0.0.1) kesh-proksidan o'ynatamiz: diskda mavjud bo'lgan
     // baytlar to'g'ridan-to'g'ri fayldan o'qiladi, faqat yetishmayotgan
     // qismi worker'dan yuklab olinadi (video_cache_server.dart).
-    final Uri proxied;
+    //
+    // MUHIM ZAXIRA YO'L: ba'zi qurilmalarda mahalliy HTTP server ochish
+    // muammoli bo'lishi mumkin (masalan tarmoq cheklovlari). Bunday
+    // holatda kesh-proksisiz, TO'G'RIDAN-TO'G'RI asl URL bilan
+    // o'ynatishga o'tamiz — kesh (doimiy saqlash) ishlamaydi, lekin
+    // video HECH QACHON abadiy "yuklanmoqda" holatida qotib qolmaydi.
+    Uri proxied;
+    bool viaProxy = true;
     try {
       proxied = await VideoCacheServer.instance.proxyUri(url);
     } catch (_) {
-      if (mounted && myToken == _playToken) {
-        setState(() {
-          _playerLoading = false;
-          _playerError = 'Videoni yuklab bo\'lmadi';
-        });
-      }
-      return;
+      proxied = Uri.parse(url);
+      viaProxy = false;
     }
     if (!mounted || myToken != _playToken) return;
 
-    final ctrl = VideoPlayerController.networkUrl(proxied);
+    // 15 soniya ichida ishga tushmasa (masalan mahalliy kesh-proksi
+    // qurilmada ishlamayotgan bo'lsa), sinab ko'rilgan controller
+    // bekor qilinadi va null qaytariladi — chaqiruvchi zaxira yo'lga
+    // (kesh'siz, to'g'ridan-to'g'ri asl URL) o'tishi mumkin bo'ladi.
+    Future<VideoPlayerController?> tryInit(Uri u) async {
+      final c = VideoPlayerController.networkUrl(u);
+      try {
+        await c.initialize().timeout(const Duration(seconds: 15));
+        return c;
+      } catch (_) {
+        await c.dispose();
+        return null;
+      }
+    }
 
-    try {
-      await ctrl.initialize();
-    } catch (_) {
+    var ctrl = await tryInit(proxied);
+
+    // Mahalliy kesh-proksi orqali ishga tushmadi (server javob
+    // bermayapti yoki qurilmada bloklangan) — kesh bo'lmasa ham video
+    // hech bo'lmasa ochilishi uchun asl URL bilan to'g'ridan-to'g'ri
+    // qayta urinib ko'ramiz.
+    if (ctrl == null && viaProxy) {
+      if (!mounted || myToken != _playToken) return;
+      ctrl = await tryInit(Uri.parse(url));
+    }
+
+    if (ctrl == null) {
       if (mounted && myToken == _playToken) {
         setState(() {
           _playerLoading = false;
           _playerError = 'Videoni yuklab bo\'lmadi';
         });
       }
-      await ctrl.dispose();
       return;
     }
 

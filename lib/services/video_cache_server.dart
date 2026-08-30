@@ -63,8 +63,16 @@ class VideoCacheServer {
   // Berilgan asl (masofaviy) URL o'rniga video_player'ga beriladigan
   // mahalliy proksi URL'ini qaytaradi. Serverni kerak bo'lsa ishga
   // tushiradi (lazy — ilova ochilganda emas, birinchi video o'ynatilganda).
+  //
+  // MUHIM: 5 soniyalik timeout bilan himoyalangan. Ba'zi qurilmalarda
+  // (masalan MIUI'ning agressiv tarmoq cheklovlari) mahalliy HTTP
+  // server ochish muammoli bo'lishi mumkin — bunday holatda bu funksiya
+  // cheksiz kutib qolmasdan xato tashlaydi, chaqiruvchi (video_player_
+  // screen.dart) esa buni ushlab, ASL (kesh'siz) URL bilan to'g'ridan-
+  // to'g'ri o'ynatishga qaytadi. Shu bilan kesh ishlamasa ham video
+  // pleyer HECH QACHON abadiy "yuklanmoqda" holatida qotib qolmaydi.
   Future<Uri> proxyUri(String originalUrl) async {
-    await _ensureStarted();
+    await _ensureStarted().timeout(const Duration(seconds: 5));
     return Uri.parse(
         'http://127.0.0.1:${_server!.port}/v?u=${Uri.encodeQueryComponent(originalUrl)}');
   }
