@@ -54,11 +54,25 @@ Future<void> main() async {
   // egallovchi) kesh qatlami bo'lib qolmasligi uchun.
   // MUHIM TUZATISH: 'lowLatency' olib tashlandi — u ASAP dekodlashga
   // undab, katta oldindan-bufer maqsadiga zid edi.
+  //
+  // MUHIM TUZATISH (qurilmada aniqlangan sekin ishga tushish sababi):
+  // FFmpeg standart holatda formatni aniqlash uchun 'avformat.probesize'
+  // (standart ~5 MB) va 'avformat.analyzeduration' (standart ~5s)
+  // miqdorida ma'lumot o'qishga urinadi. Bizning videolarimiz ko'pincha
+  // bir necha MB bo'lgani uchun, bu standart qiymatlar bilan pleyer
+  // deyarli BUTUN VIDEONI (barcha bo'laklarni tarmoqdan) yuklab
+  // bo'lmaguncha initialize() yakunlana olmasdi — garchi har bir bo'lak
+  // o'zi tez yuklansa ham, buning yig'indisi 15 soniyalik oynadan
+  // oshib ketardi. Bu qiymatlarni kichraytirish (mos ravishda 1 MiB va
+  // 1 soniya — bitta bo'lak hajmimiz bilan mos) formatni aniqlash uchun
+  // yetarli, lekin ortiqcha ma'lumot talab qilmaydi.
   fvp.registerWith(options: {
     'fastSeek': true,
     'player': {
       'buffer.range': '2000+600000',
       'demux.buffer.ranges': '64',
+      'avformat.probesize': '1048576',
+      'avformat.analyzeduration': '1000000',
     },
     'global': {
       'cache.disk.io': 0,

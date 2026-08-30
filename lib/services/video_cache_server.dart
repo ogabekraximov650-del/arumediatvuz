@@ -253,6 +253,25 @@ class _CacheEngine {
   final Map<String, Future<_CacheMeta>> _inFlightMeta = {};
   int _activeRequests = 0;
 
+  // MUHIM (qurilmada aniqlangan xato): foydalanuvchi epizod tugmasini
+  // qayta bossa, ESKI (tashlab ketilgan) so'rov uchun _serve va uning
+  // _prefetchAhead zanjiri hech qachon bekor qilinmasdi — ular orqa
+  // fonda cheksiz davom etib, hech kim kutmaydigan bo'laklarni
+  // tarmoqdan yuklashda davom etar edi. Bir necha marta qayta bosilsa,
+  // bir nechta bunday "o'lik" jarayon PARALLEL yig'ilib, tarmoq/xotira
+  // ziddiyatiga (va oxir-oqibat ilova OOM bilan o'chib qolishiga) sabab
+  // bo'lardi — aynan shu narsa "har safar tugma bosilganda MB ketishi"
+  // va "ilova qotib, o'chib qolishi" holatlarining sababi edi.
+  //
+  // Har bir video (kalit) uchun "avlod" raqami saqlanadi: har safar
+  // o'sha videoga YANGI so'rov kelganda bu raqam oshiriladi. Eski
+  // so'rovning _serve tsikli va undan tug'ilgan _prefetchAhead
+  // zanjirlari o'z avlod raqamini eskirganini sezishi bilanoq DARHOL
+  // to'xtaydi — allaqachon boshlangan (in-flight) bitta bo'lak yuklashi
+  // baribir yakunlanadi (bekor qilinmaydi, chunki keshga foydali), lekin
+  // undan KEYINGI hech qanday yangi yuklash boshlanmaydi.
+  final Map<String, int> _activeGeneration = {};
+
   Future<void> handleRequest(HttpRequest request) async {
     final rangeHdr = request.headers.value(HttpHeaders.rangeHeader) ?? '(hammasi)';
     _activeRequests++;
@@ -283,6 +302,11 @@ class _CacheEngine {
   Future<void> _serve(HttpRequest request, String originalUrl) async {
     _log('_serve boshlandi');
     final key = _hashUrl(originalUrl);
+    // Shu videoga qilingan har qanday OLDINGI (hali tugamagan) so'rovni
+    // "eskirgan" deb belgilaydi — ular o'z navbatidagi tekshiruvda buni
+    // sezib, o'z-o'zini to'xtatadi (pastga qarang).
+    final myGeneration = (_activeGeneration[key] ?? 0) + 1;
+    _activeGeneration[key] = myGeneration;
     final dir = Directory('${_cacheRoot.path}/$key');
     _log('Papka yaratilmoqda: ${dir.path}');
     await dir.create(recursive: true).timeout(const Duration(seconds: 5),
@@ -349,9 +373,19 @@ class _CacheEngine {
           .set(HttpHeaders.contentRangeHeader, 'bytes $start-$end/$total');
     }
 
+    var cancelled = false;
     try {
       var cursor = start;
       while (cursor <= end) {
+        if (_activeGeneration[key] != myGeneration) {
+          // Shu videoga YANGI so'rov kelib ulgurgan — bu (eski) so'rov
+          // endi hech kimga kerak emas, tsiklni darhol to'xtatamiz (lekin
+          // pastdagi response.close() baribir bajarilishi uchun "return"
+          // emas, "break" ishlatiladi).
+          _log('_serve bekor qilindi (yangi so\'rov boshlangan, avlod eskirdi)');
+          cancelled = true;
+          break;
+        }
         final chunkIndex = cursor ~/ chunkSize;
         final chunkStart = chunkIndex * chunkSize;
         final chunkEndMax = chunkStart + chunkSize - 1;
@@ -361,7 +395,9 @@ class _CacheEngine {
         final chunkBytes = await _readOrFetchChunk(
             key, dir, originalUrl, chunkIndex, chunkStart, chunkEnd, expectedLen);
         _log('Bo\'lak #$chunkIndex tayyor (${chunkBytes.length} bayt)');
-        _prefetchAhead(key, dir, originalUrl, chunkIndex + 1, total);
+        if (_activeGeneration[key] == myGeneration) {
+          _prefetchAhead(key, dir, originalUrl, chunkIndex + 1, total, myGeneration);
+        }
 
         final sliceStart = cursor - chunkStart;
         final sliceEndExclusive =
@@ -370,7 +406,9 @@ class _CacheEngine {
         await request.response.flush();
         cursor = chunkStart + sliceEndExclusive;
       }
-      _log('So\'rov muvaffaqiyatli yakunlandi ($start-$end)');
+      if (!cancelled) {
+        _log('So\'rov muvaffaqiyatli yakunlandi ($start-$end)');
+      }
     } catch (e) {
       // Klient uzilgan bo'lishi mumkin (masalan foydalanuvchi yangi
       // joyga sek qildi va pleyer eski so'rovni bekor qildi) — bu holat
@@ -513,10 +551,14 @@ class _CacheEngine {
   // hech kimni kutmasdan oldindan yuklab qo'yadi. Shu bilan pleyer
   // ularga yetib kelguncha ular allaqachon diskda tayyor turadi — endi
   // har bir bo'lak uchun alohida "qayta bos" kerak bo'lmaydi.
-  void _prefetchAhead(
-      String key, Directory dir, String url, int fromIndex, int total) {
-    const lookahead = 3;
+  void _prefetchAhead(String key, Directory dir, String url, int fromIndex,
+      int total, int myGeneration) {
+    const lookahead = 2;
     for (var i = fromIndex; i < fromIndex + lookahead; i++) {
+      // MUHIM: shu videoga YANGI so'rov kelib ulgurgan bo'lsa (avlod
+      // eskirgan), bu yerdan buyon HECH QANDAY yangi fon'dagi yuklash
+      // BOSHLANMAYDI — orqa fonda cheksiz to'planib ketmasligi uchun.
+      if (_activeGeneration[key] != myGeneration) return;
       final chunkStart = i * chunkSize;
       if (chunkStart >= total) break;
       final chunkEndMax = chunkStart + chunkSize - 1;
@@ -526,10 +568,12 @@ class _CacheEngine {
       if (_inFlightChunks.containsKey(flightKey)) continue;
       final finalFile = File('${dir.path}/${_chunkName(i)}');
       finalFile.exists().then((exists) async {
+        if (_activeGeneration[key] != myGeneration) return;
         if (exists) {
           final onDisk = await finalFile.readAsBytes();
           if (onDisk.length == expectedLen) return;
         }
+        if (_activeGeneration[key] != myGeneration) return;
         if (_inFlightChunks.containsKey(flightKey)) return;
         _log('Bo\'lak #$i oldindan (fon\'da) yuklab qo\'yilyapti...');
         final future = _fetchAndStoreChunk(dir, url, i, chunkStart, chunkEnd)
