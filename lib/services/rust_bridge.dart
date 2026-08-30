@@ -50,6 +50,9 @@ typedef _VideoCacheStartDart = int Function(Pointer<Utf8>);
 typedef _VideoCachePullLogsC = Pointer<Utf8> Function();
 typedef _VideoCachePullLogsDart = Pointer<Utf8> Function();
 
+typedef _VideoCacheNetBytesC = Uint64 Function();
+typedef _VideoCacheNetBytesDart = int Function();
+
 class RustCore {
   RustCore._();
   static final RustCore instance = RustCore._();
@@ -66,6 +69,7 @@ class RustCore {
   late final _VersionDart _version;
   late final _VideoCacheStartDart _videoCacheStart;
   late final _VideoCachePullLogsDart _videoCachePullLogs;
+  late final _VideoCacheNetBytesDart _videoCacheNetBytes;
 
   bool _loaded = false;
   String? _cacheFilePath;
@@ -96,6 +100,8 @@ class RustCore {
         .lookupFunction<_VideoCacheStartC, _VideoCacheStartDart>('rust_video_cache_start');
     _videoCachePullLogs = _lib.lookupFunction<_VideoCachePullLogsC, _VideoCachePullLogsDart>(
         'rust_video_cache_pull_logs');
+    _videoCacheNetBytes = _lib.lookupFunction<_VideoCacheNetBytesC, _VideoCacheNetBytesDart>(
+        'rust_video_cache_net_bytes');
 
     final dir = await getApplicationDocumentsDirectory();
     _cacheDirPath = dir.path;
@@ -302,6 +308,18 @@ class RustCore {
       return port;
     } finally {
       malloc.free(pathPtr);
+    }
+  }
+
+  /// Ilova ishga tushgandan beri TARMOQDAN olingan umumiy bayt hajmi
+  /// (keshdan o'qilganlar kirmaydi). Bu son o'smay tursa — video uchun
+  /// tarmoqqa umuman chiqilmayapti.
+  int get videoCacheNetBytes {
+    if (!_loaded) return 0;
+    try {
+      return _videoCacheNetBytes();
+    } catch (_) {
+      return 0;
     }
   }
 

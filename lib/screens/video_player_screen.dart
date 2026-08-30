@@ -1405,8 +1405,33 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
 // ko'rsatadi — muammoni adb/logcat'siz, qurilmaning o'zida ko'rish
 // uchun. Muammo aniqlangach bu widget va uni chaqirgan joy olib
 // tashlanishi mumkin.
-class _DebugLogPanel extends StatelessWidget {
+class _DebugLogPanel extends StatefulWidget {
   const _DebugLogPanel();
+
+  @override
+  State<_DebugLogPanel> createState() => _DebugLogPanelState();
+}
+
+class _DebugLogPanelState extends State<_DebugLogPanel> {
+  Timer? _netTimer;
+  int _netBytes = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    // Tarmoq hisoblagichini doimiy yangilab turamiz — u loglar oqib
+    // ketsa ham har doim ko'rinib turadi.
+    _netTimer = Timer.periodic(const Duration(milliseconds: 700), (_) {
+      final v = RustCore.instance.videoCacheNetBytes;
+      if (v != _netBytes && mounted) setState(() => _netBytes = v);
+    });
+  }
+
+  @override
+  void dispose() {
+    _netTimer?.cancel();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1414,7 +1439,7 @@ class _DebugLogPanel extends StatelessWidget {
       valueListenable: VideoCacheServer.logs,
       builder: (context, lines, __) {
         final last = lines.length > 7 ? lines.sublist(lines.length - 7) : lines;
-        if (last.isEmpty) return const SizedBox.shrink();
+        final mb = _netBytes / (1024 * 1024);
         return Container(
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
           decoration: BoxDecoration(
@@ -1424,19 +1449,35 @@ class _DebugLogPanel extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
-            children: last
-                .map((l) => Text(
-                      l,
-                      style: const TextStyle(
-                        color: Colors.greenAccent,
-                        fontSize: 9,
-                        fontFamily: 'monospace',
-                        height: 1.3,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ))
-                .toList(),
+            children: [
+              // ── DOIMIY KO'RSATKICH ──────────────────────────────
+              // Video kesh-serveri TARMOQDAN olgan umumiy hajm.
+              // Keshdan o'qilganlar bunga KIRMAYDI. Agar video
+              // o'ynayotganda bu son O'SMAY tursa — demak video uchun
+              // tarmoqqa umuman chiqilmayapti va qurilmada ko'rinayotgan
+              // trafik BOSHQA manbadan ketayotgan bo'ladi.
+              Text(
+                'VIDEO TARMOQ: ${mb.toStringAsFixed(2)} MB',
+                style: TextStyle(
+                  color: _netBytes == 0 ? Colors.lightBlueAccent : Colors.orangeAccent,
+                  fontSize: 11,
+                  fontFamily: 'monospace',
+                  fontWeight: FontWeight.bold,
+                  height: 1.4,
+                ),
+              ),
+              ...last.map((l) => Text(
+                    l,
+                    style: const TextStyle(
+                      color: Colors.greenAccent,
+                      fontSize: 9,
+                      fontFamily: 'monospace',
+                      height: 1.3,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  )),
+            ],
           ),
         );
       },

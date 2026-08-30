@@ -228,6 +228,15 @@ pub extern "C" fn rust_video_cache_start(cache_dir_ptr: *const c_char) -> i32 {
 /// ichki bufferdan tozalaydi — har chaqiruv faqat YANGI qatorlarni
 /// qaytaradi). Dart tomoni buni davriy ravishda (masalan har 400ms)
 /// so'rab, ekrandagi diagnostika panelini yangilaydi.
+/// Ilova ishga tushgandan beri TARMOQDAN olingan umumiy bayt hajmi.
+/// Keshdan o'qilgan bo'laklar bunga KIRMAYDI — shu sabab bu son
+/// o'smay tursa, video uchun tarmoqqa umuman chiqilmayotgani aniq
+/// bo'ladi. Ekrandagi diagnostika paneli buni doimiy ko'rsatib turadi.
+#[no_mangle]
+pub extern "C" fn rust_video_cache_net_bytes() -> u64 {
+    NET_BYTES.load(Ordering::Relaxed)
+}
+
 #[no_mangle]
 pub extern "C" fn rust_video_cache_pull_logs() -> *mut c_char {
     let Some(s) = SHARED.get() else {
