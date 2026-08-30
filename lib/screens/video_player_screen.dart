@@ -218,7 +218,10 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     Uri proxied;
     bool viaProxy = true;
     try {
-      proxied = Uri.parse(url).toLocalUri();
+      // MUHIM: toLocalUri() aslida String'ga (Uri'ga emas) tegishli
+      // extension — pastdagi kabi to'g'ridan-to'g'ri "url" (String) ustida
+      // chaqiriladi (paket manba kodi: lib/ext/string_ext.dart).
+      proxied = url.toLocalUri();
       VideoCacheServer.log('flutter_video_caching proksi: $proxied');
     } catch (e) {
       VideoCacheServer.log('toLocalUri xato berdi, asl URL ishlatiladi: $e');
