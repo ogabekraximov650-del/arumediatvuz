@@ -1,8 +1,6 @@
-import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:fvp/fvp.dart' as fvp;
-import 'package:path_provider/path_provider.dart';
 import 'screens/root_screen.dart';
 import 'services/rust_bridge.dart';
 
@@ -43,26 +41,19 @@ Future<void> main() async {
   // tegishli — epizod almashtirilganda yoki pleyerdan chiqilganda
   // (controller dispose qilinganda) tozalanadi.
   //
-  // 'global.cache.disk.io' — BUTUNLAY BOSHQA, doimiy DISK keshi
-  // (mdk-sdk wiki: Network Disk Cache). Tarmoqdan bir marta o'qilgan
-  // bayt-oralig'i haqiqiy faylga yoziladi va faqat KESHDA YO'Q bo'lgan
-  // baytlar qayta tarmoqdan so'raladi — mavjud baytlar to'g'ridan-to'g'ri
-  // diskdan o'qiladi. Bu kesh controller dispose bo'lganda HAM, epizod
-  // almashtirilganda HAM, hatto ilova qayta ishga tushirilganda HAM
-  // saqlanib qoladi (foydalanuvchi ilova ma'lumotlarini qo'lda
-  // tozalamaguncha) — chunki u alohida kesh papkasidagi fayllarga
-  // asoslangan, controller xotirasiga emas.
-  // 'cache.disk.io.dir' — standart $AppCacheDir/mdk/io o'rniga, OS
-  // tomonidan bosim ostida tozalanishi mumkin bo'lgan vaqtinchalik
-  // "cache" papkasi emas, path_provider'ning DOIMIY ilova papkasi
-  // (Application Support) ostiga aniq yo'naltiramiz.
-  // 'cache.disk.io.expire' — -1 = hech qachon muddati tugamaydi.
+  // MUHIM: doimiy, bayt-darajasidagi DISK keshi endi mdk-sdk'ning o'z
+  // ('global.cache.disk.io') mexanizmi orqali EMAS, balki
+  // lib/services/video_cache_server.dart'dagi o'zimizning mahalliy
+  // (127.0.0.1) HTTP kesh-proksimiz orqali amalga oshiriladi — u video
+  // pleyerga uzatiladigan URL'ni almashtirib, har bir videoni ilovaning
+  // shaxsiy papkasida 1 MiB'lik bo'laklarga bo'lib saqlaydi va faqat
+  // keshda YO'Q bo'lgan bo'laklarnigina worker'dan yuklaydi (bu tizim
+  // ustidan to'liq nazorat beradi va kelajakdagi bo'lak-darajasidagi
+  // AES shifrlash rejasiga tayyor). Shu sabab mdk-sdk'ning o'z disk
+  // keshi ATAYLAB o'chirilgan — ikkinchi (keraksiz, ikki barobar joy
+  // egallovchi) kesh qatlami bo'lib qolmasligi uchun.
   // MUHIM TUZATISH: 'lowLatency' olib tashlandi — u ASAP dekodlashga
   // undab, katta oldindan-bufer maqsadiga zid edi.
-  final appSupportDir = await getApplicationSupportDirectory();
-  final videoCacheDir = Directory('${appSupportDir.path}/video_disk_cache');
-  await videoCacheDir.create(recursive: true);
-
   fvp.registerWith(options: {
     'fastSeek': true,
     'player': {
@@ -70,9 +61,7 @@ Future<void> main() async {
       'demux.buffer.ranges': '64',
     },
     'global': {
-      'cache.disk.io': 1,
-      'cache.disk.io.dir': videoCacheDir.path,
-      'cache.disk.io.expire': -1,
+      'cache.disk.io': 0,
     },
   });
   // Ichki mexanizm (kesh, qidiruv, validatsiya) shu yerda yuklanadi —

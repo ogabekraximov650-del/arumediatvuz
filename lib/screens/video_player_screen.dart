@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:video_player/video_player.dart';
+import '../services/video_cache_server.dart';
 import '../widgets/glass.dart';
 import '../theme/app_background.dart';
 
@@ -203,7 +204,25 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
 
     if (!mounted || myToken != _playToken) return;
 
-    final ctrl = VideoPlayerController.networkUrl(Uri.parse(url));
+    // Videoni to'g'ridan-to'g'ri masofaviy URL'dan emas, mahalliy
+    // (127.0.0.1) kesh-proksidan o'ynatamiz: diskda mavjud bo'lgan
+    // baytlar to'g'ridan-to'g'ri fayldan o'qiladi, faqat yetishmayotgan
+    // qismi worker'dan yuklab olinadi (video_cache_server.dart).
+    final Uri proxied;
+    try {
+      proxied = await VideoCacheServer.instance.proxyUri(url);
+    } catch (_) {
+      if (mounted && myToken == _playToken) {
+        setState(() {
+          _playerLoading = false;
+          _playerError = 'Videoni yuklab bo\'lmadi';
+        });
+      }
+      return;
+    }
+    if (!mounted || myToken != _playToken) return;
+
+    final ctrl = VideoPlayerController.networkUrl(proxied);
 
     try {
       await ctrl.initialize();
