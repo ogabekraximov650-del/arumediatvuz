@@ -397,7 +397,35 @@ fn urlencoding_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-// ── Kesh kaliti (FNV-1a) va bo'lak fayl nomi ────────────────────────
+// ── Kesh kaliti (papka nomi) ────────────────────────────────────────
+//
+// Papka nomi endi B2'dagi FAYL NOMINING O'ZI bo'ladi, masalan:
+//   ep_1_2_720p_1788029552837.mp4
+// Avval bu tushunarsiz FNV xeshi (masalan "63b1789b28282075") edi.
+// Fayl nomi ichida SIFAT ham bor (720p / 1080p / ...), shu sabab
+// diskdagi papkalarga qaraboq qaysi epizod va qaysi sifat ekanini
+// darhol ajratish mumkin — hamda B2'dagi fayl bilan solishtirish oson.
+//
+// Fayl nomi aniqlanmasa (kutilmagan URL shakli), zaxira sifatida
+// eski FNV-1a xeshi ishlatiladi.
+fn cache_key(url: &str) -> String {
+    let without_query = url.split('?').next().unwrap_or(url);
+    let last = without_query.rsplit('/').next().unwrap_or("");
+    let safe: String = last
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '_' || *c == '-')
+        .collect();
+    if safe.is_empty() || safe == "." || safe == ".." {
+        return hash_url(url);
+    }
+    // Juda uzun nomlarni fayl tizimi chegarasidan oshib ketmasligi uchun
+    // qisqartiramiz (oxiri saqlanadi — u yerda vaqt belgisi turadi).
+    if safe.len() > 120 {
+        let tail: String = safe.chars().skip(safe.chars().count() - 120).collect();
+        return tail;
+    }
+    safe
+}
 
 fn hash_url(url: &str) -> String {
     let mut hash: u64 = 0xcbf29ce484222325;
@@ -510,6 +538,7 @@ fn read_or_fetch_chunk(
     index: u64,
     start: u64,
     end: u64,
+    expected_total: u64,
 ) -> Result<Vec<u8>, String> {
     let expected_len = (end - start + 1) as usize;
     let final_path = dir.join(chunk_name(index));
@@ -523,7 +552,17 @@ fn read_or_fetch_chunk(
             return Ok(bytes);
         }
     }
-    fetch_and_store_chunk(shared, key, dir, url, index, start, end, expected_len)
+    fetch_and_store_chunk(shared, key, dir, url, index, start, end, expected_len, expected_total)
+}
+
+/// Keshni butunlay tozalaydi (meta.json + barcha bo'lak fayllari).
+/// Manbadagi fayl o'zgarganda (hajm mos kelmaganda) chaqiriladi.
+fn invalidate_cache(dir: &PathBuf) {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 fn fetch_and_store_chunk(
@@ -535,6 +574,7 @@ fn fetch_and_store_chunk(
     start: u64,
     end: u64,
     expected_len: usize,
+    expected_total: u64,
 ) -> Result<Vec<u8>, String> {
     let final_path = dir.join(chunk_name(index));
     let flight_key = format!("{key}#{index}");
@@ -577,6 +617,32 @@ fn fetch_and_store_chunk(
             .map_err(|e| e.to_string())?;
         let status = resp.status();
         log(format!("Bo'lak #{index} javob: status={status}"));
+
+        // ── BUTUNLIK TEKSHIRUVI ────────────────────────────────────
+        // Yuklab olishdan OLDIN, serverning (Cloudflare kesh/B2)
+        // e'lon qilgan UMUMIY fayl hajmini "Content-Range: bytes s-e/TOTAL"
+        // dan olib, diskdagi meta.json'da saqlangan hajm bilan
+        // solishtiramiz. Agar mos kelmasa — demak manbadagi fayl
+        // o'zgargan (qayta yuklangan) va bizning keshimiz ESKIRGAN:
+        // bunday holda eski bo'laklarni saqlab qolish videoni buzib
+        // ko'rsatishga olib kelardi. Shu sabab kesh butunlay tozalanadi
+        // va keyingi ochishda hammasi yangidan, to'g'ri hajm bilan
+        // yuklab olinadi.
+        if let Some(cr) = resp.header("Content-Range") {
+            if let Some(server_total_str) = cr.rsplit('/').next() {
+                if let Ok(server_total) = server_total_str.trim().parse::<u64>() {
+                    if expected_total > 0 && server_total != expected_total {
+                        log(format!(
+                            "XATO: hajm mos emas! meta.json={expected_total}, serverda={server_total} — kesh tozalanmoqda"
+                        ));
+                        invalidate_cache(dir);
+                        return Err(format!(
+                            "hajm mos emas (meta={expected_total}, server={server_total})"
+                        ));
+                    }
+                }
+            }
+        }
 
         // Manba Range'ni e'tiborsiz qoldirib TO'LIQ faylni (0-baytdan)
         // 200 status bilan yuborishi mumkin — bunday holda kerakli
@@ -717,7 +783,7 @@ fn ensure_filler(shared: &'static Shared, key: &str, dir: &PathBuf, url: &str, t
                     log(format!("Bo'lak #{i} oldindan yuklanmoqda (oyna {from}..{until})"));
                     let _ = fetch_and_store_chunk(
                         shared, &job.key, &job.dir, &job.url, i, chunk_start, chunk_end,
-                        expected_len,
+                        expected_len, job.total,
                     );
                     worked = true;
                     // Bitta bo'lakdan keyin oynani qayta hisoblaymiz —
@@ -746,7 +812,7 @@ fn ensure_filler(shared: &'static Shared, key: &str, dir: &PathBuf, url: &str, t
 
 fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::io::Result<()> {
     let shared = SHARED.get().expect("shared holat ishga tushmagan");
-    let key = hash_url(url);
+    let key = cache_key(url);
     let dir = shared.cache_root.join(&key);
     fs::create_dir_all(&dir)?;
 
@@ -853,7 +919,7 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
         let chunk_start = chunk_index * CHUNK_SIZE;
         let chunk_end = (chunk_start + CHUNK_SIZE - 1).min(total - 1);
 
-        let chunk_bytes = match read_or_fetch_chunk(shared, &key, &dir, url, chunk_index, chunk_start, chunk_end) {
+        let chunk_bytes = match read_or_fetch_chunk(shared, &key, &dir, url, chunk_index, chunk_start, chunk_end, total) {
             Ok(b) => b,
             Err(e) => {
                 log(format!("So'rov uzildi/xato ({start}-{end}): {e}"));

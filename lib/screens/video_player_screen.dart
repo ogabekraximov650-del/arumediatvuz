@@ -353,7 +353,10 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       if (remaining <= const Duration(milliseconds: 300)) {
         if (!restarted) {
           restarted = true;
-          ctrl.seekTo(Duration.zero);
+          // Bu sek ham UMUMIY navbatdan o'tadi — foydalanuvchining
+          // sek qilishlari bilan bir vaqtda ishlab, pleyerni chalkashtirib
+          // yubormasligi uchun.
+          _runSeek(ctrl, Duration.zero);
         }
       } else {
         restarted = false;
@@ -474,6 +477,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       return;
     }
     _seekInProgress = true;
+    // Sekdan OLDINGI ijro holatini eslab qolamiz — pastda tiklash uchun.
+    final wasPlaying = c.value.isPlaying;
     var target = t;
     while (true) {
       try {
@@ -491,6 +496,19 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       if (next == null) break;
       if (!mounted || _controller != c || !c.value.isInitialized) break;
       target = next;
+    }
+
+    // MUHIM TUZATISH (videoni orqaga 00:00 ga sek qilganda qotib
+    // qolishi): mdk-sdk ba'zi hollarda — ayniqsa video BOSHIGA
+    // (0-pozitsiya) sek qilinganda — sekdan keyin ijroni o'zi qayta
+    // boshlamay, pauza holatida qolib ketardi. Tashqaridan bu "video
+    // qotib qoldi, play/pause bosish kerak" bo'lib ko'rinardi.
+    // Shu sabab sekdan OLDIN ijro ketayotgan bo'lsa, sekdan KEYIN uni
+    // aniq (explicit) davom ettiramiz.
+    if (wasPlaying && mounted && _controller == c && c.value.isInitialized) {
+      try {
+        await c.play();
+      } catch (_) {}
     }
     _seekInProgress = false;
   }
