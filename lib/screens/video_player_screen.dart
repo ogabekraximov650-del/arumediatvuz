@@ -57,6 +57,15 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   Timer? _leftSeekHideTimer;
   Timer? _rightSeekHideTimer;
 
+  // ── Video ustidagi tapni qo'lda kuzatish uchun: GestureDetector'ning
+  // o'rnatilgan double-tap tanish tizimi ishlatilmaydi (u taplar orasidagi
+  // masofani ham cheklaydi, shu sabab ekranning istalgan nuqtasiga ikki
+  // marta bosilganda ishonchli ishlamas edi). Buning o'rniga taplar
+  // orasidagi VAQT (300ms) tekshiriladi — joyidan qat'iy nazar.
+  DateTime? _lastTapTime;
+  bool? _lastTapWasLeft;
+  Timer? _pendingSingleTapTimer;
+
   @override
   void initState() {
     super.initState();
@@ -74,6 +83,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _leftSeekHideTimer?.cancel();
     _rightSeekHideTimer?.cancel();
     _seekDebounceTimer?.cancel();
+    _pendingSingleTapTimer?.cancel();
     _restoreSystemUI();
     _controller?.pause();
     _controller?.dispose();
@@ -214,6 +224,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     }
 
     ctrl.setLooping(false);
+    _attachEndOfVideoListener(ctrl, myToken);
     if (resumeAt != null && resumeAt > Duration.zero) {
       await ctrl.seekTo(resumeAt);
     }
@@ -229,6 +240,32 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       _playerLoading = false;
     });
     _scheduleHide();
+  }
+
+  // ── Video oxiriga yetganda (tabiiy tugash YOKI progress chizig'ini
+  // oxirigacha surish/sek qilish orqali) pleyer "qotib qolmasligi" uchun:
+  // pozitsiya davomiylikka (duration) 300ms qolganda avtomatik 0-ga
+  // qaytariladi — video boshidan qayta boshlanadi. `restarted` flag bir
+  // marta ishga tushirilib, pozitsiya oxirdan uzoqlashguncha qayta
+  // ishlamaydi (takroriy seekTo chaqiruvlarining oldini oladi).
+  void _attachEndOfVideoListener(VideoPlayerController ctrl, int token) {
+    bool restarted = false;
+    void listener() {
+      if (!mounted || token != _playToken) return;
+      final v = ctrl.value;
+      if (!v.isInitialized || v.duration <= Duration.zero) return;
+      final remaining = v.duration - v.position;
+      if (remaining <= const Duration(milliseconds: 300)) {
+        if (!restarted) {
+          restarted = true;
+          ctrl.seekTo(Duration.zero);
+        }
+      } else {
+        restarted = false;
+      }
+    }
+
+    ctrl.addListener(listener);
   }
 
   void _scheduleHide() {
@@ -288,7 +325,10 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       final dur = c.value.duration;
       var t = base + Duration(seconds: delta);
       if (t < Duration.zero) t = Duration.zero;
-      if (dur > Duration.zero && t > dur) t = dur;
+      // Oldinga sek qilib video oxiriga (yoki undan nariga) yetib borsa,
+      // ctrl.seekTo(duration) chaqirish pleyerni "qotirib qo'yishi" mumkin
+      // — shuning o'rniga video boshidan qayta boshlanadi.
+      if (dur > Duration.zero && t >= dur) t = Duration.zero;
       c.seekTo(t);
     });
   }
@@ -334,6 +374,39 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
             _rightSeekAccum = 0;
           });
         }
+      });
+    }
+  }
+
+  // Video ustidagi tapni tahlil qiladi: play/pause atrofidagi o'lik zonada
+  // — faqat kontrollarni ko'rsatish/yashirish; chap/o'ng tomonda 300ms
+  // ichida (joyidan qat'iy nazar) ketma-ket tap qilinsa — sek boshlanadi
+  // va har keyingi shu tarafdagi tap (yana 300ms ichida bo'lsa) jamlanib
+  // boradi. 300ms ichida ikkinchi tap kelmasa, birinchi tap oddiy tap
+  // sifatida hisoblanib kontrollarni ko'rsatadi/yashiradi.
+  void _handleVideoTap(double dx, double center, double deadHalf) {
+    if (dx >= center - deadHalf && dx <= center + deadHalf) {
+      _pendingSingleTapTimer?.cancel();
+      _lastTapTime = null;
+      _onTapVideo();
+      return;
+    }
+
+    final isLeft = dx < center;
+    final now = DateTime.now();
+    if (_lastTapTime != null &&
+        _lastTapWasLeft == isLeft &&
+        now.difference(_lastTapTime!) < const Duration(milliseconds: 300)) {
+      _pendingSingleTapTimer?.cancel();
+      _lastTapTime = now;
+      _handleDoubleTapSeek(isLeft);
+    } else {
+      _lastTapTime = now;
+      _lastTapWasLeft = isLeft;
+      _pendingSingleTapTimer?.cancel();
+      _pendingSingleTapTimer = Timer(const Duration(milliseconds: 300), () {
+        _lastTapTime = null;
+        _onTapVideo();
       });
     }
   }
@@ -635,42 +708,31 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
           if (_currentEp != null && !_playerLoading && _playerError == null)
             _bufferingReactive(),
 
-          // ── Chap/o'ng sek zonalari: bitta tap — kontrollarni ko'rsatish/
-          // yashirish, ikki marta ketma-ket tap — 5 sonyaga sek. O'RTADA
-          // play/pause tugmasi o'lchamidagi + har ikki chetidan 10px
-          // "o'lik zona" bor — bu yerda ikki marta bosish sek ISHGA
-          // TUSHMAYDI (faqat bitta tap kontrollarni ko'rsatish/yashirish
-          // uchun ishlaydi), aks holda tugmani bosmoqchi bo'lganda
-          // sal chetga tegib ketilsa ham nohaqli sek bo'lib qolar edi.
+          // ── Butun video maydoni ustida BITTA gesture detektor: bitta tap —
+          // kontrollarni ko'rsatish/yashirish, ketma-ket ikki (yoki undan
+          // ortiq) tap xuddi shu tarafda — sekundga sek qiladi. Taplar
+          // ekranning chap/o'ng yarmida QAYERGA bosilishidan qat'iy nazar
+          // ishlaydi. GestureDetector'ning o'rnatilgan double-tap tanish
+          // tizimi ATAYLAB ishlatilmaydi — u taplar orasidagi masofani ham
+          // cheklaydi va shu sabab har xil nuqtalarga bosilganda sek
+          // ishonchsiz ishlar edi; buning o'rniga taplar orasidagi VAQT
+          // (300ms) qo'lda tekshiriladi. O'RTADA play/pause tugmasi
+          // o'lchamidagi + har ikki chetidan 10px "o'lik zona" bor — bu
+          // yerda tap faqat kontrollarni ko'rsatish/yashirish uchun
+          // ishlaydi, sek ishga tushmaydi.
           Positioned.fill(
-            child: Row(
-              children: [
-                Expanded(
-                  child: GestureDetector(
-                    behavior: HitTestBehavior.translucent,
-                    onTap: _currentEp != null ? _onTapVideo : null,
-                    onDoubleTapDown: _currentEp != null
-                        ? (_) => _handleDoubleTapSeek(true)
-                        : null,
-                  ),
-                ),
-                SizedBox(
-                  width: _playPauseDiameter(isFullscreen) + 20,
-                  child: GestureDetector(
-                    behavior: HitTestBehavior.translucent,
-                    onTap: _currentEp != null ? _onTapVideo : null,
-                  ),
-                ),
-                Expanded(
-                  child: GestureDetector(
-                    behavior: HitTestBehavior.translucent,
-                    onTap: _currentEp != null ? _onTapVideo : null,
-                    onDoubleTapDown: _currentEp != null
-                        ? (_) => _handleDoubleTapSeek(false)
-                        : null,
-                  ),
-                ),
-              ],
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final center = constraints.maxWidth / 2;
+                final deadHalf = _playPauseDiameter(isFullscreen) / 2 + 10;
+                return GestureDetector(
+                  behavior: HitTestBehavior.translucent,
+                  onTapUp: _currentEp != null
+                      ? (details) =>
+                          _handleVideoTap(details.localPosition.dx, center, deadHalf)
+                      : null,
+                );
+              },
             ),
           ),
 
@@ -873,7 +935,18 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
           position: value?.position ?? Duration.zero,
           duration: value?.duration ?? Duration.zero,
           fmt: _fmt,
-          onSeek: (d) { ctrl?.seekTo(d); _scheduleHide(); },
+          onSeek: (d) {
+            final c = ctrl;
+            if (c != null) {
+              final dur = c.value.duration;
+              // Slayderni oxirigacha (yoki oxiriga yaqin) surilganda ham
+              // pleyer qotib qolmasligi uchun video boshidan qayta
+              // boshlanadi.
+              final target = (dur > Duration.zero && d >= dur) ? Duration.zero : d;
+              c.seekTo(target);
+            }
+            _scheduleHide();
+          },
           onQualityTap: _showQualityDialog,
           onFullscreen: _toggleFullscreen,
           isFullscreen: isFullscreen,
