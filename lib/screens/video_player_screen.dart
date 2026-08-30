@@ -317,7 +317,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
 
     if (isLeft) {
       _leftSeekHideTimer?.cancel();
-      _leftSeekHideTimer = Timer(const Duration(seconds: 5), () {
+      _leftSeekHideTimer = Timer(const Duration(seconds: 3), () {
         if (mounted) {
           setState(() {
             _showLeftSeek = false;
@@ -327,7 +327,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       });
     } else {
       _rightSeekHideTimer?.cancel();
-      _rightSeekHideTimer = Timer(const Duration(seconds: 5), () {
+      _rightSeekHideTimer = Timer(const Duration(seconds: 3), () {
         if (mounted) {
           setState(() {
             _showRightSeek = false;
@@ -635,8 +635,13 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
           if (_currentEp != null && !_playerLoading && _playerError == null)
             _bufferingReactive(),
 
-          // ── Chap/o'ng yarim: bitta tap — kontrollarni ko'rsatish/
-          // yashirish, ikki marta ketma-ket tap — 5 sonyaga sek ────
+          // ── Chap/o'ng sek zonalari: bitta tap — kontrollarni ko'rsatish/
+          // yashirish, ikki marta ketma-ket tap — 5 sonyaga sek. O'RTADA
+          // play/pause tugmasi o'lchamidagi + har ikki chetidan 10px
+          // "o'lik zona" bor — bu yerda ikki marta bosish sek ISHGA
+          // TUSHMAYDI (faqat bitta tap kontrollarni ko'rsatish/yashirish
+          // uchun ishlaydi), aks holda tugmani bosmoqchi bo'lganda
+          // sal chetga tegib ketilsa ham nohaqli sek bo'lib qolar edi.
           Positioned.fill(
             child: Row(
               children: [
@@ -647,6 +652,13 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                     onDoubleTapDown: _currentEp != null
                         ? (_) => _handleDoubleTapSeek(true)
                         : null,
+                  ),
+                ),
+                SizedBox(
+                  width: _playPauseDiameter(isFullscreen) + 20,
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.translucent,
+                    onTap: _currentEp != null ? _onTapVideo : null,
                   ),
                 ),
                 Expanded(
@@ -704,21 +716,30 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
             ),
 
           // ── Sek ko'rsatkichlari — asosiy kontrollardan mustaqil,
-          // faqat bosilgan tarafda chiqadi va 5s dan keyin yo'qoladi.
+          // faqat bosilgan tarafda chiqadi va 3s dan keyin yo'qoladi.
+          // Doiraviy shaklda, play/pause tugmasidan 2 barobar katta.
           // MUHIM: play/pause tugmasi (markaz) bilan video cheti
           // o'rtasidagi nuqtaga joylashtirilgan — chetga emas.
           if (_showLeftSeek)
             Align(
               alignment: const Alignment(-0.5, 0),
               child: IgnorePointer(
-                child: _SeekBadge(seconds: _leftSeekAccum, isLeft: true),
+                child: _SeekBadge(
+                  seconds: _leftSeekAccum,
+                  isLeft: true,
+                  diameter: _playPauseDiameter(isFullscreen) * 2,
+                ),
               ),
             ),
           if (_showRightSeek)
             Align(
               alignment: const Alignment(0.5, 0),
               child: IgnorePointer(
-                child: _SeekBadge(seconds: _rightSeekAccum, isLeft: false),
+                child: _SeekBadge(
+                  seconds: _rightSeekAccum,
+                  isLeft: false,
+                  diameter: _playPauseDiameter(isFullscreen) * 2,
+                ),
               ),
             ),
         ],
@@ -822,6 +843,15 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
         child: _playPauseIcon(playing: value.isPlaying, size: size),
       ),
     );
+  }
+
+  // Play/pause tugmasining haqiqiy (doira) diametri — ikonka o'lchami
+  // + atrofidagi 12px padding ikki tarafdan. Sek gesture'idagi o'lik
+  // zona kengligi va sek ko'rsatkichining o'lchami shu qiymatga
+  // asoslanadi.
+  double _playPauseDiameter(bool isFullscreen) {
+    final iconSize = isFullscreen ? 46.0 : 40.0;
+    return iconSize + 12 * 2;
   }
 
   Widget _playPauseIcon({required bool playing, required double size}) {
@@ -1050,15 +1080,16 @@ class _Badge extends StatelessWidget {
   }
 }
 
-// Ikki marta bosib sek qilingandagi ko'rsatkich — TIK (vertikal) pill
-// shaklida: 3 ta kichik uchburchak yuqorida qator bo'lib ketma-ket
-// miltillaydi, ularning tagida "Ns" matni turadi. Play/pause tugmasi
-// bilan video cheti o'rtasiga joylashtiriladi (build metodida Align
-// orqali) — eniga tor, bo'yiga cho'zilgan, chetga tegib turmaydi.
+// Ikki marta bosib sek qilingandagi ko'rsatkich — DOIRA shaklida
+// (play/pause tugmasidan 2 barobar katta diametrda): 3 ta kichik
+// uchburchak yuqorida qator bo'lib ketma-ket miltillaydi, ularning
+// tagida "Ns" matni turadi. Play/pause tugmasi bilan video cheti
+// o'rtasiga joylashtiriladi (build metodida Align orqali).
 class _SeekBadge extends StatefulWidget {
   final int seconds;
   final bool isLeft;
-  const _SeekBadge({required this.seconds, required this.isLeft});
+  final double diameter;
+  const _SeekBadge({required this.seconds, required this.isLeft, required this.diameter});
 
   @override
   State<_SeekBadge> createState() => _SeekBadgeState();
@@ -1084,14 +1115,18 @@ class _SeekBadgeState extends State<_SeekBadge> with SingleTickerProviderStateMi
     final icon = widget.isLeft ? Icons.arrow_left_rounded : Icons.arrow_right_rounded;
     final chevrons = _buildChevrons(icon);
     final text = Text('${widget.seconds}s',
-        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 14));
+        style: TextStyle(
+            color: Colors.white,
+            fontWeight: FontWeight.w700,
+            fontSize: widget.diameter * 0.13));
 
     return Container(
-      width: 68,
-      padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 8),
+      width: widget.diameter,
+      height: widget.diameter,
+      alignment: Alignment.center,
       decoration: BoxDecoration(
         color: Colors.black.withOpacity(0.55),
-        borderRadius: BorderRadius.circular(22),
+        shape: BoxShape.circle,
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -1118,7 +1153,7 @@ class _SeekBadgeState extends State<_SeekBadge> with SingleTickerProviderStateMi
             final opacity = t < 0.5 ? (0.3 + 0.7 * (t / 0.5)) : (1.0 - 0.7 * ((t - 0.5) / 0.5));
             return Opacity(
               opacity: opacity.clamp(0.3, 1.0),
-              child: Icon(icon, color: Colors.white, size: 20),
+              child: Icon(icon, color: Colors.white, size: widget.diameter * 0.19),
             );
           }),
         );
