@@ -1,9 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart' show RootIsolateToken, BackgroundIsolateBinaryMessenger;
 import 'package:path_provider/path_provider.dart';
 
 // ── Videoni doimiy, bayt-darajasida diskka keshlaydigan mahalliy proksi ──
@@ -28,19 +30,28 @@ import 'package:path_provider/path_provider.dart';
 // bu ilovaning shaxsiy, faqat o'zi (va qurilmada root) kira oladigan
 // ichki xotirasi (Android: /data/user/0/<paket>/..., tashqi/almashinuv
 // xotirasi EMAS) — xuddi Telegram media keshini saqlagani kabi.
+//
+// MUHIM ARXITEKTURA QARORI (muzlab qolish diagnostikasi natijasi): server
+// ASOSIY (UI) isolate'da EMAS, ALOHIDA fon Isolate'da ishlaydi. Sabab: agar
+// server asosiy isolate'da bo'lsa va o'sha ish oqimi biror sababdan (masalan
+// video pleyerning ichki native ishga tushirish jarayoni) band bo'lib
+// qolsa — server so'rovga javob berolmaydi, video pleyer esa aynan shu
+// javobni kutib turadi. Bu o'z-o'ziga qulflanish (deadlock) hosil qiladi:
+// hech qanday Dart Timer/timeout ham ishlamaydi, chunki ular ham xuddi
+// o'sha band bo'lgan ish oqimida rejalashtiriladi. Diagnostikada aynan shu
+// holat kuzatilgan edi: "meta.json diskdan o'qildi" logidan keyin HATTO
+// 5 soniyalik timeout'lar ham ishlamay, jarayon butunlay to'xtab qolgan.
+// Serverni mustaqil Isolate'ga chiqarish bu klassdagi muammoni tag-tugidan
+// yo'q qiladi — endi u asosiy ish oqimi nima bilan band bo'lishidan qat'i
+// nazar har doim so'rovlarga javob bera oladi.
 class VideoCacheServer {
   VideoCacheServer._();
   static final VideoCacheServer instance = VideoCacheServer._();
 
-  // Kelajakdagi AES-per-chunk shifrlash rejasi bilan mos: 1 MiB.
-  static const int chunkSize = 1024 * 1024;
-
-  HttpServer? _server;
-  Directory? _cacheRoot;
-  Future<void>? _starting;
-
-  final Map<String, Future<Uint8List>> _inFlightChunks = {};
-  final Map<String, Future<_CacheMeta>> _inFlightMeta = {};
+  Isolate? _isolate;
+  int? _port;
+  String? _cacheRootPath;
+  Future<int>? _starting;
 
   // ── Diagnostika jurnali ──────────────────────────────────────────
   // Mahalliy server nima uchun ishlamayotganini QURILMANING O'ZIDA,
@@ -53,38 +64,27 @@ class VideoCacheServer {
   // (xronologik) jurnalga yozishi uchun ochiq wrapper.
   static void log(String msg) => _log(msg);
 
-  static void _log(String msg) {
+  static void _log(String msg, {bool alreadyPersisted = false}) {
     final now = DateTime.now();
     final ts =
-        '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}';
+        '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}.${now.millisecond.toString().padLeft(3, '0')}';
     final line = '[$ts] $msg';
     final list = List<String>.from(logs.value)..add(line);
-    if (list.length > 60) list.removeRange(0, list.length - 60);
+    if (list.length > 200) list.removeRange(0, list.length - 200);
     logs.value = list;
-  }
 
-  Future<void> _ensureStarted() async {
-    if (_server != null) return;
-    if (_starting != null) return _starting;
-    final completer = Completer<void>();
-    _starting = completer.future;
-    _log('Server ishga tushirilmoqda...');
-    try {
-      final support = await getApplicationSupportDirectory();
-      final root = Directory('${support.path}/video_byte_cache');
-      await root.create(recursive: true);
-      _cacheRoot = root;
-      _log('Kesh papkasi: ${root.path}');
-      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-      server.listen(_handleRequest);
-      _server = server;
-      _log('Server ishga tushdi: 127.0.0.1:${server.port}');
-    } catch (e) {
-      _log('XATO: server ishga tushmadi — $e');
-      rethrow;
-    } finally {
-      completer.complete();
-      _starting = null;
+    // Kesh-isolate o'z log qatorlarini o'zi diskka yozadi (pastga q.);
+    // faqat ASOSIY isolate'dan chiqqan loglarni (masalan proxyUri yoki
+    // ctrl.initialize xatolari) shu yerda alohida yozamiz — shunda ikkala
+    // isolate'ning loglari BITTA umumiy fayl ichida xronologik aralashadi.
+    if (!alreadyPersisted) {
+      final root = instance._cacheRootPath;
+      if (root != null) {
+        try {
+          File('$root/debug_log.txt')
+              .writeAsStringSync('$line\n', mode: FileMode.append, flush: true);
+        } catch (_) {}
+      }
     }
   }
 
@@ -101,13 +101,145 @@ class VideoCacheServer {
   // pleyer HECH QACHON abadiy "yuklanmoqda" holatida qotib qolmaydi.
   Future<Uri> proxyUri(String originalUrl) async {
     _log('proxyUri chaqirildi: ${_shortUrl(originalUrl)}');
-    await _ensureStarted().timeout(const Duration(seconds: 5));
+    final port = await _ensureStarted().timeout(const Duration(seconds: 5));
     return Uri.parse(
-        'http://127.0.0.1:${_server!.port}/v?u=${Uri.encodeQueryComponent(originalUrl)}');
+        'http://127.0.0.1:$port/v?u=${Uri.encodeQueryComponent(originalUrl)}');
   }
 
-  Future<void> _handleRequest(HttpRequest request) async {
+  Future<int> _ensureStarted() {
+    if (_port != null) return Future.value(_port);
+    if (_starting != null) return _starting!;
+    final completer = Completer<int>();
+    _starting = completer.future;
+    _spawnIsolate(completer);
+    return completer.future;
+  }
+
+  Future<void> _spawnIsolate(Completer<int> completer) async {
+    _log('Kesh-server uchun ALOHIDA isolate ishga tushirilmoqda...');
+    final mainReceivePort = ReceivePort();
+    RootIsolateToken? token;
+    try {
+      token = RootIsolateToken.instance;
+      if (token == null) {
+        throw StateError('RootIsolateToken olinmadi');
+      }
+      _isolate = await Isolate.spawn(
+        _serverIsolateMain,
+        _IsolateInit(mainReceivePort.sendPort, token),
+        debugName: 'video_cache_server',
+      );
+    } catch (e) {
+      _log('XATO: kesh-server isolate ishga tushmadi — $e');
+      if (!completer.isCompleted) completer.completeError(e);
+      _starting = null;
+      return;
+    }
+
+    mainReceivePort.listen((dynamic message) {
+      if (message is! List || message.isEmpty) return;
+      final kind = message[0];
+      if (kind == 'started') {
+        _port = message[1] as int;
+        _cacheRootPath = message[2] as String;
+        _log('Kesh-server isolate ishga tushdi: 127.0.0.1:$_port');
+        if (!completer.isCompleted) completer.complete(_port);
+        _starting = null;
+      } else if (kind == 'log') {
+        // Isolate o'zi diskka allaqachon yozgan — bu yerda faqat
+        // ekrandagi (UI) ro'yxatga qo'shamiz, qayta diskka yozmaymiz.
+        _log(message[1] as String, alreadyPersisted: true);
+      } else if (kind == 'error') {
+        final err = message[1];
+        _log('XATO (kesh-server isolate): $err');
+        if (!completer.isCompleted) {
+          completer.completeError(StateError(err.toString()));
+          _starting = null;
+        }
+      }
+    });
+  }
+
+  static String _shortUrl(String url) =>
+      url.length > 70 ? '...${url.substring(url.length - 70)}' : url;
+}
+
+// Isolate.spawn'ga argument sifatida uzatiladigan yengil, sendable paket.
+class _IsolateInit {
+  final SendPort mainSendPort;
+  final RootIsolateToken rootIsolateToken;
+  _IsolateInit(this.mainSendPort, this.rootIsolateToken);
+}
+
+// ── Fon isolate'ning kirish nuqtasi ─────────────────────────────────────
+// Bu funksiya butunlay MUSTAQIL Dart isolate'ida ishlaydi — asosiy (UI)
+// isolate bilan XOTIRA ULASHMAYDI, faqat SendPort orqali xabar almashadi.
+// Shu sabab asosiy isolate qanchalik band bo'lmasin (video pleyerning
+// ichki ishga tushirish jarayoni, og'ir widget qayta chizish va h.k.), bu
+// yerdagi HTTP server har doim mustaqil ravishda so'rovlarga javob bera
+// oladi.
+void _serverIsolateMain(_IsolateInit init) async {
+  final mainSendPort = init.mainSendPort;
+  void isoLog(String msg) {
+    mainSendPort.send(['log', msg]);
+  }
+
+  try {
+    // MUHIM: fon isolate'da path_provider kabi platform-kanal (MethodChannel)
+    // paketlaridan foydalanish uchun bu chaqiruv SHART — aks holda ular
+    // yoki xato tashlaydi, yoki (yomonrog'i) abadiy osilib qoladi.
+    BackgroundIsolateBinaryMessenger.ensureInitialized(init.rootIsolateToken);
+
+    final support = await getApplicationSupportDirectory();
+    final root = Directory('${support.path}/video_byte_cache');
+    await root.create(recursive: true);
+    isoLog('Kesh papkasi: ${root.path}');
+
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    isoLog('Server (fon isolate) ishga tushdi: 127.0.0.1:${server.port}');
+    mainSendPort.send(['started', server.port, root.path]);
+
+    final engine = _CacheEngine(root, (msg) {
+      final now = DateTime.now();
+      final ts =
+          '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}.${now.millisecond.toString().padLeft(3, '0')}';
+      final line = '[$ts] $msg';
+      // Fon isolate'ning o'zi TO'G'RIDAN-TO'G'RI diskka yozadi — bu asosiy
+      // isolate qanchalik band/muzlagan bo'lmasin, HAQIQIY vaqt jurnalini
+      // kafolatlaydi (UI paneliga bog'liq emas).
+      try {
+        File('${root.path}/debug_log.txt')
+            .writeAsStringSync('$line\n', mode: FileMode.append, flush: true);
+      } catch (_) {}
+      mainSendPort.send(['log', msg]);
+    });
+    server.listen(engine.handleRequest);
+  } catch (e, st) {
+    mainSendPort.send(['error', '$e | ${st.toString().split('\n').take(2).join(' ')}']);
+  }
+}
+
+// ── Haqiqiy kesh-server mantiqi — fon isolate ichida ishlaydi ──────────
+// Avval VideoCacheServer'ning o'zida edi; endi mustaqil, statik bo'lmagan
+// holatga ega klass sifatida ajratildi — shunda uni to'g'ridan-to'g'ri
+// Isolate ichida (asosiy isolate'ning hech qanday statik holatiga
+// tegmasdan) ishlatish mumkin.
+class _CacheEngine {
+  _CacheEngine(this._cacheRoot, this._log);
+
+  final Directory _cacheRoot;
+  final void Function(String) _log;
+
+  static const int chunkSize = 1024 * 1024;
+
+  final Map<String, Future<Uint8List>> _inFlightChunks = {};
+  final Map<String, Future<_CacheMeta>> _inFlightMeta = {};
+  int _activeRequests = 0;
+
+  Future<void> handleRequest(HttpRequest request) async {
     final rangeHdr = request.headers.value(HttpHeaders.rangeHeader) ?? '(hammasi)';
+    _activeRequests++;
+    final myReqId = _activeRequests;
     try {
       final originalUrl = request.uri.queryParameters['u'];
       if (originalUrl == null || originalUrl.isEmpty) {
@@ -116,32 +248,39 @@ class VideoCacheServer {
         await request.response.close();
         return;
       }
-      _log('So\'rov keldi: Range=$rangeHdr');
+      _log('So\'rov keldi (#$myReqId, faol jami=$_activeRequests): Range=$rangeHdr');
       await _serve(request, originalUrl);
-    } catch (e) {
-      _log('XATO (_handleRequest): $e');
+      _log('So\'rov (#$myReqId) _serve dan qaytdi');
+    } catch (e, st) {
+      _log('XATO (_handleRequest #$myReqId): $e');
+      _log('  stack: ${st.toString().split('\n').take(3).join(' | ')}');
       try {
         request.response.statusCode = HttpStatus.internalServerError;
         await request.response.close();
       } catch (_) {}
+    } finally {
+      _activeRequests--;
     }
   }
 
-  static String _shortUrl(String url) =>
-      url.length > 70 ? '...${url.substring(url.length - 70)}' : url;
-
   Future<void> _serve(HttpRequest request, String originalUrl) async {
+    _log('_serve boshlandi');
     final key = _hashUrl(originalUrl);
-    final dir = Directory('${_cacheRoot!.path}/$key');
+    final dir = Directory('${_cacheRoot.path}/$key');
     _log('Papka yaratilmoqda: ${dir.path}');
     await dir.create(recursive: true).timeout(const Duration(seconds: 5),
         onTimeout: () {
       _log('XATO: papka yaratish 5s ichida tugamadi!');
       return dir;
     });
-    _log('Papka tayyor');
+    _log('Papka tayyor, _ensureMeta chaqirilyapti...');
 
-    final meta = await _ensureMeta(dir, originalUrl);
+    final meta = await _ensureMeta(dir, originalUrl).timeout(
+        const Duration(seconds: 8), onTimeout: () {
+      _log('XATO: _ensureMeta 8s ichida await dan qaytmadi!');
+      throw TimeoutException('_ensureMeta await timeout');
+    });
+    _log('_ensureMeta dan qaytdi');
     final total = meta.totalSize;
     _log('Meta: hajm=$total, tur=${meta.contentType}');
 
@@ -354,9 +493,15 @@ class VideoCacheServer {
   Future<_CacheMeta> _ensureMeta(Directory dir, String url) {
     final flightKey = dir.path;
     final existing = _inFlightMeta[flightKey];
-    if (existing != null) return existing;
-    final future = _loadOrProbeMeta(dir, url)
-        .whenComplete(() => _inFlightMeta.remove(flightKey));
+    if (existing != null) {
+      _log('_ensureMeta: mavjud (in-flight) future kutilyapti...');
+      return existing;
+    }
+    _log('_ensureMeta: yangi _loadOrProbeMeta boshlanmoqda...');
+    final future = _loadOrProbeMeta(dir, url).whenComplete(() {
+      _inFlightMeta.remove(flightKey);
+      _log('_ensureMeta: future YAKUNLANDI (whenComplete ishladi)');
+    });
     _inFlightMeta[flightKey] = future;
     return future;
   }
