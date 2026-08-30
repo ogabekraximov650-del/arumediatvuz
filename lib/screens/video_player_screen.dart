@@ -427,8 +427,72 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       // ctrl.seekTo(duration) chaqirish pleyerni "qotirib qo'yishi" mumkin
       // — shuning o'rniga video boshidan qayta boshlanadi.
       if (dur > Duration.zero && t >= dur) t = Duration.zero;
-      c.seekTo(t);
+      _runSeek(c, t);
     });
+  }
+
+  // Progress chizig'idan (yoki boshqa MUTLAQ pozitsiyadan) kelgan sek.
+  // Ikki marta bosib sek qilish bilan BITTA umumiy debounce navbatini
+  // baham ko'radi — shu sabab foydalanuvchi qanchalik tez bossa/sursa
+  // ham, pleyerga sek buyruqlari to'planib ketmaydi.
+  void _scheduleSeekTo(Duration target) {
+    final ctrl = _controller;
+    if (ctrl == null || !ctrl.value.isInitialized) return;
+
+    // Nisbiy (ikki marta bosish) navbati bekor qilinadi — oxirgi
+    // harakat ustun.
+    _pendingSeekBase = null;
+    _pendingSeekDeltaSeconds = 0;
+
+    _seekDebounceTimer?.cancel();
+    _seekDebounceTimer = Timer(const Duration(milliseconds: 110), () {
+      _seekDebounceTimer = null;
+      final c = _controller;
+      if (c == null || !c.value.isInitialized) return;
+      final dur = c.value.duration;
+      var t = target;
+      if (t < Duration.zero) t = Duration.zero;
+      // Slayder oxirigacha surilganda pleyer qotib qolmasligi uchun
+      // video boshidan qayta boshlanadi.
+      if (dur > Duration.zero && t >= dur) t = Duration.zero;
+      _runSeek(c, t);
+    });
+  }
+
+  // Barcha sek chaqiruvlari SHU yerdan o'tadi. Bir vaqtning o'zida
+  // faqat BITTA sek bajariladi: oldingisi tugamaguncha yangisi
+  // yuborilmaydi, o'rniga eng oxirgi so'ralgan nuqta eslab qolinib,
+  // joriysi tugagach bir marta qo'llaniladi. Bu pleyer ichida sek
+  // buyruqlari navbatga to'planib, uni qotirib qo'yishining oldini
+  // oladi — foydalanuvchi qanchalik tez/ko'p sek qilsa ham.
+  bool _seekInProgress = false;
+  Duration? _queuedSeek;
+
+  Future<void> _runSeek(VideoPlayerController c, Duration t) async {
+    if (_seekInProgress) {
+      _queuedSeek = t;
+      return;
+    }
+    _seekInProgress = true;
+    var target = t;
+    while (true) {
+      try {
+        // Timeout SHART: agar pleyer biror sababdan sekni yakunlamasa,
+        // _seekInProgress abadiy "true" bo'lib qolib, sek butunlay
+        // ishlamay qolardi. Timeout bu holatdan chiqib ketishni
+        // kafolatlaydi.
+        await c.seekTo(target).timeout(const Duration(seconds: 5));
+      } catch (_) {
+        // Sek muvaffaqiyatsiz/kechikkan bo'lsa — jim o'tkazamiz,
+        // ilova ishlashda davom etadi.
+      }
+      final next = _queuedSeek;
+      _queuedSeek = null;
+      if (next == null) break;
+      if (!mounted || _controller != c || !c.value.isInitialized) break;
+      target = next;
+    }
+    _seekInProgress = false;
   }
 
   // Ekranning chap/o'ng yarmiga ikki marta bosilganda 5 sonyaga
@@ -1116,15 +1180,13 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
           duration: value?.duration ?? Duration.zero,
           fmt: _fmt,
           onSeek: (d) {
-            final c = ctrl;
-            if (c != null) {
-              final dur = c.value.duration;
-              // Slayderni oxirigacha (yoki oxiriga yaqin) surilganda ham
-              // pleyer qotib qolmasligi uchun video boshidan qayta
-              // boshlanadi.
-              final target = (dur > Duration.zero && d >= dur) ? Duration.zero : d;
-              c.seekTo(target);
-            }
+            // MUHIM: progress chizig'idan kelgan sek ham DEBOUNCE
+            // orqali o'tadi. Avval har bir surish/bosish darhol
+            // ctrl.seekTo() chaqirardi — tez-tez bosilganda o'nlab sek
+            // buyrug'i pleyerda navbatga to'planib, uni qotirib
+            // qo'yardi. Endi ikki marta bosib sek qilish bilan BITTA
+            // umumiy navbat ishlatiladi.
+            _scheduleSeekTo(d);
             _scheduleHide();
           },
           onQualityTap: _showQualityDialog,

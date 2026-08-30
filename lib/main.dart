@@ -86,8 +86,13 @@ Future<void> main() async {
   fvp.registerWith(options: {
     'fastSeek': true,
     'player': {
-      'buffer.range': '1500+20000',
-      'demux.buffer.ranges': '8',
+      // Yana kichraytirildi (1s..8s bufer, 4 ta oraliq). Mahalliy Rust
+      // kesh-serveri baytlarni diskdan millisekundlarda beradi, shu
+      // sabab katta xotira buferi umuman kerak emas — u faqat sek
+      // qilinganda xotirani shishirib, ilovaning o'chib qolishiga
+      // sabab bo'lardi.
+      'buffer.range': '1000+8000',
+      'demux.buffer.ranges': '4',
       'avformat.probesize': '1048576',
       'avformat.analyzeduration': '1000000',
     },

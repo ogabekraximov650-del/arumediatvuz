@@ -17,12 +17,13 @@
 //   - Har bir video FIKSIRLANGAN 1 MiB "chunk" fayllarga bo'lib
 //     path_provider orqali berilgan (ilova-shaxsiy) papkada saqlanadi —
 //     kelajakdagi bo'lak-asosidagi AES shifrlash rejasi bilan mos.
-//   - Har bir video uchun "avlod" hisoblagichi: video uchun YANGI so'rov
-//     kelsa, ESKI so'rovning javob tanasi va undan tug'ilgan oldindan-
-//     yuklash ishlari o'z-o'zini to'xtatadi (orqa fonda cheksiz
-//     to'planib, xotira/tarmoqni band qilib qolmasligi uchun).
+//   - Har bir javob eng ko'pi 4 MiB (MAX_RESPONSE_BYTES) bilan
+//     cheklangan — shu sabab har bir ulanish qisqa umr ko'radi va
+//     tez-tez sek qilinganda ulanishlar to'planib qolmaydi.
+//   - Oldindan yuklash SURILUVCHI OYNA bilan: ijro nuqtasidan keyin
+//     eng ko'pi 10 ta bo'lak (PREFETCH_WINDOW) keshga olinadi.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -41,7 +42,26 @@ const CHUNK_SIZE: u64 = 1024 * 1024;
 /// Har bir ulanish bitta OS ish oqimi + ~1 MiB bufer degani, shu sabab
 /// bu chegara xotira sarfini bashorat qilinadigan darajada ushlab
 /// turadi (tez-tez sek qilishda ilova o'chib qolishining oldini oladi).
-const MAX_CONNS: usize = 8;
+const MAX_CONNS: usize = 24;
+
+/// Bitta HTTP javobda yuboriladigan ENG KO'P bayt (4 MiB).
+///
+/// ENG MUHIM ME'MORIY TUZATISH. Avval har bir so'rovga faylning BUTUN
+/// QOLGAN QISMI (masalan 9 MB) bitta uzun javobda uzatilardi. Pleyer sek
+/// qilganda eski ulanishni tashlab ketardi, lekin server oqimi hali ham
+/// unga yozishga urinib, yozish timeout'i tugaguncha (20 soniya!) osilib
+/// turardi. Ketma-ket 5-6 marta sek qilinganda bunday "o'lik" ulanishlar
+/// to'planib, chegaraga yetardi va undan keyingi so'rov RAD ETILARDI —
+/// pleyer esa javobsiz qolib qotib qolardi. Aynan shu sabab orqaga sek
+/// qilishda (bir necha yangi so'rov ketma-ket kelgani uchun) crash
+/// tezroq yuzaga kelardi.
+///
+/// Endi har bir javob eng ko'pi 4 MiB — bu HTTP standartiga to'liq mos
+/// (206 Partial Content), pleyer qolganini yangi Range so'rovi bilan
+/// o'zi so'raydi. Natijada har bir ulanish qisqa umr ko'radi (keshdan
+/// o'qilganda millisekundlar), ulanishlar hech qachon to'planmaydi va
+/// tashlab ketilgan ulanish ham tezda o'z-o'zidan tugaydi.
+const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Oldindan yuklash OYNASI: ijro nuqtasidan keyin ENG KO'PI BILAN shu
 /// qadar bo'lak keshga olinadi. Avval butun fayl fon'da yuklab olinardi
@@ -56,7 +76,6 @@ const PREFETCH_WINDOW: u64 = 10;
 struct Shared {
     cache_root: PathBuf,
     start: Instant,
-    generation: Mutex<HashMap<String, u64>>,
     // Hozir tarmoqdan yuklanayotgan "key#index" bo'laklari — parallel
     // so'rovlar bir xil bo'lakni ikki marta yuklab olmasligi uchun.
     in_flight: Mutex<HashSet<String>>,
@@ -85,6 +104,9 @@ static SHARED: OnceLock<Shared> = OnceLock::new();
 static PORT: OnceLock<u16> = OnceLock::new();
 static REQ_COUNTER: AtomicU64 = AtomicU64::new(0);
 static ACTIVE_CONNS: AtomicUsize = AtomicUsize::new(0);
+/// Ilova ishga tushgandan beri TARMOQDAN olingan umumiy bayt hajmi
+/// (keshdan o'qilganlar bunga kirmaydi) — diagnostika uchun.
+static NET_BYTES: AtomicU64 = AtomicU64::new(0);
 
 fn log(msg: impl Into<String>) {
     if let Some(s) = SHARED.get() {
@@ -130,7 +152,6 @@ pub extern "C" fn rust_video_cache_start(cache_dir_ptr: *const c_char) -> i32 {
     let shared = Shared {
         cache_root,
         start: Instant::now(),
-        generation: Mutex::new(HashMap::new()),
         in_flight: Mutex::new(HashSet::new()),
         logs: Mutex::new(Vec::new()),
         agent,
@@ -240,7 +261,7 @@ fn read_request_line_and_headers(stream: &mut TcpStream) -> std::io::Result<Pars
     // "o'lik" ish oqimlari to'planib, ilova o'chib qolardi. Yozish
     // timeout'i bunday oqimni majburan xatoga uchratib, tozalanishini
     // kafolatlaydi.
-    stream.set_write_timeout(Some(Duration::from_secs(20)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     let mut buf = Vec::with_capacity(4096);
     let mut byte = [0u8; 1];
     // Sarlavhalar tugashini ("\r\n\r\n") ko'rguncha, bayt-bayt o'qiymiz —
@@ -590,9 +611,16 @@ fn fetch_and_store_chunk(
                 break;
             }
         }
+        // Tarmoqdan olingan baytlarning UMUMIY hisobi — foydalanuvchi
+        // ekranda "qancha MB ketdi"ni aniq ko'rishi uchun. Agar bu son
+        // o'smay tursa, demak barcha ma'lumot keshdan o'qilyapti va
+        // tarmoqqa umuman chiqilmayapti.
+        let total_net = NET_BYTES.fetch_add(collected.len() as u64, Ordering::Relaxed)
+            + collected.len() as u64;
         log(format!(
-            "Bo'lak #{index} yig'ildi: {}/{expected_len} bayt",
-            collected.len()
+            "Bo'lak #{index} TARMOQDAN olindi: {}/{expected_len} bayt (jami tarmoq: {:.1} MB)",
+            collected.len(),
+            total_net as f64 / (1024.0 * 1024.0)
         ));
 
         if collected.len() == expected_len {
@@ -620,18 +648,6 @@ fn fetch_and_store_chunk(
 }
 
 // ── Video uchun "avlod" boshqaruvi (eskirgan so'rovlarni bekor qilish) ─
-
-fn bump_generation(shared: &Shared, key: &str) -> u64 {
-    let mut gens = shared.generation.lock().unwrap();
-    let next = gens.get(key).copied().unwrap_or(0) + 1;
-    gens.insert(key.to_string(), next);
-    next
-}
-
-fn is_current_generation(shared: &Shared, key: &str, my_generation: u64) -> bool {
-    let gens = shared.generation.lock().unwrap();
-    gens.get(key).copied() == Some(my_generation)
-}
 
 // ── Fon to'ldiruvchisi: SURILUVCHI OYNA ────────────────────────────
 //
@@ -731,7 +747,6 @@ fn ensure_filler(shared: &'static Shared, key: &str, dir: &PathBuf, url: &str, t
 fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::io::Result<()> {
     let shared = SHARED.get().expect("shared holat ishga tushmagan");
     let key = hash_url(url);
-    let my_generation = bump_generation(shared, &key);
     let dir = shared.cache_root.join(&key);
     fs::create_dir_all(&dir)?;
 
@@ -779,6 +794,15 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
         return Ok(());
     }
 
+    // Javob uzunligini cheklaymiz (yuqoridagi MAX_RESPONSE_BYTES izohiga
+    // qarang) — shu bilan har bir ulanish qisqa umr ko'radi va tez-tez
+    // sek qilinganda ulanishlar to'planib qolmaydi. Pleyer qolgan qismni
+    // yangi Range so'rovi bilan o'zi so'raydi (HTTP 206 uchun bu mutlaqo
+    // odatiy holat).
+    if is_range && end - start + 1 > MAX_RESPONSE_BYTES {
+        end = start + MAX_RESPONSE_BYTES - 1;
+    }
+
     // Oldindan yuklash oynasini SHU so'rov boshlangan joyga o'rnatamiz —
     // sek qilinganda oyna darhol yangi nuqtaga ko'chadi (masalan
     // 2-bo'lakdan 15-ga sakralsa, oyna 15..25 bo'ladi).
@@ -813,12 +837,15 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
         )?;
     }
 
+    // MUHIM: "avlod" (generation) orqali eski so'rovni bekor qilish
+    // OLIB TASHLANDI. Sabab: javob uzunligi endi 4 MiB bilan
+    // cheklangani uchun har bir so'rov o'zi tezda tugaydi — bekor
+    // qilish shart emas. Bundan tashqari u ZARARLI ham edi: pleyer
+    // (FFmpeg/mdk-sdk) bir vaqtda BIR NECHTA ulanishdan o'qishi mumkin,
+    // eski so'rovni "eskirgan" deb uzib qo'yish esa pleyer hali ham
+    // o'qiyotgan oqimni yarmida kesib, uni xatoga olib kelardi.
     let mut cursor = start;
     while cursor <= end {
-        if !is_current_generation(shared, &key, my_generation) {
-            log("_serve bekor qilindi (yangi so'rov boshlangan, avlod eskirdi)".to_string());
-            break;
-        }
         let chunk_index = cursor / CHUNK_SIZE;
         // Pleyer oldinga siljidi — oldindan yuklash oynasini ham
         // birga suramiz (oyna har doim ijro nuqtasidan boshlanadi).
