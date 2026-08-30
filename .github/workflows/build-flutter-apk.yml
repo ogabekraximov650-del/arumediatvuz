@@ -10,6 +10,15 @@ on:
       - '.github/workflows/build-flutter-apk.yml'
   workflow_dispatch:
 
+# Bir vaqtda FAQAT BITTA build ishlaydi. Avval push va qo'lda ishga
+# tushirish (workflow_dispatch) bir vaqtda kelib, bir xil commit uchun
+# IKKITA build paydo bo'lardi. Endi yangi build boshlansa, o'sha
+# branch uchun eskisi avtomatik bekor qilinadi — ro'yxatda chalkashlik
+# bo'lmaydi va CI resursi ham behuda sarflanmaydi.
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-apk:
     runs-on: ubuntu-latest

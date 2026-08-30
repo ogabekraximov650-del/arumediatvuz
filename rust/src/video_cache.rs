@@ -23,7 +23,7 @@
 //   - Oldindan yuklash SURILUVCHI OYNA bilan: ijro nuqtasidan keyin
 //     eng ko'pi 10 ta bo'lak (PREFETCH_WINDOW) keshga olinadi.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -90,6 +90,11 @@ struct Shared {
     // Pleyer hozir qaysi bo'lakni ijro etayotgani (taxminan) — oldindan
     // yuklash oynasi aynan shu nuqtadan boshlanadi.
     filler_pos: AtomicU64,
+    // Har bir FAYL uchun alohida tarmoq hisobi: kalit — B2'dagi fayl
+    // nomi (masalan "ep_1_2_720p_1788029552837.mp4"), qiymat — shu fayl
+    // uchun TARMOQDAN olingan umumiy bayt. Shu bilan "MB aynan qaysi
+    // faylga ketyapti" degan savolga aniq javob beriladi.
+    net_by_file: Mutex<HashMap<String, u64>>,
 }
 
 #[derive(Clone)]
@@ -108,15 +113,38 @@ static ACTIVE_CONNS: AtomicUsize = AtomicUsize::new(0);
 /// (keshdan o'qilganlar bunga kirmaydi) — diagnostika uchun.
 static NET_BYTES: AtomicU64 = AtomicU64::new(0);
 
+/// Jurnal fayli eng ko'p hajmi. Oshib ketsa fayl tozalanib, yangidan
+/// boshlanadi (cheksiz o'sib, qurilma xotirasini to'ldirmasligi uchun).
+const LOG_FILE_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
 fn log(msg: impl Into<String>) {
     if let Some(s) = SHARED.get() {
         let elapsed = s.start.elapsed().as_millis();
         let line = format!("[{elapsed}ms] {}", msg.into());
-        let mut logs = s.logs.lock().unwrap();
-        logs.push(line);
-        let len = logs.len();
-        if len > 300 {
-            logs.drain(0..(len - 300));
+
+        // 1) Xotiradagi ro'yxat — ekrandagi panel uchun.
+        {
+            let mut logs = s.logs.lock().unwrap();
+            logs.push(line.clone());
+            let len = logs.len();
+            if len > 300 {
+                logs.drain(0..(len - 300));
+            }
+        }
+
+        // 2) DISKDAGI YAGONA JURNAL FAYLI — foydalanuvchi uni menga
+        //    yuborishi uchun. Barcha loglar (Rust server + Dart pleyer)
+        //    shu bitta faylga xronologik tartibda yoziladi:
+        //      <ilova ichki xotirasi>/files/video_byte_cache/debug_log.txt
+        let path = s.cache_root.join("debug_log.txt");
+        if let Ok(meta) = fs::metadata(&path) {
+            if meta.len() > LOG_FILE_MAX_BYTES {
+                let _ = fs::remove_file(&path);
+            }
+        }
+        if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+            use std::io::Write as _;
+            let _ = writeln!(f, "{line}");
         }
     }
 }
@@ -158,6 +186,7 @@ pub extern "C" fn rust_video_cache_start(cache_dir_ptr: *const c_char) -> i32 {
         filler_job: Mutex::new(None),
         filler_running: AtomicBool::new(false),
         filler_pos: AtomicU64::new(0),
+        net_by_file: Mutex::new(HashMap::new()),
     };
     let _ = SHARED.set(shared);
     log("Rust kesh-server ishga tushirilmoqda...".to_string());
@@ -235,6 +264,29 @@ pub extern "C" fn rust_video_cache_start(cache_dir_ptr: *const c_char) -> i32 {
 #[no_mangle]
 pub extern "C" fn rust_video_cache_net_bytes() -> u64 {
     NET_BYTES.load(Ordering::Relaxed)
+}
+
+/// Dart tomonidan (video_cache_server.dart / video_player_screen.dart)
+/// chaqiriladi — shu bilan PLEYER loglari ham xuddi shu YAGONA
+/// debug_log.txt fayliga, server loglari bilan bir xil xronologik
+/// tartibda tushadi. Foydalanuvchi keyin o'sha bitta faylni yuborsa,
+/// butun manzara (pleyer + kesh-server) ko'rinadi.
+#[no_mangle]
+pub extern "C" fn rust_video_cache_log(msg_ptr: *const c_char) {
+    if let Some(msg) = unsafe { cstr_to_str(msg_ptr) } {
+        log(format!("[PLEYER] {msg}"));
+    }
+}
+
+/// Diskdagi yagona jurnal faylining to'liq yo'lini qaytaradi — ilova
+/// uni ekranda ko'rsatishi mumkin, shunda foydalanuvchi faylni topib
+/// yuborishi oson bo'ladi.
+#[no_mangle]
+pub extern "C" fn rust_video_cache_log_path() -> *mut c_char {
+    match SHARED.get() {
+        Some(s) => string_to_cptr(s.cache_root.join("debug_log.txt").display().to_string()),
+        None => string_to_cptr(String::new()),
+    }
 }
 
 #[no_mangle]
@@ -690,11 +742,19 @@ fn fetch_and_store_chunk(
         // ekranda "qancha MB ketdi"ni aniq ko'rishi uchun. Agar bu son
         // o'smay tursa, demak barcha ma'lumot keshdan o'qilyapti va
         // tarmoqqa umuman chiqilmayapti.
-        let total_net = NET_BYTES.fetch_add(collected.len() as u64, Ordering::Relaxed)
-            + collected.len() as u64;
+        let got = collected.len() as u64;
+        let total_net = NET_BYTES.fetch_add(got, Ordering::Relaxed) + got;
+        // Shu FAYL uchun alohida hisob — "MB aynan qaysi faylga ketyapti"
+        // degan savolga to'g'ridan-to'g'ri javob beradi.
+        let file_net = {
+            let mut m = shared.net_by_file.lock().unwrap();
+            let e = m.entry(key.to_string()).or_insert(0);
+            *e += got;
+            *e
+        };
         log(format!(
-            "Bo'lak #{index} TARMOQDAN olindi: {}/{expected_len} bayt (jami tarmoq: {:.1} MB)",
-            collected.len(),
+            "TARMOQDAN >>> fayl='{key}' bo'lak #{index} ({start}-{end}) {got}/{expected_len} bayt | shu fayl: {:.2} MB | jami: {:.2} MB | manba={url}",
+            file_net as f64 / (1024.0 * 1024.0),
             total_net as f64 / (1024.0 * 1024.0)
         ));
 

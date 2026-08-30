@@ -1466,6 +1466,18 @@ class _DebugLogPanelState extends State<_DebugLogPanel> {
                   height: 1.4,
                 ),
               ),
+              // Jurnal faylining yo'li — foydalanuvchi uni fayl
+              // menejerida topib, tahlil uchun yuborishi mumkin.
+              Text(
+                'LOG: ${VideoCacheServer.logFilePath}',
+                style: const TextStyle(
+                  color: Colors.white54,
+                  fontSize: 8,
+                  fontFamily: 'monospace',
+                  height: 1.3,
+                ),
+                maxLines: 2,
+              ),
               ...last.map((l) => Text(
                     l,
                     style: const TextStyle(

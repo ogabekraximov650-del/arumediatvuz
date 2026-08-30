@@ -53,6 +53,12 @@ typedef _VideoCachePullLogsDart = Pointer<Utf8> Function();
 typedef _VideoCacheNetBytesC = Uint64 Function();
 typedef _VideoCacheNetBytesDart = int Function();
 
+typedef _VideoCacheLogC = Void Function(Pointer<Utf8>);
+typedef _VideoCacheLogDart = void Function(Pointer<Utf8>);
+
+typedef _VideoCacheLogPathC = Pointer<Utf8> Function();
+typedef _VideoCacheLogPathDart = Pointer<Utf8> Function();
+
 class RustCore {
   RustCore._();
   static final RustCore instance = RustCore._();
@@ -70,6 +76,8 @@ class RustCore {
   late final _VideoCacheStartDart _videoCacheStart;
   late final _VideoCachePullLogsDart _videoCachePullLogs;
   late final _VideoCacheNetBytesDart _videoCacheNetBytes;
+  late final _VideoCacheLogDart _videoCacheLog;
+  late final _VideoCacheLogPathDart _videoCacheLogPath;
 
   bool _loaded = false;
   String? _cacheFilePath;
@@ -102,6 +110,10 @@ class RustCore {
         'rust_video_cache_pull_logs');
     _videoCacheNetBytes = _lib.lookupFunction<_VideoCacheNetBytesC, _VideoCacheNetBytesDart>(
         'rust_video_cache_net_bytes');
+    _videoCacheLog =
+        _lib.lookupFunction<_VideoCacheLogC, _VideoCacheLogDart>('rust_video_cache_log');
+    _videoCacheLogPath = _lib.lookupFunction<_VideoCacheLogPathC, _VideoCacheLogPathDart>(
+        'rust_video_cache_log_path');
 
     final dir = await getApplicationDocumentsDirectory();
     _cacheDirPath = dir.path;
@@ -320,6 +332,30 @@ class RustCore {
       return _videoCacheNetBytes();
     } catch (_) {
       return 0;
+    }
+  }
+
+  /// Pleyer (Dart) tomonidagi log qatorini Rust'ning YAGONA
+  /// debug_log.txt fayliga yozadi — shunda server va pleyer loglari
+  /// bitta faylda, xronologik tartibda turadi.
+  void writeVideoCacheLog(String msg) {
+    if (!_loaded) return;
+    final ptr = msg.toNativeUtf8();
+    try {
+      _videoCacheLog(ptr);
+    } catch (_) {
+    } finally {
+      malloc.free(ptr);
+    }
+  }
+
+  /// Diskdagi yagona jurnal faylining to'liq yo'li.
+  String get videoCacheLogPath {
+    if (!_loaded) return '';
+    try {
+      return _readAndFree(_videoCacheLogPath()) ?? '';
+    } catch (_) {
+      return '';
     }
   }
 

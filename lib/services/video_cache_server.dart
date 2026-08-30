@@ -42,7 +42,15 @@ class VideoCacheServer {
     final ts =
         '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}.${now.millisecond.toString().padLeft(3, '0')}';
     _appendLines(['[$ts] $msg']);
+    // Pleyer loglari ham Rust'ning YAGONA debug_log.txt fayliga tushadi —
+    // shunda foydalanuvchi bitta faylni yuborsa, server va pleyer
+    // hodisalari bir xil xronologik tartibda ko'rinadi.
+    RustCore.instance.writeVideoCacheLog('[$ts] $msg');
   }
+
+  /// Diskdagi yagona jurnal faylining to'liq yo'li (ekranda ko'rsatish
+  /// va foydalanuvchiga topib berish uchun).
+  static String get logFilePath => RustCore.instance.videoCacheLogPath;
 
   static void _appendLines(List<String> lines) {
     if (lines.isEmpty) return;
