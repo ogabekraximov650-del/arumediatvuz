@@ -335,7 +335,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
 
   // Ekranning chap/o'ng yarmiga ikki marta bosilganda 5 sonyaga
   // orqaga/oldinga suradi. Tez-tez bosilsa jamlanadi (+5, +10, +15...)
-  // va 5 soniyadan keyin ko'rsatkich avtomatik yo'qoladi.
+  // va qo'l tortilgach 2 soniyadan keyin ko'rsatkich avtomatik yo'qoladi.
   void _handleDoubleTapSeek(bool isLeft) {
     if (_currentEp == null) return;
     final ctrl = _controller;
@@ -357,7 +357,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
 
     if (isLeft) {
       _leftSeekHideTimer?.cancel();
-      _leftSeekHideTimer = Timer(const Duration(seconds: 3), () {
+      _leftSeekHideTimer = Timer(const Duration(seconds: 2), () {
         if (mounted) {
           setState(() {
             _showLeftSeek = false;
@@ -367,7 +367,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       });
     } else {
       _rightSeekHideTimer?.cancel();
-      _rightSeekHideTimer = Timer(const Duration(seconds: 3), () {
+      _rightSeekHideTimer = Timer(const Duration(seconds: 2), () {
         if (mounted) {
           setState(() {
             _showRightSeek = false;
@@ -778,7 +778,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
             ),
 
           // ── Sek ko'rsatkichlari — asosiy kontrollardan mustaqil,
-          // faqat bosilgan tarafda chiqadi va 3s dan keyin yo'qoladi.
+          // faqat bosilgan tarafda chiqadi va 2s dan keyin yo'qoladi.
           // Doiraviy shaklda, play/pause tugmasidan 2 barobar katta.
           // MUHIM: play/pause tugmasi (markaz) bilan video cheti
           // o'rtasidagi nuqtaga joylashtirilgan — chetga emas.
