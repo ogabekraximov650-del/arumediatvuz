@@ -68,6 +68,13 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   bool? _lastTapWasLeft;
   Timer? _pendingSingleTapTimer;
 
+  // Sek gesture qatlami (Listener) uchun: tapni surishdan ajratish —
+  // barmoq qo'yilgan nuqta va vaqti. Agar barmoq 14px dan ko'p surilsa
+  // yoki 350ms dan uzoq ushlab turilsa, bu tap emas (masalan slayderni
+  // tortish) va sek ishga tushmaydi.
+  Offset? _tapDownPos;
+  DateTime? _tapDownTime;
+
   @override
   void initState() {
     super.initState();
@@ -487,7 +494,12 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     if (ddx * ddx + ddy * ddy <= deadRadius * deadRadius) {
       _pendingSingleTapTimer?.cancel();
       _lastTapTime = null;
-      _onTapVideo();
+      // MUHIM: kontrollar KO'RINIB turgan bo'lsa, bu tapni allaqachon
+      // play/pause tugmasining o'zi qabul qilgan (gesture qatlami
+      // shaffof — tapni yutmaydi). Bu yerda yana _onTapVideo() chaqirsak,
+      // play bosilishi bilanoq kontrollar yopilib qolardi. Shu sabab
+      // kontrollarni faqat ular YASHIRIN bo'lganda ko'rsatamiz.
+      if (!_showControls) _onTapVideo();
       return;
     }
 
@@ -820,27 +832,10 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
           // balandlik bo'ylab cho'zilgan yo'lak EMAS — shu sabab
           // ekranning chap/o'ng tarafidagi deyarli har qanday nuqta
           // (yuqori/pastki markaz ham) sek uchun ishlaydi.
-          Positioned.fill(
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                final center = constraints.maxWidth / 2;
-                final centerY = constraints.maxHeight / 2;
-                final deadRadius = _playPauseDiameter(isFullscreen) / 2 + 10;
-                return GestureDetector(
-                  behavior: HitTestBehavior.translucent,
-                  onTapUp: _currentEp != null
-                      ? (details) => _handleVideoTap(
-                            details.localPosition.dx,
-                            details.localPosition.dy,
-                            center,
-                            centerY,
-                            deadRadius,
-                          )
-                      : null,
-                );
-              },
-            ),
-          ),
+          // (Sek gesture qatlami Stack'ning ENG USTIGA ko'chirildi — pastga
+          // qarang. Sabab: kontrollar ko'ringanda pastki panel (slayder
+          // qatori) tapni tutib qolib, ekranning pastki qismida sek
+          // umuman ishlamas edi.)
 
           // ── Xato holati: gesture qatlamidan KEYIN joylashtirilgan —
           // aks holda "Qayta urinish" tugmasi tepasidagi translucent
@@ -925,6 +920,68 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
               top: 6,
               child: IgnorePointer(
                 child: _DebugLogPanel(),
+              ),
+            ),
+
+          // ── SEK GESTURE QATLAMI — Stack'ning ENG USTIDA ─────────────
+          // MUHIM: bu qatlam `Listener` (GestureDetector emas) va
+          // HitTestBehavior.translucent bilan ishlaydi. Bu ikkovi birga
+          // shuni anglatadi: qatlam BARCHA taplarni ko'radi, LEKIN ularni
+          // yutib qolmaydi — ostidagi tugmalar (play/pause, slayder,
+          // sifat, fullscreen) o'z vazifasini avvalgidek bajaraveradi.
+          //
+          // Avval bu qatlam kontrollardan PASTDA turardi, shu sabab
+          // kontrollar ko'ringanda pastki panel (slayder qatori) tapni
+          // tutib qolib, ekranning pastki qismida sek umuman ishlamas edi.
+          // Endi chap/o'ng tarafning YUQORISI, PASTI, CHETI va O'RTASI —
+          // hamma joyi sek uchun ishlaydi; faqat haqiqiy tugmalar turgan
+          // tor zonalar (markazdagi play/pause doirasi va pastki
+          // boshqaruv paneli) bundan mustasno.
+          if (_currentEp != null)
+            Positioned.fill(
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final center = constraints.maxWidth / 2;
+                  final centerY = constraints.maxHeight / 2;
+                  final deadRadius = _playPauseDiameter(isFullscreen) / 2 + 10;
+                  // Kontrollar ko'ringandagina haqiqiy tugmalar bor —
+                  // shu paytdagina ular turgan tor zonalar chetlab
+                  // o'tiladi. Kontrollar yashiringanda esa ekranning
+                  // MUTLAQO hamma joyi (markazdan tashqari) sek qiladi.
+                  final bottomGuard = _showControls ? (isFullscreen ? 78.0 : 64.0) : 0.0;
+                  final topGuard = (_showControls && isFullscreen) ? 60.0 : 0.0;
+                  return Listener(
+                    behavior: HitTestBehavior.translucent,
+                    onPointerDown: (e) {
+                      _tapDownPos = e.localPosition;
+                      _tapDownTime = DateTime.now();
+                    },
+                    onPointerUp: (e) {
+                      final downPos = _tapDownPos;
+                      final downTime = _tapDownTime;
+                      _tapDownPos = null;
+                      _tapDownTime = null;
+                      if (downPos == null || downTime == null) return;
+                      // Surish (masalan slayderni tortish) tap deb
+                      // hisoblanmaydi.
+                      if ((e.localPosition - downPos).distance > 14) return;
+                      if (DateTime.now().difference(downTime) >
+                          const Duration(milliseconds: 350)) {
+                        return;
+                      }
+                      final dy = e.localPosition.dy;
+                      if (dy > constraints.maxHeight - bottomGuard) return;
+                      if (dy < topGuard) return;
+                      _handleVideoTap(
+                        e.localPosition.dx,
+                        dy,
+                        center,
+                        centerY,
+                        deadRadius,
+                      );
+                    },
+                  );
+                },
               ),
             ),
         ],

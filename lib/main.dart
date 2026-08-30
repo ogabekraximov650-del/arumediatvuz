@@ -66,11 +66,28 @@ Future<void> main() async {
   // oshib ketardi. Bu qiymatlarni kichraytirish (mos ravishda 1 MiB va
   // 1 soniya — bitta bo'lak hajmimiz bilan mos) formatni aniqlash uchun
   // yetarli, lekin ortiqcha ma'lumot talab qilmaydi.
+  //
+  // ENG MUHIM TUZATISH (tez-tez sek qilganda ilovaning o'chib qolishi):
+  // avvalgi 'buffer.range' MAX qiymati 600000ms (10 daqiqa) va
+  // 'demux.buffer.ranges' 64 edi. Bu mdk-sdk'ga joriy nuqtadan 10
+  // daqiqagacha ma'lumotni XOTIRADA saqlashga va bundan tashqari 64
+  // tagacha alohida bayt-oralig'ini ham xotirada ushlab turishga ruxsat
+  // berardi. Har bir sek YANGI oraliq hosil qilgani uchun, 5-6 marta
+  // ketma-ket sek qilinganda xotira sarfi tez o'sib, Android ilovani
+  // o'ldirardi — aynan foydalanuvchi kuzatgan holat.
+  //
+  // Endi bu qiymatlar keskin kamaytirildi: 1.5s min, 20s max bufer va
+  // 8 ta oraliq. Bu XOTIRA sarfini bir necha barobar kamaytiradi va
+  // ijro sifatiga ta'sir qilmaydi — chunki baytlar allaqachon MAHALLIY
+  // DISKDA (Rust kesh-serveri) tayyor turadi, ya'ni mdk-sdk ularni
+  // xotirada ushlab turishi shart emas: kerak bo'lganda diskdan
+  // millisekundlarda qayta o'qiydi. Aksincha, kichik bufer sek
+  // qilishni ham TEZLASHTIRADI (kamroq ma'lumot qayta yig'iladi).
   fvp.registerWith(options: {
     'fastSeek': true,
     'player': {
-      'buffer.range': '2000+600000',
-      'demux.buffer.ranges': '64',
+      'buffer.range': '1500+20000',
+      'demux.buffer.ranges': '8',
       'avformat.probesize': '1048576',
       'avformat.analyzeduration': '1000000',
     },

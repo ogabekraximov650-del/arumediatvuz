@@ -28,7 +28,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::raw::c_char;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -41,7 +41,15 @@ const CHUNK_SIZE: u64 = 1024 * 1024;
 /// Har bir ulanish bitta OS ish oqimi + ~1 MiB bufer degani, shu sabab
 /// bu chegara xotira sarfini bashorat qilinadigan darajada ushlab
 /// turadi (tez-tez sek qilishda ilova o'chib qolishining oldini oladi).
-const MAX_CONNS: usize = 6;
+const MAX_CONNS: usize = 8;
+
+/// Oldindan yuklash OYNASI: ijro nuqtasidan keyin ENG KO'PI BILAN shu
+/// qadar bo'lak keshga olinadi. Avval butun fayl fon'da yuklab olinardi
+/// — bu foydalanuvchining trafigini keraksiz "so'rib" olardi (u videoni
+/// bir necha soniya ko'rib chiqib qo'ysa ham) va xotirani tez to'ldirardi.
+/// Endi faqat oldinda turgan 10 ta bo'lak saqlanadi; pleyer oldinga
+/// siljigan sari (yoki sek qilinganda) oyna ham u bilan birga suriladi.
+const PREFETCH_WINDOW: u64 = 10;
 
 // ── Umumiy holat ─────────────────────────────────────────────────────
 
@@ -54,10 +62,23 @@ struct Shared {
     in_flight: Mutex<HashSet<String>>,
     logs: Mutex<Vec<String>>,
     agent: ureq::Agent,
-    // Hozir ko'rilayotgan video kaliti — fon to'ldiruvchisi (filler)
-    // faqat shu video uchun ishlaydi va boshqa video ochilganda
-    // o'z-o'zini to'xtatadi.
-    active_video: Mutex<Option<String>>,
+    // Fon to'ldiruvchisi (filler) uchun joriy vazifa. Faqat BITTA
+    // to'ldiruvchi ish oqimi bo'ladi va u shu yerdagi vazifani bajaradi;
+    // boshqa video ochilsa, vazifa almashadi va eski video uchun
+    // yuklash DARHOL to'xtaydi.
+    filler_job: Mutex<Option<FillerJob>>,
+    filler_running: AtomicBool,
+    // Pleyer hozir qaysi bo'lakni ijro etayotgani (taxminan) — oldindan
+    // yuklash oynasi aynan shu nuqtadan boshlanadi.
+    filler_pos: AtomicU64,
+}
+
+#[derive(Clone)]
+struct FillerJob {
+    key: String,
+    dir: PathBuf,
+    url: String,
+    total: u64,
 }
 
 static SHARED: OnceLock<Shared> = OnceLock::new();
@@ -113,7 +134,9 @@ pub extern "C" fn rust_video_cache_start(cache_dir_ptr: *const c_char) -> i32 {
         in_flight: Mutex::new(HashSet::new()),
         logs: Mutex::new(Vec::new()),
         agent,
-        active_video: Mutex::new(None),
+        filler_job: Mutex::new(None),
+        filler_running: AtomicBool::new(false),
+        filler_pos: AtomicU64::new(0),
     };
     let _ = SHARED.set(shared);
     log("Rust kesh-server ishga tushirilmoqda...".to_string());
@@ -471,6 +494,11 @@ fn read_or_fetch_chunk(
     let final_path = dir.join(chunk_name(index));
     if let Ok(bytes) = fs::read(&final_path) {
         if bytes.len() == expected_len {
+            // MUHIM (diagnostika): diskdan o'qilgan bo'lak uchun TARMOQQA
+            // umuman chiqilmaydi. Bu log ekranda ko'rinib turishi kerak —
+            // shu bilan "qayta yuklanyaptimi yoki keshdanmi" degan savolga
+            // to'g'ridan-to'g'ri javob beradi.
+            log(format!("Bo'lak #{index} KESHDAN o'qildi (tarmoqsiz)"));
             return Ok(bytes);
         }
     }
@@ -605,67 +633,95 @@ fn is_current_generation(shared: &Shared, key: &str, my_generation: u64) -> bool
     gens.get(key).copied() == Some(my_generation)
 }
 
-// ── Fon to'ldiruvchisi (background filler) ─────────────────────────
+// ── Fon to'ldiruvchisi: SURILUVCHI OYNA ────────────────────────────
 //
-// Avval har bir bo'lak uchun ALOHIDA ish oqimi ochilardi ("lookahead"),
-// bu esa tez-tez sek qilinganda o'nlab ish oqimi (har biri 1 MiB bufer
-// bilan) to'planib ketishiga sabab bo'lardi.
+// Avvalgi versiya video ochilishi bilan BUTUN faylni fon'da yuklab
+// olardi. Bu ikki jihatdan yomon edi: (a) foydalanuvchi videoni bir
+// necha soniya ko'rib chiqib qo'ysa ham butun fayl uchun trafik
+// sarflanardi, (b) xotira/disk keraksiz to'lardi.
 //
-// Endi har bir video uchun ENG KO'PI BILAN BITTA fon ish oqimi ochiladi.
-// U videoning YETISHMAYOTGAN bo'laklarini boshidan oxirigacha ketma-ket
-// (bittalab) yuklab, diskka yozib boradi va faqat BOSHQA video
-// ochilgandagina to'xtaydi. Natijada:
-//   - video bir marta ochilgach, butun fayl fon'da keshga tushadi, shu
-//     sabab keyingi ochishda (yoki sek qilinganda) tarmoqqa umuman
-//     chiqilmaydi — "qayta yuklab olish" muammosi yo'qoladi;
-//   - ish oqimlari soni hech qachon o'smaydi (video uchun aniq bitta),
-//     shu sabab xotira sarfi bashorat qilinadigan bo'lib qoladi.
+// Endi ijro nuqtasidan keyin FAQAT `PREFETCH_WINDOW` (10) ta bo'lak
+// oldindan olinadi. Pleyer oldinga siljigan sari (yoki sek qilinganda)
+// oyna ham u bilan birga suriladi — masalan 2-bo'lakda oyna 2..12,
+// 15-bo'lakka sek qilinsa oyna darhol 15..25 ga ko'chadi.
+//
+// Butun tizimda ENG KO'PI BILAN BITTA to'ldiruvchi ish oqimi bo'ladi:
+// yangi video ochilganda vazifa (FillerJob) almashadi, eski video uchun
+// yuklash esa darhol to'xtaydi.
 fn ensure_filler(shared: &'static Shared, key: &str, dir: &PathBuf, url: &str, total: u64) {
     {
-        // Faqat joriy (eng oxirgi so'ralgan) video to'ldiriladi.
-        let mut active = shared.active_video.lock().unwrap();
-        if active.as_deref() == Some(key) {
-            // Shu video uchun to'ldiruvchi allaqachon ishlayapti.
-            return;
+        let mut job = shared.filler_job.lock().unwrap();
+        let changed = job.as_ref().map(|j| j.key.as_str()) != Some(key);
+        if changed {
+            *job = Some(FillerJob {
+                key: key.to_string(),
+                dir: dir.clone(),
+                url: url.to_string(),
+                total,
+            });
         }
-        *active = Some(key.to_string());
     }
 
-    let (key2, dir2, url2) = (key.to_string(), dir.clone(), url.to_string());
+    // Allaqachon ishlayotgan bo'lsa, u yangi vazifani o'zi ko'radi.
+    if shared.filler_running.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
     thread::Builder::new()
         .name("video-cache-filler".into())
         .spawn(move || {
-            let chunk_count = total.div_ceil(CHUNK_SIZE);
-            for i in 0..chunk_count {
-                // Boshqa video ochilgan bo'lsa — darhol to'xtaymiz.
-                {
-                    let active = shared.active_video.lock().unwrap();
-                    if active.as_deref() != Some(key2.as_str()) {
-                        return;
-                    }
-                }
-                let chunk_start = i * CHUNK_SIZE;
-                let chunk_end = (chunk_start + CHUNK_SIZE - 1).min(total - 1);
-                let expected_len = (chunk_end - chunk_start + 1) as usize;
+            let mut idle_ticks = 0u32;
+            loop {
+                let Some(job) = shared.filler_job.lock().unwrap().clone() else {
+                    break;
+                };
+                let chunk_count = job.total.div_ceil(CHUNK_SIZE);
+                let from = shared.filler_pos.load(Ordering::Relaxed).min(chunk_count);
+                let until = (from + PREFETCH_WINDOW).min(chunk_count);
 
-                let final_path = dir2.join(chunk_name(i));
-                if let Ok(bytes) = fs::read(&final_path) {
-                    if bytes.len() == expected_len {
-                        continue; // allaqachon keshda
+                let mut worked = false;
+                for i in from..until {
+                    // Vazifa almashgan bo'lsa (boshqa video) — darhol chiqamiz.
+                    {
+                        let cur = shared.filler_job.lock().unwrap();
+                        if cur.as_ref().map(|j| j.key.as_str()) != Some(job.key.as_str()) {
+                            break;
+                        }
                     }
+                    let chunk_start = i * CHUNK_SIZE;
+                    let chunk_end = (chunk_start + CHUNK_SIZE - 1).min(job.total - 1);
+                    let expected_len = (chunk_end - chunk_start + 1) as usize;
+
+                    let final_path = job.dir.join(chunk_name(i));
+                    if let Ok(bytes) = fs::read(&final_path) {
+                        if bytes.len() == expected_len {
+                            continue; // allaqachon keshda — tarmoqqa chiqilmaydi
+                        }
+                    }
+                    log(format!("Bo'lak #{i} oldindan yuklanmoqda (oyna {from}..{until})"));
+                    let _ = fetch_and_store_chunk(
+                        shared, &job.key, &job.dir, &job.url, i, chunk_start, chunk_end,
+                        expected_len,
+                    );
+                    worked = true;
+                    // Bitta bo'lakdan keyin oynani qayta hisoblaymiz —
+                    // shu bilan sek qilinganda darhol yangi joyga o'tadi.
+                    break;
                 }
-                log(format!("Bo'lak #{i} fon'da oldindan yuklanmoqda..."));
-                if fetch_and_store_chunk(
-                    shared, &key2, &dir2, &url2, i, chunk_start, chunk_end, expected_len,
-                )
-                .is_err()
-                {
-                    // Tarmoq xatosi — biroz kutib, keyingisiga o'tamiz
-                    // (keyingi ochishda qaytadan urinib ko'riladi).
-                    thread::sleep(Duration::from_millis(500));
+
+                if worked {
+                    idle_ticks = 0;
+                } else {
+                    // Oyna to'liq keshda — kutamiz. Uzoq vaqt ish bo'lmasa
+                    // ish oqimi tugaydi (keyingi so'rovda qayta ochiladi).
+                    idle_ticks += 1;
+                    if idle_ticks > 150 {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(200));
                 }
             }
-            log(format!("Fon to'ldiruvchi yakunlandi ({chunk_count} bo'lak)"));
+            shared.filler_running.store(false, Ordering::SeqCst);
         })
         .ok();
 }
@@ -688,11 +744,6 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
     };
     let total = meta.total_size;
     log(format!("Meta: hajm={total}, tur={}", meta.content_type));
-
-    // Butun videoni fon'da (bitta ish oqimida, ketma-ket) keshga
-    // to'ldirishni boshlaymiz — shu bilan video bir marta ochilgach,
-    // keyingi ochish/sek qilishlarda tarmoqqa umuman chiqilmaydi.
-    ensure_filler(shared, &key, &dir, url, total);
 
     let (start, mut end, is_range) = match range_header {
         Some(h) if h.starts_with("bytes=") => {
@@ -728,6 +779,14 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
         return Ok(());
     }
 
+    // Oldindan yuklash oynasini SHU so'rov boshlangan joyga o'rnatamiz —
+    // sek qilinganda oyna darhol yangi nuqtaga ko'chadi (masalan
+    // 2-bo'lakdan 15-ga sakralsa, oyna 15..25 bo'ladi).
+    shared
+        .filler_pos
+        .store(start / CHUNK_SIZE, Ordering::Relaxed);
+    ensure_filler(shared, &key, &dir, url, total);
+
     let content_length = end - start + 1;
     if is_range {
         write_status_and_headers(
@@ -761,6 +820,9 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
             break;
         }
         let chunk_index = cursor / CHUNK_SIZE;
+        // Pleyer oldinga siljidi — oldindan yuklash oynasini ham
+        // birga suramiz (oyna har doim ijro nuqtasidan boshlanadi).
+        shared.filler_pos.store(chunk_index, Ordering::Relaxed);
         let chunk_start = chunk_index * CHUNK_SIZE;
         let chunk_end = (chunk_start + CHUNK_SIZE - 1).min(total - 1);
 
