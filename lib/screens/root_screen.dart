@@ -113,32 +113,33 @@ class _BottomNav extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // MUHIM TUZATISH: pastki margin endi tizim navigatsiya panelining
-    // balandligini (MediaQuery.viewPadding.bottom) hisobga oladi.
-    // Fullscreen pleyerdan qaytgach SystemUiMode o'zgarishi natijasida
-    // tizim navigatsiya paneli qayta chizilib, qattiq 14px margin
-    // yetarli bo'lmay qolib, panel orqasida qolib ketardi.
-    final systemBottomInset = MediaQuery.of(context).padding.bottom;
-    final bottomMargin = 14.0 + systemBottomInset;
-
-    return Container(
-      margin: EdgeInsets.fromLTRB(16, 0, 16, bottomMargin),
-      padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 6),
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.circular(28),
-        border: Border.all(color: AppColors.border, width: 1),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.40),
-            blurRadius: 24,
-            offset: const Offset(0, 8),
-          ),
-        ],
-      ),
-      child: AnimatedBuilder(
-        animation: pageController,
-        builder: (context, _) {
+    // MUHIM TUZATISH: qo'lda MediaQuery.padding.bottom o'qib margin
+    // hisoblash ba'zi qurilmalarda (masalan MIUI/Xiaomi 3-tugmali
+    // navigatsiya) barqaror ishlamay, panel tizim navigatsiya paneli
+    // ortida qolib ketardi. Buning o'rniga Flutter'ning o'zi sinovdan
+    // o'tkazgan SafeArea widgeti ishlatiladi — u tizim navigatsiya
+    // panelining haqiqiy balandligini har doim to'g'ri hisobga oladi.
+    return SafeArea(
+      top: false,
+      minimum: const EdgeInsets.only(bottom: 8),
+      child: Container(
+        margin: const EdgeInsets.fromLTRB(16, 0, 16, 6),
+        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 6),
+        decoration: BoxDecoration(
+          color: AppColors.surface,
+          borderRadius: BorderRadius.circular(28),
+          border: Border.all(color: AppColors.border, width: 1),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.40),
+              blurRadius: 24,
+              offset: const Offset(0, 8),
+            ),
+          ],
+        ),
+        child: AnimatedBuilder(
+          animation: pageController,
+          builder: (context, _) {
           final page = pageController.hasClients
               ? (pageController.page ?? currentIndex.toDouble())
               : currentIndex.toDouble();
@@ -223,6 +224,7 @@ class _BottomNav extends StatelessWidget {
             },
           );
         },
+        ),
       ),
     );
   }
