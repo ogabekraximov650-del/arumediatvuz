@@ -657,8 +657,14 @@ fn fetch_and_store_chunk(
             }
         }
 
-        log(format!("Bo'lak #{index} worker'dan yuklanmoqda ({start}-{end})..."));
+        // MUHIM: worker'dan HAR DOIM FAQAT SHU BITTA bo'lakning aniq
+        // bayt oralig'i so'raladi ("Range: bytes=start-end", ya'ni
+        // aniq 1 MiB yoki oxirgi bo'lak uchun undan kam). Boshqa
+        // bo'laklar bu so'rovga umuman qo'shilmaydi.
         let range = format!("bytes={start}-{end}");
+        log(format!(
+            "SO'RALYAPTI: faqat bo'lak #{index} — Range: {range} ({expected_len} bayt)"
+        ));
         let resp = shared
             .agent
             .get(url)
@@ -747,22 +753,46 @@ fn fetch_and_store_chunk(
             total_net as f64 / (1024.0 * 1024.0)
         ));
 
-        if collected.len() == expected_len {
-            // Diskka faqat TO'LIQ bo'lak yuklab bo'lingandan keyin,
-            // vaqtinchalik nomdan YAKUNIY nomga ATOM ravishda ko'chirib
-            // yoziladi.
-            let tmp_path = dir.join(format!(
-                "{}.{}.tmp",
-                chunk_name(index),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_micros())
-                    .unwrap_or(0)
+        // ── CHALA BO'LAK HECH QACHON SAQLANMAYDI ───────────────────
+        // Agar yuklash o'rtasida internet uzilsa, bo'lak KUTILGANDAN
+        // QISQA keladi. Bunday chala ma'lumotni diskka yozish keshni
+        // "to'liq" deb noto'g'ri belgilab qo'yardi va video buzilib
+        // ko'rinardi. Shu sabab faqat TO'LIQ bo'laklar saqlanadi;
+        // chalasi tashlab yuboriladi va keyingi safar qaytadan
+        // (to'liq) yuklab olinadi.
+        if collected.len() != expected_len {
+            log(format!(
+                "CHALA: bo'lak #{index} to'liq kelmadi ({}/{expected_len} bayt) — DISKKA SAQLANMADI (ehtimol internet uzildi)",
+                collected.len()
             ));
-            fs::write(&tmp_path, &collected).map_err(|e| e.to_string())?;
-            if fs::rename(&tmp_path, &final_path).is_err() {
-                let _ = fs::remove_file(&tmp_path);
-            }
+            return Err(format!(
+                "bo'lak #{index} chala keldi ({}/{expected_len})",
+                collected.len()
+            ));
+        }
+
+        // Diskka faqat TO'LIQ bo'lak yuklab bo'lingandan keyin,
+        // vaqtinchalik nomdan YAKUNIY nomga ATOM ravishda ko'chirib
+        // yoziladi — shu bilan yarim yozilgan fayl hech qachon
+        // yakuniy nom bilan qolib ketmaydi.
+        let tmp_path = dir.join(format!(
+            "{}.{}.tmp",
+            chunk_name(index),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_micros())
+                .unwrap_or(0)
+        ));
+        if let Err(e) = fs::write(&tmp_path, &collected) {
+            // Yozish muvaffaqiyatsiz bo'lsa (masalan joy tugagan) —
+            // yarim yozilgan vaqtinchalik faylni albatta tozalaymiz.
+            let _ = fs::remove_file(&tmp_path);
+            log(format!("XATO: bo'lak #{index} diskka yozilmadi — {e}"));
+            return Err(e.to_string());
+        }
+        if fs::rename(&tmp_path, &final_path).is_err() {
+            // Parallel oqim bizdan oldin yozib ulgurgan bo'lishi mumkin.
+            let _ = fs::remove_file(&tmp_path);
         }
         Ok(collected)
     })();
@@ -792,6 +822,22 @@ fn fetch_and_store_chunk(
 /// Bor bo'lsa — bu fayl to'liq yuklab olingan va unga BOSHQA HECH QACHON
 /// tarmoq so'rovi yuborilmaydi (xuddi Telegram'da faylni bir marta
 /// yuklab olgandan keyin qayta so'ralmagani kabi).
+/// Qolib ketgan vaqtinchalik (.tmp) fayllarni tozalaydi. Internet
+/// yuklash o'rtasida uzilsa yoki ilova to'satdan yopilsa, chala
+/// yozilgan .tmp fayllar qolib ketishi mumkin — ular hech qachon
+/// ishlatilmaydi, faqat joy egallaydi. Har bir video ochilganda
+/// o'sha videoning papkasi tozalab o'tiladi.
+fn cleanup_temp_files(dir: &PathBuf) {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.extension().and_then(|e| e.to_str()) == Some("tmp") {
+                let _ = fs::remove_file(&p);
+            }
+        }
+    }
+}
+
 fn is_fully_cached(dir: &PathBuf, total: u64) -> bool {
     let chunk_count = total.div_ceil(CHUNK_SIZE);
     for i in 0..chunk_count {
@@ -898,6 +944,8 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
     let key = cache_key(url);
     let dir = shared.cache_root.join(&key);
     fs::create_dir_all(&dir)?;
+    // Oldingi uzilishlardan qolgan chala .tmp fayllarni tozalaymiz.
+    cleanup_temp_files(&dir);
 
     let meta = match ensure_meta(shared, &dir, url) {
         Ok(m) => m,
@@ -952,13 +1000,25 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
         end = start + MAX_RESPONSE_BYTES - 1;
     }
 
-    // Oldindan yuklash oynasini SHU so'rov boshlangan joyga o'rnatamiz —
-    // sek qilinganda oyna darhol yangi nuqtaga ko'chadi (masalan
-    // 2-bo'lakdan 15-ga sakralsa, oyna 15..25 bo'ladi).
-    shared
-        .filler_pos
-        .store(start / CHUNK_SIZE, Ordering::Relaxed);
-    ensure_filler(shared, &key, &dir, url, total);
+    // ── TO'LIQ KESHLANGAN FAYL: WORKER'GA UMUMAN SO'ROV YO'Q ───────
+    // Har bir so'rovda meta.json VA barcha bo'lak fayllari tekshiriladi.
+    // Hammasi to'g'ri hajm bilan joyida bo'lsa — bu fayl butunlay
+    // yuklab olingan: oldindan yuklovchi ham ishga tushirilmaydi va
+    // worker'ga birorta ham so'rov ketmaydi (xuddi Telegram'da bir
+    // marta yuklab olingan fayl kabi).
+    if is_fully_cached(&dir, total) {
+        log(format!(
+            "TO'LIQ KESHDA: '{key}' — barcha bo'laklar joyida, worker'ga SO'ROV YUBORILMAYDI"
+        ));
+    } else {
+        // Oldindan yuklash oynasini SHU so'rov boshlangan joyga
+        // o'rnatamiz — sek qilinganda oyna darhol yangi nuqtaga
+        // ko'chadi (masalan 2-bo'lakdan 15-ga sakralsa, oyna 15..20).
+        shared
+            .filler_pos
+            .store(start / CHUNK_SIZE, Ordering::Relaxed);
+        ensure_filler(shared, &key, &dir, url, total);
+    }
 
     let content_length = end - start + 1;
     if is_range {
