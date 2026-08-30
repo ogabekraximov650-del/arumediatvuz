@@ -41,6 +41,15 @@ typedef _FreeStringDart = void Function(Pointer<Utf8>);
 typedef _VersionC = Pointer<Utf8> Function();
 typedef _VersionDart = Pointer<Utf8> Function();
 
+// ── Video-kesh serveri (lib/services/video_cache_server.dart shu orqali
+//    Rust'dagi native (mustaqil OS ish oqimidagi) HTTP proksiga ulanadi) ──
+
+typedef _VideoCacheStartC = Int32 Function(Pointer<Utf8>);
+typedef _VideoCacheStartDart = int Function(Pointer<Utf8>);
+
+typedef _VideoCachePullLogsC = Pointer<Utf8> Function();
+typedef _VideoCachePullLogsDart = Pointer<Utf8> Function();
+
 class RustCore {
   RustCore._();
   static final RustCore instance = RustCore._();
@@ -55,9 +64,12 @@ class RustCore {
   late final _ValidateDart _validate;
   late final _FreeStringDart _freeString;
   late final _VersionDart _version;
+  late final _VideoCacheStartDart _videoCacheStart;
+  late final _VideoCachePullLogsDart _videoCachePullLogs;
 
   bool _loaded = false;
   String? _cacheFilePath;
+  int? _videoCachePort;
 
   /// Ilova ishga tushganda bir marta chaqiriladi (main() ichida).
   Future<void> init() async {
@@ -79,6 +91,10 @@ class RustCore {
     _validate = _lib.lookupFunction<_ValidateC, _ValidateDart>('rust_validate_anime_form');
     _freeString = _lib.lookupFunction<_FreeStringC, _FreeStringDart>('rust_free_string');
     _version = _lib.lookupFunction<_VersionC, _VersionDart>('rust_core_version');
+    _videoCacheStart = _lib
+        .lookupFunction<_VideoCacheStartC, _VideoCacheStartDart>('rust_video_cache_start');
+    _videoCachePullLogs = _lib.lookupFunction<_VideoCachePullLogsC, _VideoCachePullLogsDart>(
+        'rust_video_cache_pull_logs');
 
     final dir = await getApplicationDocumentsDirectory();
     _cacheFilePath = '${dir.path}/anime_cache.rustbin';
@@ -213,4 +229,46 @@ class RustCore {
   }
 
   bool get isLoaded => _loaded;
+
+  // ── Video-kesh serveri ───────────────────────────────────────
+
+  /// Rust'dagi mahalliy (127.0.0.1) video-kesh HTTP serverini ishga
+  /// tushiradi (agar allaqachon ishga tushmagan bo'lsa) va bog'langan
+  /// portni qaytaradi. Server to'liq mustaqil native OS ish oqimida
+  /// (std::thread) ishlaydi — Dart/Flutter isolate holatidan qat'i
+  /// nazar har doim so'rovlarga javob bera oladi.
+  Future<int> startVideoCache() async {
+    if (_videoCachePort != null) return _videoCachePort!;
+    if (!_loaded) {
+      throw StateError('RustCore hali init() qilinmagan');
+    }
+    final support = await getApplicationSupportDirectory();
+    final pathPtr = support.path.toNativeUtf8();
+    try {
+      final port = _videoCacheStart(pathPtr);
+      if (port <= 0) {
+        throw StateError('Rust video-kesh serveri ishga tushmadi (kod=$port)');
+      }
+      _videoCachePort = port;
+      return port;
+    } finally {
+      malloc.free(pathPtr);
+    }
+  }
+
+  /// Rust tomonidan yozilgan, hali Dart tomonidan o'qilmagan diagnostika
+  /// jurnal qatorlarini qaytaradi (chaqiruv bilan birga ular Rust
+  /// tomonidagi bufferdan tozalanadi — har chaqiruv faqat YANGI
+  /// qatorlarni beradi).
+  List<String> pullVideoCacheLogs() {
+    if (!_loaded) return const [];
+    final ptr = _videoCachePullLogs();
+    final json = _readAndFree(ptr);
+    if (json == null) return const [];
+    try {
+      return (jsonDecode(json) as List).cast<String>();
+    } catch (_) {
+      return const [];
+    }
+  }
 }
