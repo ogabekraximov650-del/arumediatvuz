@@ -140,7 +140,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
           .get(Uri.parse('$_apiBase/api/epizods/$animeId/$seasonId'))
           .timeout(const Duration(seconds: 10));
       if (res.statusCode == 200) {
-        final fresh = (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
+        final fresh =
+            (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
         RustCore.instance.saveListCache(cacheKey, fresh);
         if (mounted) {
           setState(() {
@@ -173,7 +174,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
           .get(Uri.parse('$_apiBase/api/seasons/anime/$animeId'))
           .timeout(const Duration(seconds: 10));
       if (res.statusCode == 200) {
-        final fresh = (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
+        final fresh =
+            (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
         RustCore.instance.saveListCache(cacheKey, fresh);
         if (mounted) {
           setState(() {
@@ -465,6 +467,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   void _startHealthWatchdog() {
     _healthTimer?.cancel();
     _endStuckTicks = 0;
+    _stuckTicks = 0;
+    _lastWatchPosition = null;
     _healthTimer = Timer.periodic(const Duration(milliseconds: 600), (_) {
       if (!mounted) return;
       final c = _controller;
@@ -477,31 +481,71 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       }
       if (!v.isInitialized || v.duration <= Duration.zero) return;
 
-      // Foydalanuvchi o'zi pauza bosgan bo'lsa aralashmaymiz — faqat
-      // video OXIRIDA to'xtab qolgan holat tekshiriladi.
+      // ── 1) VIDEO OXIRIDA to'xtab qolish (avvalgidek) ────────────
       final remaining = v.duration - v.position;
       final atEnd = remaining <= const Duration(milliseconds: 400);
-      if (!atEnd || v.isPlaying) {
-        _endStuckTicks = 0;
+      if (atEnd) {
+        if (v.isPlaying) {
+          _endStuckTicks = 0;
+        } else {
+          _endStuckTicks++;
+          // ~1.2s: avval yumshoq yo'l — boshiga qaytarib, ijroni yoqamiz.
+          if (_endStuckTicks == 2) {
+            VideoCacheServer.log(
+                'Video oxirida to\'xtab qoldi — boshiga qaytarilmoqda');
+            _runSeek(c, Duration.zero, forcePlay: true);
+          }
+          // ~3s: yumshoq yo'l yordam bermadi — pleyerni BUTUNLAY
+          // qaytadan ochamiz.
+          if (_endStuckTicks >= 5) {
+            VideoCacheServer.log(
+                'Video oxirida qotib qoldi — pleyer qaytadan ochilmoqda');
+            _recoverPlayer(Duration.zero);
+          }
+        }
+        _lastWatchPosition = v.position;
+        _stuckTicks = 0;
         return;
       }
+      _endStuckTicks = 0;
 
-      _endStuckTicks++;
-      // ~1.2s: avval yumshoq yo'l — boshiga qaytarib, ijroni yoqamiz.
-      if (_endStuckTicks == 2) {
-        VideoCacheServer.log(
-            'Video oxirida to\'xtab qoldi — boshiga qaytarilmoqda');
-        _runSeek(c, Duration.zero, forcePlay: true);
+      // ── 2) UMUMIY QOTISH (sek yoki ijro paytida) ────────────────
+      //
+      // MUHIM: bu tekshiruv sek yo'lidan (`_runSeek`) MUSTAQIL —
+      // chunki u yerdagi `await`lar (yuqoridagi katta izohga qarang)
+      // hech qachon ishonchli tarzda "muvaffaqiyatsiz" bo'lmaydi.
+      // Bu yerda esa `v.position` — video_player paketining o'zi har
+      // 100ms da HAQIQIY native `getPosition()` so'rovi orqali
+      // yangilaydigan qiymat (optimistik EMAS, chunki bu davriy
+      // so'rov, sek chaqiruvidagi bir martalik "taxminiy" qiymat
+      // emas). Agar pleyer ijro qilishi yoki buferlashi KERAK bo'lsa
+      // (isPlaying yoki isBuffering yoki hozir sek navbatida turibdi),
+      // lekin pozitsiya bir necha soniya davomida BUTUNLAY
+      // o'zgarmasa — bu native tomon haqiqatan qotib qolganining
+      // ishonchli belgisi.
+      final shouldBeMoving = v.isPlaying || v.isBuffering || _seekInProgress;
+      if (!shouldBeMoving) {
+        _stuckTicks = 0;
+        _lastWatchPosition = v.position;
         return;
       }
-      // ~3s: yumshoq yo'l yordam bermadi (mdk-sdk EOF holatida qotib
-      // qolgan) — pleyerni BUTUNLAY qaytadan ochamiz. Bu har doim
-      // ishlaydi, chunki yangi controller mutlaqo toza holatda
-      // yaratiladi.
-      if (_endStuckTicks >= 5) {
+      final last = _lastWatchPosition;
+      if (last != null &&
+          (v.position - last).abs() < const Duration(milliseconds: 50)) {
+        _stuckTicks++;
+      } else {
+        _stuckTicks = 0;
+      }
+      _lastWatchPosition = v.position;
+
+      // ~4.2s (7 × 600ms) harakatsiz -> pleyer haqiqatan qotgan,
+      // qaytadan ochamiz. Fayl mahalliy diskda tayyor turgani uchun
+      // bu tez va internetsiz bo'ladi.
+      if (_stuckTicks >= 7) {
         VideoCacheServer.log(
-            'Video oxirida qotib qoldi — pleyer qaytadan ochilmoqda');
-        _recoverPlayer(Duration.zero);
+            'Pleyer harakatsiz qotib qoldi (${v.position}) — qaytadan ochilmoqda');
+        _stuckTicks = 0;
+        _recoverPlayer(v.position);
       }
     });
   }
@@ -532,7 +576,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _healthTimer?.cancel();
     _seekInProgress = false;
     _queuedSeek = null;
-    _seekFailStreak = 0;
+    _stuckTicks = 0;
+    _lastWatchPosition = null;
     try {
       await _playEpisode(ep, resumeAt: at, resumePlaying: true);
     } catch (_) {
@@ -650,10 +695,11 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   Duration? _queuedSeek;
   Timer? _healthTimer;
   int _endStuckTicks = 0;
-  // Ketma-ket bajarilmagan (timeout bo'lgan) sek soni. Ikkitasi
-  // ketma-ket bo'lsa — pleyer qotgan deb hisoblanadi va qaytadan
-  // ochiladi.
-  int _seekFailStreak = 0;
+  // UMUMIY qotish kuzatuvi (faqat video oxiri emas): pozitsiya
+  // o'zgarmay turgan takrorlar soni va oxirgi ko'rilgan pozitsiya.
+  // _startHealthWatchdog izohiga qarang.
+  int _stuckTicks = 0;
+  Duration? _lastWatchPosition;
 
   // Sek nuqtasini xavfsiz oraliqqa qisadi: [0 .. duration-1s].
   // Videoning ENG OXIRIGA sek qilish mdk-sdk'ni EOF holatiga tushirib,
@@ -666,6 +712,51 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     return t > limit ? limit : t;
   }
 
+  // ═══════════════════════════════════════════════════════════════
+  //  MUHIM KASHFIYOT (fvp manba kodidan tasdiqlangan, HTTP'ga
+  //  umuman aloqasi yo'q — shuning uchun HTTP'ni olib tashlagandan
+  //  keyin ham sek crash davom etardi):
+  // ═══════════════════════════════════════════════════════════════
+  //
+  // fvp/lib/src/video_player_mdk.dart:
+  //   Future<void> seekTo(int playerId, Duration position) async {
+  //     return _seekToWithFlags(playerId, position, ...);
+  //   }
+  //   Future<void> _seekToWithFlags(...) async {
+  //     ...
+  //     player.seek(position: ..., flags: flags);   // ← AWAIT QILINMAYDI!
+  //   }
+  //
+  // `player.seek()` o'zi ichida native javobni kutadigan Future
+  // qaytaradi, lekin `_seekToWithFlags` uni HECH QACHON await
+  // qilmaydi ("fire-and-forget") — chaqirilib, natija e'tiborsiz
+  // qoldirilib, funksiya DARHOL qaytadi.
+  //
+  // Buning ustiga video_player (rasmiy) paketining o'zi:
+  //   Future<void> seekTo(Duration position) async {
+  //     await _videoPlayerPlatform.seekTo(_playerId, position);
+  //     _updatePosition(position);   // ← pozitsiyani DARHOL, native
+  //   }                              //    javobni kutmasdan o'rnatadi!
+  //
+  // Xulosa: bizning `await c.seekTo(target)` chaqiruvimiz HAQIQIY
+  // native sek tugashini EMAS, faqat "buyruq yuborildi"ni bildiradi.
+  // `c.value.position` ham buyruqdan darhol keyin "maqsadga yetdi"
+  // deb ko'rsatadi — garchi native tomonda sek hali tugamagan yoki
+  // hatto QOTIB qolgan bo'lsa ham. Shu sabab avvalgi "timeout kutish"
+  // mantig'i HECH QACHON haqiqiy ma'noda ishlamas edi (await deyarli
+  // doim darhol "muvaffaqiyatli" qaytardi) — bu aynan HTTP'ni olib
+  // tashlagandan keyin ham sek/surish crash'i davom etishining sababi.
+  //
+  // TO'G'RI YECHIM: `c.value.isBuffering` — bu, pozitsiyadan farqli
+  // o'laroq, mdk-sdk'ning HAQIQIY (native `onMediaStatus` hodisasidan
+  // keladigan) signali (video_player_mdk.dart'dagi
+  // `onMediaStatus.listen` ga qarang). Shu sabab sekdan keyin ANIQ
+  // NATIJA sifatida ISHONCH BILAN faqat shuni kuzatish mumkin —
+  // pastdagi `_settleAfterSeek` ga qarang. Pozitsiya asosidagi
+  // "qotish" aniqlanishi esa `_startHealthWatchdog`da amalga
+  // oshiriladi (u `position` ni davriy NATIVE so'rov — `getPosition()`
+  // — orqali kuzatadi, optimistik emas).
+
   Future<void> _runSeek(VideoPlayerController c, Duration t,
       {bool forcePlay = false}) async {
     if (_seekInProgress) {
@@ -673,50 +764,31 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       return;
     }
     _seekInProgress = true;
-    // ENG MUHIM TUZATISH (ketma-ket sek qilganda "qotib qolish").
-    //
-    // Avval `_seekInProgress = false` funksiyaning ENG OXIRIDA turardi.
-    // Agar oradagi biror chaqiruv (masalan pleyer ichidagi `value`
-    // o'qish yoki `play()`) istisno (exception) tashlasa, bu qator
-    // UMUMAN bajarilmasdan qolardi — natijada bayroq abadiy "true"
-    // bo'lib qolib, undan KEYINGI BARCHA sek so'rovlari jimgina
-    // tashlab yuborilardi. Tashqaridan bu aynan "5-6 marta sek
-    // qilgandan keyin sek ishlamay qoldi, video qotdi" bo'lib
-    // ko'rinardi.
-    //
-    // Endi butun tana try/finally ichida — qanday xato bo'lishidan
-    // qat'i nazar bayroq ALBATTA bo'shatiladi.
+    // MUHIM: butun tana try/finally ichida — qanday xato bo'lishidan
+    // qat'i nazar bayroq ALBATTA bo'shatiladi (aks holda undan
+    // keyingi BARCHA sek so'rovlari jimgina tashlab yuborilaverardi).
     try {
-      // Sekdan OLDINGI ijro holatini eslab qolamiz — pastda tiklash uchun.
       var wasPlaying = forcePlay;
       try {
         wasPlaying = forcePlay || c.value.isPlaying;
       } catch (_) {}
-      // Sek bajarilmay qolgan (timeout) holatini aniqlash uchun.
-      var timedOut = false;
-      var lastTarget = t;
 
       var target = t;
       // Xavfsizlik chegarasi: navbat cheksiz aylanib qolmasligi uchun.
       var rounds = 0;
       while (rounds < 24) {
         rounds++;
-        lastTarget = target;
         try {
-          // Timeout SHART: agar pleyer biror sababdan sekni yakunlamasa,
-          // _seekInProgress abadiy "true" bo'lib qolib, sek butunlay
-          // ishlamay qolardi. Timeout bu holatdan chiqib ketishni
-          // kafolatlaydi. 5s -> 2.5s: qotgan pleyerni tezroq aniqlaymiz.
-          await c.seekTo(target).timeout(const Duration(milliseconds: 2500));
-          timedOut = false;
-        } on TimeoutException {
-          // Pleyer sekni YAKUNLAMADI — bu qotib qolishning aniq
-          // belgisi. Pastda hisobga olinadi.
-          timedOut = true;
-          VideoCacheServer.log('Sek yakunlanmadi (timeout): $target');
+          await c.seekTo(target);
         } catch (_) {
-          // Boshqa xatolar — jim o'tkazamiz, ilova ishlashda davom etadi.
+          // Xato — jim o'tkazamiz, ilova ishlashda davom etadi.
         }
+        // Yuqoridagi izohga qarang: bu yerda TO'XTAB, pleyer
+        // HAQIQATAN tinchlanguncha kutamiz — shundagina keyingi
+        // navbatdagi sek yuborilishi (yoki play() chaqirilishi)
+        // mdk-sdk'ning ichki holatini "bosib" yubormaydi.
+        await _settleAfterSeek(c);
+
         final next = _queuedSeek;
         _queuedSeek = null;
         if (next == null) break;
@@ -732,34 +804,21 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       // MUHIM TUZATISH (videoni orqaga 00:00 ga sek qilganda qotib
       // qolishi): mdk-sdk ba'zi hollarda — ayniqsa video BOSHIGA
       // (0-pozitsiya) sek qilinganda — sekdan keyin ijroni o'zi qayta
-      // boshlamay, pauza holatida qolib ketardi. Tashqaridan bu "video
-      // qotib qoldi, play/pause bosish kerak" bo'lib ko'rinardi.
-      // Shu sabab sekdan OLDIN ijro ketayotgan bo'lsa, sekdan KEYIN uni
-      // aniq (explicit) davom ettiramiz.
-      //
-      // play() ham TIMEOUT bilan o'raldi: u ham osilib qolib, bayroqni
-      // ushlab turishi mumkin edi.
+      // boshlamay, pauza holatida qolib ketardi. Shu sabab sekdan
+      // OLDIN ijro ketayotgan bo'lsa, sekdan KEYIN uni aniq
+      // (explicit) davom ettiramiz.
       if (wasPlaying && mounted && _controller == c) {
         try {
           await c.play().timeout(const Duration(seconds: 3));
         } catch (_) {}
       }
-
-      // ── "HECH QANDAY CRASH BO'LMASIN" KAFOLATI ─────────────────
-      // Sek ketma-ket IKKI marta yakunlanmasa, pleyer qotgan deb
-      // hisoblanadi va butunlay qaytadan ochiladi (o'sha
-      // pozitsiyadan). Foydalanuvchi uchun bu qisqa qayta yuklanish
-      // bo'lib ko'rinadi — abadiy qotib qolish emas.
-      if (timedOut) {
-        _seekFailStreak++;
-        if (_seekFailStreak >= 2 && mounted && _controller == c) {
-          VideoCacheServer.log(
-              'Sek ketma-ket 2 marta yakunlanmadi — pleyer qaytadan ochilmoqda');
-          scheduleMicrotask(() => _recoverPlayer(lastTarget));
-        }
-      } else {
-        _seekFailStreak = 0;
-      }
+      // "HAQIQATAN QOTIB QOLDIMI" tekshiruvi endi bu yerda EMAS —
+      // chunki await'lar hech qachon ishonchli tarzda "muvaffaqiyatsiz"
+      // bo'lmaydi (yuqoridagi izohga qarang). Buning o'rniga UMUMIY
+      // sog'liq kuzatuvchisi (_startHealthWatchdog) doimiy ishlab,
+      // pozitsiyaning HAQIQATAN (native so'rov orqali) qotib
+      // qolganini payqasa, pleyerni o'zi qaytadan ochadi — bu sek
+      // yo'lidan mutlaqo mustaqil va shu sabab ancha ishonchli.
     } finally {
       _seekInProgress = false;
       // Navbatda kutib qolgan so'nggi so'rov bo'lsa, uni tashlab
@@ -769,6 +828,31 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       if (pending != null && mounted && _controller == c) {
         scheduleMicrotask(() => _runSeek(c, pending));
       }
+    }
+  }
+
+  // Sek buyrug'idan keyin pleyer TINCHLANGUNCHA (isBuffering=false)
+  // kutadi. `isBuffering` — native hodisadan keladigan HAQIQIY
+  // signal (yuqoridagi katta izohga qarang), shu sabab bu yerda
+  // ishonch bilan ishlatiladi. Eng kami ~180ms (native tomon hali
+  // ulgurmagan bo'lishi mumkin), eng ko'pi 2.5s kutiladi — shundan
+  // ortig'i uchun umumiy sog'liq kuzatuvchisi javobgar.
+  Future<void> _settleAfterSeek(VideoPlayerController c) async {
+    const floor = Duration(milliseconds: 180);
+    const maxWait = Duration(milliseconds: 2500);
+    const poll = Duration(milliseconds: 60);
+    final deadline = DateTime.now().add(maxWait);
+    await Future.delayed(floor);
+    while (DateTime.now().isBefore(deadline)) {
+      if (!mounted || _controller != c) return;
+      bool buffering;
+      try {
+        buffering = c.value.isBuffering;
+      } catch (_) {
+        return;
+      }
+      if (!buffering) return;
+      await Future.delayed(poll);
     }
   }
 
@@ -895,7 +979,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     final ep = _currentEp;
     if (ep == null) return;
     final have = _availableQualities(ep);
-    final ordered = ['1080p', '720p', '480p', '360p'].where(have.contains).toList();
+    final ordered =
+        ['1080p', '720p', '480p', '360p'].where(have.contains).toList();
 
     showDialog(
       context: context,
@@ -910,7 +995,10 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               const Text('Sifatni tanlang',
-                  style: TextStyle(color: Colors.white, fontSize: 19, fontWeight: FontWeight.w800)),
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 19,
+                      fontWeight: FontWeight.w800)),
               const SizedBox(height: 16),
               ...ordered.map((q) {
                 final sel = _selectedQuality == q ||
@@ -933,9 +1021,12 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                     },
                     child: Container(
                       width: double.infinity,
-                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 14),
                       decoration: BoxDecoration(
-                        color: sel ? AppColors.accent : Colors.white.withOpacity(0.06),
+                        color: sel
+                            ? AppColors.accent
+                            : Colors.white.withOpacity(0.06),
                         borderRadius: BorderRadius.circular(16),
                       ),
                       child: Row(
@@ -946,20 +1037,25 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                               children: [
                                 Text(q.toUpperCase(),
                                     style: TextStyle(
-                                        color: sel ? Colors.black : Colors.white,
+                                        color:
+                                            sel ? Colors.black : Colors.white,
                                         fontWeight: FontWeight.w800,
                                         fontSize: 15)),
                                 if (size.isNotEmpty) ...[
                                   const SizedBox(height: 2),
                                   Text(size,
                                       style: TextStyle(
-                                          color: sel ? Colors.black87 : Colors.white54,
+                                          color: sel
+                                              ? Colors.black87
+                                              : Colors.white54,
                                           fontSize: 12)),
                                 ],
                               ],
                             ),
                           ),
-                          if (sel) const Icon(Icons.check_rounded, color: Colors.black),
+                          if (sel)
+                            const Icon(Icons.check_rounded,
+                                color: Colors.black),
                         ],
                       ),
                     ),
@@ -995,7 +1091,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
 
   Widget _buildNormalScreen() {
     final name = widget.season['nomi'] ?? '';
-    final bolimId = widget.season['bolim_id'] ?? widget.season['season_id'] ?? '';
+    final bolimId =
+        widget.season['bolim_id'] ?? widget.season['season_id'] ?? '';
     final turi = widget.season['turi'] ?? '';
     final yili = widget.season['yili'] ?? '';
     final janri = widget.season['janri'] ?? '';
@@ -1014,8 +1111,11 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                     GlassTappable(
                       onTap: () => Navigator.of(context).pop(),
                       child: const Glass(
-                        borderRadius: 14, blur: 14, padding: EdgeInsets.all(8),
-                        child: Icon(Icons.arrow_back_rounded, color: Colors.white),
+                        borderRadius: 14,
+                        blur: 14,
+                        padding: EdgeInsets.all(8),
+                        child:
+                            Icon(Icons.arrow_back_rounded, color: Colors.white),
                       ),
                     ),
                     const SizedBox(width: 12),
@@ -1024,12 +1124,13 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
-                              fontSize: 17, fontWeight: FontWeight.w700, color: Colors.white)),
+                              fontSize: 17,
+                              fontWeight: FontWeight.w700,
+                              color: Colors.white)),
                     ),
                   ],
                 ),
               ),
-
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16),
                 child: ClipRRect(
@@ -1037,35 +1138,46 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                   child: _buildInlinePlayer(),
                 ),
               ),
-
               const SizedBox(height: 8),
-
               SizedBox(
                 height: 28,
                 child: ListView(
                   scrollDirection: Axis.horizontal,
                   padding: const EdgeInsets.symmetric(horizontal: 16),
                   children: [
-                    if (bolimId.toString().isNotEmpty) _Badge('$bolimId-bo\'lim'),
-                    if (turi.toString().isNotEmpty) ...[const SizedBox(width: 6), _Badge(turi.toString())],
-                    if (yili.toString().isNotEmpty) ...[const SizedBox(width: 6), _Badge(yili.toString())],
-                    if (janri.toString().isNotEmpty) ...[const SizedBox(width: 6), _Badge(janri.toString())],
+                    if (bolimId.toString().isNotEmpty)
+                      _Badge('$bolimId-bo\'lim'),
+                    if (turi.toString().isNotEmpty) ...[
+                      const SizedBox(width: 6),
+                      _Badge(turi.toString())
+                    ],
+                    if (yili.toString().isNotEmpty) ...[
+                      const SizedBox(width: 6),
+                      _Badge(yili.toString())
+                    ],
+                    if (janri.toString().isNotEmpty) ...[
+                      const SizedBox(width: 6),
+                      _Badge(janri.toString())
+                    ],
                   ],
                 ),
               ),
-
               const SizedBox(height: 8),
-
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16),
                 child: Glass(
-                  borderRadius: 16, blur: 12, padding: const EdgeInsets.all(4),
+                  borderRadius: 16,
+                  blur: 12,
+                  padding: const EdgeInsets.all(4),
                   child: TabBar(
                     controller: _tabCtrl,
-                    indicator: BoxDecoration(color: AppColors.accent, borderRadius: BorderRadius.circular(12)),
+                    indicator: BoxDecoration(
+                        color: AppColors.accent,
+                        borderRadius: BorderRadius.circular(12)),
                     labelColor: Colors.white,
                     unselectedLabelColor: Colors.white54,
-                    labelStyle: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+                    labelStyle: const TextStyle(
+                        fontWeight: FontWeight.w600, fontSize: 13),
                     unselectedLabelStyle: const TextStyle(fontSize: 13),
                     dividerColor: Colors.transparent,
                     tabs: const [
@@ -1076,9 +1188,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                   ),
                 ),
               ),
-
               const SizedBox(height: 8),
-
               Expanded(
                 child: TabBarView(
                   controller: _tabCtrl,
@@ -1141,15 +1251,18 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Icon(Icons.play_circle_outline_rounded, color: Colors.white24, size: 52),
+                  Icon(Icons.play_circle_outline_rounded,
+                      color: Colors.white24, size: 52),
                   SizedBox(height: 8),
-                  Text('Epizodni tanlang', style: TextStyle(color: Colors.white38, fontSize: 13)),
+                  Text('Epizodni tanlang',
+                      style: TextStyle(color: Colors.white38, fontSize: 13)),
                 ],
               ),
             ),
 
           if (_currentEp != null && _playerLoading)
-            const Center(child: CircularProgressIndicator(color: Colors.white54)),
+            const Center(
+                child: CircularProgressIndicator(color: Colors.white54)),
 
           // ── Runtime buferlash indikatori: controller allaqachon
           // initialize bo'lgan va ijro boshlangan, lekin tarmoq
@@ -1186,9 +1299,12 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  const Icon(Icons.error_outline_rounded, color: Colors.white38, size: 40),
+                  const Icon(Icons.error_outline_rounded,
+                      color: Colors.white38, size: 40),
                   const SizedBox(height: 10),
-                  Text(_playerError!, style: const TextStyle(color: Colors.white70, fontSize: 13)),
+                  Text(_playerError!,
+                      style:
+                          const TextStyle(color: Colors.white70, fontSize: 13)),
                   const SizedBox(height: 14),
                   GestureDetector(
                     onTap: () {
@@ -1196,13 +1312,17 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                       if (ep != null) _playEpisode(ep);
                     },
                     child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 18, vertical: 10),
                       decoration: BoxDecoration(
                         color: AppColors.accent,
                         borderRadius: BorderRadius.circular(12),
                       ),
                       child: const Text('Qayta urinish',
-                          style: TextStyle(color: Colors.black, fontWeight: FontWeight.w700, fontSize: 13)),
+                          style: TextStyle(
+                              color: Colors.black,
+                              fontWeight: FontWeight.w700,
+                              fontSize: 13)),
                     ),
                   ),
                 ],
@@ -1215,7 +1335,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
               duration: const Duration(milliseconds: 200),
               child: IgnorePointer(
                 ignoring: !_showControls,
-                child: RepaintBoundary(child: _buildControls(isFullscreen: isFullscreen)),
+                child: RepaintBoundary(
+                    child: _buildControls(isFullscreen: isFullscreen)),
               ),
             ),
 
@@ -1274,7 +1395,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                   // shu paytdagina ular turgan tor zonalar chetlab
                   // o'tiladi. Kontrollar yashiringanda esa ekranning
                   // MUTLAQO hamma joyi (markazdan tashqari) sek qiladi.
-                  final bottomGuard = _showControls ? (isFullscreen ? 78.0 : 64.0) : 0.0;
+                  final bottomGuard =
+                      _showControls ? (isFullscreen ? 78.0 : 64.0) : 0.0;
                   final topGuard = (_showControls && isFullscreen) ? 60.0 : 0.0;
                   return Listener(
                     behavior: HitTestBehavior.translucent,
@@ -1343,16 +1465,23 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                       onTap: _toggleFullscreen,
                       child: const Padding(
                         padding: EdgeInsets.all(8),
-                        child: Icon(Icons.arrow_back_rounded, color: Colors.white, size: 24),
+                        child: Icon(Icons.arrow_back_rounded,
+                            color: Colors.white, size: 24),
                       ),
                     ),
                     const SizedBox(width: 4),
                     Expanded(
                       child: Text(
-                        (_currentEp?['epizod_name'] ?? widget.season['nomi'] ?? '').toString(),
+                        (_currentEp?['epizod_name'] ??
+                                widget.season['nomi'] ??
+                                '')
+                            .toString(),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 14),
+                        style: const TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w600,
+                            fontSize: 14),
                       ),
                     ),
                   ],
@@ -1388,7 +1517,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
           child: SizedBox(
             width: 34,
             height: 34,
-            child: CircularProgressIndicator(color: Colors.white54, strokeWidth: 2.5),
+            child: CircularProgressIndicator(
+                color: Colors.white54, strokeWidth: 2.5),
           ),
         );
       },
@@ -1464,11 +1594,15 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
 
   Widget _buildEpisodeTab() {
     if (_loadingEps) {
-      return Center(child: CircularProgressIndicator(valueColor: AlwaysStoppedAnimation(AppColors.accent)));
+      return Center(
+          child: CircularProgressIndicator(
+              valueColor: AlwaysStoppedAnimation(AppColors.accent)));
     }
     final eps = _playableEps;
     if (eps.isEmpty) {
-      return Center(child: Text('Epizodlar topilmadi', style: TextStyle(color: Colors.white.withOpacity(0.5))));
+      return Center(
+          child: Text('Epizodlar topilmadi',
+              style: TextStyle(color: Colors.white.withOpacity(0.5))));
     }
     return ListView.builder(
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 120),
@@ -1477,10 +1611,14 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
         final ep = eps[i];
         final epNum = ep['epizod_number'] ?? i;
         final epName = (ep['epizod_name'] ?? '').toString();
-        final isCurrent = _currentEp != null && _currentEp!['epizod_id'] == ep['epizod_id'];
+        final isCurrent =
+            _currentEp != null && _currentEp!['epizod_id'] == ep['epizod_id'];
         String qLabel = '';
         for (final k in ['1080p', '720p', '480p', '360p']) {
-          if (((ep['url_$k'] as String?) ?? '').isNotEmpty) { qLabel = k; break; }
+          if (((ep['url_$k'] as String?) ?? '').isNotEmpty) {
+            qLabel = k;
+            break;
+          }
         }
         return GlassTappable(
           onTap: () => _playEpisode(ep),
@@ -1488,16 +1626,24 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
             margin: const EdgeInsets.only(bottom: 10),
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
             decoration: BoxDecoration(
-              color: isCurrent ? AppColors.accent.withOpacity(0.14) : Colors.white.withOpacity(0.07),
+              color: isCurrent
+                  ? AppColors.accent.withOpacity(0.14)
+                  : Colors.white.withOpacity(0.07),
               borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: isCurrent ? AppColors.accent.withOpacity(0.5) : Colors.white12),
+              border: Border.all(
+                  color: isCurrent
+                      ? AppColors.accent.withOpacity(0.5)
+                      : Colors.white12),
             ),
             child: Row(
               children: [
                 Container(
-                  width: 42, height: 42,
+                  width: 42,
+                  height: 42,
                   decoration: BoxDecoration(
-                    color: isCurrent ? AppColors.accent.withOpacity(0.28) : Colors.white.withOpacity(0.08),
+                    color: isCurrent
+                        ? AppColors.accent.withOpacity(0.28)
+                        : Colors.white.withOpacity(0.08),
                     borderRadius: BorderRadius.circular(10),
                   ),
                   child: Icon(
@@ -1512,16 +1658,30 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(epName.isNotEmpty ? epName : '$epNum-epizod',
-                          style: TextStyle(color: isCurrent ? AppColors.accent : Colors.white, fontWeight: FontWeight.w600, fontSize: 14)),
-                      Text('$epNum-epizod', style: TextStyle(color: Colors.white.withOpacity(0.45), fontSize: 12)),
+                          style: TextStyle(
+                              color:
+                                  isCurrent ? AppColors.accent : Colors.white,
+                              fontWeight: FontWeight.w600,
+                              fontSize: 14)),
+                      Text('$epNum-epizod',
+                          style: TextStyle(
+                              color: Colors.white.withOpacity(0.45),
+                              fontSize: 12)),
                     ],
                   ),
                 ),
                 if (qLabel.isNotEmpty)
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                    decoration: BoxDecoration(color: AppColors.accent.withOpacity(0.85), borderRadius: BorderRadius.circular(6)),
-                    child: Text(qLabel, style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.w700)),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(
+                        color: AppColors.accent.withOpacity(0.85),
+                        borderRadius: BorderRadius.circular(6)),
+                    child: Text(qLabel,
+                        style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w700)),
                   ),
               ],
             ),
@@ -1533,10 +1693,14 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
 
   Widget _buildSeasonsTab() {
     if (_loadingSeasons) {
-      return Center(child: CircularProgressIndicator(valueColor: AlwaysStoppedAnimation(AppColors.accent)));
+      return Center(
+          child: CircularProgressIndicator(
+              valueColor: AlwaysStoppedAnimation(AppColors.accent)));
     }
     if (_seasons.isEmpty) {
-      return Center(child: Text('Bo\'limlar topilmadi', style: TextStyle(color: Colors.white.withOpacity(0.5))));
+      return Center(
+          child: Text('Bo\'limlar topilmadi',
+              style: TextStyle(color: Colors.white.withOpacity(0.5))));
     }
     return ListView.builder(
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 120),
@@ -1546,14 +1710,16 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
         final bolimId = s['bolim_id'] ?? s['season_id'] ?? '';
         final nomi = (s['nomi'] ?? '').toString();
         final photoUrl = s['photo_url'] as String?;
-        final isCur = s['season_id']?.toString() == widget.season['season_id']?.toString();
+        final isCur = s['season_id']?.toString() ==
+            widget.season['season_id']?.toString();
         return GlassTappable(
           onTap: () {
             if (!isCur) {
               Navigator.of(context).pushReplacement(PageRouteBuilder(
                 transitionDuration: const Duration(milliseconds: 300),
                 pageBuilder: (_, a, __) => VideoPlayerScreen(season: s),
-                transitionsBuilder: (_, a, __, child) => FadeTransition(opacity: a, child: child),
+                transitionsBuilder: (_, a, __, child) =>
+                    FadeTransition(opacity: a, child: child),
               ));
             }
           },
@@ -1561,32 +1727,60 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
             margin: const EdgeInsets.only(bottom: 10),
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
             decoration: BoxDecoration(
-              color: isCur ? AppColors.accent.withOpacity(0.12) : Colors.white.withOpacity(0.07),
+              color: isCur
+                  ? AppColors.accent.withOpacity(0.12)
+                  : Colors.white.withOpacity(0.07),
               borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: isCur ? AppColors.accent.withOpacity(0.4) : Colors.white12),
+              border: Border.all(
+                  color: isCur
+                      ? AppColors.accent.withOpacity(0.4)
+                      : Colors.white12),
             ),
             child: Row(
               children: [
                 if (photoUrl != null && photoUrl.isNotEmpty)
                   ClipRRect(
                     borderRadius: BorderRadius.circular(8),
-                    child: CachedNetworkImage(imageUrl: photoUrl, width: 50, height: 50, fit: BoxFit.cover,
-                        errorWidget: (_, __, ___) => Container(width: 50, height: 50, color: Colors.white10, child: const Icon(Icons.movie_outlined, color: Colors.white38))),
+                    child: CachedNetworkImage(
+                        imageUrl: photoUrl,
+                        width: 50,
+                        height: 50,
+                        fit: BoxFit.cover,
+                        errorWidget: (_, __, ___) => Container(
+                            width: 50,
+                            height: 50,
+                            color: Colors.white10,
+                            child: const Icon(Icons.movie_outlined,
+                                color: Colors.white38))),
                   )
                 else
-                  Container(width: 50, height: 50, decoration: BoxDecoration(color: Colors.white10, borderRadius: BorderRadius.circular(8)), child: const Icon(Icons.movie_outlined, color: Colors.white38)),
+                  Container(
+                      width: 50,
+                      height: 50,
+                      decoration: BoxDecoration(
+                          color: Colors.white10,
+                          borderRadius: BorderRadius.circular(8)),
+                      child: const Icon(Icons.movie_outlined,
+                          color: Colors.white38)),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(nomi.isNotEmpty ? nomi : '$bolimId-bo\'lim',
-                          style: TextStyle(color: isCur ? AppColors.accent : Colors.white, fontWeight: FontWeight.w600, fontSize: 14)),
-                      Text('$bolimId-bo\'lim', style: TextStyle(color: Colors.white.withOpacity(0.45), fontSize: 12)),
+                          style: TextStyle(
+                              color: isCur ? AppColors.accent : Colors.white,
+                              fontWeight: FontWeight.w600,
+                              fontSize: 14)),
+                      Text('$bolimId-bo\'lim',
+                          style: TextStyle(
+                              color: Colors.white.withOpacity(0.45),
+                              fontSize: 12)),
                     ],
                   ),
                 ),
-                if (isCur) Icon(Icons.play_arrow_rounded, color: AppColors.accent),
+                if (isCur)
+                  Icon(Icons.play_arrow_rounded, color: AppColors.accent),
               ],
             ),
           ),
@@ -1605,7 +1799,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 120),
       child: Glass(
-        borderRadius: 18, blur: 14, padding: const EdgeInsets.all(18),
+        borderRadius: 18,
+        blur: 14,
+        padding: const EdgeInsets.all(18),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -1617,9 +1813,17 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
             _infoRow('Holati', holati),
             if (tavsif.isNotEmpty) ...[
               const SizedBox(height: 12),
-              const Text('Tavsif', style: TextStyle(color: Colors.white60, fontSize: 12, fontWeight: FontWeight.w500)),
+              const Text('Tavsif',
+                  style: TextStyle(
+                      color: Colors.white60,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w500)),
               const SizedBox(height: 6),
-              Text(tavsif, style: TextStyle(color: Colors.white.withOpacity(0.8), fontSize: 14, height: 1.6)),
+              Text(tavsif,
+                  style: TextStyle(
+                      color: Colors.white.withOpacity(0.8),
+                      fontSize: 14,
+                      height: 1.6)),
             ],
           ],
         ),
@@ -1634,8 +1838,14 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          SizedBox(width: 90, child: Text(label, style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 13))),
-          Expanded(child: Text(value, style: const TextStyle(color: Colors.white, fontSize: 13))),
+          SizedBox(
+              width: 90,
+              child: Text(label,
+                  style: TextStyle(
+                      color: Colors.white.withOpacity(0.5), fontSize: 13))),
+          Expanded(
+              child: Text(value,
+                  style: const TextStyle(color: Colors.white, fontSize: 13))),
         ],
       ),
     );
@@ -1656,8 +1866,13 @@ class _Badge extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-      decoration: BoxDecoration(color: Colors.white.withOpacity(0.1), borderRadius: BorderRadius.circular(8), border: Border.all(color: Colors.white24)),
-      child: Text(label, style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w500)),
+      decoration: BoxDecoration(
+          color: Colors.white.withOpacity(0.1),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: Colors.white24)),
+      child: Text(label,
+          style: const TextStyle(
+              color: Colors.white, fontSize: 12, fontWeight: FontWeight.w500)),
     );
   }
 }
@@ -1671,19 +1886,23 @@ class _SeekBadge extends StatefulWidget {
   final int seconds;
   final bool isLeft;
   final double diameter;
-  const _SeekBadge({required this.seconds, required this.isLeft, required this.diameter});
+  const _SeekBadge(
+      {required this.seconds, required this.isLeft, required this.diameter});
 
   @override
   State<_SeekBadge> createState() => _SeekBadgeState();
 }
 
-class _SeekBadgeState extends State<_SeekBadge> with SingleTickerProviderStateMixin {
+class _SeekBadgeState extends State<_SeekBadge>
+    with SingleTickerProviderStateMixin {
   late final AnimationController _ctrl;
 
   @override
   void initState() {
     super.initState();
-    _ctrl = AnimationController(vsync: this, duration: const Duration(milliseconds: 900))..repeat();
+    _ctrl = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 900))
+      ..repeat();
   }
 
   @override
@@ -1694,7 +1913,8 @@ class _SeekBadgeState extends State<_SeekBadge> with SingleTickerProviderStateMi
 
   @override
   Widget build(BuildContext context) {
-    final icon = widget.isLeft ? Icons.arrow_left_rounded : Icons.arrow_right_rounded;
+    final icon =
+        widget.isLeft ? Icons.arrow_left_rounded : Icons.arrow_right_rounded;
     final chevrons = _buildChevrons(icon);
     final text = Text('${widget.seconds}s',
         style: TextStyle(
@@ -1732,10 +1952,13 @@ class _SeekBadgeState extends State<_SeekBadge> with SingleTickerProviderStateMi
             final idx = order[i];
             final start = idx * 0.15;
             final t = ((_ctrl.value - start) % 1.0 + 1.0) % 1.0;
-            final opacity = t < 0.5 ? (0.3 + 0.7 * (t / 0.5)) : (1.0 - 0.7 * ((t - 0.5) / 0.5));
+            final opacity = t < 0.5
+                ? (0.3 + 0.7 * (t / 0.5))
+                : (1.0 - 0.7 * ((t - 0.5) / 0.5));
             return Opacity(
               opacity: opacity.clamp(0.3, 1.0),
-              child: Icon(icon, color: Colors.white, size: widget.diameter * 0.19),
+              child:
+                  Icon(icon, color: Colors.white, size: widget.diameter * 0.19),
             );
           }),
         );
@@ -1782,12 +2005,16 @@ class _BottomBarState extends State<_BottomBar> {
   Widget build(BuildContext context) {
     final accent = AppColors.accent;
     final liveRatio = widget.duration.inMilliseconds > 0
-        ? (widget.position.inMilliseconds / widget.duration.inMilliseconds).clamp(0.0, 1.0)
+        ? (widget.position.inMilliseconds / widget.duration.inMilliseconds)
+            .clamp(0.0, 1.0)
         : 0.0;
     final ratio = _dragValue ?? liveRatio;
-    final shownPosition = _dragValue != null && widget.duration.inMilliseconds > 0
-        ? Duration(milliseconds: (_dragValue! * widget.duration.inMilliseconds).round())
-        : widget.position;
+    final shownPosition =
+        _dragValue != null && widget.duration.inMilliseconds > 0
+            ? Duration(
+                milliseconds:
+                    (_dragValue! * widget.duration.inMilliseconds).round())
+            : widget.position;
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(4, 0, 8, 10),
@@ -1799,7 +2026,8 @@ class _BottomBarState extends State<_BottomBar> {
                 trackHeight: 2.5,
                 thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5),
                 overlayShape: const RoundSliderOverlayShape(overlayRadius: 10),
-                thumbColor: accent, activeTrackColor: accent,
+                thumbColor: accent,
+                activeTrackColor: accent,
                 inactiveTrackColor: Colors.white.withOpacity(0.28),
                 overlayColor: accent.withOpacity(0.2),
               ),
@@ -1813,22 +2041,36 @@ class _BottomBarState extends State<_BottomBar> {
                 },
                 onChangeEnd: (v) {
                   if (widget.duration.inMilliseconds > 0) {
-                    widget.onSeek(Duration(milliseconds: (v * widget.duration.inMilliseconds).round()));
+                    widget.onSeek(Duration(
+                        milliseconds:
+                            (v * widget.duration.inMilliseconds).round()));
                   }
                   setState(() => _dragValue = null);
                 },
               ),
             ),
           ),
-          Text(widget.fmt(shownPosition), style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w500)),
-          Text('/${widget.fmt(widget.duration)}', style: const TextStyle(color: Colors.white, fontSize: 11)),
+          Text(widget.fmt(shownPosition),
+              style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w500)),
+          Text('/${widget.fmt(widget.duration)}',
+              style: const TextStyle(color: Colors.white, fontSize: 11)),
           const SizedBox(width: 6),
           GestureDetector(
             onTap: widget.onQualityTap,
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-              decoration: BoxDecoration(color: Colors.white.withOpacity(0.15), borderRadius: BorderRadius.circular(5), border: Border.all(color: Colors.white30)),
-              child: const Text('HQ', style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.w700)),
+              decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(5),
+                  border: Border.all(color: Colors.white30)),
+              child: const Text('HQ',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w700)),
             ),
           ),
           const SizedBox(width: 4),
@@ -1836,7 +2078,12 @@ class _BottomBarState extends State<_BottomBar> {
             onTap: widget.onFullscreen,
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 5),
-              child: Icon(widget.isFullscreen ? Icons.fullscreen_exit_rounded : Icons.fullscreen_rounded, color: Colors.white, size: 20),
+              child: Icon(
+                  widget.isFullscreen
+                      ? Icons.fullscreen_exit_rounded
+                      : Icons.fullscreen_rounded,
+                  color: Colors.white,
+                  size: 20),
             ),
           ),
         ],
