@@ -20,6 +20,10 @@ dependencies:
   # Video pleyr: video_player (ochiq API) + fvp (ichki mexanizm/decoding backend)
   video_player: ^2.9.2
   fvp: ^0.38.1
+  # Asosiy shifrlash kalitini xavfsiz saqlash uchun. Android'da
+  # EncryptedSharedPreferences (Keystore bilan himoyalangan) ishlatadi,
+  # ya'ni kalit qurilmadan chiqmaydi va root'siz o'qib bo'lmaydi.
+  flutter_secure_storage: ^9.2.4
 
 dev_dependencies:
   flutter_test:

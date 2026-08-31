@@ -47,19 +47,17 @@ typedef _VersionDart = Pointer<Utf8> Function();
 typedef _VideoCacheStartC = Int32 Function(Pointer<Utf8>);
 typedef _VideoCacheStartDart = int Function(Pointer<Utf8>);
 
-typedef _VideoCachePullLogsC = Pointer<Utf8> Function();
-typedef _VideoCachePullLogsDart = Pointer<Utf8> Function();
 
 typedef _VideoCacheNetBytesC = Uint64 Function();
 typedef _VideoCacheNetBytesDart = int Function();
 
-typedef _VideoCacheLogC = Void Function(Pointer<Utf8>);
-typedef _VideoCacheLogDart = void Function(Pointer<Utf8>);
 
-typedef _VideoCacheLogPathC = Pointer<Utf8> Function();
-typedef _VideoCacheLogPathDart = Pointer<Utf8> Function();
 typedef _VideoCacheLocalFileC = Pointer<Utf8> Function(Pointer<Utf8>);
 typedef _VideoCacheLocalFileDart = Pointer<Utf8> Function(Pointer<Utf8>);
+typedef _CryptoGenKeyC = Pointer<Utf8> Function();
+typedef _CryptoGenKeyDart = Pointer<Utf8> Function();
+typedef _CryptoSetKeyC = Int32 Function(Pointer<Utf8>);
+typedef _CryptoSetKeyDart = int Function(Pointer<Utf8>);
 
 class RustCore {
   RustCore._();
@@ -76,12 +74,11 @@ class RustCore {
   late final _FreeStringDart _freeString;
   late final _VersionDart _version;
   late final _VideoCacheStartDart _videoCacheStart;
-  late final _VideoCachePullLogsDart _videoCachePullLogs;
   late final _VideoCacheNetBytesDart _videoCacheNetBytes;
   late final _VideoCacheNetBytesDart _videoCacheServedBytes;
-  late final _VideoCacheLogDart _videoCacheLog;
-  late final _VideoCacheLogPathDart _videoCacheLogPath;
   late final _VideoCacheLocalFileDart _videoCacheLocalFile;
+  late final _CryptoGenKeyDart _cryptoGenKey;
+  late final _CryptoSetKeyDart _cryptoSetKey;
 
   bool _loaded = false;
   String? _cacheFilePath;
@@ -110,19 +107,17 @@ class RustCore {
     _version = _lib.lookupFunction<_VersionC, _VersionDart>('rust_core_version');
     _videoCacheStart = _lib
         .lookupFunction<_VideoCacheStartC, _VideoCacheStartDart>('rust_video_cache_start');
-    _videoCachePullLogs = _lib.lookupFunction<_VideoCachePullLogsC, _VideoCachePullLogsDart>(
-        'rust_video_cache_pull_logs');
     _videoCacheNetBytes = _lib.lookupFunction<_VideoCacheNetBytesC, _VideoCacheNetBytesDart>(
         'rust_video_cache_net_bytes');
     _videoCacheServedBytes = _lib.lookupFunction<_VideoCacheNetBytesC, _VideoCacheNetBytesDart>(
         'rust_video_cache_served_bytes');
-    _videoCacheLog =
-        _lib.lookupFunction<_VideoCacheLogC, _VideoCacheLogDart>('rust_video_cache_log');
-    _videoCacheLogPath = _lib.lookupFunction<_VideoCacheLogPathC, _VideoCacheLogPathDart>(
-        'rust_video_cache_log_path');
     _videoCacheLocalFile =
         _lib.lookupFunction<_VideoCacheLocalFileC, _VideoCacheLocalFileDart>(
             'rust_video_cache_local_file');
+    _cryptoGenKey =
+        _lib.lookupFunction<_CryptoGenKeyC, _CryptoGenKeyDart>('rust_crypto_generate_key');
+    _cryptoSetKey =
+        _lib.lookupFunction<_CryptoSetKeyC, _CryptoSetKeyDart>('rust_crypto_set_key');
 
     final dir = await getApplicationDocumentsDirectory();
     _cacheDirPath = dir.path;
@@ -352,13 +347,46 @@ class RustCore {
   /// ulanish yo'q, sek esa oddiy fayl ichida siljish.
   ///
   /// TARMOQQA UMUMAN CHIQMAYDI — faqat diskka qaraydi.
-  String videoCacheLocalFile(String url) {
-    if (!_loaded) return '';
+  Map<String, dynamic>? videoCacheLocalFile(String url) {
+    if (!_loaded) return null;
     final ptr = url.toNativeUtf8();
     try {
-      return _readAndFree(_videoCacheLocalFile(ptr)) ?? '';
+      final raw = _readAndFree(_videoCacheLocalFile(ptr));
+      if (raw == null || raw.isEmpty) return null;
+      return jsonDecode(raw) as Map<String, dynamic>;
+    } catch (_) {
+      return null;
+    } finally {
+      malloc.free(ptr);
+    }
+  }
+
+  // ── Shifrlash ────────────────────────────────────────────────
+  //
+  // Asosiy kalit ilova ishga tushganda BIR MARTA o'rnatiladi. U
+  // o'rnatilmaguncha Rust yadrosi hamma narsani AVVALGIDEK ochiq
+  // saqlaydi — ya'ni kalit yo'qolsa ham ilova ishlashdan to'xtamaydi,
+  // shunchaki himoyasiz rejimga tushadi.
+
+  /// Yangi tasodifiy asosiy kalit (64 ta hex belgi).
+  String generateMasterKey() {
+    if (!_loaded) return '';
+    try {
+      return _readAndFree(_cryptoGenKey()) ?? '';
     } catch (_) {
       return '';
+    }
+  }
+
+  /// Asosiy kalitni Rust yadrosiga uzatadi. Shundan keyin barcha
+  /// yozishlar shifrlangan holatda boradi.
+  bool setMasterKey(String hexKey) {
+    if (!_loaded || hexKey.isEmpty) return false;
+    final ptr = hexKey.toNativeUtf8();
+    try {
+      return _cryptoSetKey(ptr) == 1;
+    } catch (_) {
+      return false;
     } finally {
       malloc.free(ptr);
     }
@@ -379,43 +407,4 @@ class RustCore {
     }
   }
 
-  /// Pleyer (Dart) tomonidagi log qatorini Rust'ning YAGONA
-  /// debug_log.txt fayliga yozadi — shunda server va pleyer loglari
-  /// bitta faylda, xronologik tartibda turadi.
-  void writeVideoCacheLog(String msg) {
-    if (!_loaded) return;
-    final ptr = msg.toNativeUtf8();
-    try {
-      _videoCacheLog(ptr);
-    } catch (_) {
-    } finally {
-      malloc.free(ptr);
-    }
-  }
-
-  /// Diskdagi yagona jurnal faylining to'liq yo'li.
-  String get videoCacheLogPath {
-    if (!_loaded) return '';
-    try {
-      return _readAndFree(_videoCacheLogPath()) ?? '';
-    } catch (_) {
-      return '';
-    }
-  }
-
-  /// Rust tomonidan yozilgan, hali Dart tomonidan o'qilmagan diagnostika
-  /// jurnal qatorlarini qaytaradi (chaqiruv bilan birga ular Rust
-  /// tomonidagi bufferdan tozalanadi — har chaqiruv faqat YANGI
-  /// qatorlarni beradi).
-  List<String> pullVideoCacheLogs() {
-    if (!_loaded) return const [];
-    final ptr = _videoCachePullLogs();
-    final json = _readAndFree(ptr);
-    if (json == null) return const [];
-    try {
-      return (jsonDecode(json) as List).cast<String>();
-    } catch (_) {
-      return const [];
-    }
-  }
 }

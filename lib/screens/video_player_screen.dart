@@ -9,6 +9,7 @@ import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:video_player/video_player.dart';
+import '../main.dart' show playerOpts;
 import '../services/video_cache_server.dart';
 import '../services/rust_bridge.dart';
 import '../widgets/glass.dart';
@@ -274,10 +275,27 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // (millisekundlar), uzilish yoki timeout degan tushunchaning O'ZI
     // yo'q.
     String localPath = '';
+    bool localEncrypted = false;
     try {
-      localPath = RustCore.instance.videoCacheLocalFile(url);
-      if (localPath.isNotEmpty && !File(localPath).existsSync()) {
-        localPath = '';
+      final info = RustCore.instance.videoCacheLocalFile(url);
+      if (info != null) {
+        final p = (info['path'] as String?) ?? '';
+        if (p.isNotEmpty && File(p).existsSync()) {
+          localPath = p;
+          localEncrypted = (info['encrypted'] as bool?) ?? false;
+          if (localEncrypted) {
+            // ── SHIFRLANGAN FAYL UCHUN KALITNI UZATISH ───────────
+            // Bu qiymatlar fvp saqlab qo'ygan Map'ga yoziladi va
+            // pleyer YARATILGANDA o'qiladi (main.dart dagi izohga
+            // qarang). Kalit hech qayerga yozilmaydi — u har safar
+            // Keystore'dagi asosiy kalitdan qaytadan hisoblanadi.
+            playerOpts['avio.key'] = (info['key'] as String?) ?? '';
+            playerOpts['avio.iv'] = (info['iv'] as String?) ?? '';
+          } else {
+            playerOpts.remove('avio.key');
+            playerOpts.remove('avio.iv');
+          }
+        }
       }
     } catch (_) {
       localPath = '';
@@ -286,8 +304,14 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     Uri proxied;
     bool viaProxy = true;
     if (localPath.isNotEmpty) {
-      VideoCacheServer.log('TO\'LIQ MAHALLIY FAYLDAN o\'ynatiladi (HTTP yo\'q)');
-      proxied = Uri.file(localPath);
+      VideoCacheServer.log(
+          'MAHALLIY FAYLDAN o\'ynatiladi (HTTP yo\'q, shifrlangan=$localEncrypted)');
+      // Shifrlangan bo'lsa FFmpeg'ning "crypto:" protokoli orqali —
+      // shifr pleyerning ICHIDA ochiladi, bizga hech narsa qilish
+      // kerak emas va HTTP qatlami ishtirok etmaydi.
+      proxied = localEncrypted
+          ? Uri.parse('crypto:${Uri.file(localPath)}')
+          : Uri.file(localPath);
       viaProxy = false;
     } else {
       try {
@@ -305,6 +329,10 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // bekor qilinadi va null qaytariladi — chaqiruvchi zaxira yo'lga
     // (kesh'siz, to'g'ridan-to'g'ri asl URL) o'tishi mumkin bo'ladi.
     Future<VideoPlayerController?> tryInit(Uri u) async {
+      // "crypto:..." — bu FFmpeg protokoli, oddiy fayl ham, HTTP ham
+      // emas. Uni fvp'ga o'zgarishsiz yetkazish uchun networkUrl
+      // ishlatiladi (fvp tarmoq manbasining URL'ini AYNAN o'zi
+      // qanday bo'lsa shundayligicha FFmpeg'ga uzatadi).
       final c = u.scheme == 'file'
           ? VideoPlayerController.file(File(u.toFilePath()))
           : VideoPlayerController.networkUrl(u);
@@ -1216,21 +1244,6 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
               ),
             ),
 
-          // ── VAQTINCHALIK DIAGNOSTIKA PANELI: mahalliy kesh-server
-          // nima uchun ishlamayotganini to'g'ridan-to'g'ri ekranda,
-          // adb/logcat'siz ko'rish uchun. VideoCacheServer.logs'dagi
-          // so'nggi qatorlarni ko'rsatadi. Muammo topilgach olib
-          // tashlanishi mumkin.
-          if (_currentEp != null)
-            Positioned(
-              left: 6,
-              right: 6,
-              top: 6,
-              child: IgnorePointer(
-                child: _DebugLogPanel(),
-              ),
-            ),
-
           // ── SEK GESTURE QATLAMI — Stack'ning ENG USTIDA ─────────────
           // MUHIM: bu qatlam `Listener` (GestureDetector emas) va
           // HitTestBehavior.translucent bilan ishlaydi. Bu ikkovi birga
@@ -1631,122 +1644,6 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
 // ko'rsatadi — muammoni adb/logcat'siz, qurilmaning o'zida ko'rish
 // uchun. Muammo aniqlangach bu widget va uni chaqirgan joy olib
 // tashlanishi mumkin.
-class _DebugLogPanel extends StatefulWidget {
-  const _DebugLogPanel();
-
-  @override
-  State<_DebugLogPanel> createState() => _DebugLogPanelState();
-}
-
-class _DebugLogPanelState extends State<_DebugLogPanel> {
-  Timer? _netTimer;
-  int _netBytes = 0;
-  int _servedBytes = 0;
-
-  @override
-  void initState() {
-    super.initState();
-    // Ikkala hisoblagichni doimiy yangilab turamiz — ular loglar oqib
-    // ketsa ham har doim ko'rinib turadi.
-    _netTimer = Timer.periodic(const Duration(milliseconds: 700), (_) {
-      final v = RustCore.instance.videoCacheNetBytes;
-      final s = RustCore.instance.videoCacheServedBytes;
-      if ((v != _netBytes || s != _servedBytes) && mounted) {
-        setState(() {
-          _netBytes = v;
-          _servedBytes = s;
-        });
-      }
-    });
-  }
-
-  @override
-  void dispose() {
-    _netTimer?.cancel();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return ValueListenableBuilder<List<String>>(
-      valueListenable: VideoCacheServer.logs,
-      builder: (context, lines, __) {
-        final last = lines.length > 7 ? lines.sublist(lines.length - 7) : lines;
-        final mb = _netBytes / (1024 * 1024);
-        final servedMb = _servedBytes / (1024 * 1024);
-        return Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-          decoration: BoxDecoration(
-            color: Colors.black.withOpacity(0.62),
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // ── DOIMIY KO'RSATKICH ──────────────────────────────
-              // Video kesh-serveri TARMOQDAN olgan umumiy hajm.
-              // Keshdan o'qilganlar bunga KIRMAYDI. Agar video
-              // o'ynayotganda bu son O'SMAY tursa — demak video uchun
-              // tarmoqqa umuman chiqilmayapti va qurilmada ko'rinayotgan
-              // trafik BOSHQA manbadan ketayotgan bo'ladi.
-              Text(
-                'INTERNET: ${mb.toStringAsFixed(2)} MB',
-                style: TextStyle(
-                  color: _netBytes == 0 ? Colors.lightBlueAccent : Colors.orangeAccent,
-                  fontSize: 11,
-                  fontFamily: 'monospace',
-                  fontWeight: FontWeight.bold,
-                  height: 1.4,
-                ),
-              ),
-              // ── MAHALLIY (127.0.0.1) UZATMA ─────────────────────
-              // Diskdagi keshdan o'qib pleyerga berilgan hajm. Telefon
-              // status-satridagi "KB/s" ko'rsatkichi ko'p qurilmalarda
-              // loopback'ni ham hisoblaydi — shu sabab internet
-              // o'chirilgan bo'lsa ham u yerda raqam ko'rinishi mumkin.
-              // Bu qator aynan shuni ochib beradi.
-              Text(
-                'MAHALLIY (keshdan): ${servedMb.toStringAsFixed(2)} MB',
-                style: const TextStyle(
-                  color: Colors.greenAccent,
-                  fontSize: 11,
-                  fontFamily: 'monospace',
-                  fontWeight: FontWeight.bold,
-                  height: 1.4,
-                ),
-              ),
-              // Jurnal faylining yo'li — foydalanuvchi uni fayl
-              // menejerida topib, tahlil uchun yuborishi mumkin.
-              Text(
-                'LOG: ${VideoCacheServer.logFilePath}',
-                style: const TextStyle(
-                  color: Colors.white54,
-                  fontSize: 8,
-                  fontFamily: 'monospace',
-                  height: 1.3,
-                ),
-                maxLines: 2,
-              ),
-              ...last.map((l) => Text(
-                    l,
-                    style: const TextStyle(
-                      color: Colors.greenAccent,
-                      fontSize: 9,
-                      fontFamily: 'monospace',
-                      height: 1.3,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  )),
-            ],
-          ),
-        );
-      },
-    );
-  }
-}
-
 class _Badge extends StatelessWidget {
   final String label;
   const _Badge(this.label);

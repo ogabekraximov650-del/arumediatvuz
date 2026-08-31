@@ -12,6 +12,7 @@ mod cache;
 mod ffi_utils;
 mod search;
 mod validate;
+mod crypto;
 mod video_cache;
 
 use ffi_utils::string_to_cptr;

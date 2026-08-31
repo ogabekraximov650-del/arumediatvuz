@@ -12,6 +12,27 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ureq = "2"
 
+# ── Shifrlash ───────────────────────────────────────────────────────
+# Barchasi SOF RUST (C kutubxonasi yo'q) — Android uchun muammosiz
+# kross-kompilyatsiya qilinadi. ARM protsessorlarda AES uchun apparat
+# buyruqlaridan (ARMv8 Crypto Extensions) avtomatik foydalaniladi.
+#
+# aes + cbc  — video fayllar uchun AES-128-CBC. Aynan shu rejim,
+#              chunki shifrni FFmpeg'ning "crypto:" protokoli ochadi
+#              va u faqat CBC'ni biladi.
+# aes-gcm    — kichik fayllar (ro'yxat keshi, rasmlar) uchun
+#              AES-256-GCM: maxfiylik + butunlik tekshiruvi.
+# hkdf+sha2  — bitta asosiy kalitdan har bir fayl uchun ALOHIDA kalit
+#              hosil qilish (kalitni qayta ishlatmaslik uchun).
+# getrandom  — kriptografik tasodifiy sonlar (asosiy kalit, nonce).
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+aes-gcm = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+getrandom = "0.2"
+hex = "0.4"
+
 [profile.release]
 opt-level = 3
 lto = true

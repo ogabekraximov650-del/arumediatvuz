@@ -9,6 +9,7 @@
 //   rust_cache_get    — muddatidan qat'iy nazar, bor ma'lumotni qaytaradi
 //   rust_cache_is_fresh — faqat "hozir fon-yangilash kerakmi" savoli uchun
 
+use crate::crypto;
 use crate::ffi_utils::{cstr_to_str, string_to_cptr};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -31,9 +32,35 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Fayl uchun shifrlash yorlig'i — fayl NOMI (yo'l emas).
+///
+/// Nega yo'l emas: ilova yangilanganda yoki qurilma o'zgarganda
+/// papka yo'li o'zgarishi mumkin, fayl nomi esa o'zgarmaydi. Yorliq
+/// o'zgarsa kalit ham o'zgarib, eski kesh o'qib bo'lmas edi.
+fn label_for(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string())
+}
+
+/// Keshni diskdan o'qiydi va (yoqilgan bo'lsa) shifrini ochadi.
+///
+/// MIGRATSIYA: shifrlashdan OLDIN yozilgan ochiq keshlar ham
+/// o'qilaveradi — avval shifrni ochishga urinamiz, bo'lmasa oddiy
+/// JSON deb qaraymiz. Shu bilan yangilanishdan keyin foydalanuvchining
+/// oflayn ro'yxati yo'qolmaydi; keyingi saqlashda u avtomatik
+/// shifrlangan holatga o'tadi.
 fn read_envelope(path: &str) -> Option<CacheEnvelope> {
-    let raw = fs::read_to_string(path).ok()?;
-    serde_json::from_str(&raw).ok()
+    let raw = fs::read(path).ok()?;
+    if crypto::is_enabled() {
+        if let Some(plain) = crypto::open_blob(&label_for(path), &raw) {
+            if let Ok(env) = serde_json::from_slice::<CacheEnvelope>(&plain) {
+                return Some(env);
+            }
+        }
+    }
+    serde_json::from_slice(&raw).ok()
 }
 
 /// Keshdan o'qiydi. Fayl yo'q yoki buzilgan bo'lsagina null qaytaradi —
@@ -93,7 +120,21 @@ pub extern "C" fn rust_cache_save(path_ptr: *const c_char, json_ptr: *const c_ch
         Err(_) => return 0,
     };
 
-    match fs::write(path, serialized) {
+    // Shifrlash yoqilgan bo'lsa — AES-256-GCM bilan muhrlab yozamiz.
+    // GCM tanlangan sabab: bu fayl har doim BUTUNLAY o'qiladi (sek
+    // kerak emas) va GCM maxfiylikdan tashqari BUTUNLIK tekshiruvini
+    // ham beradi — buzilgan yoki almashtirilgan fayl darhol
+    // aniqlanadi va "yaroqsiz" deb qaraladi.
+    let bytes: Vec<u8> = if crypto::is_enabled() {
+        match crypto::seal_blob(&label_for(path), serialized.as_bytes()) {
+            Some(b) => b,
+            None => return 0,
+        }
+    } else {
+        serialized.into_bytes()
+    };
+
+    match fs::write(path, bytes) {
         Ok(_) => 1,
         Err(_) => 0,
     }

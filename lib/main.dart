@@ -2,15 +2,55 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:fvp/fvp.dart' as fvp;
 import 'screens/root_screen.dart';
+import 'services/app_keys.dart';
 import 'services/rust_bridge.dart';
+
+// ═══════════════════════════════════════════════════════════════════
+//  PLEYER SOZLAMALARI — ATAYLAB O'ZGARUVCHAN (mutable) Map
+// ═══════════════════════════════════════════════════════════════════
+//
+// fvp bu Map'ga HAVOLANI o'zida saqlab qoladi va HAR BIR yangi video
+// ochilganda uni QAYTADAN o'qiydi (fvp/lib/src/video_player_mdk.dart):
+//
+//     _playerOpts?.forEach((k, v) => player.setProperty(k, v));
+//
+// Shu xususiyat bizga fvp kodiga UMUMAN TEGMASDAN har bir video uchun
+// alohida shifrlash kalitini uzatish imkonini beradi: epizodni
+// ochishdan oldin shu Map'ga 'avio.key' va 'avio.iv' yoziladi va
+// FFmpeg aynan o'sha faylga mos kalitni oladi.
+final Map<String, String> playerOpts = {
+  // ── Bufer: 1s..5s, 8 ta bayt-oralig'i ────────────────────────────
+  // TARIX (saboq): bir bosqichda buni 0.5s..2s va 2 oraliqqa
+  // tushirgan edim — natija TESKARI bo'ldi. Kichik bufer bilan
+  // mdk-sdk uni doim tugatib, har safar yangi so'rov yuborardi;
+  // orqaga sek qilinganda esa yaqinda o'qilgan oraliqlar allaqachon
+  // tashlangani uchun hammasi qaytadan o'qilardi. Asl muammo buferda
+  // emas, serverda edi (video_cache.rs, `contiguous_cached_end`).
+  'buffer.range': '1000+5000',
+  'demux.buffer.ranges': '8',
+
+  // ── Format aniqlash ─────────────────────────────────────────────
+  // Standart qiymatlar (~5 MB / ~5s) bilan pleyer deyarli butun
+  // videoni o'qib bo'lmaguncha initialize() ni yakunlay olmasdi.
+  // Bir bo'lak hajmi (1 MiB) formatni aniqlash uchun yetarli.
+  'avformat.probesize': '1048576',
+  'avformat.analyzeduration': '1000000',
+
+  // ── "crypto:" protokoliga ruxsat ────────────────────────────────
+  // Shifrlangan videoni pleyerning O'ZI ochadi (HTTP qatlamisiz).
+  // fvp bu ro'yxatni faqat mahalliy fayl manbalari uchun qo'yadi,
+  // biz esa "crypto:file://..." ni tarmoq manbasi sifatida
+  // uzatamiz — shu sabab o'zimiz aniq belgilaymiz. Bizning
+  // sozlamalarimiz fvp'nikidan KEYIN qo'llanadi, ya'ni ustun turadi.
+  'avio.protocol_whitelist': 'file,crypto,http,https,tcp,tls,data,subfile',
+};
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // MUHIM: tizim navigatsiya panelini shaffof qilib qo'yamiz.
-  // Aks holda video pleyer fullscreen rejimidan (immersiveSticky)
-  // oddiy rejimga (edgeToEdge) qaytganda pastki panel orqasida
-  // vaqtincha qora to'rtburchak ko'rinib qolishi mumkin edi.
+  // Tizim navigatsiya panelini shaffof qilamiz — aks holda pleyer
+  // fullscreen'dan qaytganda pastda vaqtincha qora to'rtburchak
+  // ko'rinib qolardi.
   SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
     statusBarColor: Colors.transparent,
     systemNavigationBarColor: Colors.transparent,
@@ -20,76 +60,10 @@ Future<void> main() async {
   ));
   SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
 
-  // fvp: video_player uchun ichki pleyer mexanizmi (decoding/render).
-  // API o'zgarmaydi — bitta VideoPlayerController orqali ishlaydi.
-  //
-  // MUHIM: 'buffer.range' o'zi FAQAT joriy ijro nuqtasi atrofidagi
-  // BITTA sirg'anuvchi oynani boshqaradi — undan tashqariga (masalan
-  // orqaga sek qilib, allaqachon ko'rilgan joyga qaytilsa) chiqilsa,
-  // bu oyna yordam bermaydi va video HAR DOIM qayta tarmoqdan
-  // so'raladi. Aynan shuning uchun 55 soniyalik videoda ham oldinga/
-  // orqaga sek qilinganda va video tugab "play" qayta bosilganda
-  // range so'rov qayta ketardi.
-  // MIN (2000ms) — ijroni boshlash/davom ettirishdan oldin talab
-  // qilinadigan eng kam bufer (avval 30000ms edi — shu qotishning
-  // asosiy sababi edi).
-  // MAX (600000ms = 10 daqiqa) — joriy nuqtadan OLDINGA qarab
-  // buferlanadigan hajm chegarasi.
-  // 'demux.buffer.ranges' — demuxer darajasida BIR NECHTA (bu yerda 64
-  // tagacha) tarmoqdan olingan bayt-oralig'ini XOTIRADA saqlab qoladi
-  // (LRU bilan boshqariladi). Bu faqat controller yashab turgan davrga
-  // tegishli — epizod almashtirilganda yoki pleyerdan chiqilganda
-  // (controller dispose qilinganda) tozalanadi.
-  //
-  // MUHIM: doimiy, bayt-darajasidagi DISK keshi endi mdk-sdk'ning o'z
-  // ('global.cache.disk.io') mexanizmi orqali EMAS, balki
-  // lib/services/video_cache_server.dart'dagi o'zimizning mahalliy
-  // (127.0.0.1) HTTP kesh-proksimiz orqali amalga oshiriladi — u video
-  // pleyerga uzatiladigan URL'ni almashtirib, har bir videoni ilovaning
-  // shaxsiy papkasida 1 MiB'lik bo'laklarga bo'lib saqlaydi va faqat
-  // keshda YO'Q bo'lgan bo'laklarnigina worker'dan yuklaydi (bu tizim
-  // ustidan to'liq nazorat beradi va kelajakdagi bo'lak-darajasidagi
-  // AES shifrlash rejasiga tayyor). Shu sabab mdk-sdk'ning o'z disk
-  // keshi ATAYLAB o'chirilgan — ikkinchi (keraksiz, ikki barobar joy
-  // egallovchi) kesh qatlami bo'lib qolmasligi uchun.
-  // MUHIM TUZATISH: 'lowLatency' olib tashlandi — u ASAP dekodlashga
-  // undab, katta oldindan-bufer maqsadiga zid edi.
-  //
-  // MUHIM TUZATISH (qurilmada aniqlangan sekin ishga tushish sababi):
-  // FFmpeg standart holatda formatni aniqlash uchun 'avformat.probesize'
-  // (standart ~5 MB) va 'avformat.analyzeduration' (standart ~5s)
-  // miqdorida ma'lumot o'qishga urinadi. Bizning videolarimiz ko'pincha
-  // bir necha MB bo'lgani uchun, bu standart qiymatlar bilan pleyer
-  // deyarli BUTUN VIDEONI (barcha bo'laklarni tarmoqdan) yuklab
-  // bo'lmaguncha initialize() yakunlana olmasdi — garchi har bir bo'lak
-  // o'zi tez yuklansa ham, buning yig'indisi 15 soniyalik oynadan
-  // oshib ketardi. Bu qiymatlarni kichraytirish (mos ravishda 1 MiB va
-  // 1 soniya — bitta bo'lak hajmimiz bilan mos) formatni aniqlash uchun
-  // yetarli, lekin ortiqcha ma'lumot talab qilmaydi.
-  //
-  // ENG MUHIM TUZATISH (tez-tez sek qilganda ilovaning o'chib qolishi):
-  // avvalgi 'buffer.range' MAX qiymati 600000ms (10 daqiqa) va
-  // 'demux.buffer.ranges' 64 edi. Bu mdk-sdk'ga joriy nuqtadan 10
-  // daqiqagacha ma'lumotni XOTIRADA saqlashga va bundan tashqari 64
-  // tagacha alohida bayt-oralig'ini ham xotirada ushlab turishga ruxsat
-  // berardi. Har bir sek YANGI oraliq hosil qilgani uchun, 5-6 marta
-  // ketma-ket sek qilinganda xotira sarfi tez o'sib, Android ilovani
-  // o'ldirardi — aynan foydalanuvchi kuzatgan holat.
-  //
-  // Endi bu qiymatlar keskin kamaytirildi: 1.5s min, 20s max bufer va
-  // 8 ta oraliq. Bu XOTIRA sarfini bir necha barobar kamaytiradi va
-  // ijro sifatiga ta'sir qilmaydi — chunki baytlar allaqachon MAHALLIY
-  // DISKDA (Rust kesh-serveri) tayyor turadi, ya'ni mdk-sdk ularni
-  // xotirada ushlab turishi shart emas: kerak bo'lganda diskdan
-  // millisekundlarda qayta o'qiydi. Aksincha, kichik bufer sek
-  // qilishni ham TEZLASHTIRADI (kamroq ma'lumot qayta yig'iladi).
-  // ── TEKSTURA O'LCHAMINI EKRAN BILAN CHEKLASH ──────────────────
-  // mdk-sdk standart holatda videoning TO'LIQ o'lchamidagi tekstura
-  // yaratadi. 1080p (yoki undan yuqori) video kichikroq ekranli
-  // telefonda ortiqcha xotira va GPU ishini talab qiladi. Teksturani
-  // ekran o'lchami bilan cheklash sifatni ko'zga ko'rinarli
-  // yomonlashtirmaydi (ekranda baribir shundan ko'p piksel
-  // ko'rsatilmaydi), lekin pleyerni sezilarli YENGILLASHTIRADI.
+  // ── Tekstura o'lchamini ekran bilan cheklash ────────────────────
+  // mdk standart holatda videoning TO'LIQ o'lchamidagi tekstura
+  // yaratadi. Ekranda baribir shundan ko'p piksel ko'rsatilmaydi,
+  // ya'ni ortiqcha xotira va GPU ishi bekorga ketardi.
   final view = WidgetsBinding.instance.platformDispatcher.views.first;
   final screen = view.physicalSize;
   final maxSide = screen.longestSide.round().clamp(720, 3840);
@@ -99,40 +73,17 @@ Future<void> main() async {
     'fastSeek': true,
     'maxWidth': maxSide,
     'maxHeight': minSide,
-    'player': {
-      // Yana kichraytirildi (1s..8s bufer, 4 ta oraliq). Mahalliy Rust
-      // kesh-serveri baytlarni diskdan millisekundlarda beradi, shu
-      // sabab katta xotira buferi umuman kerak emas — u faqat sek
-      // qilinganda xotirani shishirib, ilovaning o'chib qolishiga
-      // sabab bo'lardi.
-      // 1s..5s bufer, 8 ta bayt-oralig'i.
-      //
-      // TUZATISH TARIXI (muhim saboq): bir bosqichda men buni 0.5s..2s
-      // va 2 ta oraliqqa TUSHIRGAN edim — maqsad "MAHALLIY" trafikni
-      // kamaytirish edi. NATIJA TESKARI BO'LDI: kichik bufer va kam
-      // oraliq bilan mdk-sdk buferni doim tugatib, HAR SAFAR yangi
-      // HTTP so'rov yuborishga majbur bo'lardi; orqaga sek qilinganda
-      // esa yaqinda o'qilgan oraliqlar allaqachon tashlangani uchun
-      // hammasi QAYTADAN o'qilardi. 9 MB fayl uchun mahalliy trafik
-      // 156 MB ga chiqdi va pleyer beqarorlashdi.
-      //
-      // Asl sabab buferda emas, SERVERDA edi (video_cache.rs dagi
-      // `contiguous_cached_end` izohiga qarang): javob 1 MiB da
-      // majburan kesilardi va pleyer har safar qayta ulanishga majbur
-      // bo'lardi. U tuzatilgach, bu yerda o'rtacha, sog'lom qiymat
-      // ishlatiladi: ijro barqaror, xotira sarfi esa cheklangan.
-      'buffer.range': '1000+5000',
-      'demux.buffer.ranges': '8',
-      'avformat.probesize': '1048576',
-      'avformat.analyzeduration': '1000000',
-    },
-    'global': {
-      'cache.disk.io': 0,
-    },
+    'player': playerOpts,
+    'global': {'cache.disk.io': 0},
   });
-  // Ichki mexanizm (kesh, qidiruv, validatsiya) shu yerda yuklanadi —
-  // undan keyin butun ilova Rust yadrosiga murojaat qila oladi.
+
+  // Rust yadrosi (kesh, qidiruv, shifrlash) shu yerda yuklanadi.
   await RustCore.instance.init();
+
+  // Shifrlash kalitini Keystore'dan olib Rust'ga uzatamiz.
+  // Muvaffaqiyatsiz bo'lsa ilova shifrlashsiz, avvalgidek ishlaydi.
+  await AppKeys.init();
+
   runApp(const FulutterApp());
 }
 
