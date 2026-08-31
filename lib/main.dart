@@ -6,19 +6,9 @@ import 'services/app_keys.dart';
 import 'services/rust_bridge.dart';
 
 // ═══════════════════════════════════════════════════════════════════
-//  PLEYER SOZLAMALARI — ATAYLAB O'ZGARUVCHAN (mutable) Map
+//  PLEYER (mdk-sdk) SOZLAMALARI
 // ═══════════════════════════════════════════════════════════════════
-//
-// fvp bu Map'ga HAVOLANI o'zida saqlab qoladi va HAR BIR yangi video
-// ochilganda uni QAYTADAN o'qiydi (fvp/lib/src/video_player_mdk.dart):
-//
-//     _playerOpts?.forEach((k, v) => player.setProperty(k, v));
-//
-// Shu xususiyat bizga fvp kodiga UMUMAN TEGMASDAN har bir video uchun
-// alohida shifrlash kalitini uzatish imkonini beradi: epizodni
-// ochishdan oldin shu Map'ga 'avio.key' va 'avio.iv' yoziladi va
-// FFmpeg aynan o'sha faylga mos kalitni oladi.
-final Map<String, String> playerOpts = {
+const Map<String, String> _playerOpts = {
   // ── Bufer: 1s..5s, 8 ta bayt-oralig'i ────────────────────────────
   // TARIX (saboq): bir bosqichda buni 0.5s..2s va 2 oraliqqa
   // tushirgan edim — natija TESKARI bo'ldi. Kichik bufer bilan
@@ -35,14 +25,6 @@ final Map<String, String> playerOpts = {
   // Bir bo'lak hajmi (1 MiB) formatni aniqlash uchun yetarli.
   'avformat.probesize': '1048576',
   'avformat.analyzeduration': '1000000',
-
-  // ── "crypto:" protokoliga ruxsat ────────────────────────────────
-  // Shifrlangan videoni pleyerning O'ZI ochadi (HTTP qatlamisiz).
-  // fvp bu ro'yxatni faqat mahalliy fayl manbalari uchun qo'yadi,
-  // biz esa "crypto:file://..." ni tarmoq manbasi sifatida
-  // uzatamiz — shu sabab o'zimiz aniq belgilaymiz. Bizning
-  // sozlamalarimiz fvp'nikidan KEYIN qo'llanadi, ya'ni ustun turadi.
-  'avio.protocol_whitelist': 'file,crypto,http,https,tcp,tls,data,subfile',
 };
 
 Future<void> main() async {
@@ -73,7 +55,7 @@ Future<void> main() async {
     'fastSeek': true,
     'maxWidth': maxSide,
     'maxHeight': minSide,
-    'player': playerOpts,
+    'player': _playerOpts,
     'global': {'cache.disk.io': 0},
   });
 

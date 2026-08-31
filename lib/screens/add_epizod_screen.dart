@@ -127,8 +127,8 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
     }
     if (tokenRes.statusCode != 200) {
       if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(const SnackBar(content: Text('Upload token olib bo\'lmadi')));
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Upload token olib bo\'lmadi')));
       }
       return;
     }
@@ -193,13 +193,19 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
       }
     } on DioException catch (e) {
       if (mounted) {
-        setState(() { q.isUploading = false; q.progress = 0; });
+        setState(() {
+          q.isUploading = false;
+          q.progress = 0;
+        });
         ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text('${q.label} yuklashda xato: ${e.message}')));
       }
     } catch (e) {
       if (mounted) {
-        setState(() { q.isUploading = false; q.progress = 0; });
+        setState(() {
+          q.isUploading = false;
+          q.progress = 0;
+        });
         ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text('${q.label} yuklashda xato: $e')));
       }
@@ -238,7 +244,10 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
     final ep = widget.initialEpizod;
     if (ep == null) {
       // Hali saqlanmagan — faqat local tozalash
-      setState(() { q.url = null; q.size = null; });
+      setState(() {
+        q.url = null;
+        q.size = null;
+      });
       return;
     }
 
@@ -251,7 +260,11 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
         ),
       );
       if (res.statusCode == 200) {
-        if (mounted) setState(() { q.url = null; q.size = null; });
+        if (mounted)
+          setState(() {
+            q.url = null;
+            q.size = null;
+          });
       } else {
         throw res.body;
       }
@@ -265,7 +278,10 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
 
   // ── Saqlash ────────────────────────────────────────────────────
   Future<void> _save() async {
-    setState(() { _isSaving = true; _errorMsg = null; });
+    setState(() {
+      _isSaving = true;
+      _errorMsg = null;
+    });
     try {
       final isEdit = widget.initialEpizod != null;
       final endpoint = isEdit
@@ -333,7 +349,8 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
                 child: Glass(
                   borderRadius: 20,
                   blur: 16,
-                  padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
                   child: Row(
                     children: [
                       GlassTappable(
@@ -342,7 +359,8 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
                           borderRadius: 14,
                           blur: 14,
                           padding: EdgeInsets.all(8),
-                          child: Icon(Icons.arrow_back_rounded, color: Colors.white),
+                          child: Icon(Icons.arrow_back_rounded,
+                              color: Colors.white),
                         ),
                       ),
                       const SizedBox(width: 14),
@@ -350,7 +368,9 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
                         child: Text(
                           isEdit ? 'Epizodni tahrirlash' : 'Epizod qo\'shish',
                           style: const TextStyle(
-                              fontSize: 19, fontWeight: FontWeight.bold, color: Colors.white),
+                              fontSize: 19,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.white),
                         ),
                       ),
                     ],
@@ -370,10 +390,12 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
                           decoration: BoxDecoration(
                             color: Colors.red.withOpacity(0.2),
                             borderRadius: BorderRadius.circular(12),
-                            border: Border.all(color: Colors.red.withOpacity(0.5)),
+                            border:
+                                Border.all(color: Colors.red.withOpacity(0.5)),
                           ),
                           child: Text(_errorMsg!,
-                              style: const TextStyle(color: Colors.redAccent, fontSize: 12)),
+                              style: const TextStyle(
+                                  color: Colors.redAccent, fontSize: 12)),
                         ),
                         const SizedBox(height: 16),
                       ],
@@ -383,8 +405,8 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
                           keyboardType: TextInputType.number),
                       const SizedBox(height: 12),
 
-                      _buildTextField('Epizod nomi (ixtiyoriy)',
-                          _nameCtrl, Icons.title_rounded),
+                      _buildTextField('Epizod nomi (ixtiyoriy)', _nameCtrl,
+                          Icons.title_rounded),
                       const SizedBox(height: 20),
 
                       // ── 4 ta sifat yuklash oynasi ──
@@ -412,7 +434,8 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
                                     ? null
                                     : () => Navigator.of(context).pop(),
                                 style: FilledButton.styleFrom(
-                                  backgroundColor: Colors.white.withOpacity(0.1),
+                                  backgroundColor:
+                                      Colors.white.withOpacity(0.1),
                                   foregroundColor: Colors.white,
                                 ),
                                 child: const Text('Bekor qilish'),
@@ -429,10 +452,12 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
                                 onPressed: _isSaving ? null : _save,
                                 child: _isSaving
                                     ? const SizedBox(
-                                        height: 20, width: 20,
+                                        height: 20,
+                                        width: 20,
                                         child: CircularProgressIndicator(
                                           strokeWidth: 2,
-                                          valueColor: AlwaysStoppedAnimation(Colors.white),
+                                          valueColor: AlwaysStoppedAnimation(
+                                              Colors.white),
                                         ),
                                       )
                                     : Text(isEdit ? 'Saqlash' : 'Qo\'shish'),
@@ -452,7 +477,8 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
     );
   }
 
-  Widget _buildTextField(String label, TextEditingController ctrl, IconData icon,
+  Widget _buildTextField(
+      String label, TextEditingController ctrl, IconData icon,
       {int maxLines = 1, TextInputType? keyboardType}) {
     return Glass(
       borderRadius: 14,
@@ -505,7 +531,6 @@ class _QualityCard extends StatelessWidget {
                 color: Colors.white, fontWeight: FontWeight.w600, fontSize: 14),
           ),
           const SizedBox(height: 10),
-
           if (q.isUploading) ...[
             // ── Yuklanmoqda ──
             ClipRRect(
@@ -520,7 +545,8 @@ class _QualityCard extends StatelessWidget {
             const SizedBox(height: 8),
             Text(
               progressText,
-              style: TextStyle(fontSize: 12, color: Colors.white.withOpacity(0.7)),
+              style:
+                  TextStyle(fontSize: 12, color: Colors.white.withOpacity(0.7)),
             ),
           ] else if (q.hasFile) ...[
             // ── Yuklangan ──

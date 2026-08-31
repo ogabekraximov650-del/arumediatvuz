@@ -140,90 +140,91 @@ class _BottomNav extends StatelessWidget {
         child: AnimatedBuilder(
           animation: pageController,
           builder: (context, _) {
-          final page = pageController.hasClients
-              ? (pageController.page ?? currentIndex.toDouble())
-              : currentIndex.toDouble();
+            final page = pageController.hasClients
+                ? (pageController.page ?? currentIndex.toDouble())
+                : currentIndex.toDouble();
 
-          return LayoutBuilder(
-            builder: (context, constraints) {
-              final itemWidth = constraints.maxWidth / _items.length;
+            return LayoutBuilder(
+              builder: (context, constraints) {
+                final itemWidth = constraints.maxWidth / _items.length;
 
-              return Stack(
-                clipBehavior: Clip.none,
-                children: [
-                  // Suzuvchi accent pill
-                  Positioned(
-                    left: page * itemWidth + 4,
-                    top: 0,
-                    bottom: 0,
-                    width: itemWidth - 8,
-                    child: Container(
-                      decoration: BoxDecoration(
-                        gradient: LinearGradient(
-                          colors: [AppColors.accent, AppColors.accent2],
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
-                        ),
-                        borderRadius: BorderRadius.circular(20),
-                        boxShadow: [
-                          BoxShadow(
-                            color: AppColors.accent.withOpacity(0.35),
-                            blurRadius: 12,
-                            offset: const Offset(0, 4),
+                return Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    // Suzuvchi accent pill
+                    Positioned(
+                      left: page * itemWidth + 4,
+                      top: 0,
+                      bottom: 0,
+                      width: itemWidth - 8,
+                      child: Container(
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            colors: [AppColors.accent, AppColors.accent2],
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
                           ),
-                        ],
+                          borderRadius: BorderRadius.circular(20),
+                          boxShadow: [
+                            BoxShadow(
+                              color: AppColors.accent.withOpacity(0.35),
+                              blurRadius: 12,
+                              offset: const Offset(0, 4),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
-                  ),
 
-                  // Tugmalar
-                  Row(
-                    children: List.generate(_items.length, (i) {
-                      final distance = (page - i).abs().clamp(0.0, 1.0);
-                      final t = 1.0 - distance;
-                      final scale = 1.0 + 0.12 * t;
-                      final color = Color.lerp(
-                        Colors.white.withOpacity(0.40),
-                        Colors.white,
-                        t,
-                      )!;
+                    // Tugmalar
+                    Row(
+                      children: List.generate(_items.length, (i) {
+                        final distance = (page - i).abs().clamp(0.0, 1.0);
+                        final t = 1.0 - distance;
+                        final scale = 1.0 + 0.12 * t;
+                        final color = Color.lerp(
+                          Colors.white.withOpacity(0.40),
+                          Colors.white,
+                          t,
+                        )!;
 
-                      return Expanded(
-                        child: GestureDetector(
-                          onTap: () => onTap(i),
-                          behavior: HitTestBehavior.opaque,
-                          child: SizedBox(
-                            height: 52,
-                            child: Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                Transform.scale(
-                                  scale: scale,
-                                  child: Icon(_items[i].icon, size: 22, color: color),
-                                ),
-                                if (t > 0.5) ...[
-                                  const SizedBox(height: 3),
-                                  Text(
-                                    _items[i].label,
-                                    style: TextStyle(
-                                      fontSize: 9,
-                                      color: color,
-                                      fontWeight: FontWeight.w600,
-                                    ),
+                        return Expanded(
+                          child: GestureDetector(
+                            onTap: () => onTap(i),
+                            behavior: HitTestBehavior.opaque,
+                            child: SizedBox(
+                              height: 52,
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Transform.scale(
+                                    scale: scale,
+                                    child: Icon(_items[i].icon,
+                                        size: 22, color: color),
                                   ),
+                                  if (t > 0.5) ...[
+                                    const SizedBox(height: 3),
+                                    Text(
+                                      _items[i].label,
+                                      style: TextStyle(
+                                        fontSize: 9,
+                                        color: color,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ],
                                 ],
-                              ],
+                              ),
                             ),
                           ),
-                        ),
-                      );
-                    }),
-                  ),
-                ],
-              );
-            },
-          );
-        },
+                        );
+                      }),
+                    ),
+                  ],
+                );
+              },
+            );
+          },
         ),
       ),
     );

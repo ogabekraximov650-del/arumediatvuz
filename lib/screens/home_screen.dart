@@ -86,10 +86,11 @@ class _HomeScreenState extends State<HomeScreen> {
         });
       }
     } catch (_) {
-      if (mounted) setState(() {
-        _isLoading = false;
-        _isOffline = true;
-      });
+      if (mounted)
+        setState(() {
+          _isLoading = false;
+          _isOffline = true;
+        });
     }
   }
 
@@ -138,15 +139,14 @@ class _HomeScreenState extends State<HomeScreen> {
                       decoration: BoxDecoration(
                         color: Colors.orange.withOpacity(0.18),
                         borderRadius: BorderRadius.circular(10),
-                        border: Border.all(
-                            color: Colors.orange.withOpacity(0.4)),
+                        border:
+                            Border.all(color: Colors.orange.withOpacity(0.4)),
                       ),
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           Icon(Icons.wifi_off_rounded,
-                              size: 14,
-                              color: Colors.orange.shade300),
+                              size: 14, color: Colors.orange.shade300),
                           const SizedBox(width: 4),
                           Text('Offline',
                               style: TextStyle(
@@ -171,19 +171,15 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
           ),
-
           if (_isOffline && _seasons.isNotEmpty)
             SliverToBoxAdapter(
               child: Padding(
                 padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
-                child: Text(
-                    'Keshdan ko\'rsatilmoqda · Yuqoriga torting',
-                    style: TextStyle(
-                        fontSize: 12,
-                        color: Colors.orange.shade400)),
+                child: Text('Keshdan ko\'rsatilmoqda · Yuqoriga torting',
+                    style:
+                        TextStyle(fontSize: 12, color: Colors.orange.shade400)),
               ),
             ),
-
           const SliverToBoxAdapter(
             child: Padding(
               padding: EdgeInsets.fromLTRB(20, 12, 20, 12),
@@ -194,15 +190,13 @@ class _HomeScreenState extends State<HomeScreen> {
                       color: Colors.white)),
             ),
           ),
-
           if (_isLoading)
             SliverToBoxAdapter(
               child: SizedBox(
                 height: 260,
                 child: Center(
                   child: CircularProgressIndicator(
-                      valueColor:
-                          AlwaysStoppedAnimation(AppColors.accent),
+                      valueColor: AlwaysStoppedAnimation(AppColors.accent),
                       strokeWidth: 2),
                 ),
               ),
@@ -227,8 +221,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         _isOffline
                             ? 'Internet yo\'q · yuqoriga torting'
                             : 'Anime topilmadi',
-                        style: TextStyle(
-                            color: Colors.white.withOpacity(0.4)),
+                        style: TextStyle(color: Colors.white.withOpacity(0.4)),
                       ),
                     ],
                   ),
@@ -239,8 +232,7 @@ class _HomeScreenState extends State<HomeScreen> {
             SliverPadding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
               sliver: SliverGrid(
-                gridDelegate:
-                    const SliverGridDelegateWithFixedCrossAxisCount(
+                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
                   crossAxisCount: 2,
                   mainAxisSpacing: 14,
                   crossAxisSpacing: 14,
@@ -252,16 +244,13 @@ class _HomeScreenState extends State<HomeScreen> {
                       season: _seasons[index],
                       onTap: () => Navigator.of(context).push(
                         PageRouteBuilder(
-                          transitionDuration:
-                              const Duration(milliseconds: 300),
+                          transitionDuration: const Duration(milliseconds: 300),
                           pageBuilder: (_, anim, __) =>
-                              VideoPlayerScreen(
-                                  season: _seasons[index]),
-                          transitionsBuilder:
-                              (_, anim, __, child) => FadeTransition(
+                              VideoPlayerScreen(season: _seasons[index]),
+                          transitionsBuilder: (_, anim, __, child) =>
+                              FadeTransition(
                             opacity: CurvedAnimation(
-                                parent: anim,
-                                curve: Curves.easeOutCubic),
+                                parent: anim, curve: Curves.easeOutCubic),
                             child: child,
                           ),
                         ),
@@ -274,7 +263,6 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               ),
             ),
-
           const SliverToBoxAdapter(child: SizedBox(height: 120)),
         ],
       ),
@@ -286,8 +274,7 @@ class _HomeScreenState extends State<HomeScreen> {
 class SeasonCard extends StatelessWidget {
   final Map<String, dynamic> season;
   final VoidCallback onTap;
-  const SeasonCard(
-      {super.key, required this.season, required this.onTap});
+  const SeasonCard({super.key, required this.season, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -324,8 +311,7 @@ class SeasonCard extends StatelessWidget {
                     child: Center(
                       child: CircularProgressIndicator(
                           strokeWidth: 2,
-                          valueColor: AlwaysStoppedAnimation(
-                              AppColors.accent)),
+                          valueColor: AlwaysStoppedAnimation(AppColors.accent)),
                     ),
                   ),
                   errorWidget: (_, __, ___) => Container(
@@ -345,7 +331,10 @@ class SeasonCard extends StatelessWidget {
 
               // Pastdan gradient
               Positioned(
-                bottom: 0, left: 0, right: 0, height: 90,
+                bottom: 0,
+                left: 0,
+                right: 0,
+                height: 90,
                 child: DecoratedBox(
                   decoration: BoxDecoration(
                     gradient: LinearGradient(
@@ -362,7 +351,9 @@ class SeasonCard extends StatelessWidget {
 
               // Nomi
               Positioned(
-                left: 10, right: 10, bottom: 10,
+                left: 10,
+                right: 10,
+                bottom: 10,
                 child: Text(
                   season['nomi'] ?? '',
                   maxLines: 2,

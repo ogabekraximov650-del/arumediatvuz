@@ -25,7 +25,8 @@ typedef _CacheClearC = Int32 Function(Pointer<Utf8>);
 typedef _CacheClearDart = int Function(Pointer<Utf8>);
 
 typedef _SearchFilterC = Pointer<Utf8> Function(Pointer<Utf8>, Pointer<Utf8>);
-typedef _SearchFilterDart = Pointer<Utf8> Function(Pointer<Utf8>, Pointer<Utf8>);
+typedef _SearchFilterDart = Pointer<Utf8> Function(
+    Pointer<Utf8>, Pointer<Utf8>);
 
 typedef _FilterGenreC = Pointer<Utf8> Function(Pointer<Utf8>, Pointer<Utf8>);
 typedef _FilterGenreDart = Pointer<Utf8> Function(Pointer<Utf8>, Pointer<Utf8>);
@@ -47,13 +48,9 @@ typedef _VersionDart = Pointer<Utf8> Function();
 typedef _VideoCacheStartC = Int32 Function(Pointer<Utf8>);
 typedef _VideoCacheStartDart = int Function(Pointer<Utf8>);
 
-
 typedef _VideoCacheNetBytesC = Uint64 Function();
 typedef _VideoCacheNetBytesDart = int Function();
 
-
-typedef _VideoCacheLocalFileC = Pointer<Utf8> Function(Pointer<Utf8>);
-typedef _VideoCacheLocalFileDart = Pointer<Utf8> Function(Pointer<Utf8>);
 typedef _CryptoGenKeyC = Pointer<Utf8> Function();
 typedef _CryptoGenKeyDart = Pointer<Utf8> Function();
 typedef _CryptoSetKeyC = Int32 Function(Pointer<Utf8>);
@@ -76,7 +73,6 @@ class RustCore {
   late final _VideoCacheStartDart _videoCacheStart;
   late final _VideoCacheNetBytesDart _videoCacheNetBytes;
   late final _VideoCacheNetBytesDart _videoCacheServedBytes;
-  late final _VideoCacheLocalFileDart _videoCacheLocalFile;
   late final _CryptoGenKeyDart _cryptoGenKey;
   late final _CryptoSetKeyDart _cryptoSetKey;
 
@@ -93,31 +89,37 @@ class RustCore {
         ? DynamicLibrary.open('librust_core.so')
         : DynamicLibrary.process();
 
-    _cacheGet = _lib.lookupFunction<_CacheGetC, _CacheGetDart>('rust_cache_get');
-    _cacheIsFresh =
-        _lib.lookupFunction<_CacheIsFreshC, _CacheIsFreshDart>('rust_cache_is_fresh');
-    _cacheSave = _lib.lookupFunction<_CacheSaveC, _CacheSaveDart>('rust_cache_save');
-    _cacheClear = _lib.lookupFunction<_CacheClearC, _CacheClearDart>('rust_cache_clear');
-    _searchFilter =
-        _lib.lookupFunction<_SearchFilterC, _SearchFilterDart>('rust_search_filter');
-    _filterGenre =
-        _lib.lookupFunction<_FilterGenreC, _FilterGenreDart>('rust_filter_by_genre');
-    _validate = _lib.lookupFunction<_ValidateC, _ValidateDart>('rust_validate_anime_form');
-    _freeString = _lib.lookupFunction<_FreeStringC, _FreeStringDart>('rust_free_string');
-    _version = _lib.lookupFunction<_VersionC, _VersionDart>('rust_core_version');
-    _videoCacheStart = _lib
-        .lookupFunction<_VideoCacheStartC, _VideoCacheStartDart>('rust_video_cache_start');
-    _videoCacheNetBytes = _lib.lookupFunction<_VideoCacheNetBytesC, _VideoCacheNetBytesDart>(
-        'rust_video_cache_net_bytes');
-    _videoCacheServedBytes = _lib.lookupFunction<_VideoCacheNetBytesC, _VideoCacheNetBytesDart>(
-        'rust_video_cache_served_bytes');
-    _videoCacheLocalFile =
-        _lib.lookupFunction<_VideoCacheLocalFileC, _VideoCacheLocalFileDart>(
-            'rust_video_cache_local_file');
-    _cryptoGenKey =
-        _lib.lookupFunction<_CryptoGenKeyC, _CryptoGenKeyDart>('rust_crypto_generate_key');
-    _cryptoSetKey =
-        _lib.lookupFunction<_CryptoSetKeyC, _CryptoSetKeyDart>('rust_crypto_set_key');
+    _cacheGet =
+        _lib.lookupFunction<_CacheGetC, _CacheGetDart>('rust_cache_get');
+    _cacheIsFresh = _lib.lookupFunction<_CacheIsFreshC, _CacheIsFreshDart>(
+        'rust_cache_is_fresh');
+    _cacheSave =
+        _lib.lookupFunction<_CacheSaveC, _CacheSaveDart>('rust_cache_save');
+    _cacheClear =
+        _lib.lookupFunction<_CacheClearC, _CacheClearDart>('rust_cache_clear');
+    _searchFilter = _lib.lookupFunction<_SearchFilterC, _SearchFilterDart>(
+        'rust_search_filter');
+    _filterGenre = _lib.lookupFunction<_FilterGenreC, _FilterGenreDart>(
+        'rust_filter_by_genre');
+    _validate = _lib
+        .lookupFunction<_ValidateC, _ValidateDart>('rust_validate_anime_form');
+    _freeString =
+        _lib.lookupFunction<_FreeStringC, _FreeStringDart>('rust_free_string');
+    _version =
+        _lib.lookupFunction<_VersionC, _VersionDart>('rust_core_version');
+    _videoCacheStart =
+        _lib.lookupFunction<_VideoCacheStartC, _VideoCacheStartDart>(
+            'rust_video_cache_start');
+    _videoCacheNetBytes =
+        _lib.lookupFunction<_VideoCacheNetBytesC, _VideoCacheNetBytesDart>(
+            'rust_video_cache_net_bytes');
+    _videoCacheServedBytes =
+        _lib.lookupFunction<_VideoCacheNetBytesC, _VideoCacheNetBytesDart>(
+            'rust_video_cache_served_bytes');
+    _cryptoGenKey = _lib.lookupFunction<_CryptoGenKeyC, _CryptoGenKeyDart>(
+        'rust_crypto_generate_key');
+    _cryptoSetKey = _lib.lookupFunction<_CryptoSetKeyC, _CryptoSetKeyDart>(
+        'rust_crypto_set_key');
 
     final dir = await getApplicationDocumentsDirectory();
     _cacheDirPath = dir.path;
@@ -346,21 +348,6 @@ class RustCore {
   /// fayldan o'ynatadi: hech qanday TCP ulanish, timeout yoki qayta
   /// ulanish yo'q, sek esa oddiy fayl ichida siljish.
   ///
-  /// TARMOQQA UMUMAN CHIQMAYDI — faqat diskka qaraydi.
-  Map<String, dynamic>? videoCacheLocalFile(String url) {
-    if (!_loaded) return null;
-    final ptr = url.toNativeUtf8();
-    try {
-      final raw = _readAndFree(_videoCacheLocalFile(ptr));
-      if (raw == null || raw.isEmpty) return null;
-      return jsonDecode(raw) as Map<String, dynamic>;
-    } catch (_) {
-      return null;
-    } finally {
-      malloc.free(ptr);
-    }
-  }
-
   // ── Shifrlash ────────────────────────────────────────────────
   //
   // Asosiy kalit ilova ishga tushganda BIR MARTA o'rnatiladi. U
@@ -406,5 +393,4 @@ class RustCore {
       return 0;
     }
   }
-
 }

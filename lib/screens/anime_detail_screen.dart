@@ -89,8 +89,7 @@ class AnimeDetailScreen extends StatelessWidget {
                             Chip(
                               label: Text(anime['janri'] ?? ''),
                               backgroundColor: Colors.white.withOpacity(0.12),
-                              labelStyle:
-                                  const TextStyle(color: Colors.white),
+                              labelStyle: const TextStyle(color: Colors.white),
                             ),
                             const SizedBox(width: 8),
                             Text(anime['davlat'] ?? '',

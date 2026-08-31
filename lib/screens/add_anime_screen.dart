@@ -193,7 +193,8 @@ class _AddAnimeScreenState extends State<AddAnimeScreen> {
                 child: Glass(
                   borderRadius: 20,
                   blur: 16,
-                  padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
                   child: Row(
                     children: [
                       GlassTappable(
@@ -202,15 +203,20 @@ class _AddAnimeScreenState extends State<AddAnimeScreen> {
                           borderRadius: 14,
                           blur: 14,
                           padding: EdgeInsets.all(8),
-                          child: Icon(Icons.arrow_back_rounded, color: Colors.white),
+                          child: Icon(Icons.arrow_back_rounded,
+                              color: Colors.white),
                         ),
                       ),
                       const SizedBox(width: 14),
                       Expanded(
                         child: Text(
-                          widget.initialAnime == null ? 'Anime qo\'shish' : 'Animeni tahrirlash',
+                          widget.initialAnime == null
+                              ? 'Anime qo\'shish'
+                              : 'Animeni tahrirlash',
                           style: const TextStyle(
-                              fontSize: 20, fontWeight: FontWeight.bold, color: Colors.white),
+                              fontSize: 20,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.white),
                         ),
                       ),
                     ],
@@ -238,22 +244,26 @@ class _AddAnimeScreenState extends State<AddAnimeScreen> {
                             child: _selectedImage != null
                                 ? ClipRRect(
                                     borderRadius: BorderRadius.circular(16),
-                                    child: Image.file(_selectedImage!, fit: BoxFit.cover),
+                                    child: Image.file(_selectedImage!,
+                                        fit: BoxFit.cover),
                                   )
                                 : _photoUrl != null
                                     ? ClipRRect(
                                         borderRadius: BorderRadius.circular(16),
-                                        child: Image.network(_photoUrl!, fit: BoxFit.cover),
+                                        child: Image.network(_photoUrl!,
+                                            fit: BoxFit.cover),
                                       )
                                     : Column(
-                                        mainAxisAlignment: MainAxisAlignment.center,
+                                        mainAxisAlignment:
+                                            MainAxisAlignment.center,
                                         children: [
                                           const Icon(Icons.image_outlined,
                                               size: 48, color: Colors.white54),
                                           const SizedBox(height: 8),
                                           Text('Rasm tanlang (ixtiyoriy)',
                                               style: TextStyle(
-                                                  color: Colors.white.withOpacity(0.6))),
+                                                  color: Colors.white
+                                                      .withOpacity(0.6))),
                                         ],
                                       ),
                           ),
@@ -266,26 +276,29 @@ class _AddAnimeScreenState extends State<AddAnimeScreen> {
                           decoration: BoxDecoration(
                             color: Colors.red.withOpacity(0.2),
                             borderRadius: BorderRadius.circular(12),
-                            border: Border.all(color: Colors.red.withOpacity(0.5)),
+                            border:
+                                Border.all(color: Colors.red.withOpacity(0.5)),
                           ),
                           child: Text(_errorMsg!,
-                              style: const TextStyle(color: Colors.redAccent, fontSize: 12)),
+                              style: const TextStyle(
+                                  color: Colors.redAccent, fontSize: 12)),
                         ),
                         const SizedBox(height: 16),
                       ],
-                      _buildTextField(
-                          'Anime nomi (ixtiyoriy)', _nameCtrl, Icons.movie_creation_outlined),
+                      _buildTextField('Anime nomi (ixtiyoriy)', _nameCtrl,
+                          Icons.movie_creation_outlined),
+                      const SizedBox(height: 12),
+                      _buildTextField('Davlat (ixtiyoriy)', _davlatCtrl,
+                          Icons.location_on_outlined),
+                      const SizedBox(height: 12),
+                      _buildTextField('Studiya (ixtiyoriy)', _studiyaCtrl,
+                          Icons.business_outlined),
                       const SizedBox(height: 12),
                       _buildTextField(
-                          'Davlat (ixtiyoriy)', _davlatCtrl, Icons.location_on_outlined),
+                          'Janri (ixtiyoriy)', _janriCtrl, Icons.label_outline),
                       const SizedBox(height: 12),
-                      _buildTextField(
-                          'Studiya (ixtiyoriy)', _studiyaCtrl, Icons.business_outlined),
-                      const SizedBox(height: 12),
-                      _buildTextField('Janri (ixtiyoriy)', _janriCtrl, Icons.label_outline),
-                      const SizedBox(height: 12),
-                      _buildTextField(
-                          'Tavsif (ixtiyoriy)', _tavsifCtrl, Icons.description_outlined,
+                      _buildTextField('Tavsif (ixtiyoriy)', _tavsifCtrl,
+                          Icons.description_outlined,
                           maxLines: 4),
                       const SizedBox(height: 24),
                       Row(
@@ -296,9 +309,12 @@ class _AddAnimeScreenState extends State<AddAnimeScreen> {
                               blur: 14,
                               padding: EdgeInsets.zero,
                               child: FilledButton(
-                                onPressed: _isLoading ? null : () => Navigator.of(context).pop(),
+                                onPressed: _isLoading
+                                    ? null
+                                    : () => Navigator.of(context).pop(),
                                 style: FilledButton.styleFrom(
-                                  backgroundColor: Colors.white.withOpacity(0.1),
+                                  backgroundColor:
+                                      Colors.white.withOpacity(0.1),
                                   foregroundColor: Colors.white,
                                 ),
                                 child: const Text('Bekor'),
@@ -312,14 +328,16 @@ class _AddAnimeScreenState extends State<AddAnimeScreen> {
                               blur: 14,
                               padding: EdgeInsets.zero,
                               child: FilledButton(
-                                onPressed: _isLoading ? null : () => _saveAnime(),
+                                onPressed:
+                                    _isLoading ? null : () => _saveAnime(),
                                 child: _isLoading
                                     ? const SizedBox(
                                         height: 20,
                                         width: 20,
                                         child: CircularProgressIndicator(
                                           strokeWidth: 2,
-                                          valueColor: AlwaysStoppedAnimation(Colors.white),
+                                          valueColor: AlwaysStoppedAnimation(
+                                              Colors.white),
                                         ),
                                       )
                                     : const Text('Saqlash'),
@@ -339,7 +357,8 @@ class _AddAnimeScreenState extends State<AddAnimeScreen> {
     );
   }
 
-  Widget _buildTextField(String label, TextEditingController ctrl, IconData icon,
+  Widget _buildTextField(
+      String label, TextEditingController ctrl, IconData icon,
       {int maxLines = 1}) {
     return Glass(
       borderRadius: 14,

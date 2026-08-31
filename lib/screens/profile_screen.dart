@@ -8,7 +8,8 @@ class ProfileScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return SingleChildScrollView(
-      physics: const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics()),
+      physics:
+          const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics()),
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 120),
       child: Column(
         children: [
@@ -21,14 +22,19 @@ class ProfileScreen extends StatelessWidget {
                 const CircleAvatar(
                   radius: 38,
                   backgroundColor: Colors.white24,
-                  child: Icon(Icons.person_rounded, size: 40, color: Colors.white),
+                  child:
+                      Icon(Icons.person_rounded, size: 40, color: Colors.white),
                 ),
                 const SizedBox(height: 12),
                 const Text('Mehmon foydalanuvchi',
-                    style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w600)),
+                    style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w600)),
                 const SizedBox(height: 4),
                 Text('Profilni sozlash uchun kiring',
-                    style: TextStyle(color: Colors.white.withOpacity(0.6), fontSize: 13)),
+                    style: TextStyle(
+                        color: Colors.white.withOpacity(0.6), fontSize: 13)),
               ],
             ),
           ),
@@ -40,9 +46,12 @@ class ProfileScreen extends StatelessWidget {
               children: [
                 _ProfileTile(icon: Icons.settings_rounded, label: 'Sozlamalar'),
                 _divider(),
-                _ProfileTile(icon: Icons.notifications_none_rounded, label: 'Bildirishnomalar'),
+                _ProfileTile(
+                    icon: Icons.notifications_none_rounded,
+                    label: 'Bildirishnomalar'),
                 _divider(),
-                _ProfileTile(icon: Icons.info_outline_rounded, label: 'Ilova haqida'),
+                _ProfileTile(
+                    icon: Icons.info_outline_rounded, label: 'Ilova haqida'),
               ],
             ),
           ),
@@ -94,7 +103,8 @@ class ProfileScreen extends StatelessWidget {
                             fontSize: 16,
                             fontWeight: FontWeight.w600)),
                   ),
-                  const Icon(Icons.chevron_right_rounded, color: Colors.white38),
+                  const Icon(Icons.chevron_right_rounded,
+                      color: Colors.white38),
                 ],
               ),
             ),
@@ -104,7 +114,8 @@ class ProfileScreen extends StatelessWidget {
     );
   }
 
-  Widget _divider() => Divider(height: 1, color: Colors.white.withOpacity(0.12));
+  Widget _divider() =>
+      Divider(height: 1, color: Colors.white.withOpacity(0.12));
 }
 
 class _ProfileTile extends StatelessWidget {

@@ -94,7 +94,8 @@ class _SearchScreenState extends State<SearchScreen> {
                     onChanged: _search,
                     decoration: InputDecoration(
                       hintText: 'Anime qidirish...',
-                      hintStyle: TextStyle(color: Colors.white.withOpacity(0.54)),
+                      hintStyle:
+                          TextStyle(color: Colors.white.withOpacity(0.54)),
                       border: InputBorder.none,
                     ),
                   ),
@@ -117,12 +118,12 @@ class _SearchScreenState extends State<SearchScreen> {
             ),
           ),
           const SizedBox(height: 20),
-
           Expanded(
             child: _isSearching
                 ? Center(
                     child: CircularProgressIndicator(
-                      valueColor: AlwaysStoppedAnimation(Colors.white.withOpacity(0.6)),
+                      valueColor:
+                          AlwaysStoppedAnimation(Colors.white.withOpacity(0.6)),
                     ),
                   )
                 : _results.isEmpty && _hasSearched
@@ -130,10 +131,12 @@ class _SearchScreenState extends State<SearchScreen> {
                         child: Column(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            const Icon(Icons.search_off_rounded, size: 48, color: Colors.white24),
+                            const Icon(Icons.search_off_rounded,
+                                size: 48, color: Colors.white24),
                             const SizedBox(height: 12),
                             Text('Qidiruv natijalari topilmadi',
-                                style: TextStyle(color: Colors.white.withOpacity(0.54))),
+                                style: TextStyle(
+                                    color: Colors.white.withOpacity(0.54))),
                           ],
                         ),
                       )
@@ -142,24 +145,28 @@ class _SearchScreenState extends State<SearchScreen> {
                             child: Column(
                               mainAxisSize: MainAxisSize.min,
                               children: [
-                                const Icon(Icons.search_rounded, size: 48, color: Colors.white24),
+                                const Icon(Icons.search_rounded,
+                                    size: 48, color: Colors.white24),
                                 const SizedBox(height: 12),
                                 Text('Anime nomini yozib qidiruv qiling',
-                                    style: TextStyle(color: Colors.white.withOpacity(0.54))),
+                                    style: TextStyle(
+                                        color: Colors.white.withOpacity(0.54))),
                               ],
                             ),
                           )
                         : GridView.builder(
                             physics: const BouncingScrollPhysics(
                                 parent: AlwaysScrollableScrollPhysics()),
-                            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                            gridDelegate:
+                                const SliverGridDelegateWithFixedCrossAxisCount(
                               crossAxisCount: 2,
                               mainAxisSpacing: 14,
                               crossAxisSpacing: 14,
                               childAspectRatio: 0.68,
                             ),
                             itemCount: _results.length,
-                            itemBuilder: (context, i) => _SeasonSearchCard(season: _results[i]),
+                            itemBuilder: (context, i) =>
+                                _SeasonSearchCard(season: _results[i]),
                           ),
           ),
         ],
@@ -181,12 +188,14 @@ class _SeasonSearchCard extends StatelessWidget {
             transitionDuration: const Duration(milliseconds: 320),
             pageBuilder: (_, animation, __) => AnimeDetailScreen(anime: season),
             transitionsBuilder: (_, animation, __, child) {
-              final curved = CurvedAnimation(parent: animation, curve: Curves.easeOutCubic);
+              final curved = CurvedAnimation(
+                  parent: animation, curve: Curves.easeOutCubic);
               return FadeTransition(
                 opacity: curved,
                 child: SlideTransition(
-                  position:
-                      Tween<Offset>(begin: const Offset(0, 0.1), end: Offset.zero).animate(curved),
+                  position: Tween<Offset>(
+                          begin: const Offset(0, 0.1), end: Offset.zero)
+                      .animate(curved),
                   child: child,
                 ),
               );
@@ -204,17 +213,21 @@ class _SeasonSearchCard extends StatelessWidget {
               child: Container(
                 width: double.infinity,
                 decoration: BoxDecoration(
-                  borderRadius: const BorderRadius.vertical(top: Radius.circular(18)),
+                  borderRadius:
+                      const BorderRadius.vertical(top: Radius.circular(18)),
                   image: DecorationImage(
-                    image: CachedNetworkImageProvider(season['photo_url'] ?? ''),
+                    image:
+                        CachedNetworkImageProvider(season['photo_url'] ?? ''),
                     fit: BoxFit.cover,
                     onError: (_, __) {},
                   ),
                   color: Colors.white.withOpacity(0.10),
                 ),
-                child: (season['photo_url'] == null || (season['photo_url'] as String).isEmpty)
+                child: (season['photo_url'] == null ||
+                        (season['photo_url'] as String).isEmpty)
                     ? const Center(
-                        child: Icon(Icons.movie_creation_outlined, size: 40, color: Colors.white70))
+                        child: Icon(Icons.movie_creation_outlined,
+                            size: 40, color: Colors.white70))
                     : null,
               ),
             ),
@@ -227,11 +240,15 @@ class _SeasonSearchCard extends StatelessWidget {
                     season['nomi'] ?? '',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14, color: Colors.white),
+                    style: const TextStyle(
+                        fontWeight: FontWeight.w600,
+                        fontSize: 14,
+                        color: Colors.white),
                   ),
                   Text(
                     season['janri'] ?? '',
-                    style: TextStyle(fontSize: 12, color: Colors.white.withOpacity(0.6)),
+                    style: TextStyle(
+                        fontSize: 12, color: Colors.white.withOpacity(0.6)),
                   ),
                 ],
               ),

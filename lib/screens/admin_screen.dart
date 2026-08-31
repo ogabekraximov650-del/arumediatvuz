@@ -21,7 +21,8 @@ class AdminScreen extends StatelessWidget {
                 child: Glass(
                   borderRadius: 20,
                   blur: 16,
-                  padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
                   child: Row(
                     children: [
                       GlassTappable(
@@ -30,7 +31,8 @@ class AdminScreen extends StatelessWidget {
                           borderRadius: 14,
                           blur: 14,
                           padding: EdgeInsets.all(8),
-                          child: Icon(Icons.arrow_back_rounded, color: Colors.white),
+                          child: Icon(Icons.arrow_back_rounded,
+                              color: Colors.white),
                         ),
                       ),
                       const SizedBox(width: 14),

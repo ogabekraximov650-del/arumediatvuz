@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io';
 import 'package:flutter/material.dart';
 // fvp'ning VideoPlayerController uchun qo'shimcha imkoniyatlari
 // (setBufferRange). Pastda buferni cheklash uchun ishlatiladi.
@@ -9,7 +8,6 @@ import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:video_player/video_player.dart';
-import '../main.dart' show playerOpts;
 import '../services/video_cache_server.dart';
 import '../services/rust_bridge.dart';
 import '../widgets/glass.dart';
@@ -263,66 +261,32 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // holatda kesh-proksisiz, TO'G'RIDAN-TO'G'RI asl URL bilan
     // o'ynatishga o'tamiz — kesh (doimiy saqlash) ishlamaydi, lekin
     // video HECH QACHON abadiy "yuklanmoqda" holatida qotib qolmaydi.
-    // ── 1-YO'L (ENG YAXSHISI): TO'LIQ MAHALLIY FAYL ─────────────
+    // ── MAHALLIY KESH-SERVER (127.0.0.1) — ASOSIY VA YAGONA YO'L ──
     //
-    // Agar video allaqachon to'liq yuklab olingan bo'lsa, Rust yadrosi
-    // bo'laklarni BITTA faylga yig'ib, uning yo'lini qaytaradi. Bunda
-    // pleyerga HTTP manzil emas, ODDIY FAYL beriladi.
+    // TARIX (muhim saboq): bir bosqichda video to'liq yuklab
+    // bo'lingach, uni pleyerga TO'G'RIDAN-TO'G'RI fayl sifatida
+    // (crypto:/file: orqali, HTTP'siz) berishga o'tgan edik. Maqsad
+    // sek paytidagi TCP qayta ulanishlarni yo'q qilish edi. Amalda
+    // bu yo'l TO'G'RI KELMADI: sek/surish crash'i baribir davom
+    // etdi (uning asl sababi transport emas, fvp'ning seekTo()
+    // implementatsiyasida ekan), ustiga tizim ikkiga bo'linib
+    // murakkablashdi.
     //
-    // NEGA BU HAL QILUVCHI: mdk-sdk (FFmpeg) HTTP manbadan tez-tez sek
-    // qilinganda har safar eski TCP ulanishni uzib, yangisini ochib,
-    // demuxer'ni qaytadan sozlaydi — bularning har biri xato qilishi
-    // mumkin bo'lgan nuqta va aynan shu "qotib qolish"ning manbai edi.
-    // Oddiy faylda esa sek — bu shunchaki fayl ichida siljish
-    // (millisekundlar), uzilish yoki timeout degan tushunchaning O'ZI
-    // yo'q.
-    String localPath = '';
-    bool localEncrypted = false;
-    try {
-      final info = RustCore.instance.videoCacheLocalFile(url);
-      if (info != null) {
-        final p = (info['path'] as String?) ?? '';
-        if (p.isNotEmpty && File(p).existsSync()) {
-          localPath = p;
-          localEncrypted = (info['encrypted'] as bool?) ?? false;
-          if (localEncrypted) {
-            // ── SHIFRLANGAN FAYL UCHUN KALITNI UZATISH ───────────
-            // Bu qiymatlar fvp saqlab qo'ygan Map'ga yoziladi va
-            // pleyer YARATILGANDA o'qiladi (main.dart dagi izohga
-            // qarang). Kalit hech qayerga yozilmaydi — u har safar
-            // Keystore'dagi asosiy kalitdan qaytadan hisoblanadi.
-            playerOpts['avio.key'] = (info['key'] as String?) ?? '';
-            playerOpts['avio.iv'] = (info['iv'] as String?) ?? '';
-          } else {
-            playerOpts.remove('avio.key');
-            playerOpts.remove('avio.iv');
-          }
-        }
-      }
-    } catch (_) {
-      localPath = '';
-    }
-
+    // Endi yana BITTA, sinovdan o'tgan yo'l: hamma narsa mahalliy
+    // kesh-serverdan (Rust, 127.0.0.1) o'qiladi. Server:
+    //   * keshdagi bo'laklarni to'g'ridan-to'g'ri beradi;
+    //   * yetishmayotganini worker'dan olib, keshga yozadi;
+    //   * to'liq yig'ilgan (full.enc) fayldan ham xizmat qila oladi
+    //     va SHIFRNI O'ZI ochadi (read_from_full) — ya'ni shifrlash
+    //     saqlanib qoladi, pleyer esa bu haqda bilishi shart emas.
     Uri proxied;
     bool viaProxy = true;
-    if (localPath.isNotEmpty) {
-      VideoCacheServer.log(
-          'MAHALLIY FAYLDAN o\'ynatiladi (HTTP yo\'q, shifrlangan=$localEncrypted)');
-      // Shifrlangan bo'lsa FFmpeg'ning "crypto:" protokoli orqali —
-      // shifr pleyerning ICHIDA ochiladi, bizga hech narsa qilish
-      // kerak emas va HTTP qatlami ishtirok etmaydi.
-      proxied = localEncrypted
-          ? Uri.parse('crypto:${Uri.file(localPath)}')
-          : Uri.file(localPath);
+    try {
+      proxied = await VideoCacheServer.instance.proxyUri(url);
+    } catch (e) {
+      VideoCacheServer.log('proxyUri xato berdi, asl URL ishlatiladi: $e');
+      proxied = Uri.parse(url);
       viaProxy = false;
-    } else {
-      try {
-        proxied = await VideoCacheServer.instance.proxyUri(url);
-      } catch (e) {
-        VideoCacheServer.log('proxyUri xato berdi, asl URL ishlatiladi: $e');
-        proxied = Uri.parse(url);
-        viaProxy = false;
-      }
     }
     if (!mounted || myToken != _playToken) return;
 
@@ -331,13 +295,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // bekor qilinadi va null qaytariladi — chaqiruvchi zaxira yo'lga
     // (kesh'siz, to'g'ridan-to'g'ri asl URL) o'tishi mumkin bo'ladi.
     Future<VideoPlayerController?> tryInit(Uri u) async {
-      // "crypto:..." — bu FFmpeg protokoli, oddiy fayl ham, HTTP ham
-      // emas. Uni fvp'ga o'zgarishsiz yetkazish uchun networkUrl
-      // ishlatiladi (fvp tarmoq manbasining URL'ini AYNAN o'zi
-      // qanday bo'lsa shundayligicha FFmpeg'ga uzatadi).
-      final c = u.scheme == 'file'
-          ? VideoPlayerController.file(File(u.toFilePath()))
-          : VideoPlayerController.networkUrl(u);
+      final c = VideoPlayerController.networkUrl(u);
       try {
         await c.initialize().timeout(const Duration(seconds: 15));
         return c;
@@ -358,23 +316,6 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // bermayapti yoki qurilmada bloklangan) — kesh bo'lmasa ham video
     // hech bo'lmasa ochilishi uchun asl URL bilan to'g'ridan-to'g'ri
     // qayta urinib ko'ramiz.
-    // MUHIM (foydalanuvchi so'rovi bo'yicha): mahalliy fayl (crypto:/
-    // file:) ishga tushmasa, ENDI HTTP proksiga YASHIRINCHA
-    // qaytilmaydi. Avval bu yerda shunday fallback bor edi — u
-    // "crypto: protokoli qurilmada ishlayaptimi?" degan savolni
-    // yashirib qo'yardi: nosozlik bo'lsa ham video HTTP orqali
-    // baribir ochilib, muammo sezilmay qolardi.
-    //
-    // Endi mahalliy fayl mavjud bo'lgan holatda (localPath.isNotEmpty)
-    // uning ishga tushmasligi ANIQ XATO sifatida ko'rinadi (pastda
-    // "ctrl == null" tekshiruvi orqali) — shu bilan crypto:
-    // protokolining haqiqiy holatini yashirmasdan bilib olamiz.
-    //
-    // Diqqat: bu FAQAT "fayl allaqachon to'liq yuklangan, lekin
-    // ochilmadi" holatiga tegishli. Video HALI TO'LIQ YUKLANMAGAN
-    // bo'lsa (localPath bo'sh), yuqorida (proxied = await
-    // VideoCacheServer.instance.proxyUri(url)) orqali progressiv
-    // HTTP oqim ISHLASHDA DAVOM ETADI — bu boshqa, zarur yo'l.
     if (ctrl == null && viaProxy) {
       if (!mounted || myToken != _playToken) return;
       VideoCacheServer.log('Zaxira: asl URL bilan qayta urinilyapti...');

@@ -56,7 +56,8 @@ class Glass extends StatelessWidget {
       ),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(borderRadius),
-        child: padding != null ? Padding(padding: padding!, child: child) : child,
+        child:
+            padding != null ? Padding(padding: padding!, child: child) : child,
       ),
     );
   }
@@ -87,7 +88,8 @@ class GlassLite extends StatelessWidget {
       ),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(borderRadius),
-        child: padding != null ? Padding(padding: padding!, child: child) : child,
+        child:
+            padding != null ? Padding(padding: padding!, child: child) : child,
       ),
     );
   }
@@ -125,7 +127,8 @@ class AccentCard extends StatelessWidget {
       ),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(borderRadius),
-        child: padding != null ? Padding(padding: padding!, child: child) : child,
+        child:
+            padding != null ? Padding(padding: padding!, child: child) : child,
       ),
     );
   }
@@ -168,7 +171,8 @@ class _GlassTappableState extends State<GlassTappable>
       onTapCancel: () => _ctrl.reverse(),
       child: AnimatedBuilder(
         animation: _ctrl,
-        builder: (_, child) => Transform.scale(scale: 1 - _ctrl.value, child: child),
+        builder: (_, child) =>
+            Transform.scale(scale: 1 - _ctrl.value, child: child),
         child: widget.child,
       ),
     );

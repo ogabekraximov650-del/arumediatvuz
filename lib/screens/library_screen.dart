@@ -13,7 +13,10 @@ class LibraryScreen extends StatelessWidget {
           child: Row(
             children: [
               Text('Kutubxona',
-                  style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.white)),
+                  style: TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white)),
             ],
           ),
         ),
@@ -28,9 +31,11 @@ class LibraryScreen extends StatelessWidget {
                 child: const Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Icon(Icons.bookmark_border_rounded, size: 48, color: Colors.white54),
+                    Icon(Icons.bookmark_border_rounded,
+                        size: 48, color: Colors.white54),
                     SizedBox(height: 12),
-                    Text("Hali saqlangan anime yo'q", style: TextStyle(color: Colors.white70)),
+                    Text("Hali saqlangan anime yo'q",
+                        style: TextStyle(color: Colors.white70)),
                   ],
                 ),
               ),

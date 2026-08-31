@@ -95,8 +95,7 @@ class _EpizodManagementScreenState extends State<EpizodManagementScreen> {
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF1E1E2E),
-        shape:
-            RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
         title: const Text('Epizodni o\'chirish?',
             style: TextStyle(color: Colors.white)),
         content: Text(
@@ -165,8 +164,8 @@ class _EpizodManagementScreenState extends State<EpizodManagementScreen> {
                 child: Glass(
                   borderRadius: 20,
                   blur: 16,
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 14, vertical: 14),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
                   child: Row(
                     children: [
                       GlassTappable(
@@ -187,7 +186,8 @@ class _EpizodManagementScreenState extends State<EpizodManagementScreen> {
                           borderRadius: BorderRadius.circular(12),
                           image: seasonPhoto != null && seasonPhoto.isNotEmpty
                               ? DecorationImage(
-                                  image: CachedNetworkImageProvider(seasonPhoto),
+                                  image:
+                                      CachedNetworkImageProvider(seasonPhoto),
                                   fit: BoxFit.cover,
                                   onError: (_, __) {},
                                 )
@@ -245,8 +245,10 @@ class _EpizodManagementScreenState extends State<EpizodManagementScreen> {
                                 child: Column(
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
-                                    const Icon(Icons.play_circle_outline_rounded,
-                                        size: 52, color: Colors.white24),
+                                    const Icon(
+                                        Icons.play_circle_outline_rounded,
+                                        size: 52,
+                                        color: Colors.white24),
                                     const SizedBox(height: 12),
                                     Text('Hali epizod qo\'shilmagan',
                                         style: TextStyle(
@@ -256,13 +258,14 @@ class _EpizodManagementScreenState extends State<EpizodManagementScreen> {
                                     Text('Pastdagi + tugmasi orqali qo\'sh',
                                         style: TextStyle(
                                             fontSize: 12,
-                                            color: Colors.white
-                                                .withOpacity(0.3))),
+                                            color:
+                                                Colors.white.withOpacity(0.3))),
                                   ],
                                 ),
                               )
                             : ListView.separated(
-                                padding: const EdgeInsets.fromLTRB(16, 4, 16, 120),
+                                padding:
+                                    const EdgeInsets.fromLTRB(16, 4, 16, 120),
                                 itemCount: _epizodlar.length,
                                 separatorBuilder: (_, __) =>
                                     const SizedBox(height: 10),
@@ -270,7 +273,8 @@ class _EpizodManagementScreenState extends State<EpizodManagementScreen> {
                                   final ep = _epizodlar[i];
                                   return _AdminEpizodCard(
                                     epizod: ep,
-                                    onTap: () => _navigateToAddEpizod(epizod: ep),
+                                    onTap: () =>
+                                        _navigateToAddEpizod(epizod: ep),
                                     onDelete: () => _deleteEpizod(ep),
                                   );
                                 },
@@ -293,17 +297,17 @@ class _AdminEpizodCard extends StatelessWidget {
 
   String get _qualities {
     final q = <String>[];
-    if ((epizod['url_360p']  ?? '').isNotEmpty) q.add('360p');
-    if ((epizod['url_480p']  ?? '').isNotEmpty) q.add('480p');
-    if ((epizod['url_720p']  ?? '').isNotEmpty) q.add('720p');
+    if ((epizod['url_360p'] ?? '').isNotEmpty) q.add('360p');
+    if ((epizod['url_480p'] ?? '').isNotEmpty) q.add('480p');
+    if ((epizod['url_720p'] ?? '').isNotEmpty) q.add('720p');
     if ((epizod['url_1080p'] ?? '').isNotEmpty) q.add('1080p');
     return q.isEmpty ? 'Fayl yo\'q' : q.join(' • ');
   }
 
   @override
   Widget build(BuildContext context) {
-    final num  = epizod['epizod_number'] ?? '?';
-    final name = epizod['epizod_name']   ?? '';
+    final num = epizod['epizod_number'] ?? '?';
+    final name = epizod['epizod_name'] ?? '';
     return GlassTappable(
       onTap: onTap,
       child: Glass(
