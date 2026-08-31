@@ -266,6 +266,40 @@ pub fn decrypt_video_range(
 }
 
 // ═══════════════════════════════════════════════════════════════════
+//  BO'LAK (chunk) DARAJASIDA SHIFRLASH
+// ═══════════════════════════════════════════════════════════════════
+//
+// Video diskda endi bitta uzluksiz CBC oqimi sifatida emas, balki
+// alohida (video_cache.rs'dagi CHUNK_SIZE hajmidagi) fayllar sifatida
+// keshlanadi — va ular foydalanuvchi sek qilganda TASODIFIY tartibda
+// yuklanishi/o'qilishi mumkin. Shu sabab har bir bo'lak boshqalaridan
+// MUSTAQIL, o'ziga xos kalit+IV bilan shifrlanadi (video darajasidagi
+// bitta umumiy CBC zanjiriga bog'liq emas) — istalgan bo'lakni, qolgan
+// bo'laklar hali yuklanmagan bo'lsa ham, mustaqil ochish mumkin.
+
+/// Bitta bo'lak uchun kalit+IV — video darajasidagi kalitdan farqli
+/// yorliq bilan (fayl nomi + bo'lak indeksi) hosil qilinadi.
+pub fn derive_chunk_key_iv(label: &str, index: u64) -> Option<([u8; 16], [u8; 16])> {
+    derive_video_key_iv(&format!("{label}:chunk:{index}"))
+}
+
+/// Bitta bo'lakni mustaqil shifrlaydi (bir yo'la — bo'laklar kichik,
+/// odatda 100 KB, xotiraga muammosiz sig'adi).
+pub fn encrypt_chunk(plain: &[u8], key: &[u8; 16], iv: &[u8; 16]) -> Vec<u8> {
+    Aes128CbcEnc::new(key.into(), iv.into()).encrypt_padded_vec_mut::<Pkcs7>(plain)
+}
+
+/// Mustaqil shifrlangan bo'lakni ochadi. Format noto'g'ri/buzilgan
+/// bo'lsa (masalan eski, boshqa o'lchamdagi qoldiq fayl) `None`
+/// qaytaradi — chaqiruvchi buni "keshda yo'q" deb talqin qilib,
+/// bo'lakni qaytadan yuklab oladi.
+pub fn decrypt_chunk(cipher: &[u8], key: &[u8; 16], iv: &[u8; 16]) -> Option<Vec<u8>> {
+    Aes128CbcDec::new(key.into(), iv.into())
+        .decrypt_padded_vec_mut::<Pkcs7>(cipher)
+        .ok()
+}
+
+// ═══════════════════════════════════════════════════════════════════
 //  KICHIK FAYLLAR: AES-256-GCM
 // ═══════════════════════════════════════════════════════════════════
 //
@@ -390,6 +424,36 @@ mod tests {
         // Bir xil nom — bir xil kalit (qayta hisoblab olish uchun).
         let a2 = derive_video_key_iv("bir.mp4").unwrap();
         assert_eq!(a, a2);
+    }
+
+    #[test]
+    fn bolak_mustaqil_shifrlanadi_va_ochiladi() {
+        with_key();
+        let (k0, iv0) = derive_chunk_key_iv("video.mp4", 0).unwrap();
+        let (k5, iv5) = derive_chunk_key_iv("video.mp4", 5).unwrap();
+        // Har bir bo'lak (indeks) o'ziga xos kalit/IV oladi — video
+        // darajasidagi kalitdan ham FARQLI.
+        let (video_key, video_iv) = derive_video_key_iv("video.mp4").unwrap();
+        assert_ne!(k0, k5, "ikki bo'lak bir xil kalit oldi");
+        assert_ne!((k0, iv0), (video_key, video_iv), "bo'lak kaliti video kaliti bilan bir xil");
+
+        let plain: Vec<u8> = (0..100_000usize).map(|i| (i % 251) as u8).collect();
+        let cipher = encrypt_chunk(&plain, &k0, &iv0);
+        assert_ne!(cipher.len(), plain.len(), "PKCS7 to'ldirish qo'shilmagan");
+        assert_eq!(cipher.len() % 16, 0);
+
+        let opened = decrypt_chunk(&cipher, &k0, &iv0).unwrap();
+        assert_eq!(opened, plain);
+
+        // Boshqa bo'lak (indeks) kaliti bilan ochib bo'lmasligi kerak.
+        assert_ne!(decrypt_chunk(&cipher, &k5, &iv5), Some(plain));
+
+        // Bo'laklar bir-biridan MUSTAQIL: 5-bo'lak 0-bo'lak hali
+        // yo'q bo'lsa ham mustaqil ochilishi kerak (haqiqiy zanjir
+        // bog'liqligi yo'q).
+        let plain5: Vec<u8> = (0..50_000usize).map(|i| ((i * 3) % 251) as u8).collect();
+        let cipher5 = encrypt_chunk(&plain5, &k5, &iv5);
+        assert_eq!(decrypt_chunk(&cipher5, &k5, &iv5).unwrap(), plain5);
     }
 
     #[test]

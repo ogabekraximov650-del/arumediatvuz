@@ -37,7 +37,12 @@ use std::time::{Duration, Instant};
 use crate::crypto;
 use crate::ffi_utils::{cstr_to_str, string_to_cptr};
 
-const CHUNK_SIZE: u64 = 1024 * 1024;
+// 100 KB — har bir bo'lak diskda MUSTAQIL shifrlangan holda saqlanadi
+// (crypto::encrypt_chunk/decrypt_chunk, har biri o'z kaliti bilan —
+// video_cache_server.dart emas, crypto.rs'dagi izohga qarang). 100 KB
+// 16 ga karrali (AES blok o'lchami), shu sabab bo'lak chegaralari
+// shifrlash blok chegaralari bilan mos keladi.
+const CHUNK_SIZE: u64 = 100 * 1024;
 
 /// Bir vaqtda ochiq bo'lishi mumkin bo'lgan eng ko'p ulanish soni.
 /// Har bir ulanish bitta OS ish oqimi + ~1 MiB bufer degani, shu sabab
@@ -76,8 +81,12 @@ const MAX_CONNS: usize = 64;
 /// Bitta javobda tekshiriladigan eng ko'p bo'lak soni. Uzun film
 /// (masalan 2 GB) uchun har bir so'rovda minglab fayl tekshiruvi
 /// qilmaslik va bitta javobni cheksiz uzaytirmaslik uchun.
-/// 256 MiB — qayta ulanish bo'ronini yo'q qilishga mo'l-ko'l yetadi.
-const MAX_SCAN_CHUNKS: u64 = 256;
+/// ~256 MiB — qayta ulanish bo'ronini yo'q qilishga mo'l-ko'l yetadi.
+/// MUHIM: CHUNK_SIZE 1 MiB'dan 100 KB'ga tushirilganda (~10x kichik)
+/// bu son ~10x OSHIRILDI — aks holda bitta javobning eng ko'p hajmi
+/// ~10x kichrayib, "ENG MUHIM ME'MORIY QAYTA KO'RIB CHIQISH" izohida
+/// tasvirlangan qayta ulanish bo'roni xavfi qaytadan paydo bo'lardi.
+const MAX_SCAN_CHUNKS: u64 = 2600;
 
 fn contiguous_cached_end(dir: &PathBuf, start: u64, end: u64, total: u64) -> u64 {
     // To'liq fayl mavjud — butun so'ralgan oraliq keshda bor.
@@ -94,7 +103,7 @@ fn contiguous_cached_end(dir: &PathBuf, start: u64, end: u64, total: u64) -> u64
     while i <= last_wanted && i < chunk_count {
         let cs = i * CHUNK_SIZE;
         let ce = (cs + CHUNK_SIZE - 1).min(total - 1);
-        let expected = (ce - cs + 1) as u64;
+        let expected = chunk_on_disk_len(ce - cs + 1);
         match fs::metadata(dir.join(chunk_name(i))) {
             Ok(m) if m.len() == expected => {
                 last = i;
@@ -111,9 +120,11 @@ fn contiguous_cached_end(dir: &PathBuf, start: u64, end: u64, total: u64) -> u64
 /// qadar bo'lak keshga olinadi. Avval butun fayl fon'da yuklab olinardi
 /// — bu foydalanuvchining trafigini keraksiz "so'rib" olardi (u videoni
 /// bir necha soniya ko'rib chiqib qo'ysa ham) va xotirani tez to'ldirardi.
-/// Endi faqat oldinda turgan 10 ta bo'lak saqlanadi; pleyer oldinga
+/// Endi faqat oldinda turgan bo'laklar saqlanadi; pleyer oldinga
 /// siljigan sari (yoki sek qilinganda) oyna ham u bilan birga suriladi.
-const PREFETCH_WINDOW: u64 = 10;
+/// ~10 MiB oldindan yuklash — CHUNK_SIZE 100 KB'ga tushirilgani sabab
+/// bu son ~10x oshirildi (avval 10 × 1 MiB = 10 MiB edi).
+const PREFETCH_WINDOW: u64 = 100;
 
 // ── Umumiy holat ─────────────────────────────────────────────────────
 
@@ -755,7 +766,7 @@ fn assemble_full_inner(dir: &PathBuf, total: u64) -> bool {
     for i in 0..chunk_count {
         let cs = i * CHUNK_SIZE;
         let ce = (cs + CHUNK_SIZE - 1).min(total - 1);
-        let expected = ce - cs + 1;
+        let expected = chunk_on_disk_len(ce - cs + 1);
         match fs::metadata(dir.join(chunk_name(i))) {
             Ok(m) if m.len() == expected => {}
             _ => return false,
@@ -796,7 +807,25 @@ fn assemble_full_inner(dir: &PathBuf, total: u64) -> bool {
 
     for i in 0..chunk_count {
         match fs::read(dir.join(chunk_name(i))) {
-            Ok(bytes) => {
+            Ok(raw) => {
+                // Bo'lak fayllari diskda MUSTAQIL shifrlangan (har biri
+                // o'z kaliti bilan, crypto.rs'ga qarang) — to'liq fayl
+                // esa BITTA umumiy CBC zanjiri, shu sabab avval har bir
+                // bo'lakni o'z holicha ochamiz, keyin qaytadan (butun
+                // fayl kaliti bilan) uzluksiz shifrlaymiz.
+                let bytes = if crypto::is_enabled() {
+                    match crypto::derive_chunk_key_iv(&label, i)
+                        .and_then(|(k, iv)| crypto::decrypt_chunk(&raw, &k, &iv))
+                    {
+                        Some(p) => p,
+                        None => {
+                            let _ = fs::remove_file(&tmp);
+                            return false;
+                        }
+                    }
+                } else {
+                    raw
+                };
                 let piece = match encryptor.as_mut() {
                     Some(e) => e.update(&bytes),
                     None => bytes,
@@ -940,6 +969,36 @@ fn chunk_name(index: u64) -> String {
     format!("chunk_{index:07}.bin")
 }
 
+/// Diskdagi kutilgan bo'lak hajmi: shifrlash yoqilgan bo'lsa PKCS7
+/// to'ldirish sabab asl (ochiq) hajmdan katta bo'ladi.
+fn chunk_on_disk_len(plain_len: u64) -> u64 {
+    if crypto::is_enabled() {
+        crypto::encrypted_size(plain_len)
+    } else {
+        plain_len
+    }
+}
+
+/// Keshdagi bo'lak faylini o'qiydi va (shifrlash yoqilgan bo'lsa)
+/// ochadi. Hajm yoki shifr mos kelmasa (masalan eski, boshqa
+/// o'lchamdagi qoldiq fayl) — `None`: chaqiruvchi buni "keshda yo'q"
+/// deb talqin qilib, bo'lakni qaytadan yuklab oladi.
+fn read_cached_chunk(dir: &PathBuf, key: &str, index: u64, expected_len: usize) -> Option<Vec<u8>> {
+    let raw = fs::read(dir.join(chunk_name(index))).ok()?;
+    if raw.len() as u64 != chunk_on_disk_len(expected_len as u64) {
+        return None;
+    }
+    if !crypto::is_enabled() {
+        return Some(raw);
+    }
+    let (k, iv) = crypto::derive_chunk_key_iv(key, index)?;
+    let plain = crypto::decrypt_chunk(&raw, &k, &iv)?;
+    if plain.len() != expected_len {
+        return None;
+    }
+    Some(plain)
+}
+
 // ── Meta (umumiy hajm + kontent turi) ───────────────────────────────
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -1048,16 +1107,13 @@ fn read_or_fetch_chunk(
             return Ok(bytes);
         }
     }
-    let final_path = dir.join(chunk_name(index));
-    if let Ok(bytes) = fs::read(&final_path) {
-        if bytes.len() == expected_len {
-            // MUHIM (diagnostika): diskdan o'qilgan bo'lak uchun TARMOQQA
-            // umuman chiqilmaydi. Bu log ekranda ko'rinib turishi kerak —
-            // shu bilan "qayta yuklanyaptimi yoki keshdanmi" degan savolga
-            // to'g'ridan-to'g'ri javob beradi.
-            log(format!("Bo'lak #{index} KESHDAN o'qildi (tarmoqsiz)"));
-            return Ok(bytes);
-        }
+    if let Some(bytes) = read_cached_chunk(dir, key, index, expected_len) {
+        // MUHIM (diagnostika): diskdan o'qilgan bo'lak uchun TARMOQQA
+        // umuman chiqilmaydi. Bu log ekranda ko'rinib turishi kerak —
+        // shu bilan "qayta yuklanyaptimi yoki keshdanmi" degan savolga
+        // to'g'ridan-to'g'ri javob beradi.
+        log(format!("Bo'lak #{index} KESHDAN o'qildi (tarmoqsiz)"));
+        return Ok(bytes);
     }
     fetch_and_store_chunk(shared, key, dir, url, index, start, end, expected_len, expected_total)
 }
@@ -1114,10 +1170,8 @@ fn fetch_and_store_chunk(
                 break;
             }
         }
-        if let Ok(bytes) = fs::read(&final_path) {
-            if bytes.len() == expected_len {
-                return Ok(bytes);
-            }
+        if let Some(bytes) = read_cached_chunk(dir, key, index, expected_len) {
+            return Ok(bytes);
         }
         if Instant::now() >= wait_deadline {
             log(format!(
@@ -1131,10 +1185,8 @@ fn fetch_and_store_chunk(
     let result = (|| -> Result<Vec<u8>, String> {
         // Boshqa ish oqimi bizni kutayotganimiz orasida ulgurgan bo'lishi
         // mumkin — yana bir bor tekshiramiz.
-        if let Ok(bytes) = fs::read(&final_path) {
-            if bytes.len() == expected_len {
-                return Ok(bytes);
-            }
+        if let Some(bytes) = read_cached_chunk(dir, key, index, expected_len) {
+            return Ok(bytes);
         }
 
         log(format!("Bo'lak #{index} worker'dan yuklanmoqda ({start}-{end})..."));
@@ -1228,6 +1280,15 @@ fn fetch_and_store_chunk(
         ));
 
         if collected.len() == expected_len {
+            // Diskka YOZISHDAN OLDIN shifrlanadi (bo'lak o'ziga xos
+            // kalit bilan — crypto.rs'ga qarang). Pleyerga (chaqiruvchi
+            // funksiyaga) esa OCHIQ bayt qaytariladi (pastdagi
+            // `Ok(collected)`) — u hech qachon shifrlangan holatni
+            // ko'rmaydi.
+            let on_disk: Vec<u8> = match crypto::derive_chunk_key_iv(key, index) {
+                Some((k, iv)) => crypto::encrypt_chunk(&collected, &k, &iv),
+                None => collected.clone(),
+            };
             // Diskka faqat TO'LIQ bo'lak yuklab bo'lingandan keyin,
             // vaqtinchalik nomdan YAKUNIY nomga ATOM ravishda ko'chirib
             // yoziladi.
@@ -1239,7 +1300,7 @@ fn fetch_and_store_chunk(
                     .map(|d| d.as_micros())
                     .unwrap_or(0)
             ));
-            fs::write(&tmp_path, &collected).map_err(|e| e.to_string())?;
+            fs::write(&tmp_path, &on_disk).map_err(|e| e.to_string())?;
             if fs::rename(&tmp_path, &final_path).is_err() {
                 let _ = fs::remove_file(&tmp_path);
             }
@@ -1585,7 +1646,8 @@ mod tests {
             // Har bir bayt o'z pozitsiyasidan hosil bo'ladi — shu bilan
             // qaytgan ma'lumot TO'G'RI joydan ekanini tekshira olamiz.
             let data: Vec<u8> = (0..len).map(|k| ((cs as usize + k) % 251) as u8).collect();
-            fs::write(dir.join(chunk_name(i)), &data).unwrap();
+            let (k, iv) = crypto::derive_chunk_key_iv(TEST_NAME, i).unwrap();
+            fs::write(dir.join(chunk_name(i)), crypto::encrypt_chunk(&data, &k, &iv)).unwrap();
         }
     }
 
@@ -1676,8 +1738,10 @@ mod tests {
         assert_eq!(status, 206);
         assert_eq!(cr, format!("bytes 0-{}/{}", TEST_TOTAL - 1, TEST_TOTAL));
         assert_eq!(len as u64, TEST_TOTAL, "butun fayl bitta javobda kelmadi");
-        // Ma'lumot to'g'ri joydan kelganini tekshiramiz.
-        for probe in [0usize, 1_048_575, 1_048_576, 5_000_000, len - 1] {
+        // Ma'lumot to'g'ri joydan kelganini tekshiramiz (shu jumladan
+        // bo'lak chegarasi — CHUNK_SIZE - 1 / CHUNK_SIZE).
+        let cs = CHUNK_SIZE as usize;
+        for probe in [0usize, cs - 1, cs, 5_000_000, len - 1] {
             assert_eq!(body[probe], (probe % 251) as u8, "bayt {probe} noto'g'ri");
         }
 
@@ -1759,7 +1823,7 @@ mod tests {
         for (start, len) in [
             (0u64, 4096usize),
             (1, 33),                       // blok chegarasiga tushmaydi
-            (1_048_576, 65_536),           // bo'lak chegarasi
+            (CHUNK_SIZE, 65_536),          // bo'lak chegarasi
             (5_000_001, 100_000),
             (TEST_TOTAL - 10, 10),         // eng oxiri
         ] {
@@ -1802,19 +1866,25 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let chunks = TEST_TOTAL.div_ceil(CHUNK_SIZE);
+        // assemble_full_inner bo'lak kalitini papka NOMIDAN hosil qiladi
+        // (dir.file_name()) — testda ham shu yorliq bilan shifrlaymiz.
+        let label = dir.file_name().unwrap().to_string_lossy().to_string();
 
         // Bitta bo'lak yetishmasa — yig'ilmasligi kerak.
         for i in 1..chunks {
             let cs = i * CHUNK_SIZE;
             let ce = (cs + CHUNK_SIZE - 1).min(TEST_TOTAL - 1);
-            fs::write(dir.join(chunk_name(i)), vec![7u8; (ce - cs + 1) as usize]).unwrap();
+            let plain = vec![7u8; (ce - cs + 1) as usize];
+            let (k, iv) = crypto::derive_chunk_key_iv(&label, i).unwrap();
+            fs::write(dir.join(chunk_name(i)), crypto::encrypt_chunk(&plain, &k, &iv)).unwrap();
         }
         assert!(!try_assemble_full(&dir, TEST_TOTAL), "chala keshda yig'ilmasligi kerak");
         assert!(!full_is_complete(&dir, TEST_TOTAL));
 
         // Yetishmayotgan bo'lak qo'shilgach — yig'ilishi kerak.
         let data0: Vec<u8> = (0..CHUNK_SIZE as usize).map(|k| (k % 251) as u8).collect();
-        fs::write(dir.join(chunk_name(0)), &data0).unwrap();
+        let (k0, iv0) = crypto::derive_chunk_key_iv(&label, 0).unwrap();
+        fs::write(dir.join(chunk_name(0)), crypto::encrypt_chunk(&data0, &k0, &iv0)).unwrap();
         assert!(try_assemble_full(&dir, TEST_TOTAL), "to'liq keshda yig'ilishi kerak");
         assert!(full_is_complete(&dir, TEST_TOTAL));
         // Shifrlangan fayl PKCS7 to'ldirishi sabab asl hajmdan katta.
@@ -1856,7 +1926,9 @@ mod tests {
             }
             let cs = i * CHUNK_SIZE;
             let ce = (cs + CHUNK_SIZE - 1).min(TEST_TOTAL - 1);
-            fs::write(cache.join(chunk_name(i)), vec![0u8; (ce - cs + 1) as usize]).unwrap();
+            let plain = vec![0u8; (ce - cs + 1) as usize];
+            let (k, iv) = crypto::derive_chunk_key_iv(TEST_NAME, i).unwrap();
+            fs::write(cache.join(chunk_name(i)), crypto::encrypt_chunk(&plain, &k, &iv)).unwrap();
         }
         // 0-dan boshlansa, javob 3-bo'lakdan OLDIN tugashi kerak.
         assert_eq!(
