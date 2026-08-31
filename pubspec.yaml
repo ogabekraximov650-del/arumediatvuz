@@ -17,8 +17,11 @@ dependencies:
   cached_network_image: ^3.4.1
   # Video yuklashda real-time progress uchun
   dio: ^5.4.0
-  # Video pleyr: video_player (ochiq API) + fvp (ichki mexanizm/decoding backend)
-  video_player: ^2.9.2
+  # Video pleyr: fvp'ning past-darajali (mdk.dart) Player API'si —
+  # video_player + fvp shim qatlami ISHLATILMAYDI (mdk-native-player
+  # o'tishi, sabab: lib/screens/video_player_screen.dart'dagi izohga
+  # qarang). video_player fvp'ning tranzitiv bog'liqligi sifatida
+  # baribir keladi.
   fvp: ^0.38.1
   # Asosiy shifrlash kalitini xavfsiz saqlash uchun. Android'da
   # EncryptedSharedPreferences (Keystore bilan himoyalangan) ishlatadi,

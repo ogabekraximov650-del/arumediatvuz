@@ -1,19 +1,217 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
-// fvp'ning VideoPlayerController uchun qo'shimcha imkoniyatlari
-// (setBufferRange). Pastda buferni cheklash uchun ishlatiladi.
-import 'package:fvp/fvp.dart';
+// fvp'ning mdk-sdk'ga past-darajali (shim'siz) kirish nuqtasi. Pleyer
+// boshqaruvi endi to'g'ridan-to'g'ri shu API orqali (mdk.Player) amalga
+// oshiriladi — video_player + fvp shim qatlami ENDI ISHLATILMAYDI (pastdagi
+// _PlayerCtrl izohiga qarang: sababi shim'ning seekTo() natijani
+// await qilmasdan qaytishi edi).
+import 'package:fvp/mdk.dart' as mdk;
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'package:cached_network_image/cached_network_image.dart';
-import 'package:video_player/video_player.dart';
 import '../services/video_cache_server.dart';
 import '../services/rust_bridge.dart';
 import '../widgets/glass.dart';
 import '../theme/app_background.dart';
 
 const String _apiBase = 'https://aniraxuzapp.ogabekraximov650.workers.dev';
+
+// ═══════════════════════════════════════════════════════════════════
+//  PLEYER (mdk-sdk) SOZLAMALARI
+// ═══════════════════════════════════════════════════════════════════
+// (Avval main.dart'da, fvp.registerWith(options: {'player': ...}) orqali
+// shim'ga uzatilardi. Endi har bir mdk.Player'ga to'g'ridan-to'g'ri
+// setProperty() bilan qo'llaniladi — pastga, _applyPlayerDefaults()ga
+// qarang.)
+const Map<String, String> _playerOpts = {
+  // ── Bufer: 1s..5s, 8 ta bayt-oralig'i ────────────────────────────
+  // TARIX (saboq): bir bosqichda buni 0.5s..2s va 2 oraliqqa
+  // tushirgan edim — natija TESKARI bo'ldi. Kichik bufer bilan
+  // mdk-sdk uni doim tugatib, har safar yangi so'rov yuborardi;
+  // orqaga sek qilinganda esa yaqinda o'qilgan oraliqlar allaqachon
+  // tashlangani uchun hammasi qaytadan o'qilardi. Asl muammo buferda
+  // emas, serverda edi (video_cache.rs, `contiguous_cached_end`).
+  'buffer.range': '1000+5000',
+  'demux.buffer.ranges': '8',
+
+  // ── Format aniqlash ─────────────────────────────────────────────
+  // Standart qiymatlar (~5 MB / ~5s) bilan pleyer deyarli butun
+  // videoni o'qib bo'lmaguncha ochilishni yakunlay olmasdi.
+  // Bir bo'lak hajmi (1 MiB) formatni aniqlash uchun yetarli.
+  'avformat.probesize': '1048576',
+  'avformat.analyzeduration': '1000000',
+};
+
+// mdk-sdk'ning tekstura o'lchamini ekran bilan cheklaydi — video TO'LIQ
+// o'lchamidagi tekstura yaratilsa, ekranda baribir shundan ko'p piksel
+// ko'rsatilmaydi, ya'ni ortiqcha xotira/GPU sarflanadi (main.dart'dagi
+// avvalgi hisob-kitob bilan bir xil).
+(int, int) _textureLimits() {
+  final view = WidgetsBinding.instance.platformDispatcher.views.first;
+  final screen = view.physicalSize;
+  final maxSide = screen.longestSide.round().clamp(720, 3840);
+  final minSide = screen.shortestSide.round().clamp(480, 2160);
+  return (maxSide, minSide);
+}
+
+// fvp'ning video_player-shim qatlami (video_player_mdk.dart,
+// MdkVideoPlayerPlatform._create()) avval har bir pleyer uchun avtomatik
+// o'rnatib kelgan standart xususiyatlar. Past-darajali mdk.Player() bunday
+// standartlarni o'zi qo'ymaydi — shu sabab bu yerda qo'lda takrorlanadi
+// (tarmoqqa qayta ulanish, format aniqlash moslamalari va h.k.).
+void _applyPlayerDefaults(mdk.Player player) {
+  player.setProperty('video.decoder', 'shader_resource=0');
+  player.setProperty('avformat.strict', 'experimental');
+  player.setProperty('avformat.safe', '0');
+  player.setProperty('avio.reconnect', '1');
+  player.setProperty('avio.reconnect_delay_max', '7');
+  player.setProperty('avformat.rtsp_transport', 'tcp');
+  player.setProperty('avformat.extension_picky', '0');
+  player.setProperty('avformat.allowed_segment_extensions', 'ALL');
+  _playerOpts.forEach(player.setProperty);
+  if (Platform.isAndroid) {
+    // Qurilma apparat dekoderini afzal ko'radi, ishlamasa FFmpeg/dav1d'ga
+    // (dasturiy dekod) o'zi qaytadi.
+    player.videoDecoders = const ['AMediaCodec', 'FFmpeg', 'dav1d'];
+  }
+}
+
+// ── Pleyerning reaktiv holati (video_player'ning VideoPlayerValue'siga
+// o'xshash, lekin BARCHA maydonlar HAQIQIY native manbadan keladi) ──
+class _PV {
+  final bool isInitialized;
+  final bool isPlaying;
+  final bool isBuffering;
+  final Duration position;
+  final Duration duration;
+  final double aspectRatio;
+
+  const _PV({
+    this.isInitialized = false,
+    this.isPlaying = false,
+    this.isBuffering = false,
+    this.position = Duration.zero,
+    this.duration = Duration.zero,
+    this.aspectRatio = 16 / 9,
+  });
+
+  _PV copyWith({
+    bool? isInitialized,
+    bool? isPlaying,
+    bool? isBuffering,
+    Duration? position,
+    Duration? duration,
+    double? aspectRatio,
+  }) {
+    return _PV(
+      isInitialized: isInitialized ?? this.isInitialized,
+      isPlaying: isPlaying ?? this.isPlaying,
+      isBuffering: isBuffering ?? this.isBuffering,
+      position: position ?? this.position,
+      duration: duration ?? this.duration,
+      aspectRatio: aspectRatio ?? this.aspectRatio,
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  mdk.dart (past-darajali) Player'ni video_player uslubidagi
+//  ValueNotifier qatlamiga o'raydi.
+// ═══════════════════════════════════════════════════════════════════
+//
+// MUHIM (nega bu qatlam kerak — fvp manba kodidan tasdiqlangan):
+//
+//   fvp/lib/src/video_player_mdk.dart:
+//     Future<void> seekTo(int playerId, Duration position) async {
+//       return _seekToWithFlags(playerId, position, ...);
+//     }
+//     Future<void> _seekToWithFlags(...) async {
+//       player.seek(position: ..., flags: flags);   // ← AWAIT QILINMAYDI!
+//     }
+//
+// `video_player` + fvp shim orqali `await controller.seekTo(target)`
+// chaqirilganda, yuqoridagi kod native javobni KUTMASDAN darhol qaytadi
+// ("fire-and-forget"), rasmiy `video_player` paketi esa buning ustiga
+// pozitsiyani native javobni kutmasdan OPTIMISTIK ravishda yangilaydi.
+// Natijada Dart tomonida "sek haqiqatan tugadimi" degan savolga ishonchli
+// javob yo'q edi — aynan shu sabab tez-tez sek qilinganda ilova qotib
+// qolar/crash bo'lar edi.
+//
+// `mdk.Player.seek()` esa — bu qatlam to'g'ridan-to'g'ri chaqiradigan
+// funksiya — HAQIQIY `Future<int>` qaytaradi: u faqat native (mdk-sdk)
+// sek buyrug'ini YAKUNLAGANDA hal bo'ladi (fvp/lib/src/player.dart,
+// `_seeked` Completer, native "seek" hodisasi orqali). Xuddi shunday,
+// `player.position` ham har chaqirilganda to'g'ridan-to'g'ri nativedan
+// o'qiladi — optimistik taxmin emas. Shu ikkalasi tufayli sek navbati
+// mantig'i (pastga, _runSeek'ga qarang) ancha soddalashadi va ishonchli
+// bo'ladi.
+class _PlayerCtrl extends ValueNotifier<_PV> {
+  final mdk.Player player;
+  Timer? _posTimer;
+  StreamSubscription? _stateSub;
+  StreamSubscription? _statusSub;
+
+  _PlayerCtrl(this.player) : super(const _PV()) {
+    _stateSub = player.onStateChanged.listen((e) {
+      value =
+          value.copyWith(isPlaying: e.newValue == mdk.PlaybackState.playing);
+    });
+    _statusSub = player.onMediaStatus.listen((e) {
+      final old = e.oldValue;
+      final nw = e.newValue;
+      if (!old.test(mdk.MediaStatus.buffering) &&
+          nw.test(mdk.MediaStatus.buffering)) {
+        value = value.copyWith(isBuffering: true);
+      } else if (!old.test(mdk.MediaStatus.buffered) &&
+          nw.test(mdk.MediaStatus.buffered)) {
+        value = value.copyWith(isBuffering: false);
+      }
+    });
+    // `position` uchun native'da o'zgarish hodisasi yo'q (faqat so'rov
+    // orqali o'qiladi) — shu sabab davriy taymer bilan yangilanadi. Bu
+    // avvalgi "sog'liq kuzatuvchisi" taymeridan farqli: bu yerda faqat
+    // UI (progress chizig'i)ni yangilash uchun ishlatiladi.
+    _posTimer = Timer.periodic(const Duration(milliseconds: 250), (_) {
+      try {
+        value = value.copyWith(
+            position: Duration(milliseconds: player.position));
+      } catch (_) {}
+    });
+  }
+
+  Future<void> play() async {
+    player.state = mdk.PlaybackState.playing;
+  }
+
+  Future<void> pause() async {
+    player.state = mdk.PlaybackState.paused;
+  }
+
+  /// Native sekni haqiqatan yakunlaguncha kutadigan Future. Natija
+  /// manfiy bo'lsa — xato (chaqiruvchi buni qaytadan ochish signali
+  /// sifatida talqin qiladi).
+  Future<int> seekTo(Duration target) {
+    final ms = target.inMilliseconds < 0 ? 0 : target.inMilliseconds;
+    return player.seek(
+        position: ms, flags: const mdk.SeekFlag(mdk.SeekFlag.defaultFlags));
+  }
+
+  void setBufferRange({int min = -1, int max = -1, bool drop = false}) =>
+      player.setBufferRange(min: min, max: max, drop: drop);
+
+  @override
+  Future<void> dispose() async {
+    _posTimer?.cancel();
+    await _stateSub?.cancel();
+    await _statusSub?.cancel();
+    // player.dispose() ataylab `void` (fire-and-forget) — mdk-sdk'ning
+    // o'zi shunday loyihalashtirgan, kutish shart emas.
+    player.dispose();
+    super.dispose();
+  }
+}
 
 class VideoPlayerScreen extends StatefulWidget {
   final Map<String, dynamic> season;
@@ -33,7 +231,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   bool _loadingSeasons = true;
 
   // ── BITTA umumiy player ──────────────────────────────────────
-  VideoPlayerController? _controller;
+  _PlayerCtrl? _controller;
   Map<String, dynamic>? _currentEp;
   String? _selectedQuality;
   bool _playerLoading = false;
@@ -290,26 +488,10 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     }
     if (!mounted || myToken != _playToken) return;
 
-    // 15 soniya ichida ishga tushmasa (masalan mahalliy kesh-proksi
-    // qurilmada ishlamayotgan bo'lsa), sinab ko'rilgan controller
-    // bekor qilinadi va null qaytariladi — chaqiruvchi zaxira yo'lga
-    // (kesh'siz, to'g'ridan-to'g'ri asl URL) o'tishi mumkin bo'ladi.
-    Future<VideoPlayerController?> tryInit(Uri u) async {
-      final c = VideoPlayerController.networkUrl(u);
-      try {
-        await c.initialize().timeout(const Duration(seconds: 15));
-        return c;
-      } catch (e) {
-        VideoCacheServer.log('ctrl.initialize() muvaffaqiyatsiz ($u): $e');
-        await c.dispose();
-        return null;
-      }
-    }
-
     VideoCacheServer.log(viaProxy
-        ? 'Proksi orqali initialize sinalyapti...'
-        : 'To\'g\'ridan-to\'g\'ri (proksisiz) initialize sinalyapti...');
-    var ctrl = await tryInit(proxied);
+        ? 'Proksi orqali ochish sinalyapti...'
+        : 'To\'g\'ridan-to\'g\'ri (proksisiz) ochish sinalyapti...');
+    var ctrl = await _tryOpen(proxied.toString(), resumeAt: resumeAt);
     var usedProxy = viaProxy;
 
     // Mahalliy kesh-proksi orqali ishga tushmadi (server javob
@@ -319,7 +501,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     if (ctrl == null && viaProxy) {
       if (!mounted || myToken != _playToken) return;
       VideoCacheServer.log('Zaxira: asl URL bilan qayta urinilyapti...');
-      ctrl = await tryInit(Uri.parse(url));
+      ctrl = await _tryOpen(url, resumeAt: resumeAt);
       usedProxy = false;
     }
     if (ctrl != null) {
@@ -342,41 +524,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       return;
     }
 
-    // MUHIM TUZATISH ("video tugab qayta boshlanganda sek qilsam
-    // crash"): avval video oxiriga yetganda BIZ qo'lda
-    // `seekTo(0)` chaqirardik. mdk-sdk esa bu paytda ichki holati
-    // bo'yicha EOF (fayl tugadi) holatida turardi va undan keyingi
-    // sek buyruqlari yakunlanmay osilib qolardi — natijada pleyer
-    // qotardi. Endi takrorlashni PLEYERNING O'ZI bajaradi
-    // (setLooping): u ichki holatini to'g'ri tozalab, oqimni toza
-    // qayta ochadi.
-    ctrl.setLooping(true);
-
-    // ── BUFERNI CHEKLASH VA ESKISINI TASHLASH ───────────────────
-    // (foydalanuvchining taklifi — va u to'g'ri chiqdi)
-    //
-    // drop: true — mdk-sdk bufer belgilangan chegaradan oshib ketsa,
-    // ESKI (kalit bo'lmagan) kadrlarni darhol tashlab yuboradi.
-    // drop: false (standart) da esa u bufer bo'shashini KUTIB turadi
-    // — natijada sek qilinganda eski, endi keraksiz ma'lumot
-    // xotirada qolib, yangisi ustiga qo'shilib borardi va pleyer
-    // asta-sekin og'irlashib, qotib qolardi.
-    //
-    // Endi har bir sek'dan keyin xotirada faqat JORIY nuqta atrofidagi
-    // ~4 soniyalik ma'lumot qoladi, qolgani darhol tozalanadi.
-    try {
-      ctrl.setBufferRange(min: 1000, max: 4000, drop: true);
-    } catch (_) {}
-    // Timeout: pleyer bu chaqiruvlarni yakunlamasa ham ekran abadiy
-    // "yuklanmoqda" holatida osilib qolmasligi kerak.
-    if (resumeAt != null && resumeAt > Duration.zero) {
-      try {
-        await ctrl.seekTo(resumeAt).timeout(const Duration(seconds: 5));
-      } catch (_) {}
-    }
     if (resumePlaying) {
       try {
-        await ctrl.play().timeout(const Duration(seconds: 3));
+        await ctrl.play();
       } catch (_) {}
     }
     if (!mounted || myToken != _playToken) {
@@ -391,30 +541,99 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _scheduleHide();
   }
 
+  // Bitta manzil (proksi yoki asl URL)dan pleyerni ochishga urinadi.
+  // Muvaffaqiyatsiz bo'lsa (yoki 15 soniyada javob kelmasa) `null`
+  // qaytaradi — chaqiruvchi zaxira manzilga o'tishi mumkin bo'ladi.
+  //
+  // MUHIM: `prepare(position: ...)` — resumeAt shu yerda, BITTA
+  // chaqiruvda, videoni ochish bilan birga beriladi. Avvalgi
+  // arxitekturada avval video 0-sekunddan ochilib, KEYIN alohida
+  // `seekTo(resumeAt)` chaqirilardi — bu ikkinchi bosqich sifat
+  // almashtirishda yoki qayta ochishda qo'shimcha, keraksiz sek
+  // xavfini keltirib chiqarardi.
+  Future<_PlayerCtrl?> _tryOpen(String url, {Duration? resumeAt}) async {
+    final player = mdk.Player();
+    try {
+      _applyPlayerDefaults(player);
+      // Video tugagach pleyerning O'ZI qaytadan boshlaydi (native,
+      // ichki holatini to'g'ri tozalab) — Dart tomonida qo'lda
+      // seekTo(0) chaqirish shart emas.
+      player.loop = -1;
+      // ── BUFERNI CHEKLASH VA ESKISINI TASHLASH ───────────────────
+      // drop: true — mdk-sdk bufer belgilangan chegaradan oshib ketsa,
+      // ESKI (kalit bo'lmagan) kadrlarni darhol tashlab yuboradi.
+      // Shu bilan sekdan keyin xotirada faqat JORIY nuqta atrofidagi
+      // ~4 soniyalik ma'lumot qoladi.
+      try {
+        player.setBufferRange(min: 1000, max: 4000, drop: true);
+      } catch (_) {}
+      player.media = url;
+      final startMs =
+          (resumeAt != null && resumeAt > Duration.zero) ? resumeAt.inMilliseconds : 0;
+      final ret = await player
+          .prepare(position: startMs)
+          .timeout(const Duration(seconds: 15), onTimeout: () => -10);
+      if (ret < 0) {
+        VideoCacheServer.log('player.prepare() muvaffaqiyatsiz ($url): kod=$ret');
+        player.dispose();
+        return null;
+      }
+      final size = await player.textureSize
+          .timeout(const Duration(seconds: 15), onTimeout: () => null);
+      if (size == null || size.width <= 0 || size.height <= 0) {
+        VideoCacheServer.log('Video o\'lchami noma\'lum ($url)');
+        player.dispose();
+        return null;
+      }
+      final (maxW, maxH) = _textureLimits();
+      final tex = await player
+          .updateTexture(width: maxW, height: maxH, fit: true)
+          .timeout(const Duration(seconds: 15), onTimeout: () => -10);
+      if (tex < 0) {
+        VideoCacheServer.log('Tekstura yaratilmadi ($url)');
+        player.dispose();
+        return null;
+      }
+      final duration = Duration(milliseconds: player.mediaInfo.duration);
+      final aspect = size.height > 0 ? size.width / size.height : 16 / 9;
+      final ctrl = _PlayerCtrl(player);
+      ctrl.value = ctrl.value.copyWith(
+        isInitialized: true,
+        duration: duration,
+        aspectRatio: aspect > 0 ? aspect : 16 / 9,
+      );
+      return ctrl;
+    } catch (e) {
+      VideoCacheServer.log('Pleyer ochishda xato ($url): $e');
+      try {
+        player.dispose();
+      } catch (_) {}
+      return null;
+    }
+  }
+
   // ── SOG'LIQ KUZATUVCHISI (health watchdog) ────────────────────
   //
-  // NEGA TAYMER, listener EMAS.
-  //
-  // Avval bu tekshiruv `ctrl.addListener(...)` orqali ishlardi. Unda
-  // HAL QILIB BO'LMAYDIGAN kamchilik bor edi: listener FAQAT pleyer
-  // qiymati O'ZGARGANDA chaqiriladi. Pleyer video oxirida butunlay
-  // to'xtab qolsa, u boshqa hech qanday yangilanish yubormaydi —
-  // demak listener ham BOSHQA CHAQIRILMAYDI va "qotib qolgan"ligini
-  // aniqlaydigan kod hech qachon ishga tushmaydi. Aynan shuning uchun
-  // video tugagach qotib qolardi.
-  //
-  // Taymer esa pleyer holatidan MUTLAQO mustaqil ishlaydi — pleyer
-  // o'lik bo'lsa ham u ishlashda davom etadi va uni tirilta oladi.
+  // Eski arxitekturada bu taymer IKKI xil "qotish"ni kuzatishga
+  // majbur edi: (1) video OXIRIDA to'xtab qolish — endi kerak emas,
+  // chunki `player.loop = -1` (native) videoni o'zi qaytadan
+  // boshlaydi; (2) sek/ijro paytidagi umumiy qotish — sek yo'li endi
+  // HAQIQIY Future orqali o'z ichida kuzatiladi (pastga, _runSeek'ga
+  // qarang). Shu sabab bu yerda faqat ORTIQCHA, ikkalasidan ham
+  // mustaqil bo'lgan OXIRGI xavfsizlik chizig'i qoladi: agar pleyer
+  // ijro qilishi KERAK bo'lsa-yu (isPlaying, buferlanmayapti, sek
+  // navbatida emas), lekin pozitsiya bir necha soniya BUTUNLAY
+  // qotib qolsa — bu native tomon haqiqatan osilib qolganining
+  // belgisi va pleyer o'sha nuqtadan qaytadan ochiladi.
   void _startHealthWatchdog() {
     _healthTimer?.cancel();
-    _endStuckTicks = 0;
     _stuckTicks = 0;
     _lastWatchPosition = null;
-    _healthTimer = Timer.periodic(const Duration(milliseconds: 600), (_) {
+    _healthTimer = Timer.periodic(const Duration(milliseconds: 800), (_) {
       if (!mounted) return;
       final c = _controller;
       if (c == null) return;
-      final VideoPlayerValue v;
+      final _PV v;
       try {
         v = c.value;
       } catch (_) {
@@ -422,49 +641,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       }
       if (!v.isInitialized || v.duration <= Duration.zero) return;
 
-      // ── 1) VIDEO OXIRIDA to'xtab qolish (avvalgidek) ────────────
-      final remaining = v.duration - v.position;
-      final atEnd = remaining <= const Duration(milliseconds: 400);
-      if (atEnd) {
-        if (v.isPlaying) {
-          _endStuckTicks = 0;
-        } else {
-          _endStuckTicks++;
-          // ~1.2s: avval yumshoq yo'l — boshiga qaytarib, ijroni yoqamiz.
-          if (_endStuckTicks == 2) {
-            VideoCacheServer.log(
-                'Video oxirida to\'xtab qoldi — boshiga qaytarilmoqda');
-            _runSeek(c, Duration.zero, forcePlay: true);
-          }
-          // ~3s: yumshoq yo'l yordam bermadi — pleyerni BUTUNLAY
-          // qaytadan ochamiz.
-          if (_endStuckTicks >= 5) {
-            VideoCacheServer.log(
-                'Video oxirida qotib qoldi — pleyer qaytadan ochilmoqda');
-            _recoverPlayer(Duration.zero);
-          }
-        }
-        _lastWatchPosition = v.position;
-        _stuckTicks = 0;
-        return;
-      }
-      _endStuckTicks = 0;
-
-      // ── 2) UMUMIY QOTISH (sek yoki ijro paytida) ────────────────
-      //
-      // MUHIM: bu tekshiruv sek yo'lidan (`_runSeek`) MUSTAQIL —
-      // chunki u yerdagi `await`lar (yuqoridagi katta izohga qarang)
-      // hech qachon ishonchli tarzda "muvaffaqiyatsiz" bo'lmaydi.
-      // Bu yerda esa `v.position` — video_player paketining o'zi har
-      // 100ms da HAQIQIY native `getPosition()` so'rovi orqali
-      // yangilaydigan qiymat (optimistik EMAS, chunki bu davriy
-      // so'rov, sek chaqiruvidagi bir martalik "taxminiy" qiymat
-      // emas). Agar pleyer ijro qilishi yoki buferlashi KERAK bo'lsa
-      // (isPlaying yoki isBuffering yoki hozir sek navbatida turibdi),
-      // lekin pozitsiya bir necha soniya davomida BUTUNLAY
-      // o'zgarmasa — bu native tomon haqiqatan qotib qolganining
-      // ishonchli belgisi.
-      final shouldBeMoving = v.isPlaying || v.isBuffering || _seekInProgress;
+      final shouldBeMoving = v.isPlaying && !v.isBuffering && !_seekBusy;
       if (!shouldBeMoving) {
         _stuckTicks = 0;
         _lastWatchPosition = v.position;
@@ -479,10 +656,10 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       }
       _lastWatchPosition = v.position;
 
-      // ~4.2s (7 × 600ms) harakatsiz -> pleyer haqiqatan qotgan,
+      // ~6.4s (8 × 800ms) harakatsiz -> pleyer haqiqatan qotgan,
       // qaytadan ochamiz. Fayl mahalliy diskda tayyor turgani uchun
       // bu tez va internetsiz bo'ladi.
-      if (_stuckTicks >= 7) {
+      if (_stuckTicks >= 8) {
         VideoCacheServer.log(
             'Pleyer harakatsiz qotib qoldi (${v.position}) — qaytadan ochilmoqda');
         _stuckTicks = 0;
@@ -515,7 +692,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _lastRecovery = now;
     _recovering = true;
     _healthTimer?.cancel();
-    _seekInProgress = false;
+    _seekBusy = false;
     _queuedSeek = null;
     _stuckTicks = 0;
     _lastWatchPosition = null;
@@ -632,19 +809,18 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   // joriysi tugagach bir marta qo'llaniladi. Bu pleyer ichida sek
   // buyruqlari navbatga to'planib, uni qotirib qo'yishining oldini
   // oladi — foydalanuvchi qanchalik tez/ko'p sek qilsa ham.
-  bool _seekInProgress = false;
+  bool _seekBusy = false;
   Duration? _queuedSeek;
   Timer? _healthTimer;
-  int _endStuckTicks = 0;
-  // UMUMIY qotish kuzatuvi (faqat video oxiri emas): pozitsiya
-  // o'zgarmay turgan takrorlar soni va oxirgi ko'rilgan pozitsiya.
-  // _startHealthWatchdog izohiga qarang.
+  // UMUMIY qotish kuzatuvi: pozitsiya o'zgarmay turgan takrorlar soni
+  // va oxirgi ko'rilgan pozitsiya. _startHealthWatchdog izohiga qarang.
   int _stuckTicks = 0;
   Duration? _lastWatchPosition;
 
-  // Sek nuqtasini xavfsiz oraliqqa qisadi: [0 .. duration-1s].
-  // Videoning ENG OXIRIGA sek qilish mdk-sdk'ni EOF holatiga tushirib,
-  // undan keyingi barcha buyruqlarni osiltirib qo'yardi.
+  // Sek nuqtasini xavfsiz oraliqqa qisadi: [0 .. duration-1s] — video
+  // ENG OXIRIGA sek qilinishining oldini oladi (qo'shimcha xavfsizlik
+  // chegarasi; endi `player.loop = -1` EOF holatini nativeda o'zi
+  // to'g'ri boshqaradi, lekin bu qisqartirish baribir arzon va foydali).
   static Duration _clampSeekTarget(Duration t, Duration dur) {
     if (t < Duration.zero) return Duration.zero;
     if (dur <= Duration.zero) return t;
@@ -653,65 +829,34 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     return t > limit ? limit : t;
   }
 
-  // ═══════════════════════════════════════════════════════════════
-  //  MUHIM KASHFIYOT (fvp manba kodidan tasdiqlangan, HTTP'ga
-  //  umuman aloqasi yo'q — shuning uchun HTTP'ni olib tashlagandan
-  //  keyin ham sek crash davom etardi):
-  // ═══════════════════════════════════════════════════════════════
+  // Barcha sek chaqiruvlari SHU yerdan o'tadi. Bir vaqtning o'zida
+  // faqat BITTA sek bajariladi: oldingisi tugamaguncha yangisi
+  // yuborilmaydi, o'rniga eng oxirgi so'ralgan nuqta eslab qolinib,
+  // joriysi tugagach bir marta qo'llaniladi — foydalanuvchi qanchalik
+  // tez/ko'p sek qilsa ham, pleyerga faqat OXIRGI nuqta yetib boradi.
   //
-  // fvp/lib/src/video_player_mdk.dart:
-  //   Future<void> seekTo(int playerId, Duration position) async {
-  //     return _seekToWithFlags(playerId, position, ...);
-  //   }
-  //   Future<void> _seekToWithFlags(...) async {
-  //     ...
-  //     player.seek(position: ..., flags: flags);   // ← AWAIT QILINMAYDI!
-  //   }
-  //
-  // `player.seek()` o'zi ichida native javobni kutadigan Future
-  // qaytaradi, lekin `_seekToWithFlags` uni HECH QACHON await
-  // qilmaydi ("fire-and-forget") — chaqirilib, natija e'tiborsiz
-  // qoldirilib, funksiya DARHOL qaytadi.
-  //
-  // Buning ustiga video_player (rasmiy) paketining o'zi:
-  //   Future<void> seekTo(Duration position) async {
-  //     await _videoPlayerPlatform.seekTo(_playerId, position);
-  //     _updatePosition(position);   // ← pozitsiyani DARHOL, native
-  //   }                              //    javobni kutmasdan o'rnatadi!
-  //
-  // Xulosa: bizning `await c.seekTo(target)` chaqiruvimiz HAQIQIY
-  // native sek tugashini EMAS, faqat "buyruq yuborildi"ni bildiradi.
-  // `c.value.position` ham buyruqdan darhol keyin "maqsadga yetdi"
-  // deb ko'rsatadi — garchi native tomonda sek hali tugamagan yoki
-  // hatto QOTIB qolgan bo'lsa ham. Shu sabab avvalgi "timeout kutish"
-  // mantig'i HECH QACHON haqiqiy ma'noda ishlamas edi (await deyarli
-  // doim darhol "muvaffaqiyatli" qaytardi) — bu aynan HTTP'ni olib
-  // tashlagandan keyin ham sek/surish crash'i davom etishining sababi.
-  //
-  // TO'G'RI YECHIM: `c.value.isBuffering` — bu, pozitsiyadan farqli
-  // o'laroq, mdk-sdk'ning HAQIQIY (native `onMediaStatus` hodisasidan
-  // keladigan) signali (video_player_mdk.dart'dagi
-  // `onMediaStatus.listen` ga qarang). Shu sabab sekdan keyin ANIQ
-  // NATIJA sifatida ISHONCH BILAN faqat shuni kuzatish mumkin —
-  // pastdagi `_settleAfterSeek` ga qarang. Pozitsiya asosidagi
-  // "qotish" aniqlanishi esa `_startHealthWatchdog`da amalga
-  // oshiriladi (u `position` ni davriy NATIVE so'rov — `getPosition()`
-  // — orqali kuzatadi, optimistik emas).
-
-  Future<void> _runSeek(VideoPlayerController c, Duration t,
-      {bool forcePlay = false}) async {
-    if (_seekInProgress) {
+  // `mdk.Player.seek()` HAQIQIY Future qaytargani uchun (_PlayerCtrl
+  // izohiga qarang — fvp shim'idan farqli o'laroq bu "fire-and-forget"
+  // EMAS), bu navbat endi ancha sodda: har bir `await c.seekTo(...)`
+  // native sek haqiqatan tugaguncha to'xtaydi, shu sabab keyingi
+  // navbatdagi so'rov mdk-sdk'ning ichki holatini "bosib" yubormaydi.
+  // Qo'shimcha xavfsizlik: har bir sek 8 soniya timeout bilan
+  // himoyalangan — native tomon haqiqatan osilib qolsa ham (kutilmagan
+  // holat), ilova abadiy kutib qolmaydi, pleyer o'sha nuqtadan qaytadan
+  // ochiladi.
+  Future<void> _runSeek(_PlayerCtrl c, Duration t) async {
+    if (_seekBusy) {
       _queuedSeek = t;
       return;
     }
-    _seekInProgress = true;
+    _seekBusy = true;
     // MUHIM: butun tana try/finally ichida — qanday xato bo'lishidan
     // qat'i nazar bayroq ALBATTA bo'shatiladi (aks holda undan
     // keyingi BARCHA sek so'rovlari jimgina tashlab yuborilaverardi).
     try {
-      var wasPlaying = forcePlay;
+      var wasPlaying = false;
       try {
-        wasPlaying = forcePlay || c.value.isPlaying;
+        wasPlaying = c.value.isPlaying;
       } catch (_) {}
 
       var target = t;
@@ -720,15 +865,20 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       while (rounds < 24) {
         rounds++;
         try {
-          await c.seekTo(target);
+          final ret = await c
+              .seekTo(target)
+              .timeout(const Duration(seconds: 8), onTimeout: () => -10);
+          if (ret < 0) {
+            if (mounted && _controller == c) {
+              VideoCacheServer.log(
+                  'Sek muvaffaqiyatsiz (kod=$ret) — pleyer qaytadan ochilmoqda');
+              _recoverPlayer(target);
+            }
+            return;
+          }
         } catch (_) {
           // Xato — jim o'tkazamiz, ilova ishlashda davom etadi.
         }
-        // Yuqoridagi izohga qarang: bu yerda TO'XTAB, pleyer
-        // HAQIQATAN tinchlanguncha kutamiz — shundagina keyingi
-        // navbatdagi sek yuborilishi (yoki play() chaqirilishi)
-        // mdk-sdk'ning ichki holatini "bosib" yubormaydi.
-        await _settleAfterSeek(c);
 
         final next = _queuedSeek;
         _queuedSeek = null;
@@ -742,26 +892,20 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
         target = next;
       }
 
-      // MUHIM TUZATISH (videoni orqaga 00:00 ga sek qilganda qotib
-      // qolishi): mdk-sdk ba'zi hollarda — ayniqsa video BOSHIGA
-      // (0-pozitsiya) sek qilinganda — sekdan keyin ijroni o'zi qayta
-      // boshlamay, pauza holatida qolib ketardi. Shu sabab sekdan
-      // OLDIN ijro ketayotgan bo'lsa, sekdan KEYIN uni aniq
-      // (explicit) davom ettiramiz.
-      if (wasPlaying && mounted && _controller == c) {
+      // Xavfsizlik chorasi (eski "video boshiga sek qilinganda pauza
+      // holatida qolib ketish" hodisasidan saboq): sekdan OLDIN ijro
+      // ketayotgan bo'lsa-yu, sekdan KEYIN pleyer negadir pauzada
+      // qolib ketsa, uni aniq (explicit) davom ettiramiz.
+      if (wasPlaying &&
+          mounted &&
+          _controller == c &&
+          !c.value.isPlaying) {
         try {
-          await c.play().timeout(const Duration(seconds: 3));
+          await c.play();
         } catch (_) {}
       }
-      // "HAQIQATAN QOTIB QOLDIMI" tekshiruvi endi bu yerda EMAS —
-      // chunki await'lar hech qachon ishonchli tarzda "muvaffaqiyatsiz"
-      // bo'lmaydi (yuqoridagi izohga qarang). Buning o'rniga UMUMIY
-      // sog'liq kuzatuvchisi (_startHealthWatchdog) doimiy ishlab,
-      // pozitsiyaning HAQIQATAN (native so'rov orqali) qotib
-      // qolganini payqasa, pleyerni o'zi qaytadan ochadi — bu sek
-      // yo'lidan mutlaqo mustaqil va shu sabab ancha ishonchli.
     } finally {
-      _seekInProgress = false;
+      _seekBusy = false;
       // Navbatda kutib qolgan so'nggi so'rov bo'lsa, uni tashlab
       // yubormaymiz — bayroq bo'shagach bir marta qayta ishga tushiramiz.
       final pending = _queuedSeek;
@@ -769,31 +913,6 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       if (pending != null && mounted && _controller == c) {
         scheduleMicrotask(() => _runSeek(c, pending));
       }
-    }
-  }
-
-  // Sek buyrug'idan keyin pleyer TINCHLANGUNCHA (isBuffering=false)
-  // kutadi. `isBuffering` — native hodisadan keladigan HAQIQIY
-  // signal (yuqoridagi katta izohga qarang), shu sabab bu yerda
-  // ishonch bilan ishlatiladi. Eng kami ~180ms (native tomon hali
-  // ulgurmagan bo'lishi mumkin), eng ko'pi 2.5s kutiladi — shundan
-  // ortig'i uchun umumiy sog'liq kuzatuvchisi javobgar.
-  Future<void> _settleAfterSeek(VideoPlayerController c) async {
-    const floor = Duration(milliseconds: 180);
-    const maxWait = Duration(milliseconds: 2500);
-    const poll = Duration(milliseconds: 60);
-    final deadline = DateTime.now().add(maxWait);
-    await Future.delayed(floor);
-    while (DateTime.now().isBefore(deadline)) {
-      if (!mounted || _controller != c) return;
-      bool buffering;
-      try {
-        buffering = c.value.isBuffering;
-      } catch (_) {
-        return;
-      }
-      if (!buffering) return;
-      await Future.delayed(poll);
     }
   }
 
@@ -1181,7 +1300,15 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                 ? Center(
                     child: AspectRatio(
                       aspectRatio: ctrl.value.aspectRatio,
-                      child: VideoPlayer(ctrl),
+                      child: ValueListenableBuilder<int?>(
+                        valueListenable: ctrl.player.textureId,
+                        builder: (_, texId, __) {
+                          if (texId == null || texId < 0) {
+                            return const SizedBox.shrink();
+                          }
+                          return Texture(textureId: texId);
+                        },
+                      ),
                     ),
                   )
                 : const SizedBox.shrink(),
@@ -1450,7 +1577,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   Widget _bufferingReactive() {
     final ctrl = _controller;
     if (ctrl == null) return const SizedBox.shrink();
-    return ValueListenableBuilder<VideoPlayerValue>(
+    return ValueListenableBuilder<_PV>(
       valueListenable: ctrl,
       builder: (_, value, __) {
         if (!value.isBuffering) return const SizedBox.shrink();
@@ -1475,7 +1602,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
         child: _playPauseIcon(playing: false, size: size),
       );
     }
-    return ValueListenableBuilder<VideoPlayerValue>(
+    return ValueListenableBuilder<_PV>(
       valueListenable: ctrl,
       builder: (_, value, __) => GestureDetector(
         onTap: _togglePlayPause,
@@ -1508,7 +1635,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   // Faqat slayder/vaqtni eng tor ko'lamda yangilaydi.
   Widget _bottomBarReactive({required bool isFullscreen}) {
     final ctrl = _controller;
-    Widget bar(VideoPlayerValue? value) => _BottomBar(
+    Widget bar(_PV? value) => _BottomBar(
           position: value?.position ?? Duration.zero,
           duration: value?.duration ?? Duration.zero,
           fmt: _fmt,
@@ -1527,7 +1654,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
           isFullscreen: isFullscreen,
         );
     if (ctrl == null) return bar(null);
-    return ValueListenableBuilder<VideoPlayerValue>(
+    return ValueListenableBuilder<_PV>(
       valueListenable: ctrl,
       builder: (_, value, __) => bar(value),
     );

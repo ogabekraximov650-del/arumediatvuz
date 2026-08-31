@@ -5,28 +5,6 @@ import 'screens/root_screen.dart';
 import 'services/app_keys.dart';
 import 'services/rust_bridge.dart';
 
-// ═══════════════════════════════════════════════════════════════════
-//  PLEYER (mdk-sdk) SOZLAMALARI
-// ═══════════════════════════════════════════════════════════════════
-const Map<String, String> _playerOpts = {
-  // ── Bufer: 1s..5s, 8 ta bayt-oralig'i ────────────────────────────
-  // TARIX (saboq): bir bosqichda buni 0.5s..2s va 2 oraliqqa
-  // tushirgan edim — natija TESKARI bo'ldi. Kichik bufer bilan
-  // mdk-sdk uni doim tugatib, har safar yangi so'rov yuborardi;
-  // orqaga sek qilinganda esa yaqinda o'qilgan oraliqlar allaqachon
-  // tashlangani uchun hammasi qaytadan o'qilardi. Asl muammo buferda
-  // emas, serverda edi (video_cache.rs, `contiguous_cached_end`).
-  'buffer.range': '1000+5000',
-  'demux.buffer.ranges': '8',
-
-  // ── Format aniqlash ─────────────────────────────────────────────
-  // Standart qiymatlar (~5 MB / ~5s) bilan pleyer deyarli butun
-  // videoni o'qib bo'lmaguncha initialize() ni yakunlay olmasdi.
-  // Bir bo'lak hajmi (1 MiB) formatni aniqlash uchun yetarli.
-  'avformat.probesize': '1048576',
-  'avformat.analyzeduration': '1000000',
-};
-
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
@@ -42,20 +20,19 @@ Future<void> main() async {
   ));
   SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
 
-  // ── Tekstura o'lchamini ekran bilan cheklash ────────────────────
-  // mdk standart holatda videoning TO'LIQ o'lchamidagi tekstura
-  // yaratadi. Ekranda baribir shundan ko'p piksel ko'rsatilmaydi,
-  // ya'ni ortiqcha xotira va GPU ishi bekorga ketardi.
-  final view = WidgetsBinding.instance.platformDispatcher.views.first;
-  final screen = view.physicalSize;
-  final maxSide = screen.longestSide.round().clamp(720, 3840);
-  final minSide = screen.shortestSide.round().clamp(480, 2160);
-
+  // ── mdk-sdk global sozlamalari (litsenziya kaliti, log handler,
+  // subtitr shrifti va h.k.) shu chaqiruv orqali o'rnatiladi ──────
+  //
+  // MUHIM: video pleyer boshqaruvi endi `package:fvp/mdk.dart`ning
+  // past-darajali `Player` API'si orqali TO'G'RIDAN-TO'G'RI amalga
+  // oshiriladi (lib/screens/video_player_screen.dart) — video_player
+  // paketi va fvp'ning shim qatlami (`registerVideoPlayerPlatformsWith`
+  // orqali yaratiladigan `VideoPlayerController`) ENDI ISHLATILMAYDI.
+  // Shunga qaramay, `fvp.registerWith()` chaqiruvi SAQLANADI: u
+  // mdk-sdk litsenziya kalitini (MDK_KEY) va boshqa global
+  // sozlamalarni o'rnatadi — bu jarayonli-global holat bo'lib, har
+  // qanday `mdk.Player` obyekti uchun amal qiladi.
   fvp.registerWith(options: {
-    'fastSeek': true,
-    'maxWidth': maxSide,
-    'maxHeight': minSide,
-    'player': _playerOpts,
     'global': {'cache.disk.io': 0},
   });
 
