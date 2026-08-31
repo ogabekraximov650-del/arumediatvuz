@@ -89,17 +89,6 @@ const MAX_CONNS: usize = 64;
 const MAX_SCAN_CHUNKS: u64 = 2600;
 
 fn contiguous_cached_end(dir: &PathBuf, start: u64, end: u64, total: u64) -> u64 {
-    // To'liq fayl mavjud — butun so'ralgan oraliq keshda bor. LEKIN
-    // baribir MAX_SCAN_CHUNKS*CHUNK_SIZE bilan cheklanadi: aks holda
-    // pleyer "bytes=X-" (oxirigacha) kabi ochiq so'rov yuborsa, katta
-    // (masalan bir necha GB) faylning QOLGAN HAMMASINI BITTA javobda,
-    // BITTA ish oqimida, TO'XTOVSIZ yuborishga urinardik — bu javob
-    // tugaguncha o'sha ulanish (va ish oqimi) band bo'lib qolardi.
-    if full_is_complete(dir, total) {
-        let budget = MAX_SCAN_CHUNKS.saturating_mul(CHUNK_SIZE);
-        let budget_end = start.saturating_add(budget).saturating_sub(1);
-        return end.min(budget_end);
-    }
     let chunk_count = total.div_ceil(CHUNK_SIZE);
     let first = start / CHUNK_SIZE;
     let last_wanted = (end / CHUNK_SIZE).min(first + MAX_SCAN_CHUNKS - 1);
@@ -325,64 +314,6 @@ pub extern "C" fn rust_video_cache_start(cache_dir_ptr: *const c_char) -> i32 {
 /// Keshdan o'qilgan bo'laklar bunga KIRMAYDI — shu sabab bu son
 /// o'smay tursa, video uchun tarmoqqa umuman chiqilmayotgani aniq
 /// bo'ladi. Ekrandagi diagnostika paneli buni doimiy ko'rsatib turadi.
-/// Berilgan video uchun DISKDAGI TO'LIQ FAYL yo'lini qaytaradi
-/// (agar hamma bo'lak yuklab bo'lingan bo'lsa). Aks holda bo'sh satr.
-///
-/// MUHIM: bu funksiya TARMOQQA UMUMAN CHIQMAYDI — faqat diskdagi
-/// meta.json va bo'lak fayllariga qaraydi. Pleyer (Dart tomoni) shu
-/// yo'lni olsa, videoni HTTP'siz, to'g'ridan-to'g'ri fayldan
-/// o'ynatadi: hech qanday ulanish, hech qanday timeout, sek esa
-/// oddiy fayl ichida siljish — ya'ni bir zumda va xatosiz.
-#[no_mangle]
-pub extern "C" fn rust_video_cache_local_file(url_ptr: *const c_char) -> *mut c_char {
-    let url = match unsafe { cstr_to_str(url_ptr) } {
-        Some(u) => u,
-        None => return string_to_cptr(String::new()),
-    };
-    let shared = match SHARED.get() {
-        Some(s) => s,
-        None => return string_to_cptr(String::new()),
-    };
-    let dir = shared.cache_root.join(cache_key(url));
-    // meta.json faqat DISKDAN — tarmoqqa chiqmaymiz.
-    let total = fs::read_to_string(dir.join("meta.json"))
-        .ok()
-        .and_then(|raw| serde_json::from_str::<CacheMeta>(&raw).ok())
-        .map(|m| m.total_size)
-        .unwrap_or(0);
-    if total == 0 {
-        return string_to_cptr(String::new());
-    }
-    if try_assemble_full(&dir, total) {
-        let p = full_file_path(&dir).to_string_lossy().to_string();
-        // Shifrlangan bo'lsa, pleyer (FFmpeg "crypto:" protokoli) uchun
-        // kalit va IV ham qaytariladi. Ular DISKKA YOZILMAYDI —
-        // har safar asosiy kalitdan qaytadan hisoblanadi va faqat
-        // xotirada, pleyerga uzatish uchun ishlatiladi.
-        let (key_hex, iv_hex) = if crypto::is_enabled() {
-            let label = dir
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            match crypto::derive_video_key_iv(&label) {
-                Some((k, iv)) => (hex::encode(k), hex::encode(iv)),
-                None => (String::new(), String::new()),
-            }
-        } else {
-            (String::new(), String::new())
-        };
-        log(format!("Mahalliy to'liq fayl topildi — HTTP'siz ijro (shifrlangan={})", crypto::is_enabled()));
-        let json = serde_json::json!({
-            "path": p,
-            "key": key_hex,
-            "iv": iv_hex,
-            "encrypted": crypto::is_enabled(),
-        });
-        return string_to_cptr(json.to_string());
-    }
-    string_to_cptr(String::new())
-}
-
 #[no_mangle]
 pub extern "C" fn rust_video_cache_net_bytes() -> u64 {
     NET_BYTES.load(Ordering::Relaxed)
@@ -634,343 +565,26 @@ fn hash_url(url: &str) -> String {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-//  TO'LIQ FAYL ("full.bin") — HTTP QATLAMINI BUTUNLAY CHETLAB O'TISH
+//  MUHIM: bitta "full.enc" faylga yig'ish OLIB TASHLANDI.
 // ═══════════════════════════════════════════════════════════════════
 //
-// NEGA BU ENG MUHIM O'ZGARISH.
-//
-// Server tomonini ancha yaxshiladik (bitta uzun javob, tez jurnal,
-// parallel ulanishlar) va u endi testlarda 300 marta "sek bo'roni"ga
-// ham bardosh beradi. Lekin haqiqiy qurilmada pleyer HALI HAM qotardi.
-// Sabab endi bizning serverimizda emas — mdk-sdk/FFmpeg'ning HTTP
-// manbadan TEZ-TEZ SEK QILISHNI qanday bajarishida. Har bir sek:
-// eski TCP ulanishni uzish, yangisini ochish, sarlavhalarni almashish,
-// demuxer'ni qaytadan sozlash. Bularning har biri xato qilishi mumkin
-// bo'lgan nuqta.
-//
-// YECHIM: fayl to'liq yuklab bo'lingach, bo'laklarni BITTA oddiy
-// faylga yig'amiz va pleyerga to'g'ridan-to'g'ri SHU FAYLNI beramiz
-// (file:// — HTTP emas). Shunda:
-//
-//   * hech qanday TCP ulanish yo'q;
-//   * sek — bu shunchaki fayl ichida `seek()`, millisekundlarda;
-//   * uzilish, timeout, qayta ulanish degan tushunchalarning O'ZI yo'q.
-//
-// Bu aynan YouTube'ning yuklab olingan videoni ko'rsatish usuli va
-// Telegram'ning FileStreamLoadOperation'i bilan bir xil g'oya.
-//
-// Disk sarfi oshmaydi: to'liq fayl yaratilgach, bo'lak fayllari
-// O'CHIRILADI. Yuklab olish jarayonida esa bo'laklar saqlanadi —
-// internet uzilsa, qayta boshlamasdan davom ettirish uchun.
-//
-// KELAJAK (AES): bo'lak-darajasidagi shifrlash joriy qilinganda bu
-// yo'l qayta ko'rib chiqiladi — shifrlangan faylni pleyer to'g'ridan
-// o'qiy olmaydi, o'shanda yana HTTP proksi kerak bo'ladi.
-const FULL_NAME: &str = "full.bin";
-const FULL_ENC_NAME: &str = "full.enc";
-
-/// SHIFRLANGAN va OCHIQ to'liq fayl ATAYLAB turli nomda saqlanadi.
-/// Shu bilan kalit yo'qolgan yoki shifrlash o'chirilgan holatda
-/// shifrlangan faylni xato ravishda "ochiq" deb o'qib yuborish
-/// mumkin emas.
-/// Vaqtinchalik fayl nomlari uchun noyob qo'shimcha.
-fn unique_suffix() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0)
-}
-
-fn full_file_path(dir: &PathBuf) -> PathBuf {
-    if crypto::is_enabled() {
-        dir.join(FULL_ENC_NAME)
-    } else {
-        dir.join(FULL_NAME)
-    }
-}
-
-/// To'liq fayl mavjud va hajmi to'g'rimi?
-///
-/// Shifrlangan holatda hajm PKCS7 to'ldirishi sabab asl hajmdan
-/// katta bo'ladi — shuni hisobga olamiz.
-fn full_is_complete(dir: &PathBuf, total: u64) -> bool {
-    if total == 0 {
-        return false;
-    }
-    let expected = if crypto::is_enabled() {
-        crypto::encrypted_size(total)
-    } else {
-        total
-    };
-    fs::metadata(full_file_path(dir))
-        .map(|m| m.len() == expected)
-        .unwrap_or(false)
-}
-
-/// Barcha bo'laklar joyida bo'lsa, ularni BITTA faylga yig'adi va
-/// bo'lak fayllarini o'chiradi. Muvaffaqiyatli bo'lsa `true`.
-///
-/// Yozish avval `.tmp` ga, keyin ATOM `rename` bilan yakuniy nomga —
-/// shu sabab jarayon o'rtada uzilsa ham yarim fayl "to'liq" deb
-/// qabul qilinmaydi.
-/// Hozir yig'ilayotgan papkalar. Ikki oqim BIR VAQTDA bitta faylni
-/// yig'ishga urinmasligi uchun.
-///
-/// BU HIMOYA TEST BILAN TOPILDI: oldindan yuklash oqimi faylni
-/// yig'ayotganda, foydalanuvchi o'sha videoni ochsa,
-/// `rust_video_cache_local_file` ham yig'ishni boshlardi. Ikkalasi
-/// BIR XIL vaqtinchalik faylga yozib, natijada CHALA fayl paydo
-/// bo'lardi ("to'liq" deb belgilangan, lekin qismi yo'q) — video
-/// buzilib ko'rinardi.
-static ASSEMBLING: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
-
-fn assembling_set() -> &'static Mutex<HashSet<PathBuf>> {
-    ASSEMBLING.get_or_init(|| Mutex::new(HashSet::new()))
-}
-
-fn try_assemble_full(dir: &PathBuf, total: u64) -> bool {
-    if total == 0 {
-        return false;
-    }
-    // Boshqa oqim shu papkani yig'ayotgan bo'lsa — aralashmaymiz.
-    {
-        let mut set = assembling_set().lock().unwrap();
-        if !set.insert(dir.clone()) {
-            return full_is_complete(dir, total);
-        }
-    }
-    let result = assemble_full_inner(dir, total);
-    assembling_set().lock().unwrap().remove(dir);
-    result
-}
-
-fn assemble_full_inner(dir: &PathBuf, total: u64) -> bool {
-    // Ilova yig'ish o'rtasida o'ldirilgan bo'lsa, papkada "yetim"
-    // .tmp fayl qolishi mumkin. Qulf sabab bu yerda faqat BIZ
-    // ishlayapmiz, ya'ni ularni xavfsiz o'chirsa bo'ladi.
-    if let Ok(entries) = fs::read_dir(dir) {
-        for e in entries.flatten() {
-            if e.file_name().to_string_lossy().ends_with(".tmp") {
-                let _ = fs::remove_file(e.path());
-            }
-        }
-    }
-    if full_is_complete(dir, total) {
-        return true;
-    }
-    // ── MIGRATSIYA ────────────────────────────────────────────────
-    // Shifrlash YOQILGANIDAN OLDIN yig'ilgan ochiq `full.bin` bo'lishi
-    // mumkin. Bo'lak fayllari o'sha paytda o'chirilgan, ya'ni uni
-    // qaytadan yig'ib bo'lmaydi. Agar buni hisobga olmasak, ilova
-    // butun videoni internetdan QAYTA yuklab olardi.
-    // Shu sabab mavjud ochiq faylni JOYIDA shifrlab, yangi nomga
-    // o'tkazamiz — foydalanuvchi hech narsa yo'qotmaydi.
-    if crypto::is_enabled() && migrate_plain_to_encrypted(dir, total) {
-        return true;
-    }
-    let chunk_count = total.div_ceil(CHUNK_SIZE);
-    // Avval HAMMA bo'lak joyidami — tekshiramiz (arzon, faqat metadata).
-    for i in 0..chunk_count {
-        let cs = i * CHUNK_SIZE;
-        let ce = (cs + CHUNK_SIZE - 1).min(total - 1);
-        let expected = chunk_on_disk_len(ce - cs + 1);
-        match fs::metadata(dir.join(chunk_name(i))) {
-            Ok(m) if m.len() == expected => {}
-            _ => return false,
-        }
-    }
-
-    // Vaqtinchalik nom NOYOB — kutilmagan holatda ham ikki yozuvchi
-    // bir xil faylga tushib qolmasligi uchun (bo'lak fayllarida ham
-    // xuddi shunday qilingan).
-    let tmp = dir.join(format!("{FULL_NAME}.{}.tmp", unique_suffix()));
-    let mut out = match fs::File::create(&tmp) {
-        Ok(f) => f,
-        Err(e) => {
-            log(format!("To'liq faylni yaratib bo'lmadi: {e}"));
-            return false;
-        }
-    };
-
-    // Shifrlash yoqilgan bo'lsa — OQIM bilan shifrlaymiz. Butun fayl
-    // hech qachon xotiraga yuklanmaydi: bo'lak o'qiladi, shifrlanadi,
-    // yoziladi va tashlanadi. Shu sabab 1 GB'lik film ham xotirani
-    // to'ldirmaydi.
-    let label = dir
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let mut encryptor = if crypto::is_enabled() {
-        match crypto::derive_video_key_iv(&label) {
-            Some((k, iv)) => Some(crypto::VideoEncryptor::new(&k, &iv)),
-            None => {
-                let _ = fs::remove_file(&tmp);
-                return false;
-            }
-        }
-    } else {
-        None
-    };
-
-    for i in 0..chunk_count {
-        match fs::read(dir.join(chunk_name(i))) {
-            Ok(raw) => {
-                // Bo'lak fayllari diskda MUSTAQIL shifrlangan (har biri
-                // o'z kaliti bilan, crypto.rs'ga qarang) — to'liq fayl
-                // esa BITTA umumiy CBC zanjiri, shu sabab avval har bir
-                // bo'lakni o'z holicha ochamiz, keyin qaytadan (butun
-                // fayl kaliti bilan) uzluksiz shifrlaymiz.
-                let bytes = if crypto::is_enabled() {
-                    match crypto::derive_chunk_key_iv(&label, i)
-                        .and_then(|(k, iv)| crypto::decrypt_chunk(&raw, &k, &iv))
-                    {
-                        Some(p) => p,
-                        None => {
-                            let _ = fs::remove_file(&tmp);
-                            return false;
-                        }
-                    }
-                } else {
-                    raw
-                };
-                let piece = match encryptor.as_mut() {
-                    Some(e) => e.update(&bytes),
-                    None => bytes,
-                };
-                if !piece.is_empty() && out.write_all(&piece).is_err() {
-                    let _ = fs::remove_file(&tmp);
-                    return false;
-                }
-            }
-            Err(_) => {
-                let _ = fs::remove_file(&tmp);
-                return false;
-            }
-        }
-    }
-    if let Some(e) = encryptor {
-        if out.write_all(&e.finish()).is_err() {
-            let _ = fs::remove_file(&tmp);
-            return false;
-        }
-    }
-    drop(out);
-    if fs::rename(&tmp, full_file_path(dir)).is_err() {
-        let _ = fs::remove_file(&tmp);
-        return false;
-    }
-    // Endi bo'laklar keraksiz — disk sarfi ikki barobar bo'lmasligi
-    // uchun o'chiriladi.
-    for i in 0..chunk_count {
-        let _ = fs::remove_file(dir.join(chunk_name(i)));
-    }
-    log(format!(
-        "TO'LIQ FAYL yig'ildi ({total} bayt, shifrlangan={}) — pleyer uni HTTP'siz o'qiydi",
-        crypto::is_enabled()
-    ));
-    true
-}
-
-/// Ochiq `full.bin` ni shifrlab `full.enc` ga o'tkazadi va eskisini
-/// o'chiradi. Oqim bilan ishlaydi — katta fayl xotiraga sig'masligi
-/// mumkin.
-fn migrate_plain_to_encrypted(dir: &PathBuf, total: u64) -> bool {
-    let plain_path = dir.join(FULL_NAME);
-    match fs::metadata(&plain_path) {
-        Ok(m) if m.len() == total => {}
-        _ => return false,
-    }
-    let label = match dir.file_name() {
-        Some(n) => n.to_string_lossy().to_string(),
-        None => return false,
-    };
-    let (key, iv) = match crypto::derive_video_key_iv(&label) {
-        Some(v) => v,
-        None => return false,
-    };
-    let mut input = match fs::File::open(&plain_path) {
-        Ok(f) => f,
-        Err(_) => return false,
-    };
-    let tmp = dir.join(format!("{FULL_ENC_NAME}.{}.tmp", unique_suffix()));
-    let mut out = match fs::File::create(&tmp) {
-        Ok(f) => f,
-        Err(_) => return false,
-    };
-    let mut enc = crypto::VideoEncryptor::new(&key, &iv);
-    let mut buf = vec![0u8; 1024 * 1024];
-    loop {
-        match input.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                let piece = enc.update(&buf[..n]);
-                if !piece.is_empty() && out.write_all(&piece).is_err() {
-                    let _ = fs::remove_file(&tmp);
-                    return false;
-                }
-            }
-            Err(_) => {
-                let _ = fs::remove_file(&tmp);
-                return false;
-            }
-        }
-    }
-    if out.write_all(&enc.finish()).is_err() {
-        let _ = fs::remove_file(&tmp);
-        return false;
-    }
-    drop(out);
-    drop(input);
-    if fs::rename(&tmp, dir.join(FULL_ENC_NAME)).is_err() {
-        let _ = fs::remove_file(&tmp);
-        return false;
-    }
-    let _ = fs::remove_file(&plain_path);
-    log("Mavjud ochiq fayl shifrlangan holatga o'tkazildi".to_string());
-    true
-}
-
-/// To'liq fayldan kerakli bo'lakni o'qiydi (HTTP yo'li uchun zaxira:
-/// bo'laklar o'chirilgan, lekin kimdir baribir Range so'rov yuborsa).
-fn read_from_full(dir: &PathBuf, start: u64, len: usize, total: u64) -> Option<Vec<u8>> {
-    use std::io::{Seek, SeekFrom};
-    let path = full_file_path(dir);
-    if !crypto::is_enabled() {
-        let mut f = fs::File::open(path).ok()?;
-        f.seek(SeekFrom::Start(start)).ok()?;
-        let mut buf = vec![0u8; len];
-        f.read_exact(&mut buf).ok()?;
-        return Some(buf);
-    }
-
-    // ── SHIFRLANGAN: kerakli qismni ochamiz ────────────────────────
-    // Bu zaxira yo'l — odatda pleyer faylni FFmpeg'ning "crypto:"
-    // protokoli orqali O'ZI ochadi va bu yerga umuman kelmaydi. Lekin
-    // biror sababdan mahalliy HTTP proksi ishlatilsa, baytlarni biz
-    // ochib beramiz.
-    //
-    // CBC'da N-blokni ochish uchun (N-1)-blok kerak, shu sabab
-    // kerakli joydan bitta blok OLDINDAN o'qiymiz.
-    let label = dir.file_name().map(|n| n.to_string_lossy().to_string())?;
-    let (key, iv) = crypto::derive_video_key_iv(&label)?;
-    let block_start = (start / 16) * 16;
-    let read_from = block_start.saturating_sub(if block_start == 0 { 0 } else { 16 });
-    let want_end = (start + len as u64).min(total);
-    let block_end = ((want_end + 15) / 16) * 16;
-    let enc_total = crypto::encrypted_size(total);
-    let read_to = if block_end >= total { enc_total } else { block_end };
-
-    let mut f = fs::File::open(path).ok()?;
-    f.seek(SeekFrom::Start(read_from)).ok()?;
-    let mut raw = vec![0u8; (read_to - read_from) as usize];
-    f.read_exact(&mut raw).ok()?;
-
-    // decrypt_video_range butun fayl bo'yicha ofsetlar bilan ishlaydi,
-    // shu sabab o'qilgan qismni to'g'ri joyga qo'yamiz.
-    let mut window = vec![0u8; read_from as usize];
-    window.extend_from_slice(&raw);
-    crypto::decrypt_video_range(&window, &key, &iv, start, len, total)
-}
+// Avval video to'liq yuklab bo'lingach barcha bo'laklar BITTA uzun
+// faylga (full.enc) qayta shifrlanib yig'ilardi. Bu ikki sabab bilan
+// ORTIQCHA edi:
+//   1) Pleyer bu faylni HECH QACHON to'g'ridan-to'g'ri (HTTP'siz)
+//      o'qimaydi — hozirgi arxitekturada u DOIM mahalliy HTTP
+//      proksi orqali ishlaydi (video_player_screen.dart), full.enc
+//      esa faqat proksi orqali, kerakli bo'lakni kesib xizmat
+//      qilinardi — ya'ni bo'lak fayllaridan farqi yo'q edi.
+//   2) `contiguous_cached_end` allaqachon bir nechta KESHDAGI bo'lakni
+//      BITTA javobga birlashtiradi (MAX_SCAN_CHUNKS gacha) — demak
+//      "bitta uzun javob" foydasi bo'lak fayllarining o'zidayoq bor.
+// Bularning ustiga, hamma bo'lakni qayta ochib-yopib BITTA faylga
+// yig'ish qo'shimcha CPU/xotira sarflardi va o'zi murakkab poyga
+// holatlariga (fon to'ldiruvchisi bilan) sabab bo'lardi. Endi HAR BIR
+// bo'lak doimiy ravishda o'z holicha (mustaqil shifrlangan) saqlanadi
+// — sek qilinganda ham, ketma-ket ijroda ham xizmat aynan shu bo'lak
+// fayllaridan ko'rsatiladi.
 
 fn chunk_name(index: u64) -> String {
     format!("chunk_{index:07}.bin")
@@ -1106,14 +720,6 @@ fn read_or_fetch_chunk(
     expected_total: u64,
 ) -> Result<Vec<u8>, String> {
     let expected_len = (end - start + 1) as usize;
-    // To'liq fayl yig'ilgan bo'lsa (bo'laklar o'chirilgan) — undan
-    // o'qiymiz.
-    if full_is_complete(dir, expected_total) {
-        if let Some(bytes) = read_from_full(dir, start, expected_len, expected_total) {
-            log(format!("Bo'lak #{index} TO'LIQ FAYLDAN o'qildi (tarmoqsiz)"));
-            return Ok(bytes);
-        }
-    }
     if let Some(bytes) = read_cached_chunk(dir, key, index, expected_len) {
         // MUHIM (diagnostika): diskdan o'qilgan bo'lak uchun TARMOQQA
         // umuman chiqilmaydi. Bu log ekranda ko'rinib turishi kerak —
@@ -1308,17 +914,7 @@ fn fetch_and_store_chunk(
                     .unwrap_or(0)
             ));
             fs::write(&tmp_path, &on_disk).map_err(|e| e.to_string())?;
-            // MUHIM (musobaqa holati): shu bo'lak yuklanib turgan payt
-            // fon yig'uvchisi (assemble_full_inner) ALLAQACHON butun
-            // faylni (full.enc) yig'ib, bo'lak fayllarini o'chirgan
-            // bo'lishi mumkin. Bunday holda bu bo'lakni endi diskka
-            // YOZMAYMIZ — u ORTIQCHA (full.enc allaqachon hammasini
-            // o'z ichiga oladi) va uni yozish "o'chirilgan bo'lakni
-            // tiriltirib qo'yish" (disk sarfini behuda oshirish)
-            // bo'lardi.
-            if full_is_complete(dir, expected_total) {
-                let _ = fs::remove_file(&tmp_path);
-            } else if fs::rename(&tmp_path, &final_path).is_err() {
+            if fs::rename(&tmp_path, &final_path).is_err() {
                 let _ = fs::remove_file(&tmp_path);
             }
         }
@@ -1418,7 +1014,7 @@ fn maybe_prefetch(
 
                 // Diskda bor bo'lsa — TARMOQQA UMUMAN CHIQILMAYDI.
                 if let Ok(m) = fs::metadata(dir2.join(chunk_name(i))) {
-                    if m.len() as usize == expected_len {
+                    if m.len() == chunk_on_disk_len(expected_len as u64) {
                         continue;
                     }
                 }
@@ -1433,10 +1029,6 @@ fn maybe_prefetch(
 
             // ESHIK YOPILDI — pleyer navbatdagi bo'lakka o'tmaguncha
             // server endi hech narsa so'ramaydi.
-            // Oyna tugadi — hamma bo'lak yig'ilgan bo'lsa, ularni
-            // BITTA faylga birlashtiramiz. Keyingi ochilishda pleyer
-            // HTTP'siz, to'g'ridan-to'g'ri shu fayldan o'ynaydi.
-            try_assemble_full(&dir2, total);
             shared.prefetch_active.store(false, Ordering::SeqCst);
         });
 
@@ -1807,61 +1399,7 @@ mod tests {
             assert_eq!(st, 206, "parallel ulanish #{i} rad etildi");
         }
 
-        // ── 7) SHIFRLANGAN TO'LIQ FAYL orqali xizmat ko'rsatish ───
-        // Bu ZAXIRA yo'l: odatda pleyer shifrni "crypto:" protokoli
-        // bilan o'zi ochadi va bu yerga kelmaydi. Ammo agar u
-        // qurilmada ishlamasa, biz baytlarni O'ZIMIZ ochib berishimiz
-        // kerak — va ular asl ma'lumot bilan AYNAN bir xil bo'lishi
-        // shart.
-        let cache_dir = root.join("video_byte_cache").join(TEST_NAME);
-        // Fon oqimi hozir yig'ayotgan bo'lishi mumkin — qulf sabab
-        // bizning chaqiruvimiz "hali tayyor emas" deb qaytadi. Bu
-        // TO'G'RI xatti-harakat (ishlab chiqarishda ham shunday:
-        // o'sha safar HTTP yo'lidan o'ynatiladi, keyingisida fayldan).
-        // Testda esa tugashini kutamiz.
-        let mut ready = false;
-        for _ in 0..100 {
-            if try_assemble_full(&cache_dir, TEST_TOTAL) {
-                ready = true;
-                break;
-            }
-            thread::sleep(Duration::from_millis(50));
-        }
-        assert!(ready, "to'liq fayl yig'ilmadi");
-        assert!(
-            cache_dir.join("full.enc").exists(),
-            "fayl shifrlangan holatda saqlanmadi"
-        );
-        assert!(
-            !cache_dir.join(chunk_name(0)).exists(),
-            "bo'laklar o'chirilmagan"
-        );
-
-        for (start, len) in [
-            (0u64, 4096usize),
-            (1, 33),                       // blok chegarasiga tushmaydi
-            (CHUNK_SIZE, 65_536),          // bo'lak chegarasi
-            (5_000_001, 100_000),
-            (TEST_TOTAL - 10, 10),         // eng oxiri
-        ] {
-            let (st, _, got_len, body) = request(
-                port,
-                Some(&format!("bytes={}-{}", start, start + len as u64 - 1)),
-                None,
-            );
-            assert_eq!(st, 206, "shifrlangan fayldan so'rov ({start}+{len})");
-            assert_eq!(got_len, len, "uzunlik mos emas ({start}+{len})");
-            for (i, b) in body.iter().enumerate() {
-                let pos = start as usize + i;
-                assert_eq!(
-                    *b,
-                    (pos % 251) as u8,
-                    "shifr ochishda XATO: bayt {pos} noto'g'ri"
-                );
-            }
-        }
-
-        // ── 8) Suffiks so'rov: "bytes=-N" (fayl oxiridan N bayt) ───
+        // ── 7) Suffiks so'rov: "bytes=-N" (fayl oxiridan N bayt) ───
         let (status, cr, len, _) = request(port, Some("bytes=-1000"), None);
         assert_eq!(status, 206);
         assert_eq!(
@@ -1871,60 +1409,6 @@ mod tests {
         assert_eq!(len, 1000);
 
         let _ = fs::remove_dir_all(&root);
-    }
-
-    /// Hamma bo'lak joyida bo'lsa, ular BITTA faylga yig'ilishi va
-    /// bo'lak fayllari o'chirilishi kerak (disk ikki barobar
-    /// egallanmasligi uchun). Undan keyin o'qish shu fayldan boradi.
-    #[test]
-    fn toliq_fayl_yigiladi_va_bolaklar_ochiriladi() {
-        enable_crypto();
-        let dir = std::env::temp_dir().join("vc_full_test");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        let chunks = TEST_TOTAL.div_ceil(CHUNK_SIZE);
-        // assemble_full_inner bo'lak kalitini papka NOMIDAN hosil qiladi
-        // (dir.file_name()) — testda ham shu yorliq bilan shifrlaymiz.
-        let label = dir.file_name().unwrap().to_string_lossy().to_string();
-
-        // Bitta bo'lak yetishmasa — yig'ilmasligi kerak.
-        for i in 1..chunks {
-            let cs = i * CHUNK_SIZE;
-            let ce = (cs + CHUNK_SIZE - 1).min(TEST_TOTAL - 1);
-            let plain = vec![7u8; (ce - cs + 1) as usize];
-            let (k, iv) = crypto::derive_chunk_key_iv(&label, i).unwrap();
-            fs::write(dir.join(chunk_name(i)), crypto::encrypt_chunk(&plain, &k, &iv)).unwrap();
-        }
-        assert!(!try_assemble_full(&dir, TEST_TOTAL), "chala keshda yig'ilmasligi kerak");
-        assert!(!full_is_complete(&dir, TEST_TOTAL));
-
-        // Yetishmayotgan bo'lak qo'shilgach — yig'ilishi kerak.
-        let data0: Vec<u8> = (0..CHUNK_SIZE as usize).map(|k| (k % 251) as u8).collect();
-        let (k0, iv0) = crypto::derive_chunk_key_iv(&label, 0).unwrap();
-        fs::write(dir.join(chunk_name(0)), crypto::encrypt_chunk(&data0, &k0, &iv0)).unwrap();
-        assert!(try_assemble_full(&dir, TEST_TOTAL), "to'liq keshda yig'ilishi kerak");
-        assert!(full_is_complete(&dir, TEST_TOTAL));
-        // Shifrlangan fayl PKCS7 to'ldirishi sabab asl hajmdan katta.
-        assert_eq!(
-            fs::metadata(full_file_path(&dir)).unwrap().len(),
-            crypto::encrypted_size(TEST_TOTAL)
-        );
-        assert!(full_file_path(&dir).to_string_lossy().ends_with(".enc"));
-        // Bo'lak fayllari o'chirilgan bo'lishi kerak.
-        for i in 0..chunks {
-            assert!(
-                !dir.join(chunk_name(i)).exists(),
-                "bo'lak #{i} o'chirilmagan — disk ikki barobar egallanadi"
-            );
-        }
-        // To'liq fayldan o'qish to'g'ri joydan kelishi kerak.
-        let part = read_from_full(&dir, 100, 16, TEST_TOTAL).unwrap();
-        assert_eq!(part[0], 100u8 % 251);
-        assert_eq!(part[15], 115u8 % 251);
-        // Ikkinchi chaqiruv ham `true` (allaqachon tayyor).
-        assert!(try_assemble_full(&dir, TEST_TOTAL));
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Bo'lak yetishmasa, javob AYNAN o'sha bo'shliqda tugashi kerak —
