@@ -85,24 +85,19 @@ struct Shared {
     // to'ldiruvchi ish oqimi bo'ladi va u shu yerdagi vazifani bajaradi;
     // boshqa video ochilsa, vazifa almashadi va eski video uchun
     // yuklash DARHOL to'xtaydi.
-    filler_job: Mutex<Option<FillerJob>>,
-    filler_running: AtomicBool,
-    // Pleyer hozir qaysi bo'lakni ijro etayotgani (taxminan) — oldindan
-    // yuklash oynasi aynan shu nuqtadan boshlanadi.
-    filler_pos: AtomicU64,
+    // Hozir ochilgan video kaliti. Boshqa video ochilsa, eski video
+    // uchun ishlayotgan oldindan-yuklash DARHOL to'xtaydi.
+    active_key: Mutex<String>,
+    // "ESHIK": bir vaqtda faqat BITTA oldindan-yuklash ish oqimi
+    // bo'lishini ta'minlaydi. Ish tugashi bilan eshik yopiladi va
+    // server yana hech narsa so'ray olmaydi — toki pleyer navbatdagi
+    // bo'lakka o'tib, eshikni qayta ochmaguncha.
+    prefetch_active: AtomicBool,
     // Har bir FAYL uchun alohida tarmoq hisobi: kalit — B2'dagi fayl
     // nomi (masalan "ep_1_2_720p_1788029552837.mp4"), qiymat — shu fayl
     // uchun TARMOQDAN olingan umumiy bayt. Shu bilan "MB aynan qaysi
     // faylga ketyapti" degan savolga aniq javob beriladi.
     net_by_file: Mutex<HashMap<String, u64>>,
-}
-
-#[derive(Clone)]
-struct FillerJob {
-    key: String,
-    dir: PathBuf,
-    url: String,
-    total: u64,
 }
 
 static SHARED: OnceLock<Shared> = OnceLock::new();
@@ -183,9 +178,8 @@ pub extern "C" fn rust_video_cache_start(cache_dir_ptr: *const c_char) -> i32 {
         in_flight: Mutex::new(HashSet::new()),
         logs: Mutex::new(Vec::new()),
         agent,
-        filler_job: Mutex::new(None),
-        filler_running: AtomicBool::new(false),
-        filler_pos: AtomicU64::new(0),
+        active_key: Mutex::new(String::new()),
+        prefetch_active: AtomicBool::new(false),
         net_by_file: Mutex::new(HashMap::new()),
     };
     let _ = SHARED.set(shared);
@@ -791,90 +785,90 @@ fn fetch_and_store_chunk(
 // necha soniya ko'rib chiqib qo'ysa ham butun fayl uchun trafik
 // sarflanardi, (b) xotira/disk keraksiz to'lardi.
 //
-// Endi ijro nuqtasidan keyin FAQAT `PREFETCH_WINDOW` (10) ta bo'lak
-// oldindan olinadi. Pleyer oldinga siljigan sari (yoki sek qilinganda)
-// oyna ham u bilan birga suriladi — masalan 2-bo'lakda oyna 2..12,
-// 15-bo'lakka sek qilinsa oyna darhol 15..25 ga ko'chadi.
+// ── "ESHIK" MODELI (reaktiv oldindan yuklash) ──────────────────────
 //
-// Butun tizimda ENG KO'PI BILAN BITTA to'ldiruvchi ish oqimi bo'ladi:
-// yangi video ochilganda vazifa (FillerJob) almashadi, eski video uchun
-// yuklash esa darhol to'xtaydi.
-fn ensure_filler(shared: &'static Shared, key: &str, dir: &PathBuf, url: &str, total: u64) {
+// MUHIM O'ZGARISH. Avval bu yerda ERKIN ISHLAYDIGAN TSIKL bor edi:
+// alohida ish oqimi `loop { ... sleep(200ms) }` bilan aylanib turar,
+// ish bo'lmasa ham ~30 soniya davomida o'zini-o'zi qayta-qayta
+// tekshirar edi. Tashqaridan bu "server o'zidan-o'zi worker'ga so'rov
+// yuboryapti" bo'lib ko'rinardi va aynan shunday ham edi.
+//
+// Endi tizim BUTUNLAY REAKTIV: hech qanday tsikl, hech qanday taymer,
+// hech qanday kutish yo'q. Yagona qoida:
+//
+//   Eshik FAQAT pleyer yangi bo'lakka o'tganda ochiladi.
+//   Ochilganda oynadagi (ijro nuqtasidan keyingi PREFETCH_WINDOW ta)
+//   YETISHMAYOTGAN bo'laklar navbatma-navbat olinadi — va tamom.
+//   Ish tugashi bilan ish oqimi TUGAYDI, eshik yopiladi.
+//
+// Masalan: pleyer 2-bo'lakni o'ynay boshladi, oynada faqat 12-bo'lak
+// yetishmayapti -> aynan o'sha bitta bo'lak so'raladi -> ish oqimi
+// tugaydi. Pleyer 3-bo'lakka o'tmaguncha server BOSHQA HECH NARSA
+// so'ramaydi. Oynadagi hamma narsa keshda bo'lsa — birorta ham so'rov
+// ketmaydi va ish oqimi darhol tugaydi.
+fn maybe_prefetch(
+    shared: &'static Shared,
+    key: &str,
+    dir: &PathBuf,
+    url: &str,
+    total: u64,
+    current_chunk: u64,
+) {
+    // Joriy videoni belgilab qo'yamiz — boshqa video ochilsa, bu yerda
+    // ishlayotgan yuklash o'zini to'xtatadi.
     {
-        let mut job = shared.filler_job.lock().unwrap();
-        let changed = job.as_ref().map(|j| j.key.as_str()) != Some(key);
-        if changed {
-            *job = Some(FillerJob {
-                key: key.to_string(),
-                dir: dir.clone(),
-                url: url.to_string(),
-                total,
-            });
+        let mut ak = shared.active_key.lock().unwrap();
+        if *ak != key {
+            *ak = key.to_string();
         }
     }
 
-    // Allaqachon ishlayotgan bo'lsa, u yangi vazifani o'zi ko'radi.
-    if shared.filler_running.swap(true, Ordering::SeqCst) {
+    // ESHIK: allaqachon ochiq (ish ketyapti) bo'lsa, ikkinchisini
+    // ochmaymiz. Shu bilan bir vaqtda faqat BITTA yuklash bo'ladi.
+    if shared.prefetch_active.swap(true, Ordering::SeqCst) {
         return;
     }
 
-    thread::Builder::new()
-        .name("video-cache-filler".into())
+    let (key2, dir2, url2) = (key.to_string(), dir.clone(), url.to_string());
+    let spawned = thread::Builder::new()
+        .name("video-cache-prefetch".into())
         .spawn(move || {
-            let mut idle_ticks = 0u32;
-            loop {
-                let Some(job) = shared.filler_job.lock().unwrap().clone() else {
-                    break;
-                };
-                let chunk_count = job.total.div_ceil(CHUNK_SIZE);
-                let from = shared.filler_pos.load(Ordering::Relaxed).min(chunk_count);
-                let until = (from + PREFETCH_WINDOW).min(chunk_count);
+            let chunk_count = total.div_ceil(CHUNK_SIZE);
+            let from = current_chunk + 1;
+            let until = (from + PREFETCH_WINDOW).min(chunk_count);
 
-                let mut worked = false;
-                for i in from..until {
-                    // Vazifa almashgan bo'lsa (boshqa video) — darhol chiqamiz.
-                    {
-                        let cur = shared.filler_job.lock().unwrap();
-                        if cur.as_ref().map(|j| j.key.as_str()) != Some(job.key.as_str()) {
-                            break;
-                        }
-                    }
-                    let chunk_start = i * CHUNK_SIZE;
-                    let chunk_end = (chunk_start + CHUNK_SIZE - 1).min(job.total - 1);
-                    let expected_len = (chunk_end - chunk_start + 1) as usize;
-
-                    let final_path = job.dir.join(chunk_name(i));
-                    if let Ok(bytes) = fs::read(&final_path) {
-                        if bytes.len() == expected_len {
-                            continue; // allaqachon keshda — tarmoqqa chiqilmaydi
-                        }
-                    }
-                    log(format!("Bo'lak #{i} oldindan yuklanmoqda (oyna {from}..{until})"));
-                    let _ = fetch_and_store_chunk(
-                        shared, &job.key, &job.dir, &job.url, i, chunk_start, chunk_end,
-                        expected_len, job.total,
-                    );
-                    worked = true;
-                    // Bitta bo'lakdan keyin oynani qayta hisoblaymiz —
-                    // shu bilan sek qilinganda darhol yangi joyga o'tadi.
+            for i in from..until {
+                // Boshqa video ochilgan bo'lsa — darhol to'xtaymiz.
+                if *shared.active_key.lock().unwrap() != key2 {
                     break;
                 }
+                let chunk_start = i * CHUNK_SIZE;
+                let chunk_end = (chunk_start + CHUNK_SIZE - 1).min(total - 1);
+                let expected_len = (chunk_end - chunk_start + 1) as usize;
 
-                if worked {
-                    idle_ticks = 0;
-                } else {
-                    // Oyna to'liq keshda — kutamiz. Uzoq vaqt ish bo'lmasa
-                    // ish oqimi tugaydi (keyingi so'rovda qayta ochiladi).
-                    idle_ticks += 1;
-                    if idle_ticks > 150 {
-                        break;
+                // Diskda bor bo'lsa — TARMOQQA UMUMAN CHIQILMAYDI.
+                if let Ok(m) = fs::metadata(dir2.join(chunk_name(i))) {
+                    if m.len() as usize == expected_len {
+                        continue;
                     }
-                    thread::sleep(Duration::from_millis(200));
                 }
+                log(format!(
+                    "Oldindan yuklanmoqda: bo'lak #{i} (oyna {from}..{until})"
+                ));
+                let _ = fetch_and_store_chunk(
+                    shared, &key2, &dir2, &url2, i, chunk_start, chunk_end, expected_len,
+                    total,
+                );
             }
-            shared.filler_running.store(false, Ordering::SeqCst);
-        })
-        .ok();
+
+            // ESHIK YOPILDI — pleyer navbatdagi bo'lakka o'tmaguncha
+            // server endi hech narsa so'ramaydi.
+            shared.prefetch_active.store(false, Ordering::SeqCst);
+        });
+
+    if spawned.is_err() {
+        shared.prefetch_active.store(false, Ordering::SeqCst);
+    }
 }
 
 // ── Asosiy servis funksiyasi: Range'ni tahlil qilib, javobni yozadi ──
@@ -938,14 +932,6 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
         end = start + MAX_RESPONSE_BYTES - 1;
     }
 
-    // Oldindan yuklash oynasini SHU so'rov boshlangan joyga o'rnatamiz —
-    // sek qilinganda oyna darhol yangi nuqtaga ko'chadi (masalan
-    // 2-bo'lakdan 15-ga sakralsa, oyna 15..25 bo'ladi).
-    shared
-        .filler_pos
-        .store(start / CHUNK_SIZE, Ordering::Relaxed);
-    ensure_filler(shared, &key, &dir, url, total);
-
     let content_length = end - start + 1;
     if is_range {
         write_status_and_headers(
@@ -982,9 +968,6 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
     let mut cursor = start;
     while cursor <= end {
         let chunk_index = cursor / CHUNK_SIZE;
-        // Pleyer oldinga siljidi — oldindan yuklash oynasini ham
-        // birga suramiz (oyna har doim ijro nuqtasidan boshlanadi).
-        shared.filler_pos.store(chunk_index, Ordering::Relaxed);
         let chunk_start = chunk_index * CHUNK_SIZE;
         let chunk_end = (chunk_start + CHUNK_SIZE - 1).min(total - 1);
 
@@ -996,6 +979,15 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
             }
         };
         log(format!("Bo'lak #{chunk_index} tayyor ({} bayt)", chunk_bytes.len()));
+
+        // ── ESHIK SHU YERDA, FAQAT SHU YERDA OCHILADI ──────────────
+        // Pleyer #chunk_index bo'lagini oldi — demak u oldinga siljidi.
+        // Shu daqiqada (va faqat shu daqiqada) oynadagi yetishmayotgan
+        // bo'laklarni olishga ruxsat beriladi. Ish tugashi bilan eshik
+        // yopiladi va server pleyer navbatdagi bo'lakka o'tmaguncha
+        // BOSHQA HECH NARSA so'ramaydi. Hech qanday taymer, hech qanday
+        // fon tsikli yo'q.
+        maybe_prefetch(shared, &key, &dir, url, total, chunk_index);
 
         let slice_start = (cursor - chunk_start) as usize;
         let wanted_end_exclusive = ((end.min(chunk_end)) - chunk_start + 1) as usize;
