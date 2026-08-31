@@ -31,7 +31,7 @@ jobs:
       - name: Setup Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android
+          targets: aarch64-linux-android, armv7-linux-androideabi
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
@@ -41,13 +41,19 @@ jobs:
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
 
-      - name: Build rust_core for all Android ABIs
+      # FAQAT IKKITA ABI kompilyatsiya qilinadi:
+      #   arm64-v8a   — 64-bitli telefonlar (bugungi kunda deyarli hammasi)
+      #   armeabi-v7a — 32-bitli eski telefonlar
+      # x86_64 OLIB TASHLANDI: u faqat kompyuterdagi emulyatorlar
+      # (Android Studio, BlueStacks) uchun kerak edi va bizga hech qachon
+      # kerak emas. Uni olib tashlash APK hajmini ~20 MB kamaytiradi va
+      # CI build vaqtini ham qisqartiradi.
+      - name: Build rust_core for Android ABIs (64-bit va 32-bit)
         working-directory: rust
         run: |
           cargo ndk \
             -t arm64-v8a \
             -t armeabi-v7a \
-            -t x86_64 \
             -o ../jniLibs-out \
             build --release
 
@@ -70,10 +76,8 @@ jobs:
         run: |
           mkdir -p android/app/src/main/jniLibs/arm64-v8a
           mkdir -p android/app/src/main/jniLibs/armeabi-v7a
-          mkdir -p android/app/src/main/jniLibs/x86_64
           cp jniLibs-out/arm64-v8a/librust_core.so android/app/src/main/jniLibs/arm64-v8a/
           cp jniLibs-out/armeabi-v7a/librust_core.so android/app/src/main/jniLibs/armeabi-v7a/
-          cp jniLibs-out/x86_64/librust_core.so android/app/src/main/jniLibs/x86_64/
           echo "✅ Rust .so fayllar joylashtirildi:"
           find android/app/src/main/jniLibs -name "*.so"
 
@@ -134,15 +138,43 @@ jobs:
       - name: Get dependencies
         run: flutter pub get
 
-      - name: Build APK (Release)
-        run: flutter build apk --release
+      # --split-per-abi: bitta "semiz" APK o'rniga HAR BIR arxitektura
+      # uchun ALOHIDA APK yasaladi. Avval bitta APK ichida ikkala (avval
+      # uchala) arxitekturaning native kutubxonalari — librust_core.so,
+      # libmdk.so, libffmpeg.so — birga turardi. Telefon o'rnatishda
+      # faqat O'ZIGA keraklisini olib, qolganini tashlab yuborardi, ya'ni
+      # foydalanuvchi hajmning katta qismini bekorga yuklab olardi.
+      # Endi har bir APK'da faqat o'z arxitekturasining kutubxonalari
+      # bo'ladi va yuklab olish hajmi keskin kamayadi.
+      - name: Build APK (Release, har bir ABI uchun alohida)
+        run: |
+          flutter build apk --release \
+            --split-per-abi \
+            --target-platform android-arm64,android-arm
 
-      - name: Upload APK Artifact
+      - name: APK hajmlarini ko'rsatish
+        run: |
+          echo "📦 Tayyor APK fayllar:"
+          ls -lh build/app/outputs/flutter-apk/*.apk
+
+      # Ikkita ALOHIDA artifact — shunda 64-bitli telefon egasi 32-bitli
+      # APK'ni ham yuklab olishga majbur bo'lmaydi.
+      - name: Upload APK (64-bit — zamonaviy telefonlar)
         uses: actions/upload-artifact@v4
         with:
-          name: fulutter-app-release
-          path: build/app/outputs/flutter-apk/app-release.apk
+          name: fulutter-64bit-arm64-v8a
+          path: build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+          retention-days: 30
+
+      - name: Upload APK (32-bit — eski telefonlar)
+        uses: actions/upload-artifact@v4
+        with:
+          name: fulutter-32bit-armeabi-v7a
+          path: build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk
           retention-days: 30
 
       - name: Done
-        run: echo "✅ APK (Rust yadrosi bilan) tayyor! Artifacts bo'limidan yuklab ol."
+        run: |
+          echo "✅ APK tayyor! Artifacts bo'limidan yuklab ol:"
+          echo "   fulutter-64bit-arm64-v8a      → zamonaviy telefonlar (deyarli hamma)"
+          echo "   fulutter-32bit-armeabi-v7a    → eski 32-bitli telefonlar"
