@@ -295,6 +295,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _seekDebounceTimer?.cancel();
     _pendingSingleTapTimer?.cancel();
     _healthTimer?.cancel();
+    _recoveryStreakResetTimer?.cancel();
     _restoreSystemUI();
     _controller?.pause();
     _controller?.dispose();
@@ -428,9 +429,18 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     Map<String, dynamic> ep, {
     Duration? resumeAt,
     bool resumePlaying = true,
+    bool isRecovery = false,
   }) async {
     final url = _getUrl(ep);
     if (url.isEmpty) return;
+
+    // Foydalanuvchi (yoki sifat almashtirish) O'ZI yangi ijro
+    // boshlagan bo'lsa — bu avvalgi muammolarga aloqasi yo'q yangi
+    // urinish, shu sabab qayta-ochish hisoblagichi tozalanadi.
+    if (!isRecovery) {
+      _recoveryStreakResetTimer?.cancel();
+      _recoveryStreak = 0;
+    }
 
     final myToken = ++_playToken;
     setState(() {
@@ -555,18 +565,6 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     final player = mdk.Player();
     try {
       _applyPlayerDefaults(player);
-      // Video tugagach pleyerning O'ZI qaytadan boshlaydi (native,
-      // ichki holatini to'g'ri tozalab) — Dart tomonida qo'lda
-      // seekTo(0) chaqirish shart emas.
-      player.loop = -1;
-      // ── BUFERNI CHEKLASH VA ESKISINI TASHLASH ───────────────────
-      // drop: true — mdk-sdk bufer belgilangan chegaradan oshib ketsa,
-      // ESKI (kalit bo'lmagan) kadrlarni darhol tashlab yuboradi.
-      // Shu bilan sekdan keyin xotirada faqat JORIY nuqta atrofidagi
-      // ~4 soniyalik ma'lumot qoladi.
-      try {
-        player.setBufferRange(min: 1000, max: 4000, drop: true);
-      } catch (_) {}
       player.media = url;
       final startMs =
           (resumeAt != null && resumeAt > Duration.zero) ? resumeAt.inMilliseconds : 0;
@@ -578,6 +576,19 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
         player.dispose();
         return null;
       }
+      // MUHIM: `loop`/`setBufferRange` faqat MEDIA MUVAFFAQIYATLI
+      // OCHILGANDAN (prepare() muvaffaqiyatli tugagandan) KEYIN
+      // o'rnatiladi — media hali yuklanmagan/tayyor bo'lmagan
+      // Player'ga bularni OLDINDAN qo'yish (birinchi versiyada shunday
+      // edi) mdk-sdk'ning EOF/pozitsiya aniqlash ichki holatini
+      // chalkashtirib, videoni tinimsiz o'zidan-o'zi boshiga qaytarib
+      // yuborishi (native loop hodisasi noto'g'ri ishga tushishi)
+      // mumkin ekan — foydalanuvchida kuzatilgan "o'zidan-o'zi sek
+      // bo'lish" xatosining sababi shu edi.
+      player.loop = -1;
+      try {
+        player.setBufferRange(min: 1000, max: 4000, drop: true);
+      } catch (_) {}
       final size = await player.textureSize
           .timeout(const Duration(seconds: 15), onTimeout: () => null);
       if (size == null || size.width <= 0 || size.height <= 0) {
@@ -681,6 +692,21 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   DateTime _lastRecovery = DateTime.fromMillisecondsSinceEpoch(0);
   bool _recovering = false;
 
+  // ── QAYTA OCHISH SIKLIDAN HIMOYA (circuit breaker) ─────────────
+  //
+  // Agar biror sabab bilan (masalan hali topilmagan nozik xato) har
+  // safar qayta ochilgan pleyer ham tezda "qotib qolgan" deb
+  // aniqlansa, 6 soniyalik tormoz o'zi YETARLI EMAS — u faqat
+  // qayta-ochishlar tezligini cheklaydi, sonini emas. Natijada ilova
+  // SOATLAB (yoki cheksiz) ketma-ket pleyerni ochib-yopib, resurs
+  // sarflab, oxir-oqibat qotib/crash bo'lishi mumkin edi. Endi ketma-
+  // ket qayta ochishlar soni ANIQ chegaralangan: shu chegaradan
+  // o'tilsa, ilova urinishni TO'XTATADI va foydalanuvchiga aniq xato
+  // ko'rsatadi — muzlab/tinimsiz qayta yuklanib turishdan yaxshiroq.
+  int _recoveryStreak = 0;
+  Timer? _recoveryStreakResetTimer;
+  static const int _maxRecoveryStreak = 5;
+
   Future<void> _recoverPlayer(Duration at) async {
     if (_recovering) return;
     final ep = _currentEp;
@@ -689,6 +715,21 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // 6 soniya oraliq.
     final now = DateTime.now();
     if (now.difference(_lastRecovery) < const Duration(seconds: 6)) return;
+
+    _recoveryStreakResetTimer?.cancel();
+    _recoveryStreak++;
+    if (_recoveryStreak > _maxRecoveryStreak) {
+      VideoCacheServer.log(
+          'Pleyer ketma-ket $_recoveryStreak marta qayta ochishga urindi — to\'xtatildi');
+      if (mounted) {
+        setState(() {
+          _playerLoading = false;
+          _playerError = 'Videoni ijro etib bo\'lmadi (takroriy xato)';
+        });
+      }
+      return;
+    }
+
     _lastRecovery = now;
     _recovering = true;
     _healthTimer?.cancel();
@@ -697,7 +738,15 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _stuckTicks = 0;
     _lastWatchPosition = null;
     try {
-      await _playEpisode(ep, resumeAt: at, resumePlaying: true);
+      await _playEpisode(ep, resumeAt: at, resumePlaying: true, isRecovery: true);
+      // Muvaffaqiyatli ochilgandan keyin 20 soniya davomida yana qayta
+      // ochish kerak bo'lmasa — demak muammo hal bo'lgan, hisoblagich
+      // tozalanadi (aks holda uzoq ko'rish seansida vaqti-vaqti bilan
+      // yuz beradigan mustaqil, alohida-alohida muammolar yig'ilib,
+      // asossiz ravishda chegaraga yetkazib qo'yardi).
+      _recoveryStreakResetTimer = Timer(const Duration(seconds: 20), () {
+        _recoveryStreak = 0;
+      });
     } catch (_) {
     } finally {
       _recovering = false;
