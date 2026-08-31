@@ -356,18 +356,23 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // bermayapti yoki qurilmada bloklangan) — kesh bo'lmasa ham video
     // hech bo'lmasa ochilishi uchun asl URL bilan to'g'ridan-to'g'ri
     // qayta urinib ko'ramiz.
-    // Mahalliy fayl biror sababdan ochilmasa — mahalliy proksiga
-    // qaytamiz (fayl buzilgan bo'lishi mumkin).
-    if (ctrl == null && localPath.isNotEmpty) {
-      if (!mounted || myToken != _playToken) return;
-      VideoCacheServer.log('Mahalliy fayl ochilmadi — proksiga qaytilmoqda');
-      try {
-        final pu = await VideoCacheServer.instance.proxyUri(url);
-        ctrl = await tryInit(pu);
-        viaProxy = true;
-        usedProxy = true;
-      } catch (_) {}
-    }
+    // MUHIM (foydalanuvchi so'rovi bo'yicha): mahalliy fayl (crypto:/
+    // file:) ishga tushmasa, ENDI HTTP proksiga YASHIRINCHA
+    // qaytilmaydi. Avval bu yerda shunday fallback bor edi — u
+    // "crypto: protokoli qurilmada ishlayaptimi?" degan savolni
+    // yashirib qo'yardi: nosozlik bo'lsa ham video HTTP orqali
+    // baribir ochilib, muammo sezilmay qolardi.
+    //
+    // Endi mahalliy fayl mavjud bo'lgan holatda (localPath.isNotEmpty)
+    // uning ishga tushmasligi ANIQ XATO sifatida ko'rinadi (pastda
+    // "ctrl == null" tekshiruvi orqali) — shu bilan crypto:
+    // protokolining haqiqiy holatini yashirmasdan bilib olamiz.
+    //
+    // Diqqat: bu FAQAT "fayl allaqachon to'liq yuklangan, lekin
+    // ochilmadi" holatiga tegishli. Video HALI TO'LIQ YUKLANMAGAN
+    // bo'lsa (localPath bo'sh), yuqorida (proxied = await
+    // VideoCacheServer.instance.proxyUri(url)) orqali progressiv
+    // HTTP oqim ISHLASHDA DAVOM ETADI — bu boshqa, zarur yo'l.
     if (ctrl == null && viaProxy) {
       if (!mounted || myToken != _playToken) return;
       VideoCacheServer.log('Zaxira: asl URL bilan qayta urinilyapti...');
