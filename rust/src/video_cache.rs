@@ -107,6 +107,25 @@ static ACTIVE_CONNS: AtomicUsize = AtomicUsize::new(0);
 /// Ilova ishga tushgandan beri TARMOQDAN olingan umumiy bayt hajmi
 /// (keshdan o'qilganlar bunga kirmaydi) — diagnostika uchun.
 static NET_BYTES: AtomicU64 = AtomicU64::new(0);
+/// Ilova ishga tushgandan beri PLEYERGA (127.0.0.1 — mahalliy
+/// "loopback" ulanish) uzatilgan umumiy bayt hajmi.
+///
+/// NEGA BU KERAK: telefon (MIUI va boshqa qobiqlar) status-satrida
+/// ko'rsatadigan "KB/s" hisoblagichi ko'p qurilmalarda BARCHA tarmoq
+/// interfeyslarini, shu jumladan MAHALLIY loopback'ni ham qo'shib
+/// hisoblaydi. Video keshdan o'qilib pleyerga 127.0.0.1 orqali
+/// uzatilganda internetga UMUMAN chiqilmaydi, lekin status-satrida
+/// baribir "192 KB/s" kabi raqam ko'rinadi. Endi ekrandagi panel
+/// ikkala sonni yonma-yon ko'rsatadi:
+///   INTERNET  — haqiqatan worker'dan olingan bayt (NET_BYTES)
+///   MAHALLIY  — diskdan o'qib pleyerga berilgan bayt (SERVED_BYTES)
+/// Agar INTERNET o'zgarmay, MAHALLIY o'sib borsa — telefon
+/// ko'rsatayotgan trafik AYNAN shu mahalliy uzatma, internet emas.
+static SERVED_BYTES: AtomicU64 = AtomicU64::new(0);
+/// Pleyer HOZIR o'qiyotgan bo'lak indeksi. Oldindan yuklash ish oqimi
+/// har bir bo'lakdan oldin shuni tekshiradi: pleyer sek qilib boshqa
+/// joyga o'tgan bo'lsa, eski (endi keraksiz) oyna DARHOL tashlanadi.
+static CURRENT_CHUNK: AtomicU64 = AtomicU64::new(0);
 
 /// Jurnal fayli eng ko'p hajmi. Oshib ketsa fayl tozalanib, yangidan
 /// boshlanadi (cheksiz o'sib, qurilma xotirasini to'ldirmasligi uchun).
@@ -258,6 +277,14 @@ pub extern "C" fn rust_video_cache_start(cache_dir_ptr: *const c_char) -> i32 {
 #[no_mangle]
 pub extern "C" fn rust_video_cache_net_bytes() -> u64 {
     NET_BYTES.load(Ordering::Relaxed)
+}
+
+/// Pleyerga MAHALLIY (127.0.0.1) ulanish orqali uzatilgan umumiy bayt.
+/// Yuqoridagi SERVED_BYTES izohiga qarang — telefon status-satridagi
+/// "KB/s" ko'rsatkichi ko'pincha aynan shuni ko'rsatadi.
+#[no_mangle]
+pub extern "C" fn rust_video_cache_served_bytes() -> u64 {
+    SERVED_BYTES.load(Ordering::Relaxed)
 }
 
 /// Dart tomonidan (video_cache_server.dart / video_player_screen.dart)
@@ -638,19 +665,42 @@ fn fetch_and_store_chunk(
     // boshlagan bo'lishi mumkin — bunday holda diskda paydo bo'lishini
     // (yoki bo'sh joy ochilishini) kutamiz, ikkinchi marta tarmoqqa
     // chiqmaymiz.
+    //
+    // MUHIM TUZATISH (sek qilganda "qotib qolish"ning asosiy sababi):
+    // avval bu kutish CHEKSIZ edi. Agar bo'lakni yuklab olayotgan ish
+    // oqimi sekin tarmoqda uzoq osilib qolsa, pleyerga xizmat
+    // ko'rsatayotgan ulanish shu yerda ABADIY aylanardi. Foydalanuvchi
+    // ketma-ket sek qilganda bunday "osilgan" ulanishlar to'planib,
+    // MAX_CONNS chegarasiga yetardi va undan keyingi so'rovlar RAD
+    // ETILARDI — pleyer javobsiz qolib qotib qolardi.
+    //
+    // Endi kutish 6 soniya bilan chegaralangan: shu vaqt ichida bo'lak
+    // paydo bo'lmasa, biz uni O'ZIMIZ yuklab olamiz. Ikki marta yuklab
+    // olish — qotib qolishdan ming marta yaxshiroq, ustiga-ustak
+    // diskka yozish atom (tmp -> rename) bo'lgani uchun xavfsiz.
+    let wait_deadline = Instant::now() + Duration::from_secs(6);
+    let mut we_own_flight = false;
     loop {
-        let mut in_flight = shared.in_flight.lock().unwrap();
-        if !in_flight.contains(&flight_key) {
-            in_flight.insert(flight_key.clone());
-            break;
+        {
+            let mut in_flight = shared.in_flight.lock().unwrap();
+            if !in_flight.contains(&flight_key) {
+                in_flight.insert(flight_key.clone());
+                we_own_flight = true;
+                break;
+            }
         }
-        drop(in_flight);
-        thread::sleep(Duration::from_millis(50));
         if let Ok(bytes) = fs::read(&final_path) {
             if bytes.len() == expected_len {
                 return Ok(bytes);
             }
         }
+        if Instant::now() >= wait_deadline {
+            log(format!(
+                "Bo'lak #{index} kutish muddati tugadi — mustaqil yuklab olinadi"
+            ));
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
     }
 
     let result = (|| -> Result<Vec<u8>, String> {
@@ -772,7 +822,9 @@ fn fetch_and_store_chunk(
         Ok(collected)
     })();
 
-    shared.in_flight.lock().unwrap().remove(&flight_key);
+    if we_own_flight {
+        shared.in_flight.lock().unwrap().remove(&flight_key);
+    }
     result
 }
 
@@ -840,6 +892,21 @@ fn maybe_prefetch(
             for i in from..until {
                 // Boshqa video ochilgan bo'lsa — darhol to'xtaymiz.
                 if *shared.active_key.lock().unwrap() != key2 {
+                    break;
+                }
+                // ESKIRGAN OYNANI TASHLASH. Foydalanuvchi sek qilib
+                // butunlay boshqa joyga o'tgan bo'lishi mumkin — bunday
+                // holda bu yerdagi eski oyna endi keraksiz. Uni davom
+                // ettirish (a) bekorga trafik sarflaydi, (b) pleyer
+                // HOZIR so'rayotgan bo'lak bilan tarmoq uchun
+                // raqobatlashib, sekni sekinlashtiradi va "qotib
+                // qolish"ga olib keladi. Shu sabab har bir bo'lakdan
+                // OLDIN pleyerning haqiqiy joyi tekshiriladi.
+                let live = CURRENT_CHUNK.load(Ordering::Relaxed);
+                if live < current_chunk || live >= current_chunk + PREFETCH_WINDOW {
+                    log(format!(
+                        "Oldindan yuklash to'xtatildi: pleyer #{live} ga o'tdi (eski oyna {from}..{until})"
+                    ));
                     break;
                 }
                 let chunk_start = i * CHUNK_SIZE;
@@ -979,6 +1046,10 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
             }
         };
         log(format!("Bo'lak #{chunk_index} tayyor ({} bayt)", chunk_bytes.len()));
+        // Pleyerning HAQIQIY joyi — oldindan yuklash ish oqimi shuni
+        // kuzatib turadi va foydalanuvchi sek qilganda eskirgan oynani
+        // darhol tashlaydi.
+        CURRENT_CHUNK.store(chunk_index, Ordering::Relaxed);
 
         // ── ESHIK SHU YERDA, FAQAT SHU YERDA OCHILADI ──────────────
         // Pleyer #chunk_index bo'lagini oldi — demak u oldinga siljidi.
@@ -1004,6 +1075,7 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
             ));
             break;
         }
+        SERVED_BYTES.fetch_add((slice_end_exclusive - slice_start) as u64, Ordering::Relaxed);
         if let Err(e) = stream.write_all(&chunk_bytes[slice_start..slice_end_exclusive]) {
             // Klient uzilgan bo'lishi mumkin (masalan foydalanuvchi yangi
             // joyga sek qildi) — bu holat xato sifatida qaytarilmaydi,
@@ -1019,8 +1091,9 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
     // qurilmada ko'rinayotgan trafik BOSHQA manbadan (boshqa ilova yoki
     // ilovaning boshqa qismi) ketayotgan bo'ladi.
     let net_mb = NET_BYTES.load(Ordering::Relaxed) as f64 / (1024.0 * 1024.0);
+    let served_mb = SERVED_BYTES.load(Ordering::Relaxed) as f64 / (1024.0 * 1024.0);
     log(format!(
-        "So'rov yakunlandi ({start}-{end}) | jami tarmoq: {net_mb:.2} MB"
+        "So'rov yakunlandi ({start}-{end}) | INTERNET: {net_mb:.2} MB | MAHALLIY (127.0.0.1): {served_mb:.2} MB"
     ));
     Ok(())
 }

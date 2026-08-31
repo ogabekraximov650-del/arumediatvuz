@@ -76,6 +76,7 @@ class RustCore {
   late final _VideoCacheStartDart _videoCacheStart;
   late final _VideoCachePullLogsDart _videoCachePullLogs;
   late final _VideoCacheNetBytesDart _videoCacheNetBytes;
+  late final _VideoCacheNetBytesDart _videoCacheServedBytes;
   late final _VideoCacheLogDart _videoCacheLog;
   late final _VideoCacheLogPathDart _videoCacheLogPath;
 
@@ -110,6 +111,8 @@ class RustCore {
         'rust_video_cache_pull_logs');
     _videoCacheNetBytes = _lib.lookupFunction<_VideoCacheNetBytesC, _VideoCacheNetBytesDart>(
         'rust_video_cache_net_bytes');
+    _videoCacheServedBytes = _lib.lookupFunction<_VideoCacheNetBytesC, _VideoCacheNetBytesDart>(
+        'rust_video_cache_served_bytes');
     _videoCacheLog =
         _lib.lookupFunction<_VideoCacheLogC, _VideoCacheLogDart>('rust_video_cache_log');
     _videoCacheLogPath = _lib.lookupFunction<_VideoCacheLogPathC, _VideoCacheLogPathDart>(
@@ -330,6 +333,21 @@ class RustCore {
     if (!_loaded) return 0;
     try {
       return _videoCacheNetBytes();
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  /// Pleyerga MAHALLIY (127.0.0.1) ulanish orqali uzatilgan umumiy
+  /// bayt hajmi. Telefon status-satridagi "KB/s" hisoblagichi ko'p
+  /// qurilmalarda loopback'ni ham qo'shib hisoblaydi — shu sabab
+  /// keshdan o'ynatilayotgan video ham u yerda "trafik" bo'lib
+  /// ko'rinadi. Bu son o'sib, videoCacheNetBytes o'smay tursa —
+  /// internetga UMUMAN chiqilmayapti.
+  int get videoCacheServedBytes {
+    if (!_loaded) return 0;
+    try {
+      return _videoCacheServedBytes();
     } catch (_) {
       return 0;
     }

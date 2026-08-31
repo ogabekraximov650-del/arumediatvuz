@@ -318,13 +318,27 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       return;
     }
 
-    ctrl.setLooping(false);
+    // MUHIM TUZATISH ("video tugab qayta boshlanganda sek qilsam
+    // crash"): avval video oxiriga yetganda BIZ qo'lda
+    // `seekTo(0)` chaqirardik. mdk-sdk esa bu paytda ichki holati
+    // bo'yicha EOF (fayl tugadi) holatida turardi va undan keyingi
+    // sek buyruqlari yakunlanmay osilib qolardi — natijada pleyer
+    // qotardi. Endi takrorlashni PLEYERNING O'ZI bajaradi
+    // (setLooping): u ichki holatini to'g'ri tozalab, oqimni toza
+    // qayta ochadi.
+    ctrl.setLooping(true);
     _attachEndOfVideoListener(ctrl, myToken);
+    // Timeout: pleyer bu chaqiruvlarni yakunlamasa ham ekran abadiy
+    // "yuklanmoqda" holatida osilib qolmasligi kerak.
     if (resumeAt != null && resumeAt > Duration.zero) {
-      await ctrl.seekTo(resumeAt);
+      try {
+        await ctrl.seekTo(resumeAt).timeout(const Duration(seconds: 5));
+      } catch (_) {}
     }
     if (resumePlaying) {
-      await ctrl.play();
+      try {
+        await ctrl.play().timeout(const Duration(seconds: 3));
+      } catch (_) {}
     }
     if (!mounted || myToken != _playToken) {
       await ctrl.dispose();
@@ -344,23 +358,50 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   // marta ishga tushirilib, pozitsiya oxirdan uzoqlashguncha qayta
   // ishlamaydi (takroriy seekTo chaqiruvlarining oldini oladi).
   void _attachEndOfVideoListener(VideoPlayerController ctrl, int token) {
-    bool restarted = false;
+    // ZAXIRA KUZATUVCHI (watchdog).
+    //
+    // Odatdagi holatda video oxiriga yetganda uni PLEYERNING O'ZI
+    // (setLooping) qayta boshlaydi va bu yerda hech narsa qilinmaydi.
+    // Ammo ba'zi qurilmalarda takrorlash ishlamay, pleyer oxirida
+    // pauzada qotib qolishi mumkin. Faqat SHU holat uchun — ya'ni
+    // pozitsiya oxirda, ijro to'xtagan va bu holat 1.2 soniyadan
+    // ortiq davom etgan bo'lsa — bir marta boshiga qaytaramiz.
+    //
+    // Avval bu tekshiruv juda "sezgir" edi (oxirgacha 300ms qolganda
+    // DARHOL seekTo(0)) va u foydalanuvchining o'z sek harakatlari
+    // bilan to'qnashib, pleyerni chalkashtirib yuborardi.
+    DateTime? stuckSince;
+    bool rescued = false;
     void listener() {
       if (!mounted || token != _playToken) return;
-      final v = ctrl.value;
+      final VideoPlayerValue v;
+      try {
+        v = ctrl.value;
+      } catch (_) {
+        return;
+      }
       if (!v.isInitialized || v.duration <= Duration.zero) return;
       final remaining = v.duration - v.position;
-      if (remaining <= const Duration(milliseconds: 300)) {
-        if (!restarted) {
-          restarted = true;
-          // Bu sek ham UMUMIY navbatdan o'tadi — foydalanuvchining
-          // sek qilishlari bilan bir vaqtda ishlab, pleyerni chalkashtirib
-          // yubormasligi uchun.
-          _runSeek(ctrl, Duration.zero);
-        }
-      } else {
-        restarted = false;
+      final atEnd = remaining <= const Duration(milliseconds: 250);
+
+      if (!atEnd) {
+        stuckSince = null;
+        rescued = false;
+        return;
       }
+      if (v.isPlaying) {
+        // Hali o'ynayapti — takrorlash ishlayotgan bo'lishi mumkin.
+        stuckSince = null;
+        return;
+      }
+      final now = DateTime.now();
+      stuckSince ??= now;
+      if (rescued) return;
+      if (now.difference(stuckSince!) < const Duration(milliseconds: 1200)) {
+        return;
+      }
+      rescued = true;
+      _runSeek(ctrl, Duration.zero);
     }
 
     ctrl.addListener(listener);
@@ -427,9 +468,12 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       var t = base + Duration(seconds: delta);
       if (t < Duration.zero) t = Duration.zero;
       // Oldinga sek qilib video oxiriga (yoki undan nariga) yetib borsa,
-      // ctrl.seekTo(duration) chaqirish pleyerni "qotirib qo'yishi" mumkin
-      // — shuning o'rniga video boshidan qayta boshlanadi.
-      if (dur > Duration.zero && t >= dur) t = Duration.zero;
+      // ctrl.seekTo(duration) chaqirish pleyerni "qotirib qo'yishi"
+      // mumkin (EOF holati). Avval bunday holatda video BOSHIGA
+      // sakrardi — bu ham kutilmagan, ham EOF muammosini keltirib
+      // chiqarardi. Endi shunchaki oxiridan 1 soniya oldinga
+      // "qisiladi" (clamp) — pleyer EOF holatiga tushmaydi.
+      t = _clampSeekTarget(t, dur);
       _runSeek(c, t);
     });
   }
@@ -455,9 +499,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       final dur = c.value.duration;
       var t = target;
       if (t < Duration.zero) t = Duration.zero;
-      // Slayder oxirigacha surilganda pleyer qotib qolmasligi uchun
-      // video boshidan qayta boshlanadi.
-      if (dur > Duration.zero && t >= dur) t = Duration.zero;
+      // Slayder oxirigacha surilganda pleyer EOF holatiga tushib
+      // qotib qolmasligi uchun oxiridan 1 soniya oldinga qisiladi.
+      t = _clampSeekTarget(t, dur);
       _runSeek(c, t);
     });
   }
@@ -471,46 +515,95 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   bool _seekInProgress = false;
   Duration? _queuedSeek;
 
+  // Sek nuqtasini xavfsiz oraliqqa qisadi: [0 .. duration-1s].
+  // Videoning ENG OXIRIGA sek qilish mdk-sdk'ni EOF holatiga tushirib,
+  // undan keyingi barcha buyruqlarni osiltirib qo'yardi.
+  static Duration _clampSeekTarget(Duration t, Duration dur) {
+    if (t < Duration.zero) return Duration.zero;
+    if (dur <= Duration.zero) return t;
+    final limit = dur - const Duration(seconds: 1);
+    if (limit <= Duration.zero) return Duration.zero;
+    return t > limit ? limit : t;
+  }
+
   Future<void> _runSeek(VideoPlayerController c, Duration t) async {
     if (_seekInProgress) {
       _queuedSeek = t;
       return;
     }
     _seekInProgress = true;
-    // Sekdan OLDINGI ijro holatini eslab qolamiz — pastda tiklash uchun.
-    final wasPlaying = c.value.isPlaying;
-    var target = t;
-    while (true) {
+    // ENG MUHIM TUZATISH (ketma-ket sek qilganda "qotib qolish").
+    //
+    // Avval `_seekInProgress = false` funksiyaning ENG OXIRIDA turardi.
+    // Agar oradagi biror chaqiruv (masalan pleyer ichidagi `value`
+    // o'qish yoki `play()`) istisno (exception) tashlasa, bu qator
+    // UMUMAN bajarilmasdan qolardi — natijada bayroq abadiy "true"
+    // bo'lib qolib, undan KEYINGI BARCHA sek so'rovlari jimgina
+    // tashlab yuborilardi. Tashqaridan bu aynan "5-6 marta sek
+    // qilgandan keyin sek ishlamay qoldi, video qotdi" bo'lib
+    // ko'rinardi.
+    //
+    // Endi butun tana try/finally ichida — qanday xato bo'lishidan
+    // qat'i nazar bayroq ALBATTA bo'shatiladi.
+    try {
+      // Sekdan OLDINGI ijro holatini eslab qolamiz — pastda tiklash uchun.
+      var wasPlaying = false;
       try {
-        // Timeout SHART: agar pleyer biror sababdan sekni yakunlamasa,
-        // _seekInProgress abadiy "true" bo'lib qolib, sek butunlay
-        // ishlamay qolardi. Timeout bu holatdan chiqib ketishni
-        // kafolatlaydi.
-        await c.seekTo(target).timeout(const Duration(seconds: 5));
-      } catch (_) {
-        // Sek muvaffaqiyatsiz/kechikkan bo'lsa — jim o'tkazamiz,
-        // ilova ishlashda davom etadi.
-      }
-      final next = _queuedSeek;
-      _queuedSeek = null;
-      if (next == null) break;
-      if (!mounted || _controller != c || !c.value.isInitialized) break;
-      target = next;
-    }
-
-    // MUHIM TUZATISH (videoni orqaga 00:00 ga sek qilganda qotib
-    // qolishi): mdk-sdk ba'zi hollarda — ayniqsa video BOSHIGA
-    // (0-pozitsiya) sek qilinganda — sekdan keyin ijroni o'zi qayta
-    // boshlamay, pauza holatida qolib ketardi. Tashqaridan bu "video
-    // qotib qoldi, play/pause bosish kerak" bo'lib ko'rinardi.
-    // Shu sabab sekdan OLDIN ijro ketayotgan bo'lsa, sekdan KEYIN uni
-    // aniq (explicit) davom ettiramiz.
-    if (wasPlaying && mounted && _controller == c && c.value.isInitialized) {
-      try {
-        await c.play();
+        wasPlaying = c.value.isPlaying;
       } catch (_) {}
+
+      var target = t;
+      // Xavfsizlik chegarasi: navbat cheksiz aylanib qolmasligi uchun.
+      var rounds = 0;
+      while (rounds < 24) {
+        rounds++;
+        try {
+          // Timeout SHART: agar pleyer biror sababdan sekni yakunlamasa,
+          // _seekInProgress abadiy "true" bo'lib qolib, sek butunlay
+          // ishlamay qolardi. Timeout bu holatdan chiqib ketishni
+          // kafolatlaydi.
+          await c.seekTo(target).timeout(const Duration(seconds: 5));
+        } catch (_) {
+          // Sek muvaffaqiyatsiz/kechikkan bo'lsa — jim o'tkazamiz,
+          // ilova ishlashda davom etadi.
+        }
+        final next = _queuedSeek;
+        _queuedSeek = null;
+        if (next == null) break;
+        if (!mounted || _controller != c) break;
+        var stillOk = false;
+        try {
+          stillOk = c.value.isInitialized;
+        } catch (_) {}
+        if (!stillOk) break;
+        target = next;
+      }
+
+      // MUHIM TUZATISH (videoni orqaga 00:00 ga sek qilganda qotib
+      // qolishi): mdk-sdk ba'zi hollarda — ayniqsa video BOSHIGA
+      // (0-pozitsiya) sek qilinganda — sekdan keyin ijroni o'zi qayta
+      // boshlamay, pauza holatida qolib ketardi. Tashqaridan bu "video
+      // qotib qoldi, play/pause bosish kerak" bo'lib ko'rinardi.
+      // Shu sabab sekdan OLDIN ijro ketayotgan bo'lsa, sekdan KEYIN uni
+      // aniq (explicit) davom ettiramiz.
+      //
+      // play() ham TIMEOUT bilan o'raldi: u ham osilib qolib, bayroqni
+      // ushlab turishi mumkin edi.
+      if (wasPlaying && mounted && _controller == c) {
+        try {
+          await c.play().timeout(const Duration(seconds: 3));
+        } catch (_) {}
+      }
+    } finally {
+      _seekInProgress = false;
+      // Navbatda kutib qolgan so'nggi so'rov bo'lsa, uni tashlab
+      // yubormaymiz — bayroq bo'shagach bir marta qayta ishga tushiramiz.
+      final pending = _queuedSeek;
+      _queuedSeek = null;
+      if (pending != null && mounted && _controller == c) {
+        scheduleMicrotask(() => _runSeek(c, pending));
+      }
     }
-    _seekInProgress = false;
   }
 
   // Ekranning chap/o'ng yarmiga ikki marta bosilganda 5 sonyaga
@@ -1415,15 +1508,22 @@ class _DebugLogPanel extends StatefulWidget {
 class _DebugLogPanelState extends State<_DebugLogPanel> {
   Timer? _netTimer;
   int _netBytes = 0;
+  int _servedBytes = 0;
 
   @override
   void initState() {
     super.initState();
-    // Tarmoq hisoblagichini doimiy yangilab turamiz — u loglar oqib
+    // Ikkala hisoblagichni doimiy yangilab turamiz — ular loglar oqib
     // ketsa ham har doim ko'rinib turadi.
     _netTimer = Timer.periodic(const Duration(milliseconds: 700), (_) {
       final v = RustCore.instance.videoCacheNetBytes;
-      if (v != _netBytes && mounted) setState(() => _netBytes = v);
+      final s = RustCore.instance.videoCacheServedBytes;
+      if ((v != _netBytes || s != _servedBytes) && mounted) {
+        setState(() {
+          _netBytes = v;
+          _servedBytes = s;
+        });
+      }
     });
   }
 
@@ -1440,6 +1540,7 @@ class _DebugLogPanelState extends State<_DebugLogPanel> {
       builder: (context, lines, __) {
         final last = lines.length > 7 ? lines.sublist(lines.length - 7) : lines;
         final mb = _netBytes / (1024 * 1024);
+        final servedMb = _servedBytes / (1024 * 1024);
         return Container(
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
           decoration: BoxDecoration(
@@ -1457,9 +1558,25 @@ class _DebugLogPanelState extends State<_DebugLogPanel> {
               // tarmoqqa umuman chiqilmayapti va qurilmada ko'rinayotgan
               // trafik BOSHQA manbadan ketayotgan bo'ladi.
               Text(
-                'VIDEO TARMOQ: ${mb.toStringAsFixed(2)} MB',
+                'INTERNET: ${mb.toStringAsFixed(2)} MB',
                 style: TextStyle(
                   color: _netBytes == 0 ? Colors.lightBlueAccent : Colors.orangeAccent,
+                  fontSize: 11,
+                  fontFamily: 'monospace',
+                  fontWeight: FontWeight.bold,
+                  height: 1.4,
+                ),
+              ),
+              // ── MAHALLIY (127.0.0.1) UZATMA ─────────────────────
+              // Diskdagi keshdan o'qib pleyerga berilgan hajm. Telefon
+              // status-satridagi "KB/s" ko'rsatkichi ko'p qurilmalarda
+              // loopback'ni ham hisoblaydi — shu sabab internet
+              // o'chirilgan bo'lsa ham u yerda raqam ko'rinishi mumkin.
+              // Bu qator aynan shuni ochib beradi.
+              Text(
+                'MAHALLIY (keshdan): ${servedMb.toStringAsFixed(2)} MB',
+                style: const TextStyle(
+                  color: Colors.greenAccent,
                   fontSize: 11,
                   fontFamily: 'monospace',
                   fontWeight: FontWeight.bold,
