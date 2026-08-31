@@ -1,5 +1,9 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
+// fvp'ning VideoPlayerController uchun qo'shimcha imkoniyatlari
+// (setBufferRange). Pastda buferni cheklash uchun ishlatiladi.
+import 'package:fvp/fvp.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
@@ -256,14 +260,43 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // holatda kesh-proksisiz, TO'G'RIDAN-TO'G'RI asl URL bilan
     // o'ynatishga o'tamiz — kesh (doimiy saqlash) ishlamaydi, lekin
     // video HECH QACHON abadiy "yuklanmoqda" holatida qotib qolmaydi.
+    // ── 1-YO'L (ENG YAXSHISI): TO'LIQ MAHALLIY FAYL ─────────────
+    //
+    // Agar video allaqachon to'liq yuklab olingan bo'lsa, Rust yadrosi
+    // bo'laklarni BITTA faylga yig'ib, uning yo'lini qaytaradi. Bunda
+    // pleyerga HTTP manzil emas, ODDIY FAYL beriladi.
+    //
+    // NEGA BU HAL QILUVCHI: mdk-sdk (FFmpeg) HTTP manbadan tez-tez sek
+    // qilinganda har safar eski TCP ulanishni uzib, yangisini ochib,
+    // demuxer'ni qaytadan sozlaydi — bularning har biri xato qilishi
+    // mumkin bo'lgan nuqta va aynan shu "qotib qolish"ning manbai edi.
+    // Oddiy faylda esa sek — bu shunchaki fayl ichida siljish
+    // (millisekundlar), uzilish yoki timeout degan tushunchaning O'ZI
+    // yo'q.
+    String localPath = '';
+    try {
+      localPath = RustCore.instance.videoCacheLocalFile(url);
+      if (localPath.isNotEmpty && !File(localPath).existsSync()) {
+        localPath = '';
+      }
+    } catch (_) {
+      localPath = '';
+    }
+
     Uri proxied;
     bool viaProxy = true;
-    try {
-      proxied = await VideoCacheServer.instance.proxyUri(url);
-    } catch (e) {
-      VideoCacheServer.log('proxyUri xato berdi, asl URL ishlatiladi: $e');
-      proxied = Uri.parse(url);
+    if (localPath.isNotEmpty) {
+      VideoCacheServer.log('TO\'LIQ MAHALLIY FAYLDAN o\'ynatiladi (HTTP yo\'q)');
+      proxied = Uri.file(localPath);
       viaProxy = false;
+    } else {
+      try {
+        proxied = await VideoCacheServer.instance.proxyUri(url);
+      } catch (e) {
+        VideoCacheServer.log('proxyUri xato berdi, asl URL ishlatiladi: $e');
+        proxied = Uri.parse(url);
+        viaProxy = false;
+      }
     }
     if (!mounted || myToken != _playToken) return;
 
@@ -272,7 +305,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // bekor qilinadi va null qaytariladi — chaqiruvchi zaxira yo'lga
     // (kesh'siz, to'g'ridan-to'g'ri asl URL) o'tishi mumkin bo'ladi.
     Future<VideoPlayerController?> tryInit(Uri u) async {
-      final c = VideoPlayerController.networkUrl(u);
+      final c = u.scheme == 'file'
+          ? VideoPlayerController.file(File(u.toFilePath()))
+          : VideoPlayerController.networkUrl(u);
       try {
         await c.initialize().timeout(const Duration(seconds: 15));
         return c;
@@ -293,6 +328,18 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // bermayapti yoki qurilmada bloklangan) — kesh bo'lmasa ham video
     // hech bo'lmasa ochilishi uchun asl URL bilan to'g'ridan-to'g'ri
     // qayta urinib ko'ramiz.
+    // Mahalliy fayl biror sababdan ochilmasa — mahalliy proksiga
+    // qaytamiz (fayl buzilgan bo'lishi mumkin).
+    if (ctrl == null && localPath.isNotEmpty) {
+      if (!mounted || myToken != _playToken) return;
+      VideoCacheServer.log('Mahalliy fayl ochilmadi — proksiga qaytilmoqda');
+      try {
+        final pu = await VideoCacheServer.instance.proxyUri(url);
+        ctrl = await tryInit(pu);
+        viaProxy = true;
+        usedProxy = true;
+      } catch (_) {}
+    }
     if (ctrl == null && viaProxy) {
       if (!mounted || myToken != _playToken) return;
       VideoCacheServer.log('Zaxira: asl URL bilan qayta urinilyapti...');
@@ -328,6 +375,22 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // (setLooping): u ichki holatini to'g'ri tozalab, oqimni toza
     // qayta ochadi.
     ctrl.setLooping(true);
+
+    // ── BUFERNI CHEKLASH VA ESKISINI TASHLASH ───────────────────
+    // (foydalanuvchining taklifi — va u to'g'ri chiqdi)
+    //
+    // drop: true — mdk-sdk bufer belgilangan chegaradan oshib ketsa,
+    // ESKI (kalit bo'lmagan) kadrlarni darhol tashlab yuboradi.
+    // drop: false (standart) da esa u bufer bo'shashini KUTIB turadi
+    // — natijada sek qilinganda eski, endi keraksiz ma'lumot
+    // xotirada qolib, yangisi ustiga qo'shilib borardi va pleyer
+    // asta-sekin og'irlashib, qotib qolardi.
+    //
+    // Endi har bir sek'dan keyin xotirada faqat JORIY nuqta atrofidagi
+    // ~4 soniyalik ma'lumot qoladi, qolgani darhol tozalanadi.
+    try {
+      ctrl.setBufferRange(min: 1000, max: 4000, drop: true);
+    } catch (_) {}
     // Timeout: pleyer bu chaqiruvlarni yakunlamasa ham ekran abadiy
     // "yuklanmoqda" holatida osilib qolmasligi kerak.
     if (resumeAt != null && resumeAt > Duration.zero) {

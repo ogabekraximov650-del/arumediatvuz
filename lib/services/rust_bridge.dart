@@ -58,6 +58,8 @@ typedef _VideoCacheLogDart = void Function(Pointer<Utf8>);
 
 typedef _VideoCacheLogPathC = Pointer<Utf8> Function();
 typedef _VideoCacheLogPathDart = Pointer<Utf8> Function();
+typedef _VideoCacheLocalFileC = Pointer<Utf8> Function(Pointer<Utf8>);
+typedef _VideoCacheLocalFileDart = Pointer<Utf8> Function(Pointer<Utf8>);
 
 class RustCore {
   RustCore._();
@@ -79,6 +81,7 @@ class RustCore {
   late final _VideoCacheNetBytesDart _videoCacheServedBytes;
   late final _VideoCacheLogDart _videoCacheLog;
   late final _VideoCacheLogPathDart _videoCacheLogPath;
+  late final _VideoCacheLocalFileDart _videoCacheLocalFile;
 
   bool _loaded = false;
   String? _cacheFilePath;
@@ -117,6 +120,9 @@ class RustCore {
         _lib.lookupFunction<_VideoCacheLogC, _VideoCacheLogDart>('rust_video_cache_log');
     _videoCacheLogPath = _lib.lookupFunction<_VideoCacheLogPathC, _VideoCacheLogPathDart>(
         'rust_video_cache_log_path');
+    _videoCacheLocalFile =
+        _lib.lookupFunction<_VideoCacheLocalFileC, _VideoCacheLocalFileDart>(
+            'rust_video_cache_local_file');
 
     final dir = await getApplicationDocumentsDirectory();
     _cacheDirPath = dir.path;
@@ -335,6 +341,26 @@ class RustCore {
       return _videoCacheNetBytes();
     } catch (_) {
       return 0;
+    }
+  }
+
+  /// Video TO'LIQ yuklab olingan bo'lsa, uning diskdagi YAGONA fayl
+  /// yo'lini qaytaradi (aks holda bo'sh satr).
+  ///
+  /// Bu yo'l olinsa, pleyer videoni HTTP'siz — to'g'ridan-to'g'ri
+  /// fayldan o'ynatadi: hech qanday TCP ulanish, timeout yoki qayta
+  /// ulanish yo'q, sek esa oddiy fayl ichida siljish.
+  ///
+  /// TARMOQQA UMUMAN CHIQMAYDI — faqat diskka qaraydi.
+  String videoCacheLocalFile(String url) {
+    if (!_loaded) return '';
+    final ptr = url.toNativeUtf8();
+    try {
+      return _readAndFree(_videoCacheLocalFile(ptr)) ?? '';
+    } catch (_) {
+      return '';
+    } finally {
+      malloc.free(ptr);
     }
   }
 

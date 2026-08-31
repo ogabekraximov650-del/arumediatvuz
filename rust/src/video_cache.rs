@@ -79,6 +79,10 @@ const MAX_CONNS: usize = 64;
 const MAX_SCAN_CHUNKS: u64 = 256;
 
 fn contiguous_cached_end(dir: &PathBuf, start: u64, end: u64, total: u64) -> u64 {
+    // To'liq fayl mavjud — butun so'ralgan oraliq keshda bor.
+    if full_is_complete(dir, total) {
+        return end;
+    }
     let chunk_count = total.div_ceil(CHUNK_SIZE);
     let first = start / CHUNK_SIZE;
     let last_wanted = (end / CHUNK_SIZE).min(first + MAX_SCAN_CHUNKS - 1);
@@ -354,6 +358,42 @@ pub extern "C" fn rust_video_cache_start(cache_dir_ptr: *const c_char) -> i32 {
 /// Keshdan o'qilgan bo'laklar bunga KIRMAYDI — shu sabab bu son
 /// o'smay tursa, video uchun tarmoqqa umuman chiqilmayotgani aniq
 /// bo'ladi. Ekrandagi diagnostika paneli buni doimiy ko'rsatib turadi.
+/// Berilgan video uchun DISKDAGI TO'LIQ FAYL yo'lini qaytaradi
+/// (agar hamma bo'lak yuklab bo'lingan bo'lsa). Aks holda bo'sh satr.
+///
+/// MUHIM: bu funksiya TARMOQQA UMUMAN CHIQMAYDI — faqat diskdagi
+/// meta.json va bo'lak fayllariga qaraydi. Pleyer (Dart tomoni) shu
+/// yo'lni olsa, videoni HTTP'siz, to'g'ridan-to'g'ri fayldan
+/// o'ynatadi: hech qanday ulanish, hech qanday timeout, sek esa
+/// oddiy fayl ichida siljish — ya'ni bir zumda va xatosiz.
+#[no_mangle]
+pub extern "C" fn rust_video_cache_local_file(url_ptr: *const c_char) -> *mut c_char {
+    let url = match unsafe { cstr_to_str(url_ptr) } {
+        Some(u) => u,
+        None => return string_to_cptr(String::new()),
+    };
+    let shared = match SHARED.get() {
+        Some(s) => s,
+        None => return string_to_cptr(String::new()),
+    };
+    let dir = shared.cache_root.join(cache_key(url));
+    // meta.json faqat DISKDAN — tarmoqqa chiqmaymiz.
+    let total = fs::read_to_string(dir.join("meta.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<CacheMeta>(&raw).ok())
+        .map(|m| m.total_size)
+        .unwrap_or(0);
+    if total == 0 {
+        return string_to_cptr(String::new());
+    }
+    if try_assemble_full(&dir, total) {
+        let p = full_file_path(&dir).to_string_lossy().to_string();
+        log(format!("Mahalliy to'liq fayl topildi — HTTP'siz ijro: {p}"));
+        return string_to_cptr(p);
+    }
+    string_to_cptr(String::new())
+}
+
 #[no_mangle]
 pub extern "C" fn rust_video_cache_net_bytes() -> u64 {
     NET_BYTES.load(Ordering::Relaxed)
@@ -624,6 +664,128 @@ fn hash_url(url: &str) -> String {
     format!("{hash:016x}")
 }
 
+// ═══════════════════════════════════════════════════════════════════
+//  TO'LIQ FAYL ("full.bin") — HTTP QATLAMINI BUTUNLAY CHETLAB O'TISH
+// ═══════════════════════════════════════════════════════════════════
+//
+// NEGA BU ENG MUHIM O'ZGARISH.
+//
+// Server tomonini ancha yaxshiladik (bitta uzun javob, tez jurnal,
+// parallel ulanishlar) va u endi testlarda 300 marta "sek bo'roni"ga
+// ham bardosh beradi. Lekin haqiqiy qurilmada pleyer HALI HAM qotardi.
+// Sabab endi bizning serverimizda emas — mdk-sdk/FFmpeg'ning HTTP
+// manbadan TEZ-TEZ SEK QILISHNI qanday bajarishida. Har bir sek:
+// eski TCP ulanishni uzish, yangisini ochish, sarlavhalarni almashish,
+// demuxer'ni qaytadan sozlash. Bularning har biri xato qilishi mumkin
+// bo'lgan nuqta.
+//
+// YECHIM: fayl to'liq yuklab bo'lingach, bo'laklarni BITTA oddiy
+// faylga yig'amiz va pleyerga to'g'ridan-to'g'ri SHU FAYLNI beramiz
+// (file:// — HTTP emas). Shunda:
+//
+//   * hech qanday TCP ulanish yo'q;
+//   * sek — bu shunchaki fayl ichida `seek()`, millisekundlarda;
+//   * uzilish, timeout, qayta ulanish degan tushunchalarning O'ZI yo'q.
+//
+// Bu aynan YouTube'ning yuklab olingan videoni ko'rsatish usuli va
+// Telegram'ning FileStreamLoadOperation'i bilan bir xil g'oya.
+//
+// Disk sarfi oshmaydi: to'liq fayl yaratilgach, bo'lak fayllari
+// O'CHIRILADI. Yuklab olish jarayonida esa bo'laklar saqlanadi —
+// internet uzilsa, qayta boshlamasdan davom ettirish uchun.
+//
+// KELAJAK (AES): bo'lak-darajasidagi shifrlash joriy qilinganda bu
+// yo'l qayta ko'rib chiqiladi — shifrlangan faylni pleyer to'g'ridan
+// o'qiy olmaydi, o'shanda yana HTTP proksi kerak bo'ladi.
+const FULL_NAME: &str = "full.bin";
+
+fn full_file_path(dir: &PathBuf) -> PathBuf {
+    dir.join(FULL_NAME)
+}
+
+/// To'liq fayl mavjud va hajmi to'g'rimi?
+fn full_is_complete(dir: &PathBuf, total: u64) -> bool {
+    total > 0
+        && fs::metadata(full_file_path(dir))
+            .map(|m| m.len() == total)
+            .unwrap_or(false)
+}
+
+/// Barcha bo'laklar joyida bo'lsa, ularni BITTA faylga yig'adi va
+/// bo'lak fayllarini o'chiradi. Muvaffaqiyatli bo'lsa `true`.
+///
+/// Yozish avval `.tmp` ga, keyin ATOM `rename` bilan yakuniy nomga —
+/// shu sabab jarayon o'rtada uzilsa ham yarim fayl "to'liq" deb
+/// qabul qilinmaydi.
+fn try_assemble_full(dir: &PathBuf, total: u64) -> bool {
+    if total == 0 {
+        return false;
+    }
+    if full_is_complete(dir, total) {
+        return true;
+    }
+    let chunk_count = total.div_ceil(CHUNK_SIZE);
+    // Avval HAMMA bo'lak joyidami — tekshiramiz (arzon, faqat metadata).
+    for i in 0..chunk_count {
+        let cs = i * CHUNK_SIZE;
+        let ce = (cs + CHUNK_SIZE - 1).min(total - 1);
+        let expected = ce - cs + 1;
+        match fs::metadata(dir.join(chunk_name(i))) {
+            Ok(m) if m.len() == expected => {}
+            _ => return false,
+        }
+    }
+
+    let tmp = dir.join(format!("{FULL_NAME}.tmp"));
+    let _ = fs::remove_file(&tmp);
+    let mut out = match fs::File::create(&tmp) {
+        Ok(f) => f,
+        Err(e) => {
+            log(format!("To'liq faylni yaratib bo'lmadi: {e}"));
+            return false;
+        }
+    };
+    for i in 0..chunk_count {
+        match fs::read(dir.join(chunk_name(i))) {
+            Ok(bytes) => {
+                if out.write_all(&bytes).is_err() {
+                    let _ = fs::remove_file(&tmp);
+                    return false;
+                }
+            }
+            Err(_) => {
+                let _ = fs::remove_file(&tmp);
+                return false;
+            }
+        }
+    }
+    drop(out);
+    if fs::rename(&tmp, full_file_path(dir)).is_err() {
+        let _ = fs::remove_file(&tmp);
+        return false;
+    }
+    // Endi bo'laklar keraksiz — disk sarfi ikki barobar bo'lmasligi
+    // uchun o'chiriladi.
+    for i in 0..chunk_count {
+        let _ = fs::remove_file(dir.join(chunk_name(i)));
+    }
+    log(format!(
+        "TO'LIQ FAYL yig'ildi ({total} bayt) — endi pleyer uni HTTP'siz, to'g'ridan-to'g'ri o'qiydi"
+    ));
+    true
+}
+
+/// To'liq fayldan kerakli bo'lakni o'qiydi (HTTP yo'li uchun zaxira:
+/// bo'laklar o'chirilgan, lekin kimdir baribir Range so'rov yuborsa).
+fn read_from_full(dir: &PathBuf, start: u64, len: usize) -> Option<Vec<u8>> {
+    use std::io::{Seek, SeekFrom};
+    let mut f = fs::File::open(full_file_path(dir)).ok()?;
+    f.seek(SeekFrom::Start(start)).ok()?;
+    let mut buf = vec![0u8; len];
+    f.read_exact(&mut buf).ok()?;
+    Some(buf)
+}
+
 fn chunk_name(index: u64) -> String {
     format!("chunk_{index:07}.bin")
 }
@@ -728,6 +890,14 @@ fn read_or_fetch_chunk(
     expected_total: u64,
 ) -> Result<Vec<u8>, String> {
     let expected_len = (end - start + 1) as usize;
+    // To'liq fayl yig'ilgan bo'lsa (bo'laklar o'chirilgan) — undan
+    // o'qiymiz.
+    if full_is_complete(dir, expected_total) {
+        if let Some(bytes) = read_from_full(dir, start, expected_len) {
+            log(format!("Bo'lak #{index} TO'LIQ FAYLDAN o'qildi (tarmoqsiz)"));
+            return Ok(bytes);
+        }
+    }
     let final_path = dir.join(chunk_name(index));
     if let Ok(bytes) = fs::read(&final_path) {
         if bytes.len() == expected_len {
@@ -1035,6 +1205,10 @@ fn maybe_prefetch(
 
             // ESHIK YOPILDI — pleyer navbatdagi bo'lakka o'tmaguncha
             // server endi hech narsa so'ramaydi.
+            // Oyna tugadi — hamma bo'lak yig'ilgan bo'lsa, ularni
+            // BITTA faylga birlashtiramiz. Keyingi ochilishda pleyer
+            // HTTP'siz, to'g'ridan-to'g'ri shu fayldan o'ynaydi.
+            try_assemble_full(&dir2, total);
             shared.prefetch_active.store(false, Ordering::SeqCst);
         });
 
@@ -1401,6 +1575,51 @@ mod tests {
         assert_eq!(len, 1000);
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Hamma bo'lak joyida bo'lsa, ular BITTA faylga yig'ilishi va
+    /// bo'lak fayllari o'chirilishi kerak (disk ikki barobar
+    /// egallanmasligi uchun). Undan keyin o'qish shu fayldan boradi.
+    #[test]
+    fn toliq_fayl_yigiladi_va_bolaklar_ochiriladi() {
+        let dir = std::env::temp_dir().join("vc_full_test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let chunks = TEST_TOTAL.div_ceil(CHUNK_SIZE);
+
+        // Bitta bo'lak yetishmasa — yig'ilmasligi kerak.
+        for i in 1..chunks {
+            let cs = i * CHUNK_SIZE;
+            let ce = (cs + CHUNK_SIZE - 1).min(TEST_TOTAL - 1);
+            fs::write(dir.join(chunk_name(i)), vec![7u8; (ce - cs + 1) as usize]).unwrap();
+        }
+        assert!(!try_assemble_full(&dir, TEST_TOTAL), "chala keshda yig'ilmasligi kerak");
+        assert!(!full_is_complete(&dir, TEST_TOTAL));
+
+        // Yetishmayotgan bo'lak qo'shilgach — yig'ilishi kerak.
+        let data0: Vec<u8> = (0..CHUNK_SIZE as usize).map(|k| (k % 251) as u8).collect();
+        fs::write(dir.join(chunk_name(0)), &data0).unwrap();
+        assert!(try_assemble_full(&dir, TEST_TOTAL), "to'liq keshda yig'ilishi kerak");
+        assert!(full_is_complete(&dir, TEST_TOTAL));
+        assert_eq!(
+            fs::metadata(full_file_path(&dir)).unwrap().len(),
+            TEST_TOTAL
+        );
+        // Bo'lak fayllari o'chirilgan bo'lishi kerak.
+        for i in 0..chunks {
+            assert!(
+                !dir.join(chunk_name(i)).exists(),
+                "bo'lak #{i} o'chirilmagan — disk ikki barobar egallanadi"
+            );
+        }
+        // To'liq fayldan o'qish to'g'ri joydan kelishi kerak.
+        let part = read_from_full(&dir, 100, 16).unwrap();
+        assert_eq!(part[0], 100u8 % 251);
+        assert_eq!(part[15], 115u8 % 251);
+        // Ikkinchi chaqiruv ham `true` (allaqachon tayyor).
+        assert!(try_assemble_full(&dir, TEST_TOTAL));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Bo'lak yetishmasa, javob AYNAN o'sha bo'shliqda tugashi kerak —

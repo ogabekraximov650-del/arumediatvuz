@@ -83,8 +83,22 @@ Future<void> main() async {
   // xotirada ushlab turishi shart emas: kerak bo'lganda diskdan
   // millisekundlarda qayta o'qiydi. Aksincha, kichik bufer sek
   // qilishni ham TEZLASHTIRADI (kamroq ma'lumot qayta yig'iladi).
+  // ── TEKSTURA O'LCHAMINI EKRAN BILAN CHEKLASH ──────────────────
+  // mdk-sdk standart holatda videoning TO'LIQ o'lchamidagi tekstura
+  // yaratadi. 1080p (yoki undan yuqori) video kichikroq ekranli
+  // telefonda ortiqcha xotira va GPU ishini talab qiladi. Teksturani
+  // ekran o'lchami bilan cheklash sifatni ko'zga ko'rinarli
+  // yomonlashtirmaydi (ekranda baribir shundan ko'p piksel
+  // ko'rsatilmaydi), lekin pleyerni sezilarli YENGILLASHTIRADI.
+  final view = WidgetsBinding.instance.platformDispatcher.views.first;
+  final screen = view.physicalSize;
+  final maxSide = screen.longestSide.round().clamp(720, 3840);
+  final minSide = screen.shortestSide.round().clamp(480, 2160);
+
   fvp.registerWith(options: {
     'fastSeek': true,
+    'maxWidth': maxSide,
+    'maxHeight': minSide,
     'player': {
       // Yana kichraytirildi (1s..8s bufer, 4 ta oraliq). Mahalliy Rust
       // kesh-serveri baytlarni diskdan millisekundlarda beradi, shu
