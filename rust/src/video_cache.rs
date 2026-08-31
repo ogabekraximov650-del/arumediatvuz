@@ -113,14 +113,16 @@ fn contiguous_cached_end(dir: &PathBuf, start: u64, end: u64, total: u64) -> u64
 }
 
 /// Oldindan yuklash OYNASI: ijro nuqtasidan keyin ENG KO'PI BILAN shu
-/// qadar bo'lak keshga olinadi. Avval butun fayl fon'da yuklab olinardi
-/// — bu foydalanuvchining trafigini keraksiz "so'rib" olardi (u videoni
-/// bir necha soniya ko'rib chiqib qo'ysa ham) va xotirani tez to'ldirardi.
-/// Endi faqat oldinda turgan bo'laklar saqlanadi; pleyer oldinga
-/// siljigan sari (yoki sek qilinganda) oyna ham u bilan birga suriladi.
-/// ~10 MiB oldindan yuklash — CHUNK_SIZE 100 KB'ga tushirilgani sabab
-/// bu son ~10x oshirildi (avval 10 × 1 MiB = 10 MiB edi).
-const PREFETCH_WINDOW: u64 = 100;
+/// qadar bo'lak keshga olinadi (~5 MB — 51 × 100 KB). Video ochilishi
+/// bilan aynan shu ~5 MB oldindan yuklab olinadi; pleyer oldinga
+/// siljigan sari (masalan 2-bo'lakka o'tsa) oyna ham u bilan birga
+/// suriladi (52-bo'lak yuklanadi) — HAR DOIM ijro nuqtasidan atigi
+/// ~5 MB oldinda turadi, BUTUN fayl OLDINDAN yuklanmaydi. Bu foydalanuvchi
+/// trafigini tejaydi (video bir necha soniya ko'rilib tashlansa ham,
+/// faqat shu ~5 MB sarflanadi). Foydalanuvchi videoni O'RTAGA (sek)
+/// olib borsa ham xuddi shunday ishlaydi — oyna YANGI nuqtadan qayta
+/// hisoblanadi, oldingi (endi keraksiz) yuklashlar darhol to'xtatiladi.
+const PREFETCH_WINDOW: u64 = 51;
 
 // ── Umumiy holat ─────────────────────────────────────────────────────
 
