@@ -89,9 +89,16 @@ const MAX_CONNS: usize = 64;
 const MAX_SCAN_CHUNKS: u64 = 2600;
 
 fn contiguous_cached_end(dir: &PathBuf, start: u64, end: u64, total: u64) -> u64 {
-    // To'liq fayl mavjud — butun so'ralgan oraliq keshda bor.
+    // To'liq fayl mavjud — butun so'ralgan oraliq keshda bor. LEKIN
+    // baribir MAX_SCAN_CHUNKS*CHUNK_SIZE bilan cheklanadi: aks holda
+    // pleyer "bytes=X-" (oxirigacha) kabi ochiq so'rov yuborsa, katta
+    // (masalan bir necha GB) faylning QOLGAN HAMMASINI BITTA javobda,
+    // BITTA ish oqimida, TO'XTOVSIZ yuborishga urinardik — bu javob
+    // tugaguncha o'sha ulanish (va ish oqimi) band bo'lib qolardi.
     if full_is_complete(dir, total) {
-        return end;
+        let budget = MAX_SCAN_CHUNKS.saturating_mul(CHUNK_SIZE);
+        let budget_end = start.saturating_add(budget).saturating_sub(1);
+        return end.min(budget_end);
     }
     let chunk_count = total.div_ceil(CHUNK_SIZE);
     let first = start / CHUNK_SIZE;
@@ -1301,7 +1308,17 @@ fn fetch_and_store_chunk(
                     .unwrap_or(0)
             ));
             fs::write(&tmp_path, &on_disk).map_err(|e| e.to_string())?;
-            if fs::rename(&tmp_path, &final_path).is_err() {
+            // MUHIM (musobaqa holati): shu bo'lak yuklanib turgan payt
+            // fon yig'uvchisi (assemble_full_inner) ALLAQACHON butun
+            // faylni (full.enc) yig'ib, bo'lak fayllarini o'chirgan
+            // bo'lishi mumkin. Bunday holda bu bo'lakni endi diskka
+            // YOZMAYMIZ — u ORTIQCHA (full.enc allaqachon hammasini
+            // o'z ichiga oladi) va uni yozish "o'chirilgan bo'lakni
+            // tiriltirib qo'yish" (disk sarfini behuda oshirish)
+            // bo'lardi.
+            if full_is_complete(dir, expected_total) {
+                let _ = fs::remove_file(&tmp_path);
+            } else if fs::rename(&tmp_path, &final_path).is_err() {
                 let _ = fs::remove_file(&tmp_path);
             }
         }

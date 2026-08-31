@@ -652,7 +652,19 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       }
       if (!v.isInitialized || v.duration <= Duration.zero) return;
 
-      final shouldBeMoving = v.isPlaying && !v.isBuffering && !_seekBusy;
+      // Video OXIRIGA yaqin (yoki `loop = -1` bilan boshiga qaytish
+      // paytida): mdk-sdk EOF'ni ichki qayta ishlashi va boshiga
+      // qaytishi (native) BIR NECHA soniya davom etishi mumkin —
+      // bu vaqt ichida `position` vaqtincha o'zgarmasligi normal
+      // holat, "qotish" EMAS. Bu oraliqni "qotish" deb hisoblasak,
+      // ayniqsa QISQA videolarda (tez-tez tugab-boshlanadigan)
+      // sog'liq kuzatuvchisi loop bilan "kurashib", pleyerni
+      // keraksiz qayta-qayta ochib yuborishi mumkin edi.
+      final nearEnd =
+          (v.duration - v.position) <= const Duration(milliseconds: 2500);
+
+      final shouldBeMoving =
+          v.isPlaying && !v.isBuffering && !_seekBusy && !nearEnd;
       if (!shouldBeMoving) {
         _stuckTicks = 0;
         _lastWatchPosition = v.position;
