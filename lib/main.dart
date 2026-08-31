@@ -91,22 +91,24 @@ Future<void> main() async {
       // sabab katta xotira buferi umuman kerak emas — u faqat sek
       // qilinganda xotirani shishirib, ilovaning o'chib qolishiga
       // sabab bo'lardi.
-      // YANA KICHRAYTIRILDI: 0.5s..2s bufer, 2 ta oraliq.
+      // 1s..5s bufer, 8 ta bayt-oralig'i.
       //
-      // NEGA: ekrandagi "MAHALLIY" hisoblagichi sek qilinganda 90 MB
-      // gacha o'sib ketardi — holbuki fayl atigi 4.37 MB. Sababi shu
-      // buferda edi: HAR BIR sek'da mdk-sdk yangi joydan 8 SONIYALIK
-      // ma'lumotni qaytadan o'qib olardi (1080p uchun ~1.5 MB), eski
-      // buferni esa tashlab yuborardi. 60 marta sek = ~90 MB qayta
-      // o'qish. Bundan tashqari har bir sek yangi bayt-oralig'i hosil
-      // qilib, xotirani ham shishirardi.
+      // TUZATISH TARIXI (muhim saboq): bir bosqichda men buni 0.5s..2s
+      // va 2 ta oraliqqa TUSHIRGAN edim — maqsad "MAHALLIY" trafikni
+      // kamaytirish edi. NATIJA TESKARI BO'LDI: kichik bufer va kam
+      // oraliq bilan mdk-sdk buferni doim tugatib, HAR SAFAR yangi
+      // HTTP so'rov yuborishga majbur bo'lardi; orqaga sek qilinganda
+      // esa yaqinda o'qilgan oraliqlar allaqachon tashlangani uchun
+      // hammasi QAYTADAN o'qilardi. 9 MB fayl uchun mahalliy trafik
+      // 156 MB ga chiqdi va pleyer beqarorlashdi.
       //
-      // Fayl MAHALLIY DISKDA (Rust kesh-serveri) turgani uchun katta
-      // xotira buferi umuman shart emas — kerakli bayt diskdan
-      // millisekundlarda o'qiladi. Kichik bufer sek'ni ham
-      // TEZLASHTIRADI (kamroq ma'lumot qayta yig'iladi).
-      'buffer.range': '500+2000',
-      'demux.buffer.ranges': '2',
+      // Asl sabab buferda emas, SERVERDA edi (video_cache.rs dagi
+      // `contiguous_cached_end` izohiga qarang): javob 1 MiB da
+      // majburan kesilardi va pleyer har safar qayta ulanishga majbur
+      // bo'lardi. U tuzatilgach, bu yerda o'rtacha, sog'lom qiymat
+      // ishlatiladi: ijro barqaror, xotira sarfi esa cheklangan.
+      'buffer.range': '1000+5000',
+      'demux.buffer.ranges': '8',
       'avformat.probesize': '1048576',
       'avformat.analyzeduration': '1000000',
     },

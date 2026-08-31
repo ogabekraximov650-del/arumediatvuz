@@ -42,32 +42,65 @@ const CHUNK_SIZE: u64 = 1024 * 1024;
 /// Har bir ulanish bitta OS ish oqimi + ~1 MiB bufer degani, shu sabab
 /// bu chegara xotira sarfini bashorat qilinadigan darajada ushlab
 /// turadi (tez-tez sek qilishda ilova o'chib qolishining oldini oladi).
-const MAX_CONNS: usize = 24;
+/// 24 -> 64. Rad etilgan ulanish = pleyer javobsiz qoladi = qotib
+/// qolish. Ish oqimi esa arzon (ayniqsa endi ular keshdan o'qiganda
+/// millisekundlarda tugaydi), shu sabab chegara ancha kengaytirildi:
+/// u endi faqat haqiqiy nosozlikdan himoya vazifasini bajaradi.
+const MAX_CONNS: usize = 64;
 
-/// Bitta HTTP javobda yuboriladigan ENG KO'P bayt (4 MiB).
+/// ENG MUHIM ME'MORIY QAYTA KO'RIB CHIQISH.
 ///
-/// ENG MUHIM ME'MORIY TUZATISH. Avval har bir so'rovga faylning BUTUN
-/// QOLGAN QISMI (masalan 9 MB) bitta uzun javobda uzatilardi. Pleyer sek
-/// qilganda eski ulanishni tashlab ketardi, lekin server oqimi hali ham
-/// unga yozishga urinib, yozish timeout'i tugaguncha (20 soniya!) osilib
-/// turardi. Ketma-ket 5-6 marta sek qilinganda bunday "o'lik" ulanishlar
-/// to'planib, chegaraga yetardi va undan keyingi so'rov RAD ETILARDI —
-/// pleyer esa javobsiz qolib qotib qolardi. Aynan shu sabab orqaga sek
-/// qilishda (bir necha yangi so'rov ketma-ket kelgani uchun) crash
-/// tezroq yuzaga kelardi.
+/// Avval har bir HTTP javob QAT'IY chegara bilan kesilardi (4 MiB,
+/// keyin 1 MiB). Bu KATTA XATO bo'lib chiqdi:
 ///
-/// Endi har bir javob eng ko'pi 4 MiB — bu HTTP standartiga to'liq mos
-/// (206 Partial Content), pleyer qolganini yangi Range so'rovi bilan
-/// o'zi so'raydi. Natijada har bir ulanish qisqa umr ko'radi (keshdan
-/// o'qilganda millisekundlar), ulanishlar hech qachon to'planmaydi va
-/// tashlab ketilgan ulanish ham tezda o'z-o'zidan tugaydi.
-/// YANA KICHRAYTIRILDI: 4 MiB -> 1 MiB (aynan BITTA bo'lak).
-/// Endi har bir HTTP javob ENG KO'PI BILAN bitta bo'lak (1 MiB)
-/// bo'ladi. Foydalanuvchi sek qilganda pleyer ulanishni tashlab
-/// ketsa, biz eng ko'pi 1 MiB'ni bekorga uzatgan bo'lamiz (avval
-/// 4 MiB edi), ulanish esa millisekundlarda tugaydi va hech qachon
-/// to'planib qolmaydi.
-const MAX_RESPONSE_BYTES: u64 = CHUNK_SIZE;
+///   Javob tugashi bilan pleyer (FFmpeg) qolganini olish uchun YANGI
+///   TCP ulanish + YANGI HTTP so'rov ochishga majbur bo'lardi. 9 MB
+///   fayl uchun bu har bir ko'rishda 9 ta ulanish; sek qilinganda esa
+///   har safar yangidan. Foydalanuvchining jurnalida "MAHALLIY" hisobi
+///   9 MB fayl uchun 156 MB ga yetgani ham, sek qilganda pleyer qotib
+///   qolgani ham AYNAN SHU ulanish bo'roni tufayli edi.
+///
+/// Endi chegara YO'Q. Uning o'rniga aqlliroq qoida ishlaydi
+/// (`contiguous_cached_end` ga qarang): javob KESHDA UZLUKSIZ MAVJUD
+/// bo'lgan oxirgi baytgacha davom etadi.
+///
+///   * Fayl to'liq keshda  -> BITTA so'rov, BITTA javob, tamom.
+///                            Hech qanday qayta ulanish yo'q.
+///   * Fayl qisman keshda  -> javob birinchi yetishmayotgan bo'lakda
+///                            tugaydi; pleyer qayta ulanadi va biz
+///                            AYNAN o'sha bo'lakni yuklab beramiz.
+///
+/// Bu ham HTTP standartiga to'liq mos (206 Partial Content), ham
+/// ulanishlar sonini o'nlab barobar kamaytiradi.
+/// Bitta javobda tekshiriladigan eng ko'p bo'lak soni. Uzun film
+/// (masalan 2 GB) uchun har bir so'rovda minglab fayl tekshiruvi
+/// qilmaslik va bitta javobni cheksiz uzaytirmaslik uchun.
+/// 256 MiB — qayta ulanish bo'ronini yo'q qilishga mo'l-ko'l yetadi.
+const MAX_SCAN_CHUNKS: u64 = 256;
+
+fn contiguous_cached_end(dir: &PathBuf, start: u64, end: u64, total: u64) -> u64 {
+    let chunk_count = total.div_ceil(CHUNK_SIZE);
+    let first = start / CHUNK_SIZE;
+    let last_wanted = (end / CHUNK_SIZE).min(first + MAX_SCAN_CHUNKS - 1);
+    // Birinchi bo'lak har doim kiradi — pleyer aynan shuni so'rayapti,
+    // keshda bo'lmasa uni tarmoqdan olib beramiz.
+    let mut last = first;
+    let mut i = first + 1;
+    while i <= last_wanted && i < chunk_count {
+        let cs = i * CHUNK_SIZE;
+        let ce = (cs + CHUNK_SIZE - 1).min(total - 1);
+        let expected = (ce - cs + 1) as u64;
+        match fs::metadata(dir.join(chunk_name(i))) {
+            Ok(m) if m.len() == expected => {
+                last = i;
+                i += 1;
+            }
+            _ => break,
+        }
+    }
+    let last_byte = ((last + 1) * CHUNK_SIZE - 1).min(total - 1);
+    end.min(last_byte)
+}
 
 /// Oldindan yuklash OYNASI: ijro nuqtasidan keyin ENG KO'PI BILAN shu
 /// qadar bo'lak keshga olinadi. Avval butun fayl fon'da yuklab olinardi
@@ -137,6 +170,52 @@ static CURRENT_CHUNK: AtomicU64 = AtomicU64::new(0);
 /// boshlanadi (cheksiz o'sib, qurilma xotirasini to'ldirmasligi uchun).
 const LOG_FILE_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
+/// Jurnal yozuvchi fon oqimiga xabar yuboradigan kanal.
+static LOG_TX: OnceLock<std::sync::mpsc::Sender<String>> = OnceLock::new();
+
+/// Diskka yozuvchi FON OQIMINI ishga tushiradi.
+///
+/// NEGA BU KERAK (aniqlangan sekinlashish sababi): avval `log()` HAR
+/// BIR QATOR uchun diskda `metadata()` + `open()` + `writeln()`
+/// bajarardi — ya'ni har bir qator uchta tizim chaqiruvi. Bu ish
+/// PLEYERGA MA'LUMOT UZATAYOTGAN ish oqimining o'zida bajarilardi.
+/// Tez-tez sek qilinganda sekundiga yuzlab qator yozilib, videoni
+/// uzatish shu qadar sekinlashardi. Endi ulanish oqimi faqat
+/// xotiradagi navbatga qo'yadi (mikrosoniyalar), diskka yozishni esa
+/// alohida fon oqimi TO'PLAM-TO'PLAM qilib bajaradi.
+fn start_log_writer(cache_root: PathBuf) {
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    if LOG_TX.set(tx).is_err() {
+        return;
+    }
+    let _ = thread::Builder::new()
+        .name("video-cache-log".into())
+        .spawn(move || {
+            let path = cache_root.join("debug_log.txt");
+            while let Ok(first) = rx.recv() {
+                // Navbatda to'plangan hamma qatorni bir marta yozamiz.
+                let mut batch = first;
+                batch.push('\n');
+                while let Ok(next) = rx.try_recv() {
+                    batch.push_str(&next);
+                    batch.push('\n');
+                    if batch.len() > 256 * 1024 {
+                        break;
+                    }
+                }
+                if let Ok(meta) = fs::metadata(&path) {
+                    if meta.len() > LOG_FILE_MAX_BYTES {
+                        let _ = fs::remove_file(&path);
+                    }
+                }
+                if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+                    use std::io::Write as _;
+                    let _ = f.write_all(batch.as_bytes());
+                }
+            }
+        });
+}
+
 fn log(msg: impl Into<String>) {
     if let Some(s) = SHARED.get() {
         let elapsed = s.start.elapsed().as_millis();
@@ -153,18 +232,10 @@ fn log(msg: impl Into<String>) {
         }
 
         // 2) DISKDAGI YAGONA JURNAL FAYLI — foydalanuvchi uni menga
-        //    yuborishi uchun. Barcha loglar (Rust server + Dart pleyer)
-        //    shu bitta faylga xronologik tartibda yoziladi:
-        //      <ilova ichki xotirasi>/files/video_byte_cache/debug_log.txt
-        let path = s.cache_root.join("debug_log.txt");
-        if let Ok(meta) = fs::metadata(&path) {
-            if meta.len() > LOG_FILE_MAX_BYTES {
-                let _ = fs::remove_file(&path);
-            }
-        }
-        if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&path) {
-            use std::io::Write as _;
-            let _ = writeln!(f, "{line}");
+        //    yuborishi uchun. Yozishni FON OQIMI bajaradi, shu sabab
+        //    bu chaqiruv pleyerga xizmat ko'rsatishni sekinlashtirmaydi.
+        if let Some(tx) = LOG_TX.get() {
+            let _ = tx.send(line);
         }
     }
 }
@@ -197,6 +268,7 @@ pub extern "C" fn rust_video_cache_start(cache_dir_ptr: *const c_char) -> i32 {
         .timeout_write(Duration::from_secs(10))
         .build();
 
+    let cache_root_for_logs = cache_root.clone();
     let shared = Shared {
         cache_root,
         start: Instant::now(),
@@ -207,7 +279,9 @@ pub extern "C" fn rust_video_cache_start(cache_dir_ptr: *const c_char) -> i32 {
         prefetch_active: AtomicBool::new(false),
         net_by_file: Mutex::new(HashMap::new()),
     };
+    let log_root = cache_root_for_logs;
     let _ = SHARED.set(shared);
+    start_log_writer(log_root);
     log("Rust kesh-server ishga tushirilmoqda...".to_string());
 
     let listener = match TcpListener::bind("127.0.0.1:0") {
@@ -349,22 +423,39 @@ fn read_request_line_and_headers(stream: &mut TcpStream) -> std::io::Result<Pars
     // "o'lik" ish oqimlari to'planib, ilova o'chib qolardi. Yozish
     // timeout'i bunday oqimni majburan xatoga uchratib, tozalanishini
     // kafolatlaydi.
-    // 5s -> 2s. Pleyer sek qilib ulanishni tashlab ketganda, "o'lik"
-    // ish oqimi 2.5 barobar tezroq tozalanadi va ulanishlar
-    // MAX_CONNS chegarasiga yetib bormaydi.
-    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
-    let mut buf = Vec::with_capacity(4096);
-    let mut byte = [0u8; 1];
-    // Sarlavhalar tugashini ("\r\n\r\n") ko'rguncha, bayt-bayt o'qiymiz —
-    // so'rov tanasi (agar bo'lsa) BUTUNLAY e'tiborsiz qoldiriladi, chunki
-    // bizga faqat GET kerak.
+    // YOZISH TIMEOUT'I QAYTA KO'RIB CHIQILDI: 2s -> 20s.
+    //
+    // Muhim tushuncha: pleyer sek qilib ulanishni tashlab ketganda u
+    // soketni YOPADI — bunda `write_all` timeout'ni KUTMASDAN, darhol
+    // xato qaytaradi (ECONNRESET/EPIPE) va ish oqimi shu zahoti
+    // tugaydi. Ya'ni "o'lik" ulanishlarni tozalash uchun qisqa timeout
+    // KERAK EMAS.
+    //
+    // Timeout faqat bitta holatda ishlaydi: pleyer soketni ochiq
+    // qoldirib, ma'lumot o'qishni to'xtatganda — ya'ni foydalanuvchi
+    // videoni PAUZA qilganda. 2 soniya bunga juda kam edi: 2 soniyadan
+    // uzoq pauza qilinsa, biz oqimni uzib qo'yardik va davom
+    // ettirilganda video buzilardi. 20 soniya odatdagi pauzalarni
+    // bemalol qoplaydi.
+    stream.set_write_timeout(Some(Duration::from_secs(20)))?;
+    // Nagle algoritmini o'chirish: sarlavha va kichik bo'laklar
+    // kechiktirilmasdan darhol yuboriladi (mahalliy ulanishda bu
+    // javob tezligini sezilarli oshiradi).
+    let _ = stream.set_nodelay(true);
+    // MUHIM TEZLIK TUZATISHI: avval sarlavhalar BAYT-BAYT (har bayt
+    // uchun alohida `read()` tizim chaqiruvi bilan) o'qilardi — bitta
+    // so'rov uchun 300-500 ta tizim chaqiruvi. Endi bir yo'la 4 KB
+    // o'qiladi. GET so'rovida tana (body) bo'lmagani uchun sarlavha
+    // chegarasidan ortiq o'qib yuborish xavfi ham yo'q.
+    let mut buf: Vec<u8> = Vec::with_capacity(4096);
+    let mut tmp = [0u8; 4096];
     loop {
-        let n = stream.read(&mut byte)?;
+        let n = stream.read(&mut tmp)?;
         if n == 0 {
             break;
         }
-        buf.push(byte[0]);
-        if buf.len() >= 4 && &buf[buf.len() - 4..] == b"\r\n\r\n" {
+        buf.extend_from_slice(&tmp[..n]);
+        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
             break;
         }
         if buf.len() > 64 * 1024 {
@@ -399,12 +490,17 @@ fn write_status_and_headers(
     status_text: &str,
     headers: &[(&str, String)],
 ) -> std::io::Result<()> {
-    write!(stream, "HTTP/1.1 {status} {status_text}\r\n")?;
+    // Sarlavhalar BITTA `write_all` bilan yuboriladi. Avval har bir
+    // qator alohida `write!` bilan yozilardi — ya'ni bitta javob uchun
+    // 5-6 ta alohida TCP yozuvi, natijada ortiqcha paketlar va
+    // kechikish.
+    let mut head = String::with_capacity(256);
+    head.push_str(&format!("HTTP/1.1 {status} {status_text}\r\n"));
     for (name, value) in headers {
-        write!(stream, "{name}: {value}\r\n")?;
+        head.push_str(&format!("{name}: {value}\r\n"));
     }
-    write!(stream, "Connection: close\r\n\r\n")?;
-    Ok(())
+    head.push_str("Connection: close\r\n\r\n");
+    stream.write_all(head.as_bytes())
 }
 
 fn handle_connection(mut stream: TcpStream) -> std::io::Result<()> {
@@ -999,13 +1095,16 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
         return Ok(());
     }
 
-    // Javob uzunligini cheklaymiz (yuqoridagi MAX_RESPONSE_BYTES izohiga
-    // qarang) — shu bilan har bir ulanish qisqa umr ko'radi va tez-tez
-    // sek qilinganda ulanishlar to'planib qolmaydi. Pleyer qolgan qismni
-    // yangi Range so'rovi bilan o'zi so'raydi (HTTP 206 uchun bu mutlaqo
-    // odatiy holat).
-    if is_range && end - start + 1 > MAX_RESPONSE_BYTES {
-        end = start + MAX_RESPONSE_BYTES - 1;
+    // Javob KESHDA UZLUKSIZ MAVJUD bo'lgan joygacha davom etadi
+    // (yuqoridagi `contiguous_cached_end` izohiga qarang). To'liq
+    // keshlangan faylda bu butun so'ralgan oraliq bo'ladi — ya'ni
+    // BITTA javob, hech qanday qayta ulanishsiz.
+    //
+    // Bu faqat Range so'rovlariga qo'llaniladi: Range'siz (200 OK)
+    // javobda Content-Length butun faylni bildiradi va uni qisqartirish
+    // HTTP qoidasini buzgan bo'lardi.
+    if is_range {
+        end = contiguous_cached_end(&dir, start, end, total);
     }
 
     let content_length = end - start + 1;
@@ -1107,3 +1206,241 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
     ));
     Ok(())
 }
+
+
+// ═══════════════════════════════════════════════════════════════════
+//  TESTLAR
+// ═══════════════════════════════════════════════════════════════════
+//
+// Bu testlar TARMOQQA UMUMAN CHIQMAYDI: kesh papkasi oldindan
+// to'ldiriladi (meta.json + bo'lak fayllari), shundan keyin server
+// xuddi pleyer kabi HTTP so'rovlar bilan "qiynaladi". Shu bilan
+// eng muhim ikki narsa tekshiriladi:
+//   1) To'liq keshlangan fayl BITTA javobda beriladimi (qayta
+//      ulanish bo'ronisiz);
+//   2) Ketma-ket ko'p marta "sek" qilinganda (ulanishni yarmida
+//      tashlab ketish) server javob berishda davom etadimi.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpStream;
+
+    const TEST_TOTAL: u64 = 9_036_153; // foydalanuvchining haqiqiy fayli
+    const TEST_NAME: &str = "testvid.mp4";
+
+    fn fill_cache(root: &PathBuf, skip: Option<u64>) {
+        let dir = root.join("video_byte_cache").join(TEST_NAME);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("meta.json"),
+            format!(
+                "{{\"total_size\":{TEST_TOTAL},\"content_type\":\"video/mp4\"}}"
+            ),
+        )
+        .unwrap();
+        let chunks = TEST_TOTAL.div_ceil(CHUNK_SIZE);
+        for i in 0..chunks {
+            if Some(i) == skip {
+                let _ = fs::remove_file(dir.join(chunk_name(i)));
+                continue;
+            }
+            let cs = i * CHUNK_SIZE;
+            let ce = (cs + CHUNK_SIZE - 1).min(TEST_TOTAL - 1);
+            let len = (ce - cs + 1) as usize;
+            // Har bir bayt o'z pozitsiyasidan hosil bo'ladi — shu bilan
+            // qaytgan ma'lumot TO'G'RI joydan ekanini tekshira olamiz.
+            let data: Vec<u8> = (0..len).map(|k| ((cs as usize + k) % 251) as u8).collect();
+            fs::write(dir.join(chunk_name(i)), &data).unwrap();
+        }
+    }
+
+    /// So'rov yuboradi. `read_limit` — javob tanasidan necha bayt
+    /// o'qilsin (None = hammasi). Qaytaradi: (status, content-range,
+    /// o'qilgan bayt soni).
+    fn request(
+        port: u16,
+        range: Option<&str>,
+        read_limit: Option<usize>,
+    ) -> (u16, String, usize, Vec<u8>) {
+        let mut st = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        st.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let mut req = format!(
+            "GET /v?u=http%3A%2F%2F127.0.0.1%3A9%2F{TEST_NAME} HTTP/1.1\r\nHost: x\r\n"
+        );
+        if let Some(r) = range {
+            req.push_str(&format!("Range: {r}\r\n"));
+        }
+        req.push_str("\r\n");
+        st.write_all(req.as_bytes()).unwrap();
+
+        let mut br = BufReader::new(st);
+        let mut status_line = String::new();
+        br.read_line(&mut status_line).unwrap();
+        let status: u16 = status_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let mut content_range = String::new();
+        loop {
+            let mut line = String::new();
+            if br.read_line(&mut line).unwrap() == 0 {
+                break;
+            }
+            if line == "\r\n" {
+                break;
+            }
+            if let Some(v) = line.strip_prefix("Content-Range: ") {
+                content_range = v.trim().to_string();
+            }
+        }
+        let mut body = Vec::new();
+        match read_limit {
+            None => {
+                br.read_to_end(&mut body).unwrap();
+            }
+            Some(n) => {
+                let mut buf = vec![0u8; n];
+                let mut got = 0;
+                while got < n {
+                    match br.read(&mut buf[got..]) {
+                        Ok(0) => break,
+                        Ok(k) => got += k,
+                        Err(_) => break,
+                    }
+                }
+                body.extend_from_slice(&buf[..got]);
+                // Ulanishni ATAYLAB yarmida tashlab ketamiz — pleyer
+                // sek qilganda aynan shunday qiladi.
+            }
+        }
+        let len = body.len();
+        (status, content_range, len, body)
+    }
+
+    #[test]
+    fn keshdan_bir_javobda_va_sek_bosimiga_bardosh() {
+        let root = std::env::temp_dir().join(format!(
+            "vc_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fill_cache(&root, None);
+
+        let c_root = std::ffi::CString::new(root.to_str().unwrap()).unwrap();
+        let port = rust_video_cache_start(c_root.as_ptr());
+        assert!(port > 0, "server ishga tushmadi");
+        let port = port as u16;
+
+        // ── 1) TO'LIQ KESHLANGAN FAYL: BITTA javobda hammasi ───────
+        let (status, cr, len, body) = request(port, Some("bytes=0-"), None);
+        assert_eq!(status, 206);
+        assert_eq!(cr, format!("bytes 0-{}/{}", TEST_TOTAL - 1, TEST_TOTAL));
+        assert_eq!(len as u64, TEST_TOTAL, "butun fayl bitta javobda kelmadi");
+        // Ma'lumot to'g'ri joydan kelganini tekshiramiz.
+        for probe in [0usize, 1_048_575, 1_048_576, 5_000_000, len - 1] {
+            assert_eq!(body[probe], (probe % 251) as u8, "bayt {probe} noto'g'ri");
+        }
+
+        // ── 2) O'RTADAN so'rov ham bitta javobda ───────────────────
+        let (status, cr, len, body) = request(port, Some("bytes=5000000-"), None);
+        assert_eq!(status, 206);
+        assert_eq!(cr, format!("bytes 5000000-{}/{}", TEST_TOTAL - 1, TEST_TOTAL));
+        assert_eq!(len as u64, TEST_TOTAL - 5_000_000);
+        assert_eq!(body[0], (5_000_000usize % 251) as u8);
+
+        // ── 3) SEK BO'RONI: 300 marta ulanib, yarmida tashlab ketish ─
+        // Avval aynan shu holat serverni "bo'g'ib" qo'yardi va pleyer
+        // javobsiz qolib qotardi.
+        for i in 0..300u64 {
+            let start = (i * 29_411) % (TEST_TOTAL - 1);
+            let (st, _, _, _) =
+                request(port, Some(&format!("bytes={start}-")), Some(16 * 1024));
+            assert_eq!(st, 206, "sek #{i} da server javob bermadi");
+        }
+
+        // ── 4) Bo'ron tugagach server HALI HAM sog'lom bo'lishi kerak ─
+        let (status, cr, len, _) = request(port, Some("bytes=0-"), None);
+        assert_eq!(status, 206, "bo'rondan keyin server javob bermadi");
+        assert_eq!(cr, format!("bytes 0-{}/{}", TEST_TOTAL - 1, TEST_TOTAL));
+        assert_eq!(len as u64, TEST_TOTAL);
+
+        // ── 5) 416: chegaradan tashqari so'rov ─────────────────────
+        let (status, _, _, _) =
+            request(port, Some(&format!("bytes={}-", TEST_TOTAL + 10)), None);
+        assert_eq!(status, 416);
+
+        // ── 6) PARALLEL ULANISHLAR ────────────────────────────────
+        // Pleyer (mdk-sdk/FFmpeg) bir vaqtda bir NECHTA ulanish ochishi
+        // mumkin — ayniqsa tez-tez sek qilinganda eskilari hali yopilib
+        // ulgurmaydi. Server hammasiga javob berishi SHART: bittasi ham
+        // rad etilsa, pleyer javobsiz qolib qotadi.
+        let mut handles = Vec::new();
+        for i in 0..40u64 {
+            handles.push(thread::spawn(move || {
+                let st = (i * 211_111) % (TEST_TOTAL - 1);
+                request(port, Some(&format!("bytes={st}-")), Some(64 * 1024)).0
+            }));
+        }
+        for (i, h) in handles.into_iter().enumerate() {
+            let st = h.join().expect("ish oqimi yiqildi");
+            assert_eq!(st, 206, "parallel ulanish #{i} rad etildi");
+        }
+
+        // ── 7) Suffiks so'rov: "bytes=-N" (fayl oxiridan N bayt) ───
+        let (status, cr, len, _) = request(port, Some("bytes=-1000"), None);
+        assert_eq!(status, 206);
+        assert_eq!(
+            cr,
+            format!("bytes {}-{}/{}", TEST_TOTAL - 1000, TEST_TOTAL - 1, TEST_TOTAL)
+        );
+        assert_eq!(len, 1000);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Bo'lak yetishmasa, javob AYNAN o'sha bo'shliqda tugashi kerak —
+    /// keyin pleyer qayta ulanadi va biz faqat o'sha bo'lakni olamiz.
+    #[test]
+    fn yetishmayotgan_bolakda_javob_tugaydi() {
+        let dir = std::env::temp_dir().join("vc_gap_test");
+        let _ = fs::remove_dir_all(&dir);
+        let cache = dir.join("video_byte_cache").join(TEST_NAME);
+        fs::create_dir_all(&cache).unwrap();
+        let chunks = TEST_TOTAL.div_ceil(CHUNK_SIZE);
+        for i in 0..chunks {
+            if i == 3 {
+                continue; // 3-bo'lak ATAYLAB yo'q
+            }
+            let cs = i * CHUNK_SIZE;
+            let ce = (cs + CHUNK_SIZE - 1).min(TEST_TOTAL - 1);
+            fs::write(cache.join(chunk_name(i)), vec![0u8; (ce - cs + 1) as usize]).unwrap();
+        }
+        // 0-dan boshlansa, javob 3-bo'lakdan OLDIN tugashi kerak.
+        assert_eq!(
+            contiguous_cached_end(&cache, 0, TEST_TOTAL - 1, TEST_TOTAL),
+            3 * CHUNK_SIZE - 1
+        );
+        // 4-bo'lakdan boshlansa, oxirigacha uzluksiz.
+        assert_eq!(
+            contiguous_cached_end(&cache, 4 * CHUNK_SIZE, TEST_TOTAL - 1, TEST_TOTAL),
+            TEST_TOTAL - 1
+        );
+        // Yetishmayotgan bo'lakning O'ZIDAN boshlansa: o'sha bo'lak
+        // tarmoqdan olinadi, undan KEYINGILARI esa keshda bo'lgani
+        // uchun O'SHA JAVOBDA davom ettiriladi — ya'ni bitta so'rov
+        // bilan oxirigacha. Bu ataylab shunday: keraksiz qayta
+        // ulanishning oldini oladi.
+        assert_eq!(
+            contiguous_cached_end(&cache, 3 * CHUNK_SIZE, TEST_TOTAL - 1, TEST_TOTAL),
+            TEST_TOTAL - 1
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+}
+
