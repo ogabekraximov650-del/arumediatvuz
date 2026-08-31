@@ -21,7 +21,7 @@
 //     cheklangan — shu sabab har bir ulanish qisqa umr ko'radi va
 //     tez-tez sek qilinganda ulanishlar to'planib qolmaydi.
 //   - Oldindan yuklash SURILUVCHI OYNA bilan: ijro nuqtasidan keyin
-//     eng ko'pi 5 ta bo'lak (PREFETCH_WINDOW) keshga olinadi.
+//     eng ko'pi 10 ta bo'lak (PREFETCH_WINDOW) keshga olinadi.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -67,9 +67,9 @@ const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 /// qadar bo'lak keshga olinadi. Avval butun fayl fon'da yuklab olinardi
 /// — bu foydalanuvchining trafigini keraksiz "so'rib" olardi (u videoni
 /// bir necha soniya ko'rib chiqib qo'ysa ham) va xotirani tez to'ldirardi.
-/// Endi faqat oldinda turgan 5 ta bo'lak saqlanadi; pleyer oldinga
+/// Endi faqat oldinda turgan 10 ta bo'lak saqlanadi; pleyer oldinga
 /// siljigan sari (yoki sek qilinganda) oyna ham u bilan birga suriladi.
-const PREFETCH_WINDOW: u64 = 5;
+const PREFETCH_WINDOW: u64 = 10;
 
 // ── Umumiy holat ─────────────────────────────────────────────────────
 
@@ -524,15 +524,26 @@ fn ensure_meta(shared: &Shared, dir: &PathBuf, url: &str) -> Result<CacheMeta, S
     let mut size: u64 = 0;
     let mut content_type = "video/mp4".to_string();
 
-    // MUHIM TEZLASHTIRISH (jurnal tahlilidan): avval bu yerda HEAD
-    // so'rovi yuborilardi, lekin bizning worker'imiz HEAD'ni umuman
-    // qo'llab-quvvatlamaydi — u HAR DOIM 404 qaytarardi. Ya'ni har bir
-    // yangi video ochilganda BEHUDA bitta tarmoq so'rovi ketib, ~800 ms
-    // vaqt yo'qotilardi (jurnalda: 202ms da so'rov keldi -> 996ms da
-    // "HEAD ishlamadi"). Endi to'g'ridan-to'g'ri ishlaydigan yo'ldan —
-    // "bytes=0-0" GET orqali — hajm aniqlanadi.
-    {
-        // "bytes=0-0" bilan GET. Javob tanasi HECH QACHON
+    // Avval HEAD sinaladi (ba'zi manbalar buni qo'llab-quvvatlamaydi —
+    // bizning worker'imiz ham 404 qaytaradi, bu normal, keyingi zaxira
+    // yo'lga o'tiladi).
+    match shared.agent.head(url).call() {
+        Ok(resp) => {
+            if let Some(len) = resp.header("Content-Length").and_then(|v| v.parse().ok()) {
+                size = len;
+            }
+            if let Some(ct) = resp.header("Content-Type") {
+                content_type = ct.to_string();
+            }
+            log(format!("HEAD javobi: status={}, hajm={size}", resp.status()));
+        }
+        Err(e) => {
+            log(format!("HEAD ishlamadi: {e} — zaxira GET urinib ko'riladi"));
+        }
+    }
+
+    if size == 0 {
+        // Zaxira: "bytes=0-0" bilan GET. Javob tanasi HECH QACHON
         // o'qilmaydi (into_reader() chaqirilmaydi) — shu bilan manba
         // Range'ni e'tiborsiz qoldirib butun faylni yubora boshlagan
         // taqdirda ham, biz shunchaki ulanishni tashlab, hech narsa
@@ -564,7 +575,7 @@ fn ensure_meta(shared: &Shared, dir: &PathBuf, url: &str) -> Result<CacheMeta, S
     }
 
     if size == 0 {
-        log("XATO: video hajmini aniqlab bo'lmadi".to_string());
+        log("XATO: video hajmini aniqlab bo'lmadi (HEAD ham, GET ham)".to_string());
         return Err("hajm aniqlanmadi".to_string());
     }
 
@@ -657,14 +668,8 @@ fn fetch_and_store_chunk(
             }
         }
 
-        // MUHIM: worker'dan HAR DOIM FAQAT SHU BITTA bo'lakning aniq
-        // bayt oralig'i so'raladi ("Range: bytes=start-end", ya'ni
-        // aniq 1 MiB yoki oxirgi bo'lak uchun undan kam). Boshqa
-        // bo'laklar bu so'rovga umuman qo'shilmaydi.
+        log(format!("Bo'lak #{index} worker'dan yuklanmoqda ({start}-{end})..."));
         let range = format!("bytes={start}-{end}");
-        log(format!(
-            "SO'RALYAPTI: faqat bo'lak #{index} — Range: {range} ({expected_len} bayt)"
-        ));
         let resp = shared
             .agent
             .get(url)
@@ -753,46 +758,22 @@ fn fetch_and_store_chunk(
             total_net as f64 / (1024.0 * 1024.0)
         ));
 
-        // ── CHALA BO'LAK HECH QACHON SAQLANMAYDI ───────────────────
-        // Agar yuklash o'rtasida internet uzilsa, bo'lak KUTILGANDAN
-        // QISQA keladi. Bunday chala ma'lumotni diskka yozish keshni
-        // "to'liq" deb noto'g'ri belgilab qo'yardi va video buzilib
-        // ko'rinardi. Shu sabab faqat TO'LIQ bo'laklar saqlanadi;
-        // chalasi tashlab yuboriladi va keyingi safar qaytadan
-        // (to'liq) yuklab olinadi.
-        if collected.len() != expected_len {
-            log(format!(
-                "CHALA: bo'lak #{index} to'liq kelmadi ({}/{expected_len} bayt) — DISKKA SAQLANMADI (ehtimol internet uzildi)",
-                collected.len()
+        if collected.len() == expected_len {
+            // Diskka faqat TO'LIQ bo'lak yuklab bo'lingandan keyin,
+            // vaqtinchalik nomdan YAKUNIY nomga ATOM ravishda ko'chirib
+            // yoziladi.
+            let tmp_path = dir.join(format!(
+                "{}.{}.tmp",
+                chunk_name(index),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_micros())
+                    .unwrap_or(0)
             ));
-            return Err(format!(
-                "bo'lak #{index} chala keldi ({}/{expected_len})",
-                collected.len()
-            ));
-        }
-
-        // Diskka faqat TO'LIQ bo'lak yuklab bo'lingandan keyin,
-        // vaqtinchalik nomdan YAKUNIY nomga ATOM ravishda ko'chirib
-        // yoziladi — shu bilan yarim yozilgan fayl hech qachon
-        // yakuniy nom bilan qolib ketmaydi.
-        let tmp_path = dir.join(format!(
-            "{}.{}.tmp",
-            chunk_name(index),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_micros())
-                .unwrap_or(0)
-        ));
-        if let Err(e) = fs::write(&tmp_path, &collected) {
-            // Yozish muvaffaqiyatsiz bo'lsa (masalan joy tugagan) —
-            // yarim yozilgan vaqtinchalik faylni albatta tozalaymiz.
-            let _ = fs::remove_file(&tmp_path);
-            log(format!("XATO: bo'lak #{index} diskka yozilmadi — {e}"));
-            return Err(e.to_string());
-        }
-        if fs::rename(&tmp_path, &final_path).is_err() {
-            // Parallel oqim bizdan oldin yozib ulgurgan bo'lishi mumkin.
-            let _ = fs::remove_file(&tmp_path);
+            fs::write(&tmp_path, &collected).map_err(|e| e.to_string())?;
+            if fs::rename(&tmp_path, &final_path).is_err() {
+                let _ = fs::remove_file(&tmp_path);
+            }
         }
         Ok(collected)
     })();
@@ -818,48 +799,7 @@ fn fetch_and_store_chunk(
 // Butun tizimda ENG KO'PI BILAN BITTA to'ldiruvchi ish oqimi bo'ladi:
 // yangi video ochilganda vazifa (FillerJob) almashadi, eski video uchun
 // yuklash esa darhol to'xtaydi.
-/// Faylning BARCHA bo'laklari diskda bor-yo'qligini tekshiradi.
-/// Bor bo'lsa — bu fayl to'liq yuklab olingan va unga BOSHQA HECH QACHON
-/// tarmoq so'rovi yuborilmaydi (xuddi Telegram'da faylni bir marta
-/// yuklab olgandan keyin qayta so'ralmagani kabi).
-/// Qolib ketgan vaqtinchalik (.tmp) fayllarni tozalaydi. Internet
-/// yuklash o'rtasida uzilsa yoki ilova to'satdan yopilsa, chala
-/// yozilgan .tmp fayllar qolib ketishi mumkin — ular hech qachon
-/// ishlatilmaydi, faqat joy egallaydi. Har bir video ochilganda
-/// o'sha videoning papkasi tozalab o'tiladi.
-fn cleanup_temp_files(dir: &PathBuf) {
-    if let Ok(entries) = fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if p.extension().and_then(|e| e.to_str()) == Some("tmp") {
-                let _ = fs::remove_file(&p);
-            }
-        }
-    }
-}
-
-fn is_fully_cached(dir: &PathBuf, total: u64) -> bool {
-    let chunk_count = total.div_ceil(CHUNK_SIZE);
-    for i in 0..chunk_count {
-        let chunk_start = i * CHUNK_SIZE;
-        let chunk_end = (chunk_start + CHUNK_SIZE - 1).min(total - 1);
-        let expected_len = (chunk_end - chunk_start + 1) as usize;
-        match fs::metadata(dir.join(chunk_name(i))) {
-            Ok(m) if m.len() as usize == expected_len => {}
-            _ => return false,
-        }
-    }
-    true
-}
-
 fn ensure_filler(shared: &'static Shared, key: &str, dir: &PathBuf, url: &str, total: u64) {
-    // Fayl butunlay keshda bo'lsa, oldindan yuklovchini UMUMAN ishga
-    // tushirmaymiz — hech qanday ish oqimi ochilmaydi va worker'ga
-    // birorta ham so'rov ketmaydi.
-    if is_fully_cached(dir, total) {
-        return;
-    }
-
     {
         let mut job = shared.filler_job.lock().unwrap();
         let changed = job.as_ref().map(|j| j.key.as_str()) != Some(key);
@@ -944,8 +884,6 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
     let key = cache_key(url);
     let dir = shared.cache_root.join(&key);
     fs::create_dir_all(&dir)?;
-    // Oldingi uzilishlardan qolgan chala .tmp fayllarni tozalaymiz.
-    cleanup_temp_files(&dir);
 
     let meta = match ensure_meta(shared, &dir, url) {
         Ok(m) => m,
@@ -1000,25 +938,13 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
         end = start + MAX_RESPONSE_BYTES - 1;
     }
 
-    // ── TO'LIQ KESHLANGAN FAYL: WORKER'GA UMUMAN SO'ROV YO'Q ───────
-    // Har bir so'rovda meta.json VA barcha bo'lak fayllari tekshiriladi.
-    // Hammasi to'g'ri hajm bilan joyida bo'lsa — bu fayl butunlay
-    // yuklab olingan: oldindan yuklovchi ham ishga tushirilmaydi va
-    // worker'ga birorta ham so'rov ketmaydi (xuddi Telegram'da bir
-    // marta yuklab olingan fayl kabi).
-    if is_fully_cached(&dir, total) {
-        log(format!(
-            "TO'LIQ KESHDA: '{key}' — barcha bo'laklar joyida, worker'ga SO'ROV YUBORILMAYDI"
-        ));
-    } else {
-        // Oldindan yuklash oynasini SHU so'rov boshlangan joyga
-        // o'rnatamiz — sek qilinganda oyna darhol yangi nuqtaga
-        // ko'chadi (masalan 2-bo'lakdan 15-ga sakralsa, oyna 15..20).
-        shared
-            .filler_pos
-            .store(start / CHUNK_SIZE, Ordering::Relaxed);
-        ensure_filler(shared, &key, &dir, url, total);
-    }
+    // Oldindan yuklash oynasini SHU so'rov boshlangan joyga o'rnatamiz —
+    // sek qilinganda oyna darhol yangi nuqtaga ko'chadi (masalan
+    // 2-bo'lakdan 15-ga sakralsa, oyna 15..25 bo'ladi).
+    shared
+        .filler_pos
+        .store(start / CHUNK_SIZE, Ordering::Relaxed);
+    ensure_filler(shared, &key, &dir, url, total);
 
     let content_length = end - start + 1;
     if is_range {
