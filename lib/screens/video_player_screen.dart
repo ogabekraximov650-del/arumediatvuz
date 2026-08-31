@@ -236,7 +236,6 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   String? _selectedQuality;
   bool _playerLoading = false;
   int _playToken = 0;
-  bool _disposingOld = false;
   String? _playerError;
 
   // ── Ikki marta bosib sek qilishda tarmoqqa yuboriladigan seekTo
@@ -482,11 +481,14 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     //
     // Endi yana BITTA, sinovdan o'tgan yo'l: hamma narsa mahalliy
     // kesh-serverdan (Rust, 127.0.0.1) o'qiladi. Server:
-    //   * keshdagi bo'laklarni to'g'ridan-to'g'ri beradi;
-    //   * yetishmayotganini worker'dan olib, keshga yozadi;
-    //   * to'liq yig'ilgan (full.enc) fayldan ham xizmat qila oladi
-    //     va SHIFRNI O'ZI ochadi (read_from_full) — ya'ni shifrlash
-    //     saqlanib qoladi, pleyer esa bu haqda bilishi shart emas.
+    //   * keshdagi (mustaqil AES bilan shifrlangan) bo'laklarni ochib,
+    //     to'g'ridan-to'g'ri beradi (rust/src/video_cache.rs,
+    //     read_cached_chunk) — pleyer shifrlash haqida bilishi shart
+    //     emas;
+    //   * yetishmayotganini worker'dan olib, keshga (shifrlab) yozadi.
+    // Bo'laklar HECH QACHON bitta faylga yig'ilmaydi — hamisha, hatto
+    // video to'liq yuklab bo'lingandan keyin ham, shu alohida bo'lak
+    // fayllaridan xizmat ko'rsatiladi.
     Uri proxied;
     bool viaProxy = true;
     try {
