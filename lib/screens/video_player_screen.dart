@@ -93,6 +93,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _rightSeekHideTimer?.cancel();
     _seekDebounceTimer?.cancel();
     _pendingSingleTapTimer?.cancel();
+    _healthTimer?.cancel();
     _restoreSystemUI();
     _controller?.pause();
     _controller?.dispose();
@@ -327,7 +328,6 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // (setLooping): u ichki holatini to'g'ri tozalab, oqimni toza
     // qayta ochadi.
     ctrl.setLooping(true);
-    _attachEndOfVideoListener(ctrl, myToken);
     // Timeout: pleyer bu chaqiruvlarni yakunlamasa ham ekran abadiy
     // "yuklanmoqda" holatida osilib qolmasligi kerak.
     if (resumeAt != null && resumeAt > Duration.zero) {
@@ -348,63 +348,101 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       _controller = ctrl;
       _playerLoading = false;
     });
+    _startHealthWatchdog();
     _scheduleHide();
   }
 
-  // ── Video oxiriga yetganda (tabiiy tugash YOKI progress chizig'ini
-  // oxirigacha surish/sek qilish orqali) pleyer "qotib qolmasligi" uchun:
-  // pozitsiya davomiylikka (duration) 300ms qolganda avtomatik 0-ga
-  // qaytariladi — video boshidan qayta boshlanadi. `restarted` flag bir
-  // marta ishga tushirilib, pozitsiya oxirdan uzoqlashguncha qayta
-  // ishlamaydi (takroriy seekTo chaqiruvlarining oldini oladi).
-  void _attachEndOfVideoListener(VideoPlayerController ctrl, int token) {
-    // ZAXIRA KUZATUVCHI (watchdog).
-    //
-    // Odatdagi holatda video oxiriga yetganda uni PLEYERNING O'ZI
-    // (setLooping) qayta boshlaydi va bu yerda hech narsa qilinmaydi.
-    // Ammo ba'zi qurilmalarda takrorlash ishlamay, pleyer oxirida
-    // pauzada qotib qolishi mumkin. Faqat SHU holat uchun — ya'ni
-    // pozitsiya oxirda, ijro to'xtagan va bu holat 1.2 soniyadan
-    // ortiq davom etgan bo'lsa — bir marta boshiga qaytaramiz.
-    //
-    // Avval bu tekshiruv juda "sezgir" edi (oxirgacha 300ms qolganda
-    // DARHOL seekTo(0)) va u foydalanuvchining o'z sek harakatlari
-    // bilan to'qnashib, pleyerni chalkashtirib yuborardi.
-    DateTime? stuckSince;
-    bool rescued = false;
-    void listener() {
-      if (!mounted || token != _playToken) return;
+  // ── SOG'LIQ KUZATUVCHISI (health watchdog) ────────────────────
+  //
+  // NEGA TAYMER, listener EMAS.
+  //
+  // Avval bu tekshiruv `ctrl.addListener(...)` orqali ishlardi. Unda
+  // HAL QILIB BO'LMAYDIGAN kamchilik bor edi: listener FAQAT pleyer
+  // qiymati O'ZGARGANDA chaqiriladi. Pleyer video oxirida butunlay
+  // to'xtab qolsa, u boshqa hech qanday yangilanish yubormaydi —
+  // demak listener ham BOSHQA CHAQIRILMAYDI va "qotib qolgan"ligini
+  // aniqlaydigan kod hech qachon ishga tushmaydi. Aynan shuning uchun
+  // video tugagach qotib qolardi.
+  //
+  // Taymer esa pleyer holatidan MUTLAQO mustaqil ishlaydi — pleyer
+  // o'lik bo'lsa ham u ishlashda davom etadi va uni tirilta oladi.
+  void _startHealthWatchdog() {
+    _healthTimer?.cancel();
+    _endStuckTicks = 0;
+    _healthTimer = Timer.periodic(const Duration(milliseconds: 600), (_) {
+      if (!mounted) return;
+      final c = _controller;
+      if (c == null) return;
       final VideoPlayerValue v;
       try {
-        v = ctrl.value;
+        v = c.value;
       } catch (_) {
         return;
       }
       if (!v.isInitialized || v.duration <= Duration.zero) return;
+
+      // Foydalanuvchi o'zi pauza bosgan bo'lsa aralashmaymiz — faqat
+      // video OXIRIDA to'xtab qolgan holat tekshiriladi.
       final remaining = v.duration - v.position;
-      final atEnd = remaining <= const Duration(milliseconds: 250);
+      final atEnd = remaining <= const Duration(milliseconds: 400);
+      if (!atEnd || v.isPlaying) {
+        _endStuckTicks = 0;
+        return;
+      }
 
-      if (!atEnd) {
-        stuckSince = null;
-        rescued = false;
+      _endStuckTicks++;
+      // ~1.2s: avval yumshoq yo'l — boshiga qaytarib, ijroni yoqamiz.
+      if (_endStuckTicks == 2) {
+        VideoCacheServer.log(
+            'Video oxirida to\'xtab qoldi — boshiga qaytarilmoqda');
+        _runSeek(c, Duration.zero, forcePlay: true);
         return;
       }
-      if (v.isPlaying) {
-        // Hali o'ynayapti — takrorlash ishlayotgan bo'lishi mumkin.
-        stuckSince = null;
-        return;
+      // ~3s: yumshoq yo'l yordam bermadi (mdk-sdk EOF holatida qotib
+      // qolgan) — pleyerni BUTUNLAY qaytadan ochamiz. Bu har doim
+      // ishlaydi, chunki yangi controller mutlaqo toza holatda
+      // yaratiladi.
+      if (_endStuckTicks >= 5) {
+        VideoCacheServer.log(
+            'Video oxirida qotib qoldi — pleyer qaytadan ochilmoqda');
+        _recoverPlayer(Duration.zero);
       }
-      final now = DateTime.now();
-      stuckSince ??= now;
-      if (rescued) return;
-      if (now.difference(stuckSince!) < const Duration(milliseconds: 1200)) {
-        return;
-      }
-      rescued = true;
-      _runSeek(ctrl, Duration.zero);
+    });
+  }
+
+  // ── PLEYERNI QAYTADAN OCHISH (oxirgi chora) ────────────────────
+  //
+  // "Foydalanuvchi nima qilsa ham crash bo'lmasin" KAFOLATI shu yerda.
+  // Sek yakunlanmasa yoki pleyer qotib qolsa, biz endi kutib
+  // o'tirmaymiz: joriy epizodni AYNAN O'SHA POZITSIYADAN qaytadan
+  // ochamiz. Foydalanuvchi uchun bu 1-2 soniyalik qayta yuklanish
+  // bo'lib ko'rinadi — abadiy qotib qolish emas.
+  //
+  // Fayl allaqachon mahalliy diskda turgani uchun qayta ochish tez
+  // bo'ladi va INTERNETGA UMUMAN chiqilmaydi.
+  DateTime _lastRecovery = DateTime.fromMillisecondsSinceEpoch(0);
+  bool _recovering = false;
+
+  Future<void> _recoverPlayer(Duration at) async {
+    if (_recovering) return;
+    final ep = _currentEp;
+    if (ep == null || !mounted) return;
+    // Cheksiz qayta ochish tsikliga tushib qolmaslik uchun: kamida
+    // 6 soniya oraliq.
+    final now = DateTime.now();
+    if (now.difference(_lastRecovery) < const Duration(seconds: 6)) return;
+    _lastRecovery = now;
+    _recovering = true;
+    _healthTimer?.cancel();
+    _seekInProgress = false;
+    _queuedSeek = null;
+    _seekFailStreak = 0;
+    try {
+      await _playEpisode(ep, resumeAt: at, resumePlaying: true);
+    } catch (_) {
+    } finally {
+      _recovering = false;
     }
-
-    ctrl.addListener(listener);
   }
 
   void _scheduleHide() {
@@ -514,6 +552,12 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   // oladi — foydalanuvchi qanchalik tez/ko'p sek qilsa ham.
   bool _seekInProgress = false;
   Duration? _queuedSeek;
+  Timer? _healthTimer;
+  int _endStuckTicks = 0;
+  // Ketma-ket bajarilmagan (timeout bo'lgan) sek soni. Ikkitasi
+  // ketma-ket bo'lsa — pleyer qotgan deb hisoblanadi va qaytadan
+  // ochiladi.
+  int _seekFailStreak = 0;
 
   // Sek nuqtasini xavfsiz oraliqqa qisadi: [0 .. duration-1s].
   // Videoning ENG OXIRIGA sek qilish mdk-sdk'ni EOF holatiga tushirib,
@@ -526,7 +570,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     return t > limit ? limit : t;
   }
 
-  Future<void> _runSeek(VideoPlayerController c, Duration t) async {
+  Future<void> _runSeek(VideoPlayerController c, Duration t,
+      {bool forcePlay = false}) async {
     if (_seekInProgress) {
       _queuedSeek = t;
       return;
@@ -547,25 +592,34 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // qat'i nazar bayroq ALBATTA bo'shatiladi.
     try {
       // Sekdan OLDINGI ijro holatini eslab qolamiz — pastda tiklash uchun.
-      var wasPlaying = false;
+      var wasPlaying = forcePlay;
       try {
-        wasPlaying = c.value.isPlaying;
+        wasPlaying = forcePlay || c.value.isPlaying;
       } catch (_) {}
+      // Sek bajarilmay qolgan (timeout) holatini aniqlash uchun.
+      var timedOut = false;
+      var lastTarget = t;
 
       var target = t;
       // Xavfsizlik chegarasi: navbat cheksiz aylanib qolmasligi uchun.
       var rounds = 0;
       while (rounds < 24) {
         rounds++;
+        lastTarget = target;
         try {
           // Timeout SHART: agar pleyer biror sababdan sekni yakunlamasa,
           // _seekInProgress abadiy "true" bo'lib qolib, sek butunlay
           // ishlamay qolardi. Timeout bu holatdan chiqib ketishni
-          // kafolatlaydi.
-          await c.seekTo(target).timeout(const Duration(seconds: 5));
+          // kafolatlaydi. 5s -> 2.5s: qotgan pleyerni tezroq aniqlaymiz.
+          await c.seekTo(target).timeout(const Duration(milliseconds: 2500));
+          timedOut = false;
+        } on TimeoutException {
+          // Pleyer sekni YAKUNLAMADI — bu qotib qolishning aniq
+          // belgisi. Pastda hisobga olinadi.
+          timedOut = true;
+          VideoCacheServer.log('Sek yakunlanmadi (timeout): $target');
         } catch (_) {
-          // Sek muvaffaqiyatsiz/kechikkan bo'lsa — jim o'tkazamiz,
-          // ilova ishlashda davom etadi.
+          // Boshqa xatolar — jim o'tkazamiz, ilova ishlashda davom etadi.
         }
         final next = _queuedSeek;
         _queuedSeek = null;
@@ -593,6 +647,22 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
         try {
           await c.play().timeout(const Duration(seconds: 3));
         } catch (_) {}
+      }
+
+      // ── "HECH QANDAY CRASH BO'LMASIN" KAFOLATI ─────────────────
+      // Sek ketma-ket IKKI marta yakunlanmasa, pleyer qotgan deb
+      // hisoblanadi va butunlay qaytadan ochiladi (o'sha
+      // pozitsiyadan). Foydalanuvchi uchun bu qisqa qayta yuklanish
+      // bo'lib ko'rinadi — abadiy qotib qolish emas.
+      if (timedOut) {
+        _seekFailStreak++;
+        if (_seekFailStreak >= 2 && mounted && _controller == c) {
+          VideoCacheServer.log(
+              'Sek ketma-ket 2 marta yakunlanmadi — pleyer qaytadan ochilmoqda');
+          scheduleMicrotask(() => _recoverPlayer(lastTarget));
+        }
+      } else {
+        _seekFailStreak = 0;
       }
     } finally {
       _seekInProgress = false;

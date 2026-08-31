@@ -1,0 +1,26 @@
+# ── Flutter / Dart ──────────────────────────────────────────────
+.dart_tool/
+.packages
+build/
+pubspec.lock
+.flutter-plugins
+.flutter-plugins-dependencies
+*.iml
+
+# ── Android (CI'da `flutter create` bilan qaytadan yaratiladi) ──
+android/
+jniLibs-out/
+
+# ── Rust ────────────────────────────────────────────────────────
+# target/ — kompilyatsiya natijalari (yuzlab MB).
+# Cargo.lock — bu loyiha kutubxona emas, ilova; lekin uni saqlash
+# CI'da versiya farqiga olib kelmasligi uchun hozircha chetlab
+# turiladi (avvalgi holat shunday edi).
+rust/target/
+rust/Cargo.lock
+
+# ── Muharrir / OS ───────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+.DS_Store

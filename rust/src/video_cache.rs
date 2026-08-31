@@ -61,7 +61,13 @@ const MAX_CONNS: usize = 24;
 /// o'zi so'raydi. Natijada har bir ulanish qisqa umr ko'radi (keshdan
 /// o'qilganda millisekundlar), ulanishlar hech qachon to'planmaydi va
 /// tashlab ketilgan ulanish ham tezda o'z-o'zidan tugaydi.
-const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
+/// YANA KICHRAYTIRILDI: 4 MiB -> 1 MiB (aynan BITTA bo'lak).
+/// Endi har bir HTTP javob ENG KO'PI BILAN bitta bo'lak (1 MiB)
+/// bo'ladi. Foydalanuvchi sek qilganda pleyer ulanishni tashlab
+/// ketsa, biz eng ko'pi 1 MiB'ni bekorga uzatgan bo'lamiz (avval
+/// 4 MiB edi), ulanish esa millisekundlarda tugaydi va hech qachon
+/// to'planib qolmaydi.
+const MAX_RESPONSE_BYTES: u64 = CHUNK_SIZE;
 
 /// Oldindan yuklash OYNASI: ijro nuqtasidan keyin ENG KO'PI BILAN shu
 /// qadar bo'lak keshga olinadi. Avval butun fayl fon'da yuklab olinardi
@@ -343,7 +349,10 @@ fn read_request_line_and_headers(stream: &mut TcpStream) -> std::io::Result<Pars
     // "o'lik" ish oqimlari to'planib, ilova o'chib qolardi. Yozish
     // timeout'i bunday oqimni majburan xatoga uchratib, tozalanishini
     // kafolatlaydi.
-    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    // 5s -> 2s. Pleyer sek qilib ulanishni tashlab ketganda, "o'lik"
+    // ish oqimi 2.5 barobar tezroq tozalanadi va ulanishlar
+    // MAX_CONNS chegarasiga yetib bormaydi.
+    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
     let mut buf = Vec::with_capacity(4096);
     let mut byte = [0u8; 1];
     // Sarlavhalar tugashini ("\r\n\r\n") ko'rguncha, bayt-bayt o'qiymiz —
@@ -1075,7 +1084,6 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
             ));
             break;
         }
-        SERVED_BYTES.fetch_add((slice_end_exclusive - slice_start) as u64, Ordering::Relaxed);
         if let Err(e) = stream.write_all(&chunk_bytes[slice_start..slice_end_exclusive]) {
             // Klient uzilgan bo'lishi mumkin (masalan foydalanuvchi yangi
             // joyga sek qildi) — bu holat xato sifatida qaytarilmaydi,
@@ -1083,6 +1091,8 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
             log(format!("So'rov uzildi/xato ({start}-{end}): {e}"));
             break;
         }
+        // Faqat HAQIQATAN uzatilgan baytlar hisoblanadi.
+        SERVED_BYTES.fetch_add((slice_end_exclusive - slice_start) as u64, Ordering::Relaxed);
         cursor = chunk_start + slice_end_exclusive as u64;
     }
     // MUHIM DIAGNOSTIKA: har bir so'rov oxirida ilova ishga tushgandan

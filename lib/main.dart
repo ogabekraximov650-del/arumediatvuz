@@ -91,8 +91,22 @@ Future<void> main() async {
       // sabab katta xotira buferi umuman kerak emas — u faqat sek
       // qilinganda xotirani shishirib, ilovaning o'chib qolishiga
       // sabab bo'lardi.
-      'buffer.range': '1000+8000',
-      'demux.buffer.ranges': '4',
+      // YANA KICHRAYTIRILDI: 0.5s..2s bufer, 2 ta oraliq.
+      //
+      // NEGA: ekrandagi "MAHALLIY" hisoblagichi sek qilinganda 90 MB
+      // gacha o'sib ketardi — holbuki fayl atigi 4.37 MB. Sababi shu
+      // buferda edi: HAR BIR sek'da mdk-sdk yangi joydan 8 SONIYALIK
+      // ma'lumotni qaytadan o'qib olardi (1080p uchun ~1.5 MB), eski
+      // buferni esa tashlab yuborardi. 60 marta sek = ~90 MB qayta
+      // o'qish. Bundan tashqari har bir sek yangi bayt-oralig'i hosil
+      // qilib, xotirani ham shishirardi.
+      //
+      // Fayl MAHALLIY DISKDA (Rust kesh-serveri) turgani uchun katta
+      // xotira buferi umuman shart emas — kerakli bayt diskdan
+      // millisekundlarda o'qiladi. Kichik bufer sek'ni ham
+      // TEZLASHTIRADI (kamroq ma'lumot qayta yig'iladi).
+      'buffer.range': '500+2000',
+      'demux.buffer.ranges': '2',
       'avformat.probesize': '1048576',
       'avformat.analyzeduration': '1000000',
     },
