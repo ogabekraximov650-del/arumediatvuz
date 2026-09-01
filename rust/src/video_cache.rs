@@ -1455,6 +1455,25 @@ fn fetch_and_store_chunk(
 // tugaydi. Pleyer 3-bo'lakka o'tmaguncha server BOSHQA HECH NARSA
 // so'ramaydi. Oynadagi hamma narsa keshda bo'lsa — birorta ham so'rov
 // ketmaydi va ish oqimi darhol tugaydi.
+/// Oldindan yuklash OYNASINI hisoblaydi: pleyer HOZIR o'qiyotgan
+/// bo'lakdan keyin ENG KO'PI `PREFETCH_WINDOW` ta bo'lak olinadi.
+/// Qaytaradi: `[from, until)` — ya'ni `until` OYNAGA KIRMAYDI.
+///
+/// Foydalanuvchi tilida (bo'laklar 1 dan sanalganda):
+///   * pleyer 1-bo'lakni ko'rsatyapti -> 11-bo'lakkacha yuklanadi;
+///   * pleyer 2-bo'lakka o'tdi        -> 12-bo'lakkacha;
+///   * 21-bo'lakka sek qilindi        -> 31-bo'lakkacha.
+/// Kodda indeks 0 dan boshlanadi, shu sabab "1-bo'lak" = indeks 0.
+///
+/// Oyna HAR DOIM pleyer bilan birga suriladi va HECH QACHON undan
+/// kengroq bo'lmaydi — ya'ni worker'dan oldindan 10 MB dan ortiq
+/// olinmaydi.
+fn prefetch_range(current_chunk: u64, chunk_count: u64) -> (u64, u64) {
+    let from = current_chunk + 1;
+    let until = from.saturating_add(PREFETCH_WINDOW).min(chunk_count);
+    (from, until)
+}
+
 fn maybe_prefetch(
     shared: &'static Shared,
     key: &str,
@@ -1483,8 +1502,7 @@ fn maybe_prefetch(
         .name("video-cache-prefetch".into())
         .spawn(move || {
             let chunk_count = total.div_ceil(CHUNK_SIZE);
-            let from = current_chunk + 1;
-            let until = (from + PREFETCH_WINDOW).min(chunk_count);
+            let (from, until) = prefetch_range(current_chunk, chunk_count);
 
             // ── PARALLEL YUKLASH ──────────────────────────────────
             // Oynadagi bo'laklar ketma-ket emas, BIR NECHTA ish oqimi
@@ -1997,6 +2015,35 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// OLDINDAN YUKLASH OYNASI: foydalanuvchi aytgan misollar aynan
+    /// shu yerda tekshiriladi. Bo'laklar kodda 0 dan sanaladi, ya'ni
+    /// "1-bo'lak" = indeks 0.
+    #[test]
+    fn oldindan_yuklash_oynasi_10_bolak() {
+        // Butun fayl juda uzun (1000 bo'lak) — chegara faqat oyna.
+        let n = 1000;
+
+        // 1-bo'lak ko'rsatilyapti (indeks 0) -> 2..11-bo'laklar
+        // (indeks 1..=10) olinadi, ya'ni 11-bo'lakkacha.
+        assert_eq!(prefetch_range(0, n), (1, 11));
+        // 2-bo'lakka o'tdi -> 12-bo'lakkacha (indeks 11).
+        assert_eq!(prefetch_range(1, n), (2, 12));
+        // 21-bo'lakka sek qilindi (indeks 20) -> 31-bo'lakkacha
+        // (indeks 30).
+        assert_eq!(prefetch_range(20, n), (21, 31));
+
+        // Har doim ANIQ 10 ta bo'lak (fayl oxiri yaqin bo'lmasa).
+        for cur in 0..50u64 {
+            let (from, until) = prefetch_range(cur, n);
+            assert_eq!(until - from, PREFETCH_WINDOW, "oyna 10 ta emas");
+        }
+
+        // Fayl oxirida oyna qisqaradi va HECH QACHON fayldan
+        // chiqib ketmaydi.
+        assert_eq!(prefetch_range(995, 1000), (996, 1000));
+        assert_eq!(prefetch_range(999, 1000), (1000, 1000));
     }
 
     /// FFI orqali holatni so'rab, JSON'ga o'giradi va Rust qaytargan

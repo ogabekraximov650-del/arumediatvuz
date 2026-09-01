@@ -748,7 +748,11 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // Birinchi sek: ijroni to'xtatamiz va keyin qaytishni eslab
     // qolamiz.
     if (_pendingTarget == null) {
-      _resumeAfterSeek = _intendedPlaying && ctrl.value.isPlaying;
+      // MUHIM: bu yerda `ctrl.value.isPlaying` EMAS, foydalanuvchining
+      // NIYATI olinadi. Sek qilingan payt pleyer buferlash sabab
+      // vaqtincha "to'xtagan" bo'lishi mumkin — o'shanda isPlaying
+      // false bo'lib, sekdan keyin video PAUZADA qolib ketardi.
+      _resumeAfterSeek = _intendedPlaying;
       if (ctrl.value.isPlaying) {
         ctrl.pause();
       }
@@ -777,6 +781,18 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     }
     await _runSeek(c, target);
     if (!mounted || _controller != c) return;
+
+    // ── YANGI SEKNI YO'QOTMASLIK ─────────────────────────────
+    // `_runSeek` eng ko'pi 1 soniya davom etadi va o'sha payt
+    // foydalanuvchi YANA sek qilgan bo'lishi mumkin. Avval bu holatda
+    // biz `_pendingTarget`ni SO'ZSIZ tozalab yuborardik — natijada
+    // foydalanuvchining eng oxirgi sek'i YO'QOLARDI: video eski
+    // nuqtadan davom etar, ekranda esa hech narsa bo'lmagandek
+    // tuyulardi ("qotib qoldi" hissi). Endi maqsad o'zgargan bo'lsa,
+    // uni tegmasdan qoldiramiz — o'zining 1 soniyalik taymeri bilan
+    // bajariladi.
+    if (_pendingTarget != target) return;
+
     setState(() => _pendingTarget = null);
     if (_resumeAfterSeek) {
       _resumeAfterSeek = false;
