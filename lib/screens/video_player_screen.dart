@@ -33,7 +33,13 @@ const Map<String, String> _playerOpts = {
   // orqaga sek qilinganda esa yaqinda o'qilgan oraliqlar allaqachon
   // tashlangani uchun hammasi qaytadan o'qilardi. Asl muammo buferda
   // emas, serverda edi (video_cache.rs, `contiguous_cached_end`).
-  'buffer.range': '1000+5000',
+  // TUZATISH (o'zidan-o'zi "sek"/sakrash muammosi): bufer oynasi
+  // 1s..5s juda kichik edi. Tarmoq bir lahza sekinlashsa bufer
+  // bo'shab qolar, mdk-sdk esa paketlarni TASHLAB (drop) oldinga
+  // "sakrardi" — ekranda bu aynan "pleyer o'zidan-o'zi sek qilyapti"
+  // bo'lib ko'rinadi. Endi oyna 4s..30s: pleyer oldinga ancha ko'p
+  // ma'lumot yig'ib qo'yadi va qisqa uzilishlarni sezdirmaydi.
+  'buffer.range': '4000+30000',
   'demux.buffer.ranges': '8',
 
   // ── Format aniqlash ─────────────────────────────────────────────
@@ -588,8 +594,25 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       // mumkin ekan — foydalanuvchida kuzatilgan "o'zidan-o'zi sek
       // bo'lish" xatosining sababi shu edi.
       player.loop = -1;
+      // ── ENG MUHIM TUZATISH: `drop` ALBATTA `false` ──────────────
+      // fvp/mdk-sdk hujjatiga ko'ra (player.dart, setBufferRange
+      // izohi):
+      //   drop = true  -> buferlangan davomiylik `max`dan oshsa,
+      //                   ESKI (kalit bo'lmagan) paketlarni TASHLAB
+      //                   yuboradi;
+      //   drop = false -> paket yuborishni buferga joy bo'lguncha
+      //                   KUTADI (hech narsa tashlanmaydi).
+      // `drop: true` jonli (live) oqimlar uchun mo'ljallangan. Oddiy
+      // fayl (VOD) uchun u ZARARLI: tarmoq/disk bir lahza kechiksa
+      // pleyer kadrlarni tashlab, oldinga sakraydi — foydalanuvchi
+      // buni "pleyer o'zidan-o'zi tinimsiz sek qilyapti" deb
+      // ko'radi. Aynan shu bayroq muammoning sababi edi.
+      //
+      // Bufer oynasi ham kengaytirildi (4s..30s): pleyer oldindan
+      // ko'proq ma'lumot yig'adi, qisqa tarmoq uzilishlari
+      // ijroga umuman ta'sir qilmaydi.
       try {
-        player.setBufferRange(min: 1000, max: 4000, drop: true);
+        player.setBufferRange(min: 4000, max: 30000, drop: false);
       } catch (_) {}
       final size = await player.textureSize
           .timeout(const Duration(seconds: 15), onTimeout: () => null);

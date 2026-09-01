@@ -17,11 +17,12 @@
 //   - Har bir video FIKSIRLANGAN 1 MiB "chunk" fayllarga bo'lib
 //     path_provider orqali berilgan (ilova-shaxsiy) papkada saqlanadi —
 //     kelajakdagi bo'lak-asosidagi AES shifrlash rejasi bilan mos.
-//   - Har bir javob eng ko'pi 4 MiB (MAX_RESPONSE_BYTES) bilan
-//     cheklangan — shu sabab har bir ulanish qisqa umr ko'radi va
-//     tez-tez sek qilinganda ulanishlar to'planib qolmaydi.
+//   - Javob uzunligi qat'iy chegara bilan kesilmaydi: u keshda
+//     UZLUKSIZ mavjud bo'lgan oxirgi baytgacha davom etadi
+//     (`contiguous_cached_end`) — shu bilan keraksiz qayta
+//     ulanishlar bo'lmaydi.
 //   - Oldindan yuklash SURILUVCHI OYNA bilan: ijro nuqtasidan keyin
-//     eng ko'pi 10 ta bo'lak (PREFETCH_WINDOW) keshga olinadi.
+//     eng ko'pi PREFETCH_WINDOW ta bo'lak (~8 MB) keshga olinadi.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -37,12 +38,22 @@ use std::time::{Duration, Instant};
 use crate::crypto;
 use crate::ffi_utils::{cstr_to_str, string_to_cptr};
 
-// 100 KB — har bir bo'lak diskda MUSTAQIL shifrlangan holda saqlanadi
+// 1 MiB — har bir bo'lak diskda MUSTAQIL shifrlangan holda saqlanadi
 // (crypto::encrypt_chunk/decrypt_chunk, har biri o'z kaliti bilan —
-// video_cache_server.dart emas, crypto.rs'dagi izohga qarang). 100 KB
+// video_cache_server.dart emas, crypto.rs'dagi izohga qarang). 1 MiB
 // 16 ga karrali (AES blok o'lchami), shu sabab bo'lak chegaralari
 // shifrlash blok chegaralari bilan mos keladi.
-const CHUNK_SIZE: u64 = 100 * 1024;
+//
+// TUZATISH (uzluksiz "sakrash"/stutter muammosi): bir bosqichda bu
+// 100 KB ga tushirilgan edi. Natijada har bir bo'lak uchun ALOHIDA
+// HTTP so'rov ketardi — 1 MB video uchun 10 ta so'rov. Yuklash esa
+// ketma-ket (bittalab) bo'lgani uchun haqiqiy tezlik
+// "bo'lak_hajmi / so'rov kechikishi" bilan cheklanardi: 100 KB va
+// 100 ms kechikishda bu atigi ~1 MB/s — 1080p video uchun yetarli
+// emas. Bufer bo'shab qolar, pleyer kadr tashlab oldinga sakrardi.
+// 1 MiB bilan ayni tarmoqda o'tkazuvchanlik ~10 barobar oshadi,
+// so'rovlar soni esa shuncha kamayadi.
+const CHUNK_SIZE: u64 = 1024 * 1024;
 
 /// Bir vaqtda ochiq bo'lishi mumkin bo'lgan eng ko'p ulanish soni.
 /// Har bir ulanish bitta OS ish oqimi + ~1 MiB bufer degani, shu sabab
@@ -82,11 +93,10 @@ const MAX_CONNS: usize = 64;
 /// (masalan 2 GB) uchun har bir so'rovda minglab fayl tekshiruvi
 /// qilmaslik va bitta javobni cheksiz uzaytirmaslik uchun.
 /// ~256 MiB — qayta ulanish bo'ronini yo'q qilishga mo'l-ko'l yetadi.
-/// MUHIM: CHUNK_SIZE 1 MiB'dan 100 KB'ga tushirilganda (~10x kichik)
-/// bu son ~10x OSHIRILDI — aks holda bitta javobning eng ko'p hajmi
-/// ~10x kichrayib, "ENG MUHIM ME'MORIY QAYTA KO'RIB CHIQISH" izohida
-/// tasvirlangan qayta ulanish bo'roni xavfi qaytadan paydo bo'lardi.
-const MAX_SCAN_CHUNKS: u64 = 2600;
+/// CHUNK_SIZE yana 1 MiB ga qaytarilgani uchun bu son ham mos ravishda
+/// qaytarildi: 260 x 1 MiB = ~256 MiB — bitta javobda tekshiriladigan
+/// eng katta hajm o'zgarmadi.
+const MAX_SCAN_CHUNKS: u64 = 260;
 
 fn contiguous_cached_end(dir: &PathBuf, start: u64, end: u64, total: u64) -> u64 {
     let chunk_count = total.div_ceil(CHUNK_SIZE);
@@ -113,7 +123,7 @@ fn contiguous_cached_end(dir: &PathBuf, start: u64, end: u64, total: u64) -> u64
 }
 
 /// Oldindan yuklash OYNASI: ijro nuqtasidan keyin ENG KO'PI BILAN shu
-/// qadar bo'lak keshga olinadi (~5 MB — 51 × 100 KB). Video ochilishi
+/// qadar bo'lak keshga olinadi (~8 MB — 8 × 1 MiB). Video ochilishi
 /// bilan aynan shu ~5 MB oldindan yuklab olinadi; pleyer oldinga
 /// siljigan sari (masalan 2-bo'lakka o'tsa) oyna ham u bilan birga
 /// suriladi (52-bo'lak yuklanadi) — HAR DOIM ijro nuqtasidan atigi
@@ -122,7 +132,7 @@ fn contiguous_cached_end(dir: &PathBuf, start: u64, end: u64, total: u64) -> u64
 /// faqat shu ~5 MB sarflanadi). Foydalanuvchi videoni O'RTAGA (sek)
 /// olib borsa ham xuddi shunday ishlaydi — oyna YANGI nuqtadan qayta
 /// hisoblanadi, oldingi (endi keraksiz) yuklashlar darhol to'xtatiladi.
-const PREFETCH_WINDOW: u64 = 51;
+const PREFETCH_WINDOW: u64 = 8;
 
 // ── Umumiy holat ─────────────────────────────────────────────────────
 
@@ -628,15 +638,31 @@ fn read_cached_chunk(dir: &PathBuf, key: &str, index: u64, expected_len: usize) 
 struct CacheMeta {
     total_size: u64,
     content_type: String,
+    /// Bo'laklar QAYSI o'lchamda saqlangani. CHUNK_SIZE o'zgarganda
+    /// diskdagi eski bo'laklar yaroqsiz bo'lib qoladi (uzunligi mos
+    /// kelmaydi) — ular hech qachon o'qilmasa ham, joyni behuda band
+    /// qilib yotardi. Shu sabab bu qiymat joriy CHUNK_SIZE bilan mos
+    /// kelmasa, kesh papkasi bir marta butunlay tozalanadi.
+    /// `default` — eski (bu maydonsiz) meta.json fayllari uchun: ular
+    /// 0 bo'lib o'qiladi va shu bilan "eskirgan" deb aniqlanadi.
+    #[serde(default)]
+    chunk_size: u64,
 }
 
 fn ensure_meta(shared: &Shared, dir: &PathBuf, url: &str) -> Result<CacheMeta, String> {
     let meta_path = dir.join("meta.json");
     if let Ok(raw) = fs::read_to_string(&meta_path) {
         if let Ok(meta) = serde_json::from_str::<CacheMeta>(&raw) {
-            if meta.total_size > 0 {
+            if meta.total_size > 0 && meta.chunk_size == CHUNK_SIZE {
                 log(format!("meta.json diskdan o'qildi: hajm={}", meta.total_size));
                 return Ok(meta);
+            }
+            if meta.total_size > 0 {
+                log(format!(
+                    "Kesh eskirgan (bo'lak o'lchami {} != {CHUNK_SIZE}) — tozalanmoqda",
+                    meta.chunk_size
+                ));
+                invalidate_cache(dir);
             }
         }
     }
@@ -702,6 +728,7 @@ fn ensure_meta(shared: &Shared, dir: &PathBuf, url: &str) -> Result<CacheMeta, S
     let meta = CacheMeta {
         total_size: size,
         content_type,
+        chunk_size: CHUNK_SIZE,
     };
     if let Ok(json) = serde_json::to_string(&meta) {
         let _ = fs::write(&meta_path, json);
@@ -1241,7 +1268,7 @@ mod tests {
         fs::write(
             dir.join("meta.json"),
             format!(
-                "{{\"total_size\":{TEST_TOTAL},\"content_type\":\"video/mp4\"}}"
+                "{{\"total_size\":{TEST_TOTAL},\"content_type\":\"video/mp4\",\"chunk_size\":{CHUNK_SIZE}}}"
             ),
         )
         .unwrap();
