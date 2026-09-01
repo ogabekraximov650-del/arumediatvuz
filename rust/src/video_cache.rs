@@ -19,10 +19,10 @@
 //     kelajakdagi bo'lak-asosidagi AES shifrlash rejasi bilan mos.
 //   - Javob uzunligi qat'iy chegara bilan kesilmaydi: u keshda
 //     UZLUKSIZ mavjud bo'lgan oxirgi baytgacha davom etadi
-//     (`contiguous_cached_end`) — shu bilan keraksiz qayta
-//     ulanishlar bo'lmaydi.
+//     — yetishmayotgan bo'laklar javob yozilayotgan payt yuklab
+//     olinadi, shu sabab keraksiz qayta ulanishlar bo'lmaydi.
 //   - Oldindan yuklash SURILUVCHI OYNA bilan: ijro nuqtasidan keyin
-//     eng ko'pi PREFETCH_WINDOW ta bo'lak (~8 MB) keshga olinadi.
+//     eng ko'pi PREFETCH_WINDOW ta bo'lak (~24 MB) keshga olinadi.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -31,7 +31,7 @@ use std::net::{TcpListener, TcpStream};
 use std::os::raw::c_char;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -74,68 +74,11 @@ const MAX_CONNS: usize = 64;
 /// oladi — natijada HECH BIRI o'z vaqtida tugamaydi, pleyer esa
 /// javob kutib qotib qoladi. Endi bir vaqtda eng ko'pi 6 ta yuklash
 /// bo'ladi; qolganlari navbat kutadi (rad etilmaydi).
-const MAX_NET_FETCHES: usize = 6;
+const MAX_NET_FETCHES: usize = 10;
 static NET_FETCHES: AtomicUsize = AtomicUsize::new(0);
 
-/// ENG MUHIM ME'MORIY QAYTA KO'RIB CHIQISH.
-///
-/// Avval har bir HTTP javob QAT'IY chegara bilan kesilardi (4 MiB,
-/// keyin 1 MiB). Bu KATTA XATO bo'lib chiqdi:
-///
-///   Javob tugashi bilan pleyer (FFmpeg) qolganini olish uchun YANGI
-///   TCP ulanish + YANGI HTTP so'rov ochishga majbur bo'lardi. 9 MB
-///   fayl uchun bu har bir ko'rishda 9 ta ulanish; sek qilinganda esa
-///   har safar yangidan. Foydalanuvchining jurnalida "MAHALLIY" hisobi
-///   9 MB fayl uchun 156 MB ga yetgani ham, sek qilganda pleyer qotib
-///   qolgani ham AYNAN SHU ulanish bo'roni tufayli edi.
-///
-/// Endi chegara YO'Q. Uning o'rniga aqlliroq qoida ishlaydi
-/// (`contiguous_cached_end` ga qarang): javob KESHDA UZLUKSIZ MAVJUD
-/// bo'lgan oxirgi baytgacha davom etadi.
-///
-///   * Fayl to'liq keshda  -> BITTA so'rov, BITTA javob, tamom.
-///                            Hech qanday qayta ulanish yo'q.
-///   * Fayl qisman keshda  -> javob birinchi yetishmayotgan bo'lakda
-///                            tugaydi; pleyer qayta ulanadi va biz
-///                            AYNAN o'sha bo'lakni yuklab beramiz.
-///
-/// Bu ham HTTP standartiga to'liq mos (206 Partial Content), ham
-/// ulanishlar sonini o'nlab barobar kamaytiradi.
-/// Bitta javobda tekshiriladigan eng ko'p bo'lak soni. Uzun film
-/// (masalan 2 GB) uchun har bir so'rovda minglab fayl tekshiruvi
-/// qilmaslik va bitta javobni cheksiz uzaytirmaslik uchun.
-/// ~256 MiB — qayta ulanish bo'ronini yo'q qilishga mo'l-ko'l yetadi.
-/// CHUNK_SIZE yana 1 MiB ga qaytarilgani uchun bu son ham mos ravishda
-/// qaytarildi: 260 x 1 MiB = ~256 MiB — bitta javobda tekshiriladigan
-/// eng katta hajm o'zgarmadi.
-const MAX_SCAN_CHUNKS: u64 = 260;
-
-fn contiguous_cached_end(dir: &PathBuf, start: u64, end: u64, total: u64) -> u64 {
-    let chunk_count = total.div_ceil(CHUNK_SIZE);
-    let first = start / CHUNK_SIZE;
-    let last_wanted = (end / CHUNK_SIZE).min(first + MAX_SCAN_CHUNKS - 1);
-    // Birinchi bo'lak har doim kiradi — pleyer aynan shuni so'rayapti,
-    // keshda bo'lmasa uni tarmoqdan olib beramiz.
-    let mut last = first;
-    let mut i = first + 1;
-    while i <= last_wanted && i < chunk_count {
-        let cs = i * CHUNK_SIZE;
-        let ce = (cs + CHUNK_SIZE - 1).min(total - 1);
-        let expected = chunk_on_disk_len(ce - cs + 1);
-        match fs::metadata(dir.join(chunk_name(i))) {
-            Ok(m) if m.len() == expected => {
-                last = i;
-                i += 1;
-            }
-            _ => break,
-        }
-    }
-    let last_byte = ((last + 1) * CHUNK_SIZE - 1).min(total - 1);
-    end.min(last_byte)
-}
-
 /// Oldindan yuklash OYNASI: ijro nuqtasidan keyin ENG KO'PI BILAN shu
-/// qadar bo'lak keshga olinadi (~8 MB — 8 × 1 MiB). Video ochilishi
+/// qadar bo'lak keshga olinadi (~24 MB — 24 × 1 MiB). Video ochilishi
 /// bilan aynan shu ~5 MB oldindan yuklab olinadi; pleyer oldinga
 /// siljigan sari (masalan 2-bo'lakka o'tsa) oyna ham u bilan birga
 /// suriladi (52-bo'lak yuklanadi) — HAR DOIM ijro nuqtasidan atigi
@@ -144,7 +87,17 @@ fn contiguous_cached_end(dir: &PathBuf, start: u64, end: u64, total: u64) -> u64
 /// faqat shu ~5 MB sarflanadi). Foydalanuvchi videoni O'RTAGA (sek)
 /// olib borsa ham xuddi shunday ishlaydi — oyna YANGI nuqtadan qayta
 /// hisoblanadi, oldingi (endi keraksiz) yuklashlar darhol to'xtatiladi.
-const PREFETCH_WINDOW: u64 = 8;
+const PREFETCH_WINDOW: u64 = 24;
+
+/// Oldindan yuklashda bir vaqtda ishlaydigan ish oqimlari soni.
+///
+/// SABAB: bitta bo'lak = bitta HTTP so'rov. Ular KETMA-KET olinganda
+/// haqiqiy tezlik "bo'lak hajmi ÷ so'rov kechikishi" bilan cheklanadi:
+/// 1 MiB va 200 ms kechikishda bu atigi ~5 MB/s, mobil tarmoqda esa
+/// ancha kam. Natijada bufer to'lolmay, video to'xtab-to'xtab ketardi.
+/// 4 ta oqim bilan bir vaqtda 4 ta bo'lak olinadi va tezlik shunga
+/// mos ravishda oshadi (tarmoq imkoni qadar).
+const PREFETCH_THREADS: usize = 4;
 
 // ── Umumiy holat ─────────────────────────────────────────────────────
 
@@ -387,7 +340,7 @@ fn read_request_line_and_headers(stream: &mut TcpStream) -> std::io::Result<Pars
     // "o'lik" ish oqimlari to'planib, ilova o'chib qolardi. Yozish
     // timeout'i bunday oqimni majburan xatoga uchratib, tozalanishini
     // kafolatlaydi.
-    // YOZISH TIMEOUT'I QAYTA KO'RIB CHIQILDI: 2s -> 20s.
+    // YOZISH TIMEOUT'I: 60s.
     //
     // Muhim tushuncha: pleyer sek qilib ulanishni tashlab ketganda u
     // soketni YOPADI — bunda `write_all` timeout'ni KUTMASDAN, darhol
@@ -399,9 +352,10 @@ fn read_request_line_and_headers(stream: &mut TcpStream) -> std::io::Result<Pars
     // qoldirib, ma'lumot o'qishni to'xtatganda — ya'ni foydalanuvchi
     // videoni PAUZA qilganda. 2 soniya bunga juda kam edi: 2 soniyadan
     // uzoq pauza qilinsa, biz oqimni uzib qo'yardik va davom
-    // ettirilganda video buzilardi. 20 soniya odatdagi pauzalarni
-    // bemalol qoplaydi.
-    stream.set_write_timeout(Some(Duration::from_secs(20)))?;
+    // ettirilganda video buzilardi. Endi javoblar UZLUKSIZ (bo'shliqda
+    // qisqartirilmaydi), ya'ni pleyer buferi to'lganda o'qishni bir
+    // muddat to'xtatib turishi butunlay normal — shu sabab 60 soniya.
+    stream.set_write_timeout(Some(Duration::from_secs(60)))?;
     // Nagle algoritmini o'chirish: sarlavha va kichik bo'laklar
     // kechiktirilmasdan darhol yuboriladi (mahalliy ulanishda bu
     // javob tezligini sezilarli oshiradi).
@@ -600,9 +554,9 @@ fn hash_url(url: &str) -> String {
 //      proksi orqali ishlaydi (video_player_screen.dart), full.enc
 //      esa faqat proksi orqali, kerakli bo'lakni kesib xizmat
 //      qilinardi — ya'ni bo'lak fayllaridan farqi yo'q edi.
-//   2) `contiguous_cached_end` allaqachon bir nechta KESHDAGI bo'lakni
-//      BITTA javobga birlashtiradi (MAX_SCAN_CHUNKS gacha) — demak
-//      "bitta uzun javob" foydasi bo'lak fayllarining o'zidayoq bor.
+//   2) server allaqachon bir nechta bo'lakni BITTA uzluksiz javobga
+//      birlashtirib beradi — demak "bitta uzun fayl" foydasi bo'lak
+//      fayllarining o'zidayoq bor.
 // Bularning ustiga, hamma bo'lakni qayta ochib-yopib BITTA faylga
 // yig'ish qo'shimcha CPU/xotira sarflardi va o'zi murakkab poyga
 // holatlariga (fon to'ldiruvchisi bilan) sabab bo'lardi. Endi HAR BIR
@@ -1066,43 +1020,58 @@ fn maybe_prefetch(
             let from = current_chunk + 1;
             let until = (from + PREFETCH_WINDOW).min(chunk_count);
 
-            for i in from..until {
-                // Boshqa video ochilgan bo'lsa — darhol to'xtaymiz.
-                if *shared.active_key.lock().unwrap() != key2 {
-                    break;
-                }
-                // ESKIRGAN OYNANI TASHLASH. Foydalanuvchi sek qilib
-                // butunlay boshqa joyga o'tgan bo'lishi mumkin — bunday
-                // holda bu yerdagi eski oyna endi keraksiz. Uni davom
-                // ettirish (a) bekorga trafik sarflaydi, (b) pleyer
-                // HOZIR so'rayotgan bo'lak bilan tarmoq uchun
-                // raqobatlashib, sekni sekinlashtiradi va "qotib
-                // qolish"ga olib keladi. Shu sabab har bir bo'lakdan
-                // OLDIN pleyerning haqiqiy joyi tekshiriladi.
-                let live = CURRENT_CHUNK.load(Ordering::Relaxed);
-                if live < current_chunk || live >= current_chunk + PREFETCH_WINDOW {
-                    log(format!(
-                        "Oldindan yuklash to'xtatildi: pleyer #{live} ga o'tdi (eski oyna {from}..{until})"
-                    ));
-                    break;
-                }
-                let chunk_start = i * CHUNK_SIZE;
-                let chunk_end = (chunk_start + CHUNK_SIZE - 1).min(total - 1);
-                let expected_len = (chunk_end - chunk_start + 1) as usize;
+            // ── PARALLEL YUKLASH ──────────────────────────────────
+            // Oynadagi bo'laklar ketma-ket emas, BIR NECHTA ish oqimi
+            // bilan bir vaqtda olinadi. Navbat — oddiy atomik
+            // hisoblagich: har bir oqim keyingi raqamni olib, o'sha
+            // bo'lakni yuklaydi. Bu tarmoq kechikishini "yashiradi"
+            // va bufer ijro nuqtasidan oldinda turishini ta'minlaydi.
+            let cursor = Arc::new(AtomicU64::new(from));
+            let mut workers = Vec::with_capacity(PREFETCH_THREADS);
+            for _ in 0..PREFETCH_THREADS {
+                let cursor = Arc::clone(&cursor);
+                let (k, d, u) = (key2.clone(), dir2.clone(), url2.clone());
+                let h = thread::Builder::new()
+                    .name("video-cache-prefetch-w".into())
+                    .spawn(move || loop {
+                        let i = cursor.fetch_add(1, Ordering::SeqCst);
+                        if i >= until {
+                            break;
+                        }
+                        // Boshqa video ochilgan bo'lsa — darhol to'xtaymiz.
+                        if *shared.active_key.lock().unwrap() != k {
+                            break;
+                        }
+                        // ESKIRGAN OYNANI TASHLASH: foydalanuvchi sek
+                        // qilib butunlay boshqa joyga o'tgan bo'lishi
+                        // mumkin — bunday holda bu oyna endi keraksiz va
+                        // uni davom ettirish pleyer HOZIR so'rayotgan
+                        // bo'lak bilan tarmoq uchun raqobatlashadi.
+                        let live = CURRENT_CHUNK.load(Ordering::Relaxed);
+                        if live < current_chunk || live >= current_chunk + PREFETCH_WINDOW {
+                            break;
+                        }
+                        let chunk_start = i * CHUNK_SIZE;
+                        let chunk_end = (chunk_start + CHUNK_SIZE - 1).min(total - 1);
+                        let expected_len = (chunk_end - chunk_start + 1) as usize;
 
-                // Diskda bor bo'lsa — TARMOQQA UMUMAN CHIQILMAYDI.
-                if let Ok(m) = fs::metadata(dir2.join(chunk_name(i))) {
-                    if m.len() == chunk_on_disk_len(expected_len as u64) {
-                        continue;
-                    }
+                        // Diskda bor bo'lsa — TARMOQQA UMUMAN CHIQILMAYDI.
+                        if let Ok(m) = fs::metadata(d.join(chunk_name(i))) {
+                            if m.len() == chunk_on_disk_len(expected_len as u64) {
+                                continue;
+                            }
+                        }
+                        let _ = fetch_and_store_chunk(
+                            shared, &k, &d, &u, i, chunk_start, chunk_end, expected_len,
+                            total,
+                        );
+                    });
+                if let Ok(h) = h {
+                    workers.push(h);
                 }
-                log(format!(
-                    "Oldindan yuklanmoqda: bo'lak #{i} (oyna {from}..{until})"
-                ));
-                let _ = fetch_and_store_chunk(
-                    shared, &key2, &dir2, &url2, i, chunk_start, chunk_end, expected_len,
-                    total,
-                );
+            }
+            for w in workers {
+                let _ = w.join();
             }
 
             // ESHIK YOPILDI — pleyer navbatdagi bo'lakka o'tmaguncha
@@ -1167,17 +1136,20 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
         return Ok(());
     }
 
-    // Javob KESHDA UZLUKSIZ MAVJUD bo'lgan joygacha davom etadi
-    // (yuqoridagi `contiguous_cached_end` izohiga qarang). To'liq
-    // keshlangan faylda bu butun so'ralgan oraliq bo'ladi — ya'ni
-    // BITTA javob, hech qanday qayta ulanishsiz.
+    // ── JAVOB QISQARTIRILMAYDI ────────────────────────────────
     //
-    // Bu faqat Range so'rovlariga qo'llaniladi: Range'siz (200 OK)
-    // javobda Content-Length butun faylni bildiradi va uni qisqartirish
-    // HTTP qoidasini buzgan bo'lardi.
-    if is_range {
-        end = contiguous_cached_end(&dir, start, end, total);
-    }
+    // Avval javob "keshda uzluksiz mavjud" joygacha qisqartirilardi:
+    // yetishmayotgan birinchi bo'lakda javob tugar, pleyer esa qolganini
+    // olish uchun YANGI ulanish ochishga majbur bo'lardi. Har bir
+    // qayta ulanish — bu yangi TCP + HTTP so'rov, ya'ni qo'shimcha
+    // kechikish; ijro davomida ular yig'ilib, videoni "to'xtab-to'xtab"
+    // ko'rsatardi.
+    //
+    // Endi server oddiy HTTP serverdek ishlaydi: so'ralgan oraliq
+    // BITTA javobda, uzluksiz beriladi. Yetishmayotgan bo'laklar
+    // javob yozilayotgan payt, shu yerning o'zida yuklab olinadi
+    // (pastdagi tsiklga qarang), oldindan yuklash esa ijro nuqtasidan
+    // oldinda ishlab, ularning ko'pini allaqachon tayyorlab qo'yadi.
 
     let content_length = end - start + 1;
     if is_range {
@@ -1486,50 +1458,26 @@ mod tests {
         );
         assert_eq!(len, 1000);
 
+        // ── 4) KESHDA BO'SHLIQ BO'LSA ─────────────────────────────
+        // Javob endi bo'shliqda QISQARTIRILMAYDI: server yetishmayotgan
+        // bo'lakni javob yozilayotgan payt yuklab olishga urinadi. Bu
+        // testda manba mavjud emas (127.0.0.1:9), shu sabab javob aynan
+        // o'sha bo'shliqda uziladi — ya'ni undan OLDINGI hamma narsa
+        // BITTA javobda kelgani tasdiqlanadi.
+        let dir = root.join("video_byte_cache").join(TEST_NAME);
+        fs::remove_file(dir.join(chunk_name(3))).unwrap();
+        let (status, _cr, len, body) = request(port, Some("bytes=0-"), None);
+        assert_eq!(status, 206);
+        assert_eq!(
+            len as u64,
+            3 * CHUNK_SIZE,
+            "bo'shliqqacha bo'lgan qism bitta javobda kelmadi"
+        );
+        for (i, b) in body.iter().enumerate().take(2000) {
+            assert_eq!(*b, (i % 251) as u8, "bayt #{i} noto'g'ri joydan");
+        }
+
         let _ = fs::remove_dir_all(&root);
     }
 
-    /// Bo'lak yetishmasa, javob AYNAN o'sha bo'shliqda tugashi kerak —
-    /// keyin pleyer qayta ulanadi va biz faqat o'sha bo'lakni olamiz.
-    #[test]
-    fn yetishmayotgan_bolakda_javob_tugaydi() {
-        enable_crypto();
-        let dir = std::env::temp_dir().join("vc_gap_test");
-        let _ = fs::remove_dir_all(&dir);
-        let cache = dir.join("video_byte_cache").join(TEST_NAME);
-        fs::create_dir_all(&cache).unwrap();
-        let chunks = TEST_TOTAL.div_ceil(CHUNK_SIZE);
-        for i in 0..chunks {
-            if i == 3 {
-                continue; // 3-bo'lak ATAYLAB yo'q
-            }
-            let cs = i * CHUNK_SIZE;
-            let ce = (cs + CHUNK_SIZE - 1).min(TEST_TOTAL - 1);
-            let plain = vec![0u8; (ce - cs + 1) as usize];
-            let (k, iv) = crypto::derive_chunk_key_iv(TEST_NAME, i).unwrap();
-            fs::write(cache.join(chunk_name(i)), crypto::encrypt_chunk(&plain, &k, &iv)).unwrap();
-        }
-        // 0-dan boshlansa, javob 3-bo'lakdan OLDIN tugashi kerak.
-        assert_eq!(
-            contiguous_cached_end(&cache, 0, TEST_TOTAL - 1, TEST_TOTAL),
-            3 * CHUNK_SIZE - 1
-        );
-        // 4-bo'lakdan boshlansa, oxirigacha uzluksiz.
-        assert_eq!(
-            contiguous_cached_end(&cache, 4 * CHUNK_SIZE, TEST_TOTAL - 1, TEST_TOTAL),
-            TEST_TOTAL - 1
-        );
-        // Yetishmayotgan bo'lakning O'ZIDAN boshlansa: o'sha bo'lak
-        // tarmoqdan olinadi, undan KEYINGILARI esa keshda bo'lgani
-        // uchun O'SHA JAVOBDA davom ettiriladi — ya'ni bitta so'rov
-        // bilan oxirigacha. Bu ataylab shunday: keraksiz qayta
-        // ulanishning oldini oladi.
-        assert_eq!(
-            contiguous_cached_end(&cache, 3 * CHUNK_SIZE, TEST_TOTAL - 1, TEST_TOTAL),
-            TEST_TOTAL - 1
-        );
-        let _ = fs::remove_dir_all(&dir);
-    }
-
 }
-

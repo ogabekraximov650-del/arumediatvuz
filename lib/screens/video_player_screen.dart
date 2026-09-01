@@ -72,6 +72,15 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   // sinovdan o'tgan holda kechadi.
   VideoPlayerController? _controller;
 
+  // Foydalanuvchi NIMANI xohlagani: ijro yoki pauza. Sek/buferlash
+  // paytida ExoPlayer ichkarida bir lahza to'xtaydi va `isPlaying`
+  // false bo'ladi — lekin tugmaning ko'rinishi shu sababli
+  // "sakramasligi" kerak. Shu sabab tugma ana shu NIYATNI ko'rsatadi.
+  bool _intendedPlaying = true;
+
+  // Progress chizig'i barmoq bilan surilayotgan payt.
+  bool _isScrubbing = false;
+
   Map<String, dynamic>? _currentEp;
   String? _selectedQuality;
   bool _playerLoading = false;
@@ -290,6 +299,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       _showControls = true;
       _playerLoading = true;
       _playerError = null;
+      _intendedPlaying = resumePlaying;
     });
 
     // Sek navbatini tozalaymiz — eski epizodga tegishli so'rovlar
@@ -622,8 +632,10 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _lastPlayPauseTap = now;
 
     if (ctrl.value.isPlaying) {
+      setState(() => _intendedPlaying = false);
       ctrl.pause();
     } else {
+      setState(() => _intendedPlaying = true);
       ctrl.play();
     }
     _scheduleHide();
@@ -649,7 +661,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // lekin bu qatlam platformaga bo'ladigan chaqiruvlar sonini
     // yanada kamaytiradi.
     _seekDebounceTimer?.cancel();
-    _seekDebounceTimer = Timer(const Duration(milliseconds: 110), () {
+    _seekDebounceTimer = Timer(const Duration(milliseconds: 90), () {
       final base = _pendingSeekBase;
       final delta = _pendingSeekDeltaSeconds;
       _pendingSeekBase = null;
@@ -684,20 +696,23 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // harakat ustun.
     _pendingSeekBase = null;
     _pendingSeekDeltaSeconds = 0;
-
     _seekDebounceTimer?.cancel();
-    _seekDebounceTimer = Timer(const Duration(milliseconds: 110), () {
-      _seekDebounceTimer = null;
-      final c = _controller;
-      if (c == null || !c.value.isInitialized) return;
-      final dur = c.value.duration;
-      var t = target;
-      if (t < Duration.zero) t = Duration.zero;
-      // Slayder oxirigacha surilganda pleyer EOF holatiga tushib
-      // qotib qolmasligi uchun oxiridan 1 soniya oldinga qisiladi.
-      t = _clampSeekTarget(t, dur);
-      _runSeek(c, t);
-    });
+    _seekDebounceTimer = null;
+
+    // MUHIM: progress chizig'idan kelgan sek KECHIKTIRILMAYDI.
+    //
+    // Bu chaqiruv barmoq slayderdan UZILGANDA (onChangeEnd) bitta
+    // marta keladi — ya'ni u allaqachon "yakuniy" nuqta. Uni yana
+    // 110 ms kutish foyda bermaydi, faqat javobni sekinlashtiradi.
+    // (Surish davomida esa pleyerga umuman tegilmaydi — faqat
+    // slayderning o'z ko'rinishi yangilanadi.)
+    final dur = ctrl.value.duration;
+    var t = target;
+    if (t < Duration.zero) t = Duration.zero;
+    // Slayder oxirigacha surilganda pleyer EOF holatiga tushib
+    // qolmasligi uchun oxiridan 1 soniya oldinga qisiladi.
+    t = _clampSeekTarget(t, dur);
+    _runSeek(ctrl, t);
   }
 
   // Barcha sek chaqiruvlari SHU yerdan o'tadi. Bir vaqtning o'zida
@@ -1206,7 +1221,13 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
           // qilingandan keyin) ko'rinadi. _playerLoading dan farqli —
           // bu holat controller yashab turganda ham qayta-qayta
           // yoqilib-o'chib turishi mumkin.
-          if (_currentEp != null && !_playerLoading && _playerError == null)
+          // Kontrollar KO'RINIB turganda buferlash markaziy tugmaning
+          // halqasi orqali ko'rsatiladi (_centerButton) — bu yerda
+          // ikkinchi aylanani chizish shart emas.
+          if (_currentEp != null &&
+              !_playerLoading &&
+              _playerError == null &&
+              !_showControls)
             _bufferingReactive(),
 
           // ── Butun video maydoni ustida BITTA gesture detektor: bitta tap —
@@ -1461,20 +1482,78 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     );
   }
 
-  // Faqat play/pause ikonkasini eng tor ko'lamda yangilaydi.
+  // ── MARKAZIY TUGMA: play/pause + uni O'RAB TURGAN HALQA ─────
+  //
+  // Halqa ikki vazifani bajaradi:
+  //   * odatdagi holatda — ijro qay darajada o'tganini ko'rsatadi
+  //     (to'liq aylana = video oxiri);
+  //   * pleyer band bo'lganda (buferlash, sek, progress chizig'i
+  //     surilayotgan payt) — AYLANADI, ya'ni "kutilmoqda" degani.
+  //
+  // Muhim tafsilot: band bo'lganda tugmadagi ikonka O'ZGARMAYDI.
+  // ExoPlayer sek paytida ichkarida bir lahza to'xtaydi va
+  // `isPlaying` false bo'lib qoladi; agar ikonka shunga qarab
+  // chizilsa, har bir sekda tugma "play" ga sakrab, ko'zni
+  // qamashtirardi. Endi u foydalanuvchining NIYATINI ko'rsatadi.
   Widget _playPauseReactive({required double size}) {
     final ctrl = _controller;
     if (ctrl == null) {
       return GestureDetector(
         onTap: _togglePlayPause,
-        child: _playPauseIcon(playing: false, size: size),
+        child: _centerButton(playing: false, busy: true, progress: 0),
       );
     }
     return ValueListenableBuilder<VideoPlayerValue>(
       valueListenable: ctrl,
-      builder: (_, value, __) => GestureDetector(
-        onTap: _togglePlayPause,
-        child: _playPauseIcon(playing: value.isPlaying, size: size),
+      builder: (_, value, __) {
+        final busy = !value.isInitialized ||
+            value.isBuffering ||
+            _isScrubbing ||
+            _seekBusy;
+        final dur = value.duration.inMilliseconds;
+        final progress = dur > 0
+            ? (value.position.inMilliseconds / dur).clamp(0.0, 1.0)
+            : 0.0;
+        return GestureDetector(
+          onTap: _togglePlayPause,
+          child: _centerButton(
+            playing: busy ? _intendedPlaying : value.isPlaying,
+            busy: busy,
+            progress: progress,
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _centerButton({
+    required bool playing,
+    required bool busy,
+    required double progress,
+  }) {
+    const iconSize = 40.0;
+    const ringPadding = 6.0;
+    final ringSize = iconSize + 12 * 2 + ringPadding * 2;
+    return SizedBox(
+      width: ringSize,
+      height: ringSize,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          SizedBox(
+            width: ringSize,
+            height: ringSize,
+            child: CircularProgressIndicator(
+              // `value: null` — aylanuvchi (aniqlanmagan) rejim.
+              value: busy ? null : progress,
+              strokeWidth: 2.6,
+              color: AppColors.accent,
+              backgroundColor:
+                  busy ? Colors.transparent : Colors.white.withOpacity(0.22),
+            ),
+          ),
+          _playPauseIcon(playing: playing, size: iconSize),
+        ],
       ),
     );
   }
@@ -1484,8 +1563,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   // zona kengligi va sek ko'rsatkichining o'lchami shu qiymatga
   // asoslanadi.
   double _playPauseDiameter(bool isFullscreen) {
-    final iconSize = isFullscreen ? 46.0 : 40.0;
-    return iconSize + 12 * 2;
+    // Ikonka (40) + ichki padding (12×2) + halqa uchun joy (6×2).
+    return 40.0 + 12 * 2 + 6 * 2;
   }
 
   Widget _playPauseIcon({required bool playing, required double size}) {
@@ -1520,6 +1599,14 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
           onQualityTap: _showQualityDialog,
           onFullscreen: _toggleFullscreen,
           isFullscreen: isFullscreen,
+          onScrubStart: () {
+            _hideTimer?.cancel();
+            if (!_isScrubbing) setState(() => _isScrubbing = true);
+          },
+          onScrubEnd: () {
+            if (_isScrubbing) setState(() => _isScrubbing = false);
+            _scheduleHide();
+          },
         );
     if (ctrl == null) return bar(null);
     return ValueListenableBuilder<VideoPlayerValue>(
@@ -1919,6 +2006,10 @@ class _BottomBar extends StatefulWidget {
   final VoidCallback onQualityTap;
   final VoidCallback onFullscreen;
   final bool isFullscreen;
+  // Barmoq slayderga qo'yilganda/uzilganda xabar beradi — markaziy
+  // tugmaning halqasi shu paytda aylanadi.
+  final VoidCallback onScrubStart;
+  final VoidCallback onScrubEnd;
 
   const _BottomBar({
     required this.position,
@@ -1928,6 +2019,8 @@ class _BottomBar extends StatefulWidget {
     required this.onQualityTap,
     required this.onFullscreen,
     required this.isFullscreen,
+    required this.onScrubStart,
+    required this.onScrubEnd,
   });
 
   @override
@@ -1971,6 +2064,7 @@ class _BottomBarState extends State<_BottomBar> {
                 value: ratio,
                 onChangeStart: (v) {
                   setState(() => _dragValue = v);
+                  widget.onScrubStart();
                 },
                 onChanged: (v) {
                   setState(() => _dragValue = v);
@@ -1982,6 +2076,7 @@ class _BottomBarState extends State<_BottomBar> {
                             (v * widget.duration.inMilliseconds).round()));
                   }
                   setState(() => _dragValue = null);
+                  widget.onScrubEnd();
                 },
               ),
             ),
