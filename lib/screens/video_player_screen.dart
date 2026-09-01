@@ -34,13 +34,23 @@ const Map<String, String> _playerOpts = {
   // tashlangani uchun hammasi qaytadan o'qilardi. Asl muammo buferda
   // emas, serverda edi (video_cache.rs, `contiguous_cached_end`).
   // TUZATISH (o'zidan-o'zi "sek"/sakrash muammosi): bufer oynasi
-  // 1s..5s juda kichik edi. Tarmoq bir lahza sekinlashsa bufer
-  // bo'shab qolar, mdk-sdk esa paketlarni TASHLAB (drop) oldinga
-  // "sakrardi" — ekranda bu aynan "pleyer o'zidan-o'zi sek qilyapti"
-  // bo'lib ko'rinadi. Endi oyna 4s..30s: pleyer oldinga ancha ko'p
-  // ma'lumot yig'ib qo'yadi va qisqa uzilishlarni sezdirmaydi.
-  'buffer.range': '4000+30000',
-  'demux.buffer.ranges': '8',
+  // 1s..5s juda kichik edi — tarmoq bir lahza sekinlashsa bufer
+  // bo'shab qolar, pleyer esa oldinga "sakrardi".
+  //
+  // IKKINCHI TUZATISH (sek qilganda ilova o'chib qolishi): bir
+  // bosqichda bu 4s..30s ga ko'tarilgan edi — bu esa BOSHQA muammoni
+  // keltirib chiqardi. `demux.buffer.ranges` HAR BIR sekdan keyin
+  // ALOHIDA buferlangan oraliq saqlaydi: 8 oraliq × 30 soniya =
+  // ~4 daqiqalik demultipleksirlangan paket XOTIRADA. Tez-tez sek
+  // qilinganda bu yuzlab megabaytga yetib, Android ilovani
+  // xotira yetishmovchiligi sabab O'LDIRARDI ("crash bo'lib otib
+  // yuboryapti").
+  //
+  // Endi 2s..8s va 4 oraliq = ~32 soniyalik paket — bu avvalgi
+  // (8 × 4s = 32s) holat bilan BIR XIL xotira, lekin har bir oraliq
+  // 2 barobar uzun bo'lgani uchun ijro silliqligi saqlanadi.
+  'buffer.range': '2000+8000',
+  'demux.buffer.ranges': '4',
 
   // ── Format aniqlash ─────────────────────────────────────────────
   // Standart qiymatlar (~5 MB / ~5s) bilan pleyer deyarli butun
@@ -159,6 +169,32 @@ class _PlayerCtrl extends ValueNotifier<_PV> {
   StreamSubscription? _stateSub;
   StreamSubscription? _statusSub;
 
+  // ── ILOVA O'CHIB QOLISHINING (crash) IKKINCHI ASOSIY SABABI ─────
+  //
+  // `mdk.Player` — bu native (C++) obyekt ustidagi yupqa qobiq.
+  // `player.dispose()` chaqirilgach u `mdkPlayerAPI_delete()` bilan
+  // native obyektni XOTIRADAN O'CHIRADI. Shundan KEYIN o'sha Player
+  // ustida biror metod chaqirilsa (masalan `seek`, `position`,
+  // `state`) — bu bo'shatilgan xotiraga murojaat bo'lib, ilova
+  // BUTUNLAY o'chib qoladi (SIGSEGV). Bunday native halokatni Dart
+  // `try/catch` bilan USHLAB BO'LMAYDI.
+  //
+  // Aynan shu holat sek qilinganda tez-tez yuz berardi: sek uzoq
+  // cho'zilsa yoki xato qaytarsa, ekran pleyerni qaytadan ochishga
+  // urinardi (eskisini dispose qilib) — lekin ayni paytda hali
+  // TUGAMAGAN sek Future'i o'sha eski (endi o'chirilgan) Player'ga
+  // qaytib murojaat qilardi.
+  //
+  // Yechim ikki qatlamli:
+  //   1) `_disposed` bayrog'i — dispose'dan keyin BARCHA native
+  //      chaqiruvlar jimgina to'xtatiladi (hech qanday murojaat yo'q);
+  //   2) dispose'ning O'ZI hali tugamagan sek yakunlanishini kutadi
+  //      (eng ko'pi 2 soniya), shundan keyingina native obyektni
+  //      o'chiradi.
+  bool _disposed = false;
+  bool get isDisposed => _disposed;
+  Future<int>? _pendingSeek;
+
   _PlayerCtrl(this.player) : super(const _PV()) {
     _stateSub = player.onStateChanged.listen((e) {
       value =
@@ -180,6 +216,7 @@ class _PlayerCtrl extends ValueNotifier<_PV> {
     // avvalgi "sog'liq kuzatuvchisi" taymeridan farqli: bu yerda faqat
     // UI (progress chizig'i)ni yangilash uchun ishlatiladi.
     _posTimer = Timer.periodic(const Duration(milliseconds: 250), (_) {
+      if (_disposed) return;
       try {
         value = value.copyWith(
             position: Duration(milliseconds: player.position));
@@ -188,30 +225,76 @@ class _PlayerCtrl extends ValueNotifier<_PV> {
   }
 
   Future<void> play() async {
+    if (_disposed) return;
     player.state = mdk.PlaybackState.playing;
   }
 
   Future<void> pause() async {
+    if (_disposed) return;
     player.state = mdk.PlaybackState.paused;
   }
 
-  /// Native sekni haqiqatan yakunlaguncha kutadigan Future. Natija
-  /// manfiy bo'lsa — xato (chaqiruvchi buni qaytadan ochish signali
-  /// sifatida talqin qiladi).
+  /// Native sekni haqiqatan yakunlaguncha kutadigan Future.
+  ///
+  /// Qaytish qiymati:
+  ///   >= 0 — muvaffaqiyat (yangi pozitsiya);
+  ///   -2   — bu sek YANGIROQ sek bilan almashtirildi (fvp/player.dart,
+  ///          `seek()`: oldingi Completer -2 bilan yopiladi). Bu XATO
+  ///          EMAS — shunchaki "eskirdi" degani;
+  ///   boshqa manfiy — haqiqiy xato.
   Future<int> seekTo(Duration target) {
+    if (_disposed) return Future.value(-99);
     final ms = target.inMilliseconds < 0 ? 0 : target.inMilliseconds;
-    return player.seek(
+    final f = player.seek(
         position: ms, flags: const mdk.SeekFlag(mdk.SeekFlag.defaultFlags));
+    // dispose() shu Future'ni kutadi — tugamagan sek ustida native
+    // obyekt o'chirilib ketmasligi uchun.
+    _pendingSeek = f;
+    f.whenComplete(() {
+      if (identical(_pendingSeek, f)) _pendingSeek = null;
+    });
+    return f;
   }
 
-  void setBufferRange({int min = -1, int max = -1, bool drop = false}) =>
-      player.setBufferRange(min: min, max: max, drop: drop);
+  void setBufferRange({int min = -1, int max = -1, bool drop = false}) {
+    if (_disposed) return;
+    player.setBufferRange(min: min, max: max, drop: drop);
+  }
 
   @override
   Future<void> dispose() async {
+    if (_disposed) return;
+    // BAYROQ ENG BIRINCHI o'rnatiladi: shu daqiqadan boshlab bu
+    // obyektga kelgan har qanday chaqiruv (sek, play, pause, taymer)
+    // native tomonga UMUMAN yetib bormaydi.
+    _disposed = true;
     _posTimer?.cancel();
     await _stateSub?.cancel();
     await _statusSub?.cancel();
+
+    // Tugamagan sek bo'lsa — uni kutamiz. Aks holda native tomon
+    // seklab turgan paytda obyekt o'chirilib, ilova qulaydi.
+    // 2 soniyadan ortiq kutmaymiz (native osilib qolgan bo'lsa ham
+    // ilova to'xtab qolmasligi kerak).
+    final pending = _pendingSeek;
+    if (pending != null) {
+      try {
+        await pending.timeout(const Duration(seconds: 2));
+      } catch (_) {}
+    }
+
+    // Teksturani O'ZIMIZ, nazorat ostida bo'shatamiz: shu bilan
+    // Flutter tomonidagi `Texture` vidjeti allaqachon olib
+    // tashlangan bo'ladi va "bo'shatilgan teksturaga murojaat"
+    // xavfi yo'qoladi.
+    try {
+      player.state = mdk.PlaybackState.stopped;
+    } catch (_) {}
+    try {
+      await player
+          .updateTexture(width: -1)
+          .timeout(const Duration(seconds: 3));
+    } catch (_) {}
     // player.dispose() ataylab `void` (fire-and-forget) — mdk-sdk'ning
     // o'zi shunday loyihalashtirgan, kutish shart emas.
     player.dispose();
@@ -455,10 +538,19 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       _playerError = null;
     });
 
+    // ── Eskisini XAVFSIZ yopish ────────────────────────────────
+    // Tartib MUHIM:
+    //   1) `_controller = null` + setState — Flutter daraxtidan
+    //      `Texture` vidjeti OLIB TASHLANADI;
+    //   2) bitta kadr kutamiz — vidjet haqiqatan yo'q bo'lguncha;
+    //   3) shundan keyingina native obyekt o'chiriladi.
+    // Avval bu teskari edi: native tekstura hali ekranda turgan
+    // paytda bo'shatilardi — bu ham grafik xatolarga, ham ilovaning
+    // o'chib qolishiga sabab bo'lishi mumkin edi.
     final old = _controller;
-    _controller = null;
     if (old != null) {
-      await old.pause();
+      setState(() => _controller = null);
+      await WidgetsBinding.instance.endOfFrame;
       await old.dispose();
     }
 
@@ -608,11 +700,11 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       // buni "pleyer o'zidan-o'zi tinimsiz sek qilyapti" deb
       // ko'radi. Aynan shu bayroq muammoning sababi edi.
       //
-      // Bufer oynasi ham kengaytirildi (4s..30s): pleyer oldindan
-      // ko'proq ma'lumot yig'adi, qisqa tarmoq uzilishlari
-      // ijroga umuman ta'sir qilmaydi.
+      // Bufer oynasi 2s..8s (yuqoridagi `_playerOpts` izohiga qarang:
+      // undan kattasi tez-tez sek qilinganda xotirani portlatib
+      // yuborardi).
       try {
-        player.setBufferRange(min: 4000, max: 30000, drop: false);
+        player.setBufferRange(min: 2000, max: 8000, drop: false);
       } catch (_) {}
       final size = await player.textureSize
           .timeout(const Duration(seconds: 15), onTimeout: () => null);
@@ -688,8 +780,24 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       final nearEnd =
           (v.duration - v.position) <= const Duration(milliseconds: 2500);
 
-      final shouldBeMoving =
-          v.isPlaying && !v.isBuffering && !_seekBusy && !nearEnd;
+      // MUHIM: foydalanuvchi hozirgina sek qilgan bo'lsa (yoki sek
+      // hali tugamagan bo'lsa), pleyer bir necha soniya "joyida
+      // turgandek" ko'rinishi butunlay NORMAL — u yangi joydan
+      // ma'lumot yig'ayapti. Buni "qotib qolish" deb hisoblab pleyerni
+      // qaytadan ochish — aynan foydalanuvchi tez-tez sek qilganda
+      // ilovaning ochilib-yopilib, oxiri o'chib qolishiga olib
+      // kelardi. Endi sekdan keyin 5 soniya "tinchlik davri" bor.
+      final now = DateTime.now();
+      final recentSeek =
+          now.difference(_lastSeekRequest) < const Duration(seconds: 5) ||
+              now.difference(_lastSeekDone) < const Duration(seconds: 5);
+
+      final shouldBeMoving = v.isPlaying &&
+          !v.isBuffering &&
+          !_seekBusy &&
+          !recentSeek &&
+          !_recovering &&
+          !nearEnd;
       if (!shouldBeMoving) {
         _stuckTicks = 0;
         _lastWatchPosition = v.position;
@@ -704,10 +812,10 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       }
       _lastWatchPosition = v.position;
 
-      // ~6.4s (8 × 800ms) harakatsiz -> pleyer haqiqatan qotgan,
+      // ~9.6s (12 × 800ms) harakatsiz -> pleyer haqiqatan qotgan,
       // qaytadan ochamiz. Fayl mahalliy diskda tayyor turgani uchun
       // bu tez va internetsiz bo'ladi.
-      if (_stuckTicks >= 8) {
+      if (_stuckTicks >= 12) {
         VideoCacheServer.log(
             'Pleyer harakatsiz qotib qoldi (${v.position}) — qaytadan ochilmoqda');
         _stuckTicks = 0;
@@ -758,6 +866,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     if (_recoveryStreak > _maxRecoveryStreak) {
       VideoCacheServer.log(
           'Pleyer ketma-ket $_recoveryStreak marta qayta ochishga urindi — to\'xtatildi');
+      // Kuzatuvchi ham to'xtatiladi — aks holda u har 800 ms da
+      // qayta-qayta urinishda davom etardi.
+      _healthTimer?.cancel();
       if (mounted) {
         setState(() {
           _playerLoading = false;
@@ -770,7 +881,11 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _lastRecovery = now;
     _recovering = true;
     _healthTimer?.cancel();
-    _seekBusy = false;
+    // MUHIM: `_seekBusy` bu yerda ZO'RLAB tozalanmaydi. Uni tozalash
+    // hali tugamagan `_runSeek` bilan yonma-yon IKKINCHI sek yo'lini
+    // ochib yuborardi. Har bir `_runSeek` o'z `finally` blokida
+    // bayroqni albatta bo'shatadi, shu sabab bu yerda tegish shart
+    // emas va xavfli.
     _queuedSeek = null;
     _stuckTicks = 0;
     _lastWatchPosition = null;
@@ -898,6 +1013,11 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   bool _seekBusy = false;
   Duration? _queuedSeek;
   Timer? _healthTimer;
+  // Foydalanuvchi OXIRGI marta sek so'ragan / sek tugagan payt.
+  // Sog'liq kuzatuvchisi shu vaqtlarga qarab "sek davom etyapti"
+  // holatini qotib qolish deb xato hisoblamaydi.
+  DateTime _lastSeekRequest = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastSeekDone = DateTime.fromMillisecondsSinceEpoch(0);
   // UMUMIY qotish kuzatuvi: pozitsiya o'zgarmay turgan takrorlar soni
   // va oxirgi ko'rilgan pozitsiya. _startHealthWatchdog izohiga qarang.
   int _stuckTicks = 0;
@@ -931,14 +1051,16 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   // holat), ilova abadiy kutib qolmaydi, pleyer o'sha nuqtadan qaytadan
   // ochiladi.
   Future<void> _runSeek(_PlayerCtrl c, Duration t) async {
+    if (c.isDisposed) return;
+    _lastSeekRequest = DateTime.now();
     if (_seekBusy) {
+      // Bir vaqtda faqat BITTA sek. Yangi so'rov navbatga qo'yiladi
+      // (faqat ENG OXIRGISI saqlanadi) — foydalanuvchi qanchalik tez
+      // sursa ham, native tomonga buyruqlar to'planib bormaydi.
       _queuedSeek = t;
       return;
     }
     _seekBusy = true;
-    // MUHIM: butun tana try/finally ichida — qanday xato bo'lishidan
-    // qat'i nazar bayroq ALBATTA bo'shatiladi (aks holda undan
-    // keyingi BARCHA sek so'rovlari jimgina tashlab yuborilaverardi).
     try {
       var wasPlaying = false;
       try {
@@ -946,57 +1068,82 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       } catch (_) {}
 
       var target = t;
-      // Xavfsizlik chegarasi: navbat cheksiz aylanib qolmasligi uchun.
       var rounds = 0;
-      while (rounds < 24) {
+      // Ketma-ket HAQIQIY xatolar soni. Bitta xato — normal hodisa
+      // (masalan bo'lak hali yuklanmagan), shu sabab birinchi xatoda
+      // pleyer QAYTA OCHILMAYDI: shunchaki bir oz kutib, xuddi shu
+      // nuqtaga yana urinib ko'riladi.
+      var hardFailures = 0;
+      while (rounds < 32) {
         rounds++;
+        if (!mounted || c.isDisposed || _controller != c) return;
+
+        int ret;
         try {
-          final ret = await c
+          ret = await c
               .seekTo(target)
-              .timeout(const Duration(seconds: 8), onTimeout: () => -10);
-          if (ret < 0) {
-            if (mounted && _controller == c) {
-              VideoCacheServer.log(
-                  'Sek muvaffaqiyatsiz (kod=$ret) — pleyer qaytadan ochilmoqda');
-              _recoverPlayer(target);
-            }
-            return;
-          }
+              .timeout(const Duration(seconds: 10), onTimeout: () => -10);
         } catch (_) {
-          // Xato — jim o'tkazamiz, ilova ishlashda davom etadi.
+          ret = -11;
+        }
+
+        if (!mounted || c.isDisposed || _controller != c) return;
+
+        // -2 = bu sek yangirog'i bilan almashtirildi (fvp/player.dart).
+        // Bu XATO EMAS: shunchaki biz navbatdagi yangi nuqtaga
+        // o'tamiz. Avval bu ham "xato" deb qabul qilinib, pleyerni
+        // QAYTA OCHISHGA sabab bo'lardi — tez-tez sek qilinganda esa
+        // bu pleyerni ketma-ket ochib-yopishga aylanib, ilovani
+        // o'ldirardi. ENDI BUNDAY EMAS.
+        if (ret >= 0 || ret == -2) {
+          hardFailures = 0;
+        } else {
+          hardFailures++;
+          VideoCacheServer.log('Sek natijasi kod=$ret (urinish $hardFailures)');
+          if (hardFailures < 3) {
+            // Qisqa nafas olib, XUDDI SHU nuqtaga qayta urinamiz.
+            await Future.delayed(const Duration(milliseconds: 350));
+            if (!mounted || c.isDisposed || _controller != c) return;
+            final newer = _queuedSeek;
+            if (newer != null) {
+              _queuedSeek = null;
+              target = newer;
+            }
+            continue;
+          }
+          // Uch marta ketma-ket haqiqiy xato — endi pleyerni
+          // o'sha nuqtadan qaytadan ochamiz (oxirgi chora).
+          VideoCacheServer.log(
+              'Sek 3 marta muvaffaqiyatsiz — pleyer qaytadan ochilmoqda');
+          _recoverPlayer(target);
+          return;
         }
 
         final next = _queuedSeek;
         _queuedSeek = null;
         if (next == null) break;
-        if (!mounted || _controller != c) break;
-        var stillOk = false;
-        try {
-          stillOk = c.value.isInitialized;
-        } catch (_) {}
-        if (!stillOk) break;
         target = next;
       }
 
-      // Xavfsizlik chorasi (eski "video boshiga sek qilinganda pauza
-      // holatida qolib ketish" hodisasidan saboq): sekdan OLDIN ijro
-      // ketayotgan bo'lsa-yu, sekdan KEYIN pleyer negadir pauzada
-      // qolib ketsa, uni aniq (explicit) davom ettiramiz.
-      if (wasPlaying &&
-          mounted &&
-          _controller == c &&
-          !c.value.isPlaying) {
+      // Sekdan oldin ijro ketayotgan bo'lsa-yu, keyin pauzada qolib
+      // ketsa — aniq davom ettiramiz.
+      if (wasPlaying && mounted && !c.isDisposed && _controller == c) {
+        var playing = true;
         try {
-          await c.play();
+          playing = c.value.isPlaying;
         } catch (_) {}
+        if (!playing) {
+          try {
+            await c.play();
+          } catch (_) {}
+        }
       }
     } finally {
       _seekBusy = false;
-      // Navbatda kutib qolgan so'nggi so'rov bo'lsa, uni tashlab
-      // yubormaymiz — bayroq bo'shagach bir marta qayta ishga tushiramiz.
+      _lastSeekDone = DateTime.now();
       final pending = _queuedSeek;
       _queuedSeek = null;
-      if (pending != null && mounted && _controller == c) {
+      if (pending != null && mounted && !c.isDisposed && _controller == c) {
         scheduleMicrotask(() => _runSeek(c, pending));
       }
     }

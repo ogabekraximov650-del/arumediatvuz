@@ -65,6 +65,18 @@ const CHUNK_SIZE: u64 = 1024 * 1024;
 /// u endi faqat haqiqiy nosozlikdan himoya vazifasini bajaradi.
 const MAX_CONNS: usize = 64;
 
+/// Bir vaqtda TARMOQDAN yuklanadigan bo'laklarning eng ko'p soni.
+///
+/// Foydalanuvchi progress chizig'ini tez-tez surganda pleyer ketma-ket
+/// bir necha yangi ulanish ochadi va ularning har biri o'z bo'lagini
+/// yuklamoqchi bo'ladi. Chegarasiz holda o'nlab parallel yuklash
+/// boshlanib, ular bir xil (cheklangan) tarmoq tezligini bo'lishib
+/// oladi — natijada HECH BIRI o'z vaqtida tugamaydi, pleyer esa
+/// javob kutib qotib qoladi. Endi bir vaqtda eng ko'pi 6 ta yuklash
+/// bo'ladi; qolganlari navbat kutadi (rad etilmaydi).
+const MAX_NET_FETCHES: usize = 6;
+static NET_FETCHES: AtomicUsize = AtomicUsize::new(0);
+
 /// ENG MUHIM ME'MORIY QAYTA KO'RIB CHIQISH.
 ///
 /// Avval har bir HTTP javob QAT'IY chegara bilan kesilardi (4 MiB,
@@ -830,6 +842,43 @@ fn fetch_and_store_chunk(
         if let Some(bytes) = read_cached_chunk(dir, key, index, expected_len) {
             return Ok(bytes);
         }
+
+        // ── Parallel yuklashlar chegarasi (MAX_NET_FETCHES izohiga
+        // qarang). Navbat 8 soniyadan ortiq kutilmaydi — undan keyin
+        // baribir yuklab olinadi, chunki javobsiz qolish eng yomon
+        // holat.
+        let queue_deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            let cur = NET_FETCHES.load(Ordering::SeqCst);
+            if cur < MAX_NET_FETCHES {
+                if NET_FETCHES
+                    .compare_exchange(cur, cur + 1, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    break;
+                }
+                continue;
+            }
+            if Instant::now() >= queue_deadline {
+                NET_FETCHES.fetch_add(1, Ordering::SeqCst);
+                break;
+            }
+            // Kutish paytida bo'lak boshqa oqim tomonidan yuklanib
+            // qolgan bo'lishi mumkin.
+            if let Some(bytes) = read_cached_chunk(dir, key, index, expected_len) {
+                return Ok(bytes);
+            }
+            thread::sleep(Duration::from_millis(30));
+        }
+        // Chegara hisoblagichi bu blok qanday tugashidan qat'i nazar
+        // albatta kamaytiriladi.
+        struct FetchGuard;
+        impl Drop for FetchGuard {
+            fn drop(&mut self) {
+                NET_FETCHES.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        let _guard = FetchGuard;
 
         log(format!("Bo'lak #{index} worker'dan yuklanmoqda ({start}-{end})..."));
         let range = format!("bytes={start}-{end}");
