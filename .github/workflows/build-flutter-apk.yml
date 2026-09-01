@@ -22,6 +22,10 @@ concurrency:
   group: build-apk-${{ github.ref }}
   cancel-in-progress: true
 
+# APK'ni Release sifatida chiqarish uchun yozish ruxsati kerak.
+permissions:
+  contents: write
+
 jobs:
   build-apk:
     runs-on: ubuntu-latest
@@ -163,6 +167,29 @@ jobs:
           name: fulutter-app-release
           path: build/app/outputs/flutter-apk/app-release.apk
           retention-days: 30
+
+      # ── APK'ni TO'G'RIDAN-TO'G'RI yuklab olinadigan qilib chiqarish ──
+      #
+      # Muammo: GitHub "Artifacts" bo'limidagi fayl HAR DOIM ZIP ichida
+      # beriladi. Telefonda uni avval ochish (extract) kerak; ochilmagan
+      # ZIP'ni o'rnatishga urinilsa Android "Paketni tahlil qilishda
+      # muammo yuz berdi" deydi — bu APK buzuq degani EMAS.
+      #
+      # Shu sabab APK Release sifatida ham chiqariladi: u yerdan
+      # telefonga TO'G'RIDAN-TO'G'RI .apk fayli yuklanadi va darhol
+      # o'rnatiladi, hech narsani ochish shart emas.
+      - name: APK'ni Release sifatida chiqarish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Fulutter APK (build ${{ github.run_number }})
+          body: |
+            Telefonga to'g'ridan-to'g'ri o'rnatish uchun quyidagi
+            `app-release.apk` faylini yuklab oling (ZIP emas).
+
+            Commit: ${{ github.sha }}
+          prerelease: true
+          files: build/app/outputs/flutter-apk/app-release.apk
 
       - name: Done
         run: |
