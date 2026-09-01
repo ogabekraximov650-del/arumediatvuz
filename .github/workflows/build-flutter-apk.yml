@@ -141,64 +141,16 @@ jobs:
       - name: Get dependencies
         run: flutter pub get
 
-      # fvp gradle bosqichida SourceForge'dan mdk-sdk-android.7z
-      # (~200 MB) yuklab oladi va uni pub-cache ichiga ochadi. Uni
-      # keshlash ikki foyda beradi: (a) build sezilarli tezlashadi,
-      # (b) SourceForge'ning uzilib qolishi (bu build'ni yiqitgan asl
-      # sabab) keyingi safar UMUMAN takrorlanmaydi.
-      #
-      # DIQQAT: kesh faqat build MUVAFFAQIYATLI tugagandagina
-      # saqlanadi (pastdagi "Save" qadamiga qarang) — aks holda yarim
-      # yuklangan, buzuq holat keshlanib qolishi mumkin edi.
-      - name: fvp/mdk-sdk keshini tiklash
-        id: mdk-cache
-        uses: actions/cache/restore@v4
-        with:
-          path: ~/.pub-cache/hosted/pub.dev/fvp-0.38.1
-          key: mdk-sdk-${{ runner.os }}-fvp-0.38.1
-
       # BITTA APK ichida IKKALA arxitektura (64-bit + 32-bit).
       # --split-per-abi ISHLATILMAYDI: foydalanuvchi bitta fayl olishi
       # va qaysi birini tanlashni o'ylab o'tirmasligi kerak. Telefon
       # o'rnatishda o'ziga keraklisini avtomatik oladi.
       # x86_64 esa --target-platform orqali chetlab o'tiladi (u faqat
       # kompyuterdagi emulyatorlar uchun edi).
-      #
-      # 3 MARTA QAYTA URINISH — SABAB: fvp (video pleyer) kutubxonasi
-      # gradle bosqichida SourceForge'dan mdk-sdk-android.7z (~200 MB)
-      # yuklab oladi. SourceForge vaqti-vaqti bilan ulanishni yarmida
-      # uzib qo'yadi ("Failure when receiving data from the peer") va
-      # butun build shu sabab yiqiladi — kodda hech qanday xato
-      # bo'lmasa ham. Qayta urinishdan oldin fvp'ning yarim qolgan
-      # kompilyatsiya papkasi tozalanadi, aks holda buzuq yuklamadan
-      # qayta foydalanishga urinardi.
       - name: Build APK (Release — 64-bit va 32-bit bitta APK ichida)
         run: |
-          for i in 1 2 3; do
-            echo "▶ Urinish $i/3"
-            if flutter build apk --release \
-                 --target-platform android-arm64,android-arm; then
-              echo "✅ Build muvaffaqiyatli ($i-urinishda)"
-              exit 0
-            fi
-            echo "⚠ Urinish $i muvaffaqiyatsiz."
-            if [ "$i" -lt 3 ]; then
-              echo "   Yarim qolgan fvp yuklamasi tozalanmoqda..."
-              rm -rf ~/.pub-cache/hosted/pub.dev/fvp-*/android/.cxx || true
-              rm -rf build/fvp || true
-              echo "   30 soniyadan keyin qayta urinamiz..."
-              sleep 30
-            fi
-          done
-          echo "❌ 3 urinishdan keyin ham build bo'lmadi"
-          exit 1
-
-      - name: fvp/mdk-sdk keshini saqlash
-        if: success() && steps.mdk-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: ~/.pub-cache/hosted/pub.dev/fvp-0.38.1
-          key: mdk-sdk-${{ runner.os }}-fvp-0.38.1
+          flutter build apk --release \
+            --target-platform android-arm64,android-arm
 
       - name: APK hajmini ko'rsatish
         run: |

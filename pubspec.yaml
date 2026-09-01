@@ -17,12 +17,17 @@ dependencies:
   cached_network_image: ^3.4.1
   # Video yuklashda real-time progress uchun
   dio: ^5.4.0
-  # Video pleyr: fvp'ning past-darajali (mdk.dart) Player API'si —
-  # video_player + fvp shim qatlami ISHLATILMAYDI (mdk-native-player
-  # o'tishi, sabab: lib/screens/video_player_screen.dart'dagi izohga
-  # qarang). video_player fvp'ning tranzitiv bog'liqligi sifatida
-  # baribir keladi.
-  fvp: ^0.38.1
+  # ── VIDEO PLEYER ────────────────────────────────────────────
+  # Flutter jamoasining RASMIY paketi. Android'da u ExoPlayer
+  # (androidx.media3) ustida ishlaydi — YouTube va boshqa yirik
+  # Android pleyerlari ishlatadigan dvigatel; iOS/macOS'da AVPlayer.
+  #
+  # Avval `fvp` (mdk-sdk) ishlatilardi va pleyer boshqaruvi QO'LDA
+  # yozilgan edi (Player yaratish/o'chirish, native surface, media
+  # almashtirish, EOF). Amalda bu ketma-ket crash va qotib qolishlarga
+  # olib keldi. Batafsil sabablar:
+  # lib/screens/video_player_screen.dart faylining boshidagi izohda.
+  video_player: ^2.9.2
   # Asosiy shifrlash kalitini xavfsiz saqlash uchun. Android'da
   # EncryptedSharedPreferences (Keystore bilan himoyalangan) ishlatadi,
   # ya'ni kalit qurilmadan chiqmaydi va root'siz o'qib bo'lmaydi.

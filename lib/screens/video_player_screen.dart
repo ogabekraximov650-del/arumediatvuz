@@ -1,391 +1,52 @@
 import 'dart:async';
-import 'dart:io' show Platform;
-import 'dart:ui' as ui;
+import 'dart:convert';
 
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
-// `Factory` — package:flutter/foundation.dart'da, gestures'da EMAS
-// (build shu sabab yiqilgan edi).
-import 'package:flutter/foundation.dart' show Factory;
-import 'package:flutter/gestures.dart' show OneSequenceGestureRecognizer;
-import 'package:flutter/rendering.dart' show PlatformViewHitTestBehavior;
-// fvp'ning mdk-sdk'ga past-darajali (shim'siz) kirish nuqtasi. Pleyer
-// boshqaruvi endi to'g'ridan-to'g'ri shu API orqali (mdk.Player) amalga
-// oshiriladi — video_player + fvp shim qatlami ENDI ISHLATILMAYDI (pastdagi
-// _PlayerCtrl izohiga qarang: sababi shim'ning seekTo() natijani
-// await qilmasdan qaytishi edi).
-import 'package:fvp/mdk.dart' as mdk;
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
-import 'dart:convert';
-import 'package:cached_network_image/cached_network_image.dart';
-import '../services/video_cache_server.dart';
+// ═══════════════════════════════════════════════════════════════════
+//  PLEYER: RASMIY `video_player` (Android'da ExoPlayer / Media3)
+// ═══════════════════════════════════════════════════════════════════
+//
+// NEGA fvp/mdk-sdk'DAN VOZ KECHILDI (uzoq izlanishdan keyingi qaror):
+//
+// Avval pleyer `package:fvp/mdk.dart` (mdk-sdk) ustiga QO'LDA
+// qurilgan edi. U ishlagan bo'lsa-da, biz uning past-darajali
+// hayot-siklini (Player yaratish/o'chirish, native surface'ni
+// biriktirish, media almashtirish, EOF/loop) o'zimiz boshqarishga
+// majbur edik. Har bir qadamda yangi nosozlik chiqaverdi: sek
+// paytida o'chirilgan obyektga murojaat (SIGSEGV), media
+// almashtirilganda rasm qotib qolishi, fullscreen'da surface'ning
+// uzilib qolishi. Bularning har biri "biz o'zimiz yozgan"
+// boshqaruv qatlamining xatosi edi.
+//
+// `video_player` — Flutter jamoasining RASMIY paketi va Android'da
+// u **ExoPlayer (androidx.media3)** ustida ishlaydi. Bu AYNAN
+// YouTube va boshqa yirik Android pleyerlari ishlatadigan dvigatel.
+// Bizga kerak bo'lgan hamma narsa unda tayyor va millionlab
+// ilovalarda sinovdan o'tgan:
+//   * ketma-ket, tez-tez sek qilish — ExoPlayer ularni ichkarida
+//     birlashtiradi va navbatga to'plamaydi;
+//   * media almashtirish, EOF va takrorlash (setLooping);
+//   * surface'ning hayot sikli — plagin o'zi to'g'ri boshqaradi;
+//   * bufer strategiyasi.
+//
+// Bundan tashqari `VideoViewType.platformView` bilan chiqish
+// **SurfaceView**ga beriladi (video_player_android 2.8.0+) —
+// Google'ning Android uchun rasmiy tavsiyasi va Flutter
+// teksturasidagi (SurfaceTexture/Impeller) muammolardan xoli yo'l.
+//
+// Mahalliy Rust kesh-serveri (127.0.0.1) O'ZGARISHSIZ qoladi:
+// ExoPlayer oddiy HTTP Range so'rovlari bilan ishlaydi.
+import 'package:video_player/video_player.dart';
+
 import '../services/rust_bridge.dart';
-import '../widgets/glass.dart';
+import '../services/video_cache_server.dart';
 import '../theme/app_background.dart';
+import '../widgets/glass.dart';
 
 const String _apiBase = 'https://aniraxuzapp.ogabekraximov650.workers.dev';
-
-// ═══════════════════════════════════════════════════════════════════
-//  PLEYER (mdk-sdk) SOZLAMALARI
-// ═══════════════════════════════════════════════════════════════════
-// (Avval main.dart'da, fvp.registerWith(options: {'player': ...}) orqali
-// shim'ga uzatilardi. Endi har bir mdk.Player'ga to'g'ridan-to'g'ri
-// setProperty() bilan qo'llaniladi — pastga, _applyPlayerDefaults()ga
-// qarang.)
-const Map<String, String> _playerOpts = {
-  // ── Bufer: 1s..5s, 8 ta bayt-oralig'i ────────────────────────────
-  // TARIX (saboq): bir bosqichda buni 0.5s..2s va 2 oraliqqa
-  // tushirgan edim — natija TESKARI bo'ldi. Kichik bufer bilan
-  // mdk-sdk uni doim tugatib, har safar yangi so'rov yuborardi;
-  // orqaga sek qilinganda esa yaqinda o'qilgan oraliqlar allaqachon
-  // tashlangani uchun hammasi qaytadan o'qilardi. Asl muammo buferda
-  // emas, serverda edi (video_cache.rs, `contiguous_cached_end`).
-  // TUZATISH (o'zidan-o'zi "sek"/sakrash muammosi): bufer oynasi
-  // 1s..5s juda kichik edi — tarmoq bir lahza sekinlashsa bufer
-  // bo'shab qolar, pleyer esa oldinga "sakrardi".
-  //
-  // IKKINCHI TUZATISH (sek qilganda ilova o'chib qolishi): bir
-  // bosqichda bu 4s..30s ga ko'tarilgan edi — bu esa BOSHQA muammoni
-  // keltirib chiqardi. `demux.buffer.ranges` HAR BIR sekdan keyin
-  // ALOHIDA buferlangan oraliq saqlaydi: 8 oraliq × 30 soniya =
-  // ~4 daqiqalik demultipleksirlangan paket XOTIRADA. Tez-tez sek
-  // qilinganda bu yuzlab megabaytga yetib, Android ilovani
-  // xotira yetishmovchiligi sabab O'LDIRARDI ("crash bo'lib otib
-  // yuboryapti").
-  //
-  // Endi 2s..8s va 4 oraliq = ~32 soniyalik paket — bu avvalgi
-  // (8 × 4s = 32s) holat bilan BIR XIL xotira, lekin har bir oraliq
-  // 2 barobar uzun bo'lgani uchun ijro silliqligi saqlanadi.
-  'buffer.range': '2000+8000',
-  'demux.buffer.ranges': '4',
-
-  // ── Format aniqlash ─────────────────────────────────────────────
-  // Standart qiymatlar (~5 MB / ~5s) bilan pleyer deyarli butun
-  // videoni o'qib bo'lmaguncha ochilishni yakunlay olmasdi.
-  // Bir bo'lak hajmi (1 MiB) formatni aniqlash uchun yetarli.
-  'avformat.probesize': '1048576',
-  'avformat.analyzeduration': '1000000',
-};
-
-// mdk-sdk'ning tekstura o'lchamini ekran bilan cheklaydi — video TO'LIQ
-// o'lchamidagi tekstura yaratilsa, ekranda baribir shundan ko'p piksel
-// ko'rsatilmaydi, ya'ni ortiqcha xotira/GPU sarflanadi (main.dart'dagi
-// avvalgi hisob-kitob bilan bir xil).
-(int, int) _textureLimits() {
-  final view = WidgetsBinding.instance.platformDispatcher.views.first;
-  final screen = view.physicalSize;
-  final maxSide = screen.longestSide.round().clamp(720, 3840);
-  final minSide = screen.shortestSide.round().clamp(480, 2160);
-  return (maxSide, minSide);
-}
-
-// fvp'ning video_player-shim qatlami (video_player_mdk.dart,
-// MdkVideoPlayerPlatform._create()) avval har bir pleyer uchun avtomatik
-// o'rnatib kelgan standart xususiyatlar. Past-darajali mdk.Player() bunday
-// standartlarni o'zi qo'ymaydi — shu sabab bu yerda qo'lda takrorlanadi
-// (tarmoqqa qayta ulanish, format aniqlash moslamalari va h.k.).
-void _applyPlayerDefaults(mdk.Player player) {
-  player.setProperty('video.decoder', 'shader_resource=0');
-  player.setProperty('avformat.strict', 'experimental');
-  player.setProperty('avformat.safe', '0');
-  player.setProperty('avio.reconnect', '1');
-  player.setProperty('avio.reconnect_delay_max', '7');
-  player.setProperty('avformat.rtsp_transport', 'tcp');
-  player.setProperty('avformat.extension_picky', '0');
-  player.setProperty('avformat.allowed_segment_extensions', 'ALL');
-  _playerOpts.forEach(player.setProperty);
-  if (Platform.isAndroid) {
-    // Qurilma apparat dekoderini afzal ko'radi, ishlamasa FFmpeg/dav1d'ga
-    // (dasturiy dekod) o'zi qaytadi.
-    player.videoDecoders = const ['AMediaCodec', 'FFmpeg', 'dav1d'];
-  }
-}
-
-/// Video qanday chiziladi: Android SurfaceView (platform view) yoki
-/// Flutter teksturasi.
-enum _SurfaceMode { surfaceView, texture }
-
-// ── Pleyerning reaktiv holati (video_player'ning VideoPlayerValue'siga
-// o'xshash, lekin BARCHA maydonlar HAQIQIY native manbadan keladi) ──
-class _PV {
-  final bool isInitialized;
-  final bool isPlaying;
-  final bool isBuffering;
-  final Duration position;
-  final Duration duration;
-  final double aspectRatio;
-
-  const _PV({
-    this.isInitialized = false,
-    this.isPlaying = false,
-    this.isBuffering = false,
-    this.position = Duration.zero,
-    this.duration = Duration.zero,
-    this.aspectRatio = 16 / 9,
-  });
-
-  _PV copyWith({
-    bool? isInitialized,
-    bool? isPlaying,
-    bool? isBuffering,
-    Duration? position,
-    Duration? duration,
-    double? aspectRatio,
-  }) {
-    return _PV(
-      isInitialized: isInitialized ?? this.isInitialized,
-      isPlaying: isPlaying ?? this.isPlaying,
-      isBuffering: isBuffering ?? this.isBuffering,
-      position: position ?? this.position,
-      duration: duration ?? this.duration,
-      aspectRatio: aspectRatio ?? this.aspectRatio,
-    );
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════
-//  mdk.dart (past-darajali) Player'ni video_player uslubidagi
-//  ValueNotifier qatlamiga o'raydi.
-// ═══════════════════════════════════════════════════════════════════
-//
-// MUHIM (nega bu qatlam kerak — fvp manba kodidan tasdiqlangan):
-//
-//   fvp/lib/src/video_player_mdk.dart:
-//     Future<void> seekTo(int playerId, Duration position) async {
-//       return _seekToWithFlags(playerId, position, ...);
-//     }
-//     Future<void> _seekToWithFlags(...) async {
-//       player.seek(position: ..., flags: flags);   // ← AWAIT QILINMAYDI!
-//     }
-//
-// `video_player` + fvp shim orqali `await controller.seekTo(target)`
-// chaqirilganda, yuqoridagi kod native javobni KUTMASDAN darhol qaytadi
-// ("fire-and-forget"), rasmiy `video_player` paketi esa buning ustiga
-// pozitsiyani native javobni kutmasdan OPTIMISTIK ravishda yangilaydi.
-// Natijada Dart tomonida "sek haqiqatan tugadimi" degan savolga ishonchli
-// javob yo'q edi — aynan shu sabab tez-tez sek qilinganda ilova qotib
-// qolar/crash bo'lar edi.
-//
-// `mdk.Player.seek()` esa — bu qatlam to'g'ridan-to'g'ri chaqiradigan
-// funksiya — HAQIQIY `Future<int>` qaytaradi: u faqat native (mdk-sdk)
-// sek buyrug'ini YAKUNLAGANDA hal bo'ladi (fvp/lib/src/player.dart,
-// `_seeked` Completer, native "seek" hodisasi orqali). Xuddi shunday,
-// `player.position` ham har chaqirilganda to'g'ridan-to'g'ri nativedan
-// o'qiladi — optimistik taxmin emas. Shu ikkalasi tufayli sek navbati
-// mantig'i (pastga, _runSeek'ga qarang) ancha soddalashadi va ishonchli
-// bo'ladi.
-// ── PLEYER BOSHQARUVCHISI ────────────────────────────────────────
-//
-// ENG MUHIM ME'MORIY QOIDA (fvp muallifining o'z tavsiyasi,
-// README.md): "reuse the Player instance without unconditionally
-// create and dispose, changing the Player.media is enough" —
-// ya'ni BITTA Player obyekti yaratiladi va u ekran yopilguncha
-// YASHAYDI. Epizod almashsa, sifat o'zgarsa yoki pleyer qaytadan
-// ochilishi kerak bo'lsa — yangi obyekt yaratilmaydi, shunchaki
-// `media` almashtirilib, `prepare()` qayta chaqiriladi.
-//
-// NEGA BU SHUNCHALIK MUHIM: `mdk.Player` — native (C++) obyekt
-// ustidagi qobiq. `dispose()` uni XOTIRADAN O'CHIRADI va shundan
-// keyingi har qanday murojaat ilovani butunlay yiqitadi (SIGSEGV,
-// buni Dart try/catch USHLAY OLMAYDI). Eski kod har bir epizod,
-// har bir sifat almashtirish va har bir "qayta ochish"da Player'ni
-// o'chirib, yangisini yaratardi — ya'ni foydalanuvchi qanchalik ko'p
-// sek qilsa, shunchalik ko'p o'chirish-yaratish, shunchalik ko'p
-// crash imkoniyati. Endi bunday sikl UMUMAN yo'q.
-class _PlayerCtrl extends ValueNotifier<_PV> {
-  final mdk.Player player;
-  Timer? _posTimer;
-  StreamSubscription? _stateSub;
-  StreamSubscription? _statusSub;
-
-  bool _disposed = false;
-  bool get isDisposed => _disposed;
-  Future<int>? _pendingSeek;
-
-  // Media almashtirish davom etayotgan payt — bu vaqtda holat
-  // hodisalari (stopped/EOF) e'tiborga olinmaydi.
-  bool _switching = false;
-
-  /// Video tugab, native tomon ijroni to'xtatganda chaqiriladi
-  /// (ekran buni qayta boshlash uchun ishlatadi).
-  void Function()? onEnded;
-
-  _PlayerCtrl(this.player) : super(const _PV()) {
-    _stateSub = player.onStateChanged.listen((e) {
-      if (_disposed) return;
-      value =
-          value.copyWith(isPlaying: e.newValue == mdk.PlaybackState.playing);
-      if (e.newValue == mdk.PlaybackState.stopped && !_switching) {
-        onEnded?.call();
-      }
-    });
-    _statusSub = player.onMediaStatus.listen((e) {
-      if (_disposed) return;
-      final old = e.oldValue;
-      final nw = e.newValue;
-      if (!old.test(mdk.MediaStatus.buffering) &&
-          nw.test(mdk.MediaStatus.buffering)) {
-        value = value.copyWith(isBuffering: true);
-      } else if (!old.test(mdk.MediaStatus.buffered) &&
-          nw.test(mdk.MediaStatus.buffered)) {
-        value = value.copyWith(isBuffering: false);
-      }
-    });
-    _posTimer = Timer.periodic(const Duration(milliseconds: 250), (_) {
-      if (_disposed) return;
-      try {
-        value =
-            value.copyWith(position: Duration(milliseconds: player.position));
-      } catch (_) {}
-    });
-  }
-
-  /// Yangi media ochadi (yoki joriysini qaytadan ochadi) — Player
-  /// obyektining O'ZI almashmaydi.
-  ///
-  /// Qaytaradi: muvaffaqiyatli bo'lsa video o'lchami, aks holda null.
-  Future<ui.Size?> open(String url, {Duration? startAt}) async {
-    if (_disposed) return null;
-    _switching = true;
-    try {
-      // MUHIM: bu yerda `state = stopped` QILINMAYDI.
-      //
-      // Avval shunday edi va bu Android'da SurfaceView bilan
-      // birgalikda videoning "qotib qolishi"ga olib kelardi: to'liq
-      // to'xtash native tomonda chizish nishonini (surface) bo'shatib
-      // yuboradi, yangi media esa endi hech qayerga chizilmaydi —
-      // ovoz ketadi-yu, rasm qotib qoladi. mdk-sdk'da media
-      // almashtirishning to'g'ri yo'li — shunchaki `media` ni
-      // o'rnatib, `prepare()` chaqirish; u eskisini o'zi yopadi.
-      try {
-        player.state = mdk.PlaybackState.paused;
-      } catch (_) {}
-      value = value.copyWith(
-        isInitialized: false,
-        isPlaying: false,
-        isBuffering: false,
-        position: Duration.zero,
-      );
-
-      player.media = url;
-      final startMs =
-          (startAt != null && startAt > Duration.zero) ? startAt.inMilliseconds : 0;
-      var ret = await player
-          .prepare(position: startMs)
-          .timeout(const Duration(seconds: 20), onTimeout: () => -10);
-      if (_disposed) return null;
-      if (ret == -1) {
-        // -1 = "already loading or loaded" (fvp/player.dart izohi):
-        // eski media hali to'liq yopilmagan. Faqat SHU holatda to'liq
-        // to'xtatib, bir marta qayta urinamiz.
-        VideoCacheServer.log('prepare() -1 qaytardi — to\'xtatib qayta urinilyapti');
-        try {
-          player.state = mdk.PlaybackState.stopped;
-        } catch (_) {}
-        await Future.delayed(const Duration(milliseconds: 120));
-        if (_disposed) return null;
-        player.media = url;
-        ret = await player
-            .prepare(position: startMs)
-            .timeout(const Duration(seconds: 20), onTimeout: () => -10);
-        if (_disposed) return null;
-      }
-      if (ret < 0) {
-        VideoCacheServer.log('prepare() muvaffaqiyatsiz: kod=$ret');
-        return null;
-      }
-
-      final size = await player.textureSize
-          .timeout(const Duration(seconds: 15), onTimeout: () => null);
-      if (_disposed) return null;
-      if (size == null || size.width <= 0 || size.height <= 0) {
-        VideoCacheServer.log('Video o\'lchami noma\'lum');
-        return null;
-      }
-
-      // Bufer sozlamalari HAR SAFAR media ochilgandan KEYIN
-      // qo'yiladi (mdk ularni media bilan bog'liq holatda saqlaydi).
-      try {
-        player.setBufferRange(min: 2000, max: 8000, drop: false);
-      } catch (_) {}
-
-      final dur = Duration(milliseconds: player.mediaInfo.duration);
-      final aspect = size.height > 0 ? size.width / size.height : 16 / 9;
-      value = value.copyWith(
-        isInitialized: true,
-        duration: dur,
-        aspectRatio: aspect > 0 ? aspect : 16 / 9,
-        position: startAt ?? Duration.zero,
-      );
-      return size;
-    } catch (e) {
-      VideoCacheServer.log('Media ochishda xato: $e');
-      return null;
-    } finally {
-      _switching = false;
-    }
-  }
-
-  Future<void> play() async {
-    if (_disposed) return;
-    player.state = mdk.PlaybackState.playing;
-  }
-
-  Future<void> pause() async {
-    if (_disposed) return;
-    player.state = mdk.PlaybackState.paused;
-  }
-
-  /// Native sekni haqiqatan yakunlaguncha kutadigan Future.
-  ///
-  /// Qaytish qiymati:
-  ///   >= 0 — muvaffaqiyat;
-  ///   -2   — bu sek YANGIROQ sek bilan almashtirildi (fvp/player.dart,
-  ///          `seek()`: oldingi Completer -2 bilan yopiladi) — XATO EMAS;
-  ///   boshqa manfiy — haqiqiy xato.
-  Future<int> seekTo(Duration target) {
-    if (_disposed) return Future.value(-99);
-    final ms = target.inMilliseconds < 0 ? 0 : target.inMilliseconds;
-    final f = player.seek(
-        position: ms, flags: const mdk.SeekFlag(mdk.SeekFlag.defaultFlags));
-    _pendingSeek = f;
-    f.whenComplete(() {
-      if (identical(_pendingSeek, f)) _pendingSeek = null;
-    });
-    return f;
-  }
-
-  @override
-  Future<void> dispose() async {
-    if (_disposed) return;
-    _disposed = true;
-    onEnded = null;
-    _posTimer?.cancel();
-    await _stateSub?.cancel();
-    await _statusSub?.cancel();
-
-    // Tugamagan sek bo'lsa — uni kutamiz (eng ko'pi 2s). Aks holda
-    // native tomon seklab turgan paytda obyekt o'chirilib, ilova
-    // qulashi mumkin.
-    final pending = _pendingSeek;
-    if (pending != null) {
-      try {
-        await pending.timeout(const Duration(seconds: 2));
-      } catch (_) {}
-    }
-    try {
-      player.state = mdk.PlaybackState.stopped;
-    } catch (_) {}
-    // Tekstura rejimida uni o'zimiz, nazorat ostida bo'shatamiz.
-    try {
-      await player
-          .updateTexture(width: -1)
-          .timeout(const Duration(seconds: 3));
-    } catch (_) {}
-    player.dispose();
-    super.dispose();
-  }
-}
 
 class VideoPlayerScreen extends StatefulWidget {
   final Map<String, dynamic> season;
@@ -404,39 +65,13 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   bool _loadingEps = true;
   bool _loadingSeasons = true;
 
-  // ── BITTA umumiy player ──────────────────────────────────────
-  _PlayerCtrl? _controller;
-  // Ekran umri davomida yashaydigan Player. `_controller` faqat
-  // "hozir ko'rsatishga tayyor" holatni bildiradi; obyektning o'zi
-  // esa shu yerda saqlanadi va epizod almashganda ham o'chirilmaydi.
-  _PlayerCtrl? _keptCtrl;
+  // ── PLEYER ───────────────────────────────────────────────────
+  // Har bir epizod uchun BITTA `VideoPlayerController`. Uni
+  // yaratish/o'chirishni endi biz emas, rasmiy plagin boshqaradi —
+  // surface, dekoder va bufer hayot sikli ExoPlayer tomonida,
+  // sinovdan o'tgan holda kechadi.
+  VideoPlayerController? _controller;
 
-  // ── KO'RSATISH REJIMI ────────────────────────────────────────
-  // Android'da video Flutter teksturasi orqali emas, ALOHIDA
-  // SurfaceView orqali chiziladi (fvp 0.38 dagi 'fvp/video-view'
-  // platform view). Sabablari _buildVideoSurface() izohida.
-  // Sifat oynasidan qo'lda tekstura rejimiga o'tish mumkin (zaxira).
-  _SurfaceMode _surfaceMode =
-      Platform.isAndroid ? _SurfaceMode.surfaceView : _SurfaceMode.texture;
-  bool get _useSurfaceView => _surfaceMode == _SurfaceMode.surfaceView;
-  Map<String, Object>? _surfaceParams;
-
-  // ── NEGA GlobalKey ───────────────────────────────────────────
-  // Fullscreen'ga o'tganda butun ekran boshqa vidjet daraxtiga
-  // almashadi (_buildNormalScreen -> _buildFullscreenPlayer). Oddiy
-  // kalit bilan bu SurfaceView'ning YO'Q QILINIB, yangisining
-  // yaratilishini bildiradi; yangi surface yaratilayotgan payt
-  // eskisining o'chirilishi esa native tomonda pleyerning chizish
-  // nishonini uzib qo'yadi — natijada fullscreen'da video umuman
-  // ko'rinmaydi (foydalanuvchida aynan shu bo'lgan).
-  //
-  // GlobalKey bilan Flutter vidjetni yo'q qilmaydi, balki yangi
-  // joyga KO'CHIRADI (reparent) — SurfaceView va uning native
-  // ulanishi buzilmasdan saqlanadi.
-  GlobalKey _surfaceViewKey = GlobalKey(debugLabel: 'fvp-surface');
-  // Platform view yaratilgandagi video nisbati. View faqat nisbat
-  // sezilarli o'zgarganda qayta yaratiladi.
-  double? _surfaceAspect;
   Map<String, dynamic>? _currentEp;
   String? _selectedQuality;
   bool _playerLoading = false;
@@ -501,13 +136,10 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _healthTimer?.cancel();
     _recoveryStreakResetTimer?.cancel();
     _restoreSystemUI();
-    // Ekran umri davomida yashagan YAGONA Player shu yerda, ekran
-    // yopilganda o'chiriladi (boshqa hech qayerda emas).
-    final kept = _keptCtrl;
+    final c = _controller;
     _controller = null;
-    _keptCtrl = null;
-    kept?.pause();
-    kept?.dispose();
+    c?.removeListener(_onControllerUpdate);
+    c?.dispose();
     super.dispose();
   }
 
@@ -641,14 +273,17 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     final url = _getUrl(ep);
     if (url.isEmpty) return;
 
-    // Foydalanuvchi (yoki sifat almashtirish) O'ZI yangi ijro
-    // boshlagan bo'lsa — bu avvalgi muammolarga aloqasi yo'q yangi
-    // urinish, shu sabab qayta-ochish hisoblagichi tozalanadi.
     if (!isRecovery) {
       _recoveryStreakResetTimer?.cancel();
       _recoveryStreak = 0;
     }
 
+    // Har bir ochish o'z "chiptasi" (token) bilan boradi. Foydalanuvchi
+    // ochilish tugashini kutmasdan boshqa epizodni bossa, eskisi shu
+    // token orqali o'zini bekor qilingan deb biladi va HECH NARSAGA
+    // tegmaydi (aynan shu tekshiruvsiz eski ochilish yangisining
+    // controllerini o'chirib yuborib, "epizod almashtirganda ekran
+    // qora bo'lib qoldi" holatini keltirib chiqarardi).
     final myToken = ++_playToken;
     setState(() {
       _currentEp = ep;
@@ -657,140 +292,98 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       _playerError = null;
     });
 
-    // Sek navbatini tozalaymiz — eski epizodga tegishli sek
-    // so'rovlari yangisiga tushib qolmasligi kerak.
+    // Sek navbatini tozalaymiz — eski epizodga tegishli so'rovlar
+    // yangisiga tushib qolmasligi kerak.
     _seekDebounceTimer?.cancel();
     _queuedSeek = null;
     _pendingSeekBase = null;
     _pendingSeekDeltaSeconds = 0;
+    _seekBusy = false;
+    _healthTimer?.cancel();
+
+    // ── ESKI CONTROLLERNI XAVFSIZ YOPISH ─────────────────────
+    // Tartib muhim: avval uni daraxtdan olib tashlaymiz (setState),
+    // BIR KADR kutamiz (video vidjeti haqiqatan yo'q bo'lsin), keyin
+    // dispose qilamiz. `dispose()` dan keyin controllerga murojaat
+    // qilinmaydi — plagin o'zi ham buni e'tiborsiz qoldiradi
+    // ("after dispose all further calls are ignored"), ya'ni bu yerda
+    // native halokat xavfi YO'Q.
+    final old = _controller;
+    if (old != null) {
+      setState(() => _controller = null);
+      await WidgetsBinding.instance.endOfFrame;
+      try {
+        await old.pause();
+      } catch (_) {}
+      try {
+        await old.dispose();
+      } catch (_) {}
+    }
+    if (!mounted || myToken != _playToken) return;
 
     // ── Video manzili: HAMISHA mahalliy kesh-server orqali ────
-    Uri proxied;
+    Uri source;
     bool viaProxy = true;
     try {
-      proxied = await VideoCacheServer.instance.proxyUri(url);
+      source = await VideoCacheServer.instance.proxyUri(url);
     } catch (e) {
       VideoCacheServer.log('proxyUri xato berdi, asl URL ishlatiladi: $e');
-      proxied = Uri.parse(url);
+      source = Uri.parse(url);
       viaProxy = false;
     }
     if (!mounted || myToken != _playToken) return;
 
-    // ── BITTA, QAYTA ISHLATILADIGAN PLAYER ────────────────────
-    // Obyekt yaratish/o'chirish sikli yo'q (yuqorida, _PlayerCtrl
-    // izohiga qarang) — mavjudi bo'lsa shunga yangi media beriladi.
-    final ctrl = _ensureController();
-    if (ctrl == null) {
-      if (mounted && myToken == _playToken) {
-        setState(() {
-          _playerLoading = false;
-          _playerError = 'Pleyerni yaratib bo\'lmadi';
-        });
-      }
+    var ctrl = await _openController(source, myToken);
+    // Mahalliy proksi ishlamasa — kesh bo'lmasa ham video ochilishi
+    // uchun asl URL bilan qayta urinamiz.
+    if (ctrl == null && viaProxy) {
+      if (!mounted || myToken != _playToken) return;
+      VideoCacheServer.log('Zaxira: asl URL bilan qayta urinilyapti...');
+      ctrl = await _openController(Uri.parse(url), myToken);
+    }
+
+    if (!mounted || myToken != _playToken) {
+      // Bu ochilish eskirgan — yaratilgan controllerni tashlab
+      // yuboramiz, ekrandagisiga TEGMAYMIZ.
+      try {
+        await ctrl?.dispose();
+      } catch (_) {}
       return;
     }
 
-    VideoCacheServer.log(viaProxy
-        ? 'Proksi orqali ochish sinalyapti...'
-        : 'To\'g\'ridan-to\'g\'ri (proksisiz) ochish sinalyapti...');
-    var size = await ctrl.open(proxied.toString(), startAt: resumeAt);
-    var usedProxy = viaProxy;
-
-    // Mahalliy kesh-proksi ishlamasa — kesh bo'lmasa ham video hech
-    // bo'lmasa ochilishi uchun asl URL bilan qayta urinamiz.
-    if (size == null && viaProxy) {
-      if (!mounted || myToken != _playToken) return;
-      VideoCacheServer.log('Zaxira: asl URL bilan qayta urinilyapti...');
-      size = await ctrl.open(url, startAt: resumeAt);
-      usedProxy = false;
-    }
-
-    if (!mounted || myToken != _playToken) return;
-
-    if (size == null) {
+    if (ctrl == null) {
       setState(() {
         _playerLoading = false;
         _playerError = 'Videoni yuklab bo\'lmadi';
       });
       return;
     }
-    VideoCacheServer.log(
-        'Video ochildi (${usedProxy ? 'proksi orqali' : 'to\'g\'ridan-to\'g\'ri'})');
 
-    // ── Ko'rsatish qatlami ────────────────────────────────────
-    // Android'da SurfaceView (platform view), boshqa platformalarda
-    // Flutter teksturasi — _buildVideoSurface() izohiga qarang.
-    if (_useSurfaceView) {
-      // ── SurfaceView'ni IMKON QADAR QAYTA YARATMASLIK ──────────
-      // Surface bir marta yaratilib, Player'ga native tarzda
-      // biriktiriladi. Har bir yangi epizodda uni qayta yaratish
-      // (a) keraksiz, chunki Player o'sha-o'sha; (b) XAVFLI: Flutter
-      // avval yangi view'ni yaratib, keyin eskisini o'chiradi —
-      // eskisining o'chirilishi esa native tomonda surface'ni
-      // bo'shatadi va yangi rasm hech qayerga chizilmay qoladi
-      // (foydalanuvchida "epizod almashtirganda video qotib qoldi"
-      // aynan shu edi).
-      //
-      // Shu sabab view faqat IKKI holatda qayta yaratiladi:
-      //   * hali umuman yaratilmagan bo'lsa;
-      //   * yangi videoning tomonlar nisbati sezilarli farq qilsa
-      //     (aks holda rasm cho'zilib ketardi) — bunda avval eskisi
-      //     olib tashlanadi, BIR KADR kutiladi, keyin yangisi
-      //     qo'yiladi (qat'iy tartib, poyga yo'q).
-      final aspect = size.width / size.height;
-      final needNew = _surfaceParams == null ||
-          _surfaceAspect == null ||
-          (aspect - _surfaceAspect!).abs() > 0.02;
-      if (needNew) {
-        final (w, h) = _clampVideoSize(size);
-        if (_surfaceParams != null) {
-          setState(() => _surfaceParams = null);
-          await WidgetsBinding.instance.endOfFrame;
-          if (!mounted || myToken != _playToken) return;
-        }
-        setState(() {
-          _surfaceViewKey = GlobalKey(debugLabel: 'fvp-surface');
-          _surfaceAspect = aspect;
-          _surfaceParams = <String, Object>{
-            'player': ctrl.player.nativeHandle,
-            'width': w,
-            'height': h,
-            'tunnel': false,
-          };
-        });
-      }
-    } else {
-      final (maxW, maxH) = _textureLimits();
-      final tex = await ctrl.player
-          .updateTexture(width: maxW, height: maxH, fit: true)
-          .timeout(const Duration(seconds: 15), onTimeout: () => -10);
-      if (!mounted || myToken != _playToken) return;
-      if (tex < 0) {
-        setState(() {
-          _playerLoading = false;
-          _playerError = 'Videoni ko\'rsatib bo\'lmadi';
-        });
-        return;
-      }
-    }
-
-    // Video tugaganda qayta boshlash MANTIG'I DART TOMONIDA
-    // (`_handleEnded`) — `player.loop` ISHLATILMAYDI. Sabab:
-    // native loop videoni EOF holatida ichkaridan qayta o'ynatadi va
-    // aynan shu payt (fayl oxiri + demukser qayta o'qish + tekstura)
-    // qurilmada ilovaning o'chib qolishiga sabab bo'lgan edi. Endi
-    // tugash oddiy hodisa sifatida qabul qilinib, media BOSHIDAN
-    // xuddi yangi epizod kabi, tekshirilgan yo'l bilan qayta ochiladi.
+    // Video tugaganda o'zi boshidan boshlanadi. Bu NATIVE (ExoPlayer)
+    // takrorlash — u fayl oxirini o'zi to'g'ri boshqaradi, bizning
+    // qo'lda "qayta ochish" mantig'imiz kerak emas.
     try {
-      ctrl.player.loop = 0;
+      await ctrl.setLooping(true);
     } catch (_) {}
 
+    if (resumeAt != null && resumeAt > Duration.zero) {
+      try {
+        await ctrl.seekTo(resumeAt);
+      } catch (_) {}
+    }
+    if (!mounted || myToken != _playToken) {
+      try {
+        await ctrl.dispose();
+      } catch (_) {}
+      return;
+    }
     if (resumePlaying) {
       try {
         await ctrl.play();
       } catch (_) {}
     }
-    if (!mounted || myToken != _playToken) return;
+
+    ctrl.addListener(_onControllerUpdate);
     setState(() {
       _controller = ctrl;
       _playerLoading = false;
@@ -799,144 +392,72 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _scheduleHide();
   }
 
-  // Ekran uchun BITTA Player yaratadi (yoki mavjudini qaytaradi).
-  _PlayerCtrl? _ensureController() {
-    final existing = _controller ?? _keptCtrl;
-    if (existing != null && !existing.isDisposed) return existing;
+  // Bitta manzildan controller ochishga urinadi. Muvaffaqiyatsiz
+  // bo'lsa (yoki 25 soniyada javob kelmasa) null qaytaradi.
+  Future<VideoPlayerController?> _openController(Uri uri, int myToken) async {
+    // ── NEGA platformView (SurfaceView) ──────────────────────
+    // Android'da video ikki yo'l bilan ko'rsatilishi mumkin:
+    // Flutter teksturasi (standart) yoki alohida SurfaceView
+    // (platform view). Google'ning rasmiy tavsiyasi — SurfaceView:
+    // u o'z ekran qatlamiga chiziladi, Flutter sahnasiga
+    // aralashmaydi, quvvat sarfi kam va SurfaceTexture bilan
+    // bog'liq muammolar (Impeller) umuman tegmaydi. YouTube va
+    // ExoPlayer asosidagi ilovalar shu yo'ldan boradi.
+    final ctrl = VideoPlayerController.networkUrl(
+      uri,
+      viewType: VideoViewType.platformView,
+      videoPlayerOptions: VideoPlayerOptions(
+        // Ilova fonga ketganda ExoPlayer ijroni to'xtatadi va
+        // qurilma resurslarini bo'shatadi.
+        allowBackgroundPlayback: false,
+        mixWithOthers: false,
+      ),
+    );
     try {
-      final player = mdk.Player();
-      _applyPlayerDefaults(player);
-      final c = _PlayerCtrl(player);
-      c.onEnded = _handleEnded;
-      _keptCtrl = c;
-      return c;
+      await ctrl.initialize().timeout(const Duration(seconds: 25));
+      if (!mounted || myToken != _playToken) {
+        try {
+          await ctrl.dispose();
+        } catch (_) {}
+        return null;
+      }
+      if (!ctrl.value.isInitialized) {
+        await ctrl.dispose();
+        return null;
+      }
+      VideoCacheServer.log(
+          'Video ochildi: ${ctrl.value.size.width.toInt()}x${ctrl.value.size.height.toInt()}, '
+          '${ctrl.value.duration}');
+      return ctrl;
     } catch (e) {
-      VideoCacheServer.log('mdk.Player yaratilmadi: $e');
+      VideoCacheServer.log('Controller ochishda xato: $e');
+      try {
+        await ctrl.dispose();
+      } catch (_) {}
       return null;
     }
   }
 
-  // Video tugadi (native ijro to'xtadi) — boshidan qayta ochamiz.
-  // Bu FAQAT haqiqiy tugashda ishlaydi: media almashtirish paytida
-  // _PlayerCtrl._switching bayrog'i buni to'sib turadi.
-  void _handleEnded() {
-    if (!mounted || _recovering) return;
-    final ep = _currentEp;
-    if (ep == null) return;
+  // Controllerdan kelgan har bir yangilanish. Bu yerda faqat
+  // XATO holatini kuzatamiz — qolgan yangilanishlarni UI o'zi
+  // (ValueListenableBuilder orqali) oladi.
+  void _onControllerUpdate() {
     final c = _controller;
-    if (c == null || c.isDisposed) return;
-    // Tugash faqat oxiriga yaqin joyda kutiladi. Aks holda bu
-    // to'xtash boshqa sabab bilan (masalan xato) bo'lgan.
-    final v = c.value;
-    if (v.duration > Duration.zero &&
-        (v.duration - v.position) > const Duration(seconds: 5)) {
-      return;
+    if (c == null || !mounted) return;
+    if (c.value.hasError && !_recovering) {
+      VideoCacheServer.log('Pleyer xatosi: ${c.value.errorDescription}');
+      _recoverPlayer(c.value.position);
     }
-    VideoCacheServer.log('Video tugadi — boshidan qayta boshlanmoqda');
-    _playEpisode(ep, resumeAt: Duration.zero, resumePlaying: true);
-  }
-
-  // Video o'lchamini ekran imkoniyati bilan cheklaydi (fvp'ning o'z
-  // shim qatlami ham xuddi shunday qiladi): 4K RGBA maydon zaif
-  // grafika protsessorlarida kadr tushishiga olib keladi.
-  (int, int) _clampVideoSize(ui.Size size) {
-    final (maxW, maxH) = _textureLimits();
-    var w = size.width.toInt();
-    var h = size.height.toInt();
-    if (w <= 0 || h <= 0) return (maxW, maxH);
-    final r = w / h;
-    final fitW = (maxH * r).toInt();
-    if (fitW <= maxW) {
-      if (fitW < w) {
-        w = fitW;
-        h = maxH;
-      }
-    } else if (maxW < w) {
-      h = (maxW / r).toInt();
-      w = maxW;
-    }
-    return (w <= 0 ? maxW : w, h <= 0 ? maxH : h);
-  }
-
-  // ── VIDEO SURATI QANDAY CHIZILADI ────────────────────────────
-  //
-  // Android'da IKKI yo'l bor:
-  //
-  //   1) Flutter teksturasi (`Texture` vidjeti) — video kadrlari
-  //      Flutter'ning o'z sahnasiga qo'shiladi. Bu yo'l qulay, LEKIN
-  //      u SurfaceTexture'ga tayanadi va Flutter'ning yangi grafik
-  //      dvigateli (Impeller) bilan birgalikda ma'lum muammolarga
-  //      ega — jumladan tekstura qayta yaratilganda (ya'ni video
-  //      qayta ochilganda yoki sek qilinganda) ilovaning o'chib
-  //      qolishi. Bu Flutter'ning o'z xato ro'yxatida ham bor
-  //      (flutter/flutter#145077) va fvp'da ham uchragan (fvp#197).
-  //
-  //   2) SurfaceView (platform view, fvp 0.38 dan beri:
-  //      'fvp/video-view') — video O'ZINING alohida ekran qatlamiga
-  //      chiziladi, Flutter sahnasiga umuman aralashmaydi.
-  //      **Android'dagi jiddiy pleyerlar — YouTube, ExoPlayer/Media3
-  //      asosidagi ilovalar — aynan SurfaceView ishlatadi**, chunki u
-  //      eng barqaror va eng tejamli yo'l (Google'ning o'z tavsiyasi:
-  //      developer.android.com/media/media3/ui/surface).
-  //
-  // Shu sabab Android'da 2-yo'l tanlandi. Boshqa platformalarda
-  // (va agar platform view ishlamasa) tekstura yo'li qoladi.
-  Widget _buildVideoSurface(_PlayerCtrl ctrl) {
-    final params = _surfaceParams;
-    if (!_useSurfaceView || params == null) {
-      // Tekstura yo'li (Android bo'lmagan platformalar).
-      return ValueListenableBuilder<int?>(
-        valueListenable: ctrl.player.textureId,
-        builder: (_, texId, __) {
-          if (texId == null || texId < 0) return const SizedBox.shrink();
-          return Texture(textureId: texId);
-        },
-      );
-    }
-    final layoutDirection = Directionality.maybeOf(context) ?? TextDirection.ltr;
-    return PlatformViewLink(
-      // GlobalKey — yuqoridagi izohga qarang: fullscreen'ga o'tishda
-      // SurfaceView qayta yaratilmaydi, faqat ko'chiriladi.
-      key: _surfaceViewKey,
-      viewType: 'fvp/video-view',
-      surfaceFactory: (context, controller) => AndroidViewSurface(
-        controller: controller as AndroidViewController,
-        gestureRecognizers: const <Factory<OneSequenceGestureRecognizer>>{},
-        // Barcha teginishlar YUQORIDAGI qatlamga (bizning sek/tap
-        // gestlarimizga) o'tadi — SurfaceView ularni yutmaydi.
-        hitTestBehavior: PlatformViewHitTestBehavior.transparent,
-      ),
-      onCreatePlatformView: (creationParams) {
-        // SurfaceView "hybrid composition" talab qiladi, aks holda u
-        // noto'g'ri joyda/qatlamda chiziladi (Flutter hujjatlari).
-        final controller = PlatformViewsService.initExpensiveAndroidView(
-          id: creationParams.id,
-          viewType: 'fvp/video-view',
-          layoutDirection: layoutDirection,
-          creationParams: params,
-          creationParamsCodec: const StandardMessageCodec(),
-        );
-        controller
-            .addOnPlatformViewCreatedListener(creationParams.onPlatformViewCreated);
-        controller.create();
-        return controller;
-      },
-    );
   }
 
   // ── SOG'LIQ KUZATUVCHISI (health watchdog) ────────────────────
   //
-  // Eski arxitekturada bu taymer IKKI xil "qotish"ni kuzatishga
-  // majbur edi: (1) video OXIRIDA to'xtab qolish — endi kerak emas,
-  // chunki video tugashi endi alohida hodisa sifatida
-  // (`_handleEnded`) boshqariladi; (2) sek/ijro paytidagi umumiy qotish — sek yo'li endi
-  // HAQIQIY Future orqali o'z ichida kuzatiladi (pastga, _runSeek'ga
-  // qarang). Shu sabab bu yerda faqat ORTIQCHA, ikkalasidan ham
-  // mustaqil bo'lgan OXIRGI xavfsizlik chizig'i qoladi: agar pleyer
-  // ijro qilishi KERAK bo'lsa-yu (isPlaying, buferlanmayapti, sek
-  // navbatida emas), lekin pozitsiya bir necha soniya BUTUNLAY
-  // qotib qolsa — bu native tomon haqiqatan osilib qolganining
-  // belgisi va pleyer o'sha nuqtadan qaytadan ochiladi.
+  // ExoPlayer o'zi ancha barqaror, shu sabab bu taymer endi faqat
+  // ORTIQCHA, oxirgi xavfsizlik chizig'i: agar pleyer ijro qilishi
+  // KERAK bo'lsa-yu (isPlaying, buferlanmayapti, sek navbatida emas),
+  // lekin pozitsiya bir necha soniya BUTUNLAY qotib qolsa — epizod
+  // o'sha nuqtadan qaytadan ochiladi. Odatdagi ishlashda bu hech
+  // qachon ishga tushmaydi.
   void _startHealthWatchdog() {
     _healthTimer?.cancel();
     _stuckTicks = 0;
@@ -945,22 +466,12 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       if (!mounted) return;
       final c = _controller;
       if (c == null) return;
-      final _PV v;
-      try {
-        v = c.value;
-      } catch (_) {
-        return;
-      }
+      final VideoPlayerValue v = c.value;
       if (!v.isInitialized || v.duration <= Duration.zero) return;
 
-      // Video OXIRIGA yaqin (yoki `loop = -1` bilan boshiga qaytish
-      // paytida): mdk-sdk EOF'ni ichki qayta ishlashi va boshiga
-      // qaytishi (native) BIR NECHA soniya davom etishi mumkin —
-      // bu vaqt ichida `position` vaqtincha o'zgarmasligi normal
-      // holat, "qotish" EMAS. Bu oraliqni "qotish" deb hisoblasak,
-      // ayniqsa QISQA videolarda (tez-tez tugab-boshlanadigan)
-      // sog'liq kuzatuvchisi loop bilan "kurashib", pleyerni
-      // keraksiz qayta-qayta ochib yuborishi mumkin edi.
+      // Video oxiriga yaqin joyda takrorlash (loop) ishlaydi va
+      // pozitsiya bir lahza "joyida turgandek" ko'rinishi mumkin —
+      // bu qotish emas.
       final nearEnd =
           (v.duration - v.position) <= const Duration(milliseconds: 2500);
 
@@ -1133,9 +644,10 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _pendingSeekBase ??= ctrl.value.position;
     _pendingSeekDeltaSeconds += deltaSeconds;
 
-    // Debounce 220ms dan 110ms ga tushirildi — bo'laklar endi fon'da
-    // diskka oldindan keshlangani uchun (Rust filler) sek deyarli
-    // darhol bajariladi va uzoq kutish shart emas.
+    // Ketma-ket bosilgan taplar bitta so'rovga birlashtiriladi
+    // (debounce). ExoPlayer sek so'rovlarini o'zi ham birlashtiradi,
+    // lekin bu qatlam platformaga bo'ladigan chaqiruvlar sonini
+    // yanada kamaytiradi.
     _seekDebounceTimer?.cancel();
     _seekDebounceTimer = Timer(const Duration(milliseconds: 110), () {
       final base = _pendingSeekBase;
@@ -1218,115 +730,48 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     return t > limit ? limit : t;
   }
 
-  // Barcha sek chaqiruvlari SHU yerdan o'tadi. Bir vaqtning o'zida
-  // faqat BITTA sek bajariladi: oldingisi tugamaguncha yangisi
-  // yuborilmaydi, o'rniga eng oxirgi so'ralgan nuqta eslab qolinib,
-  // joriysi tugagach bir marta qo'llaniladi — foydalanuvchi qanchalik
-  // tez/ko'p sek qilsa ham, pleyerga faqat OXIRGI nuqta yetib boradi.
+  // ── SEK: "eng oxirgisi yutadi" ─────────────────────────────
   //
-  // `mdk.Player.seek()` HAQIQIY Future qaytargani uchun (_PlayerCtrl
-  // izohiga qarang — fvp shim'idan farqli o'laroq bu "fire-and-forget"
-  // EMAS), bu navbat endi ancha sodda: har bir `await c.seekTo(...)`
-  // native sek haqiqatan tugaguncha to'xtaydi, shu sabab keyingi
-  // navbatdagi so'rov mdk-sdk'ning ichki holatini "bosib" yubormaydi.
-  // Qo'shimcha xavfsizlik: har bir sek 8 soniya timeout bilan
-  // himoyalangan — native tomon haqiqatan osilib qolsa ham (kutilmagan
-  // holat), ilova abadiy kutib qolmaydi, pleyer o'sha nuqtadan qaytadan
-  // ochiladi.
-  Future<void> _runSeek(_PlayerCtrl c, Duration t) async {
-    if (c.isDisposed) return;
+  // Professional pleyerlar (ExoPlayer/Media3 "scrubbing mode",
+  // YouTube) progress chizig'i surilayotganda shunday ishlaydi:
+  //   * oraliq sek so'rovlari NAVBATGA TO'PLANMAYDI — eskisi
+  //     bekor qilinib, faqat eng oxirgi nuqta bajariladi;
+  //   * sek kalit kadrga (key frame) qilinadi, shu sabab tez.
+  //
+  // ExoPlayer buni ichkarida o'zi ham qiladi, lekin biz ustiga bitta
+  // yupqa qatlam qo'yamiz: bir vaqtda faqat BITTA `seekTo` uchib
+  // turadi, undan keyingilari esa "keyingi nuqta" sifatida saqlanadi.
+  // Shu bilan tez-tez surilganda platformaga yuboriladigan chaqiruv
+  // soni minimumga tushadi.
+  Future<void> _runSeek(VideoPlayerController c, Duration t) async {
     _lastSeekRequest = DateTime.now();
     if (_seekBusy) {
-      // Bir vaqtda faqat BITTA sek. Yangi so'rov navbatga qo'yiladi
-      // (faqat ENG OXIRGISI saqlanadi) — foydalanuvchi qanchalik tez
-      // sursa ham, native tomonga buyruqlar to'planib bormaydi.
       _queuedSeek = t;
       return;
     }
     _seekBusy = true;
     try {
-      var wasPlaying = false;
-      try {
-        wasPlaying = c.value.isPlaying;
-      } catch (_) {}
-
       var target = t;
       var rounds = 0;
-      // Ketma-ket HAQIQIY xatolar soni. Bitta xato — normal hodisa
-      // (masalan bo'lak hali yuklanmagan), shu sabab birinchi xatoda
-      // pleyer QAYTA OCHILMAYDI: shunchaki bir oz kutib, xuddi shu
-      // nuqtaga yana urinib ko'riladi.
-      var hardFailures = 0;
       while (rounds < 32) {
         rounds++;
-        if (!mounted || c.isDisposed || _controller != c) return;
-
-        int ret;
+        if (!mounted || _controller != c) return;
         try {
-          ret = await c
-              .seekTo(target)
-              .timeout(const Duration(seconds: 10), onTimeout: () => -10);
-        } catch (_) {
-          ret = -11;
+          await c.seekTo(target).timeout(const Duration(seconds: 10));
+        } catch (e) {
+          VideoCacheServer.log('seekTo xato/kechikish: $e');
         }
-
-        if (!mounted || c.isDisposed || _controller != c) return;
-
-        // -2 = bu sek yangirog'i bilan almashtirildi (fvp/player.dart).
-        // Bu XATO EMAS: shunchaki biz navbatdagi yangi nuqtaga
-        // o'tamiz. Avval bu ham "xato" deb qabul qilinib, pleyerni
-        // QAYTA OCHISHGA sabab bo'lardi — tez-tez sek qilinganda esa
-        // bu pleyerni ketma-ket ochib-yopishga aylanib, ilovani
-        // o'ldirardi. ENDI BUNDAY EMAS.
-        if (ret >= 0 || ret == -2) {
-          hardFailures = 0;
-        } else {
-          hardFailures++;
-          VideoCacheServer.log('Sek natijasi kod=$ret (urinish $hardFailures)');
-          if (hardFailures < 3) {
-            // Qisqa nafas olib, XUDDI SHU nuqtaga qayta urinamiz.
-            await Future.delayed(const Duration(milliseconds: 350));
-            if (!mounted || c.isDisposed || _controller != c) return;
-            final newer = _queuedSeek;
-            if (newer != null) {
-              _queuedSeek = null;
-              target = newer;
-            }
-            continue;
-          }
-          // Uch marta ketma-ket haqiqiy xato — endi pleyerni
-          // o'sha nuqtadan qaytadan ochamiz (oxirgi chora).
-          VideoCacheServer.log(
-              'Sek 3 marta muvaffaqiyatsiz — pleyer qaytadan ochilmoqda');
-          _recoverPlayer(target);
-          return;
-        }
-
         final next = _queuedSeek;
         _queuedSeek = null;
         if (next == null) break;
         target = next;
-      }
-
-      // Sekdan oldin ijro ketayotgan bo'lsa-yu, keyin pauzada qolib
-      // ketsa — aniq davom ettiramiz.
-      if (wasPlaying && mounted && !c.isDisposed && _controller == c) {
-        var playing = true;
-        try {
-          playing = c.value.isPlaying;
-        } catch (_) {}
-        if (!playing) {
-          try {
-            await c.play();
-          } catch (_) {}
-        }
       }
     } finally {
       _seekBusy = false;
       _lastSeekDone = DateTime.now();
       final pending = _queuedSeek;
       _queuedSeek = null;
-      if (pending != null && mounted && !c.isDisposed && _controller == c) {
+      if (pending != null && mounted && _controller == c) {
         scheduleMicrotask(() => _runSeek(c, pending));
       }
     }
@@ -1340,12 +785,27 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     final ctrl = _controller;
     if (ctrl == null || !ctrl.value.isInitialized) return;
 
+    // ── KO'RSATKICH HAQIQATNI KO'RSATADI ─────────────────────
+    // Avval har bir bosishda ko'rsatkich shunchaki +5 ga oshaverardi:
+    // 55 soniyalik videoda "+65s" deb turardi, holbuki video oxiridan
+    // nariga sek qilib bo'lmaydi. Endi jamlangan qiymat videoning
+    // HAQIQIY chegaralari bilan cheklanadi — ya'ni ekranda ko'ringan
+    // son bilan haqiqiy sakrash bir xil bo'ladi.
+    final v = ctrl.value;
+    final base = _pendingSeekBase ?? v.position;
+    final dur = v.duration;
+    final maxForward = dur > Duration.zero
+        ? (_clampSeekTarget(dur, dur) - base).inSeconds
+        : 0;
+    final maxBack = base.inSeconds;
+
     setState(() {
       if (isLeft) {
-        _leftSeekAccum += 5;
+        _leftSeekAccum = (_leftSeekAccum + 5).clamp(0, maxBack < 0 ? 0 : maxBack);
         _showLeftSeek = true;
       } else {
-        _rightSeekAccum += 5;
+        _rightSeekAccum =
+            (_rightSeekAccum + 5).clamp(0, maxForward < 0 ? 0 : maxForward);
         _showRightSeek = true;
       }
     });
@@ -1538,51 +998,6 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                   ),
                 );
               }),
-              // ── Zaxira ko'rsatish rejimi ──────────────────────
-              // Agar biror qurilmada SurfaceView (asosiy yo'l) bilan
-              // video ko'rinmasa (qora ekran), foydalanuvchi shu
-              // yerdan eski "tekstura" rejimiga o'tib, videoni
-              // baribir ko'ra oladi. Aksincha ham — tekstura
-              // rejimida muammo bo'lsa, SurfaceView'ga qaytadi.
-              if (Platform.isAndroid) ...[
-                const SizedBox(height: 4),
-                GestureDetector(
-                  onTap: () {
-                    Navigator.pop(ctx);
-                    final c = _controller;
-                    final at = c?.value.position;
-                    final wasPlaying = c?.value.isPlaying ?? true;
-                    setState(() {
-                      _surfaceMode = _surfaceMode == _SurfaceMode.surfaceView
-                          ? _SurfaceMode.texture
-                          : _SurfaceMode.surfaceView;
-                      _surfaceParams = null;
-                      _surfaceAspect = null;
-                    });
-                    _playEpisode(ep,
-                        resumeAt: at, resumePlaying: wasPlaying);
-                  },
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 8),
-                    child: Row(
-                      children: [
-                        const Icon(Icons.swap_horiz_rounded,
-                            color: Colors.white54, size: 18),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            _surfaceMode == _SurfaceMode.surfaceView
-                                ? 'Ko\'rsatish: SurfaceView (agar video ko\'rinmasa, bosing)'
-                                : 'Ko\'rsatish: Tekstura (SurfaceView\'ga qaytish uchun bosing)',
-                            style: const TextStyle(
-                                color: Colors.white54, fontSize: 12),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
             ],
           ),
         ),
@@ -1761,7 +1176,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                 ? Center(
                     child: AspectRatio(
                       aspectRatio: ctrl.value.aspectRatio,
-                      child: _buildVideoSurface(ctrl),
+                      child: VideoPlayer(ctrl),
                     ),
                   )
                 : const SizedBox.shrink(),
@@ -2030,7 +1445,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   Widget _bufferingReactive() {
     final ctrl = _controller;
     if (ctrl == null) return const SizedBox.shrink();
-    return ValueListenableBuilder<_PV>(
+    return ValueListenableBuilder<VideoPlayerValue>(
       valueListenable: ctrl,
       builder: (_, value, __) {
         if (!value.isBuffering) return const SizedBox.shrink();
@@ -2055,7 +1470,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
         child: _playPauseIcon(playing: false, size: size),
       );
     }
-    return ValueListenableBuilder<_PV>(
+    return ValueListenableBuilder<VideoPlayerValue>(
       valueListenable: ctrl,
       builder: (_, value, __) => GestureDetector(
         onTap: _togglePlayPause,
@@ -2088,7 +1503,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   // Faqat slayder/vaqtni eng tor ko'lamda yangilaydi.
   Widget _bottomBarReactive({required bool isFullscreen}) {
     final ctrl = _controller;
-    Widget bar(_PV? value) => _BottomBar(
+    Widget bar(VideoPlayerValue? value) => _BottomBar(
           position: value?.position ?? Duration.zero,
           duration: value?.duration ?? Duration.zero,
           fmt: _fmt,
@@ -2107,7 +1522,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
           isFullscreen: isFullscreen,
         );
     if (ctrl == null) return bar(null);
-    return ValueListenableBuilder<_PV>(
+    return ValueListenableBuilder<VideoPlayerValue>(
       valueListenable: ctrl,
       builder: (_, value, __) => bar(value),
     );
