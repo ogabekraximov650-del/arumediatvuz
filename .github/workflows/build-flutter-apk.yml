@@ -156,6 +156,52 @@ jobs:
           flutter build apk --release \
             --target-platform android-arm64,android-arm
 
+      # ── APK'ni ESKI IMZO SXEMASI (v1) BILAN HAM IMZOLASH ──────
+      #
+      # Android 7.0 dan boshlab APK "v2" sxemasi bilan imzolanadi va
+      # zamonaviy Gradle standart holatda FAQAT v2/v3 imzo qo'yadi.
+      # Lekin:
+      #   * Android 6 va undan eskilar v2 ni UMUMAN bilmaydi — ular
+      #     uchun APK "imzosiz" ko'rinadi va o'rnatgichda aynan
+      #     "Paketni tahlil qilishda muammo yuz berdi" chiqadi;
+      #   * ba'zi qobiqlar (MIUI kabi) va fayl menejerlaridagi
+      #     o'rnatgichlar ham v1 imzoni talab qilib qoladi.
+      #
+      # Shu sabab APK build'dan keyin apksigner bilan QAYTA imzolanadi:
+      # v1 + v2 + v3 — ya'ni eski ham, yangi ham qurilmalar qabul
+      # qiladi. Kalit — Gradle yaratgan standart debug kaliti.
+      - name: APK'ni v1+v2+v3 imzo bilan qayta imzolash
+        run: |
+          set -e
+          APK="build/app/outputs/flutter-apk/app-release.apk"
+          KS="$HOME/.android/debug.keystore"
+          if [ ! -f "$KS" ]; then
+            mkdir -p "$HOME/.android"
+            keytool -genkeypair -v -keystore "$KS" -storepass android \
+              -keypass android -alias androiddebugkey \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          echo "apksigner: $APKSIGNER"
+          "$APKSIGNER" sign \
+            --ks "$KS" --ks-pass pass:android --key-pass pass:android \
+            --ks-key-alias androiddebugkey \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            "$APK"
+          echo "── Imzo tekshiruvi ──"
+          "$APKSIGNER" verify -v "$APK"
+
+      - name: APK tarkibini tekshirish (minSdk, arxitekturalar)
+        run: |
+          APK="build/app/outputs/flutter-apk/app-release.apk"
+          AAPT=$(ls "$ANDROID_HOME"/build-tools/*/aapt2 | sort -V | tail -1)
+          "$AAPT" dump badging "$APK" | grep -E "^(package|sdkVersion|targetSdkVersion|native-code)" || true
+          echo "── Ichidagi kutubxonalar ──"
+          unzip -l "$APK" | grep "lib/" | awk '{print $4}' | cut -d/ -f2 | sort -u
+
       - name: APK hajmini ko'rsatish
         run: |
           echo "📦 Tayyor APK:"
