@@ -3,7 +3,10 @@ import 'dart:io' show Platform;
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
-import 'package:flutter/gestures.dart' show Factory, OneSequenceGestureRecognizer;
+// `Factory` — package:flutter/foundation.dart'da, gestures'da EMAS
+// (build shu sabab yiqilgan edi).
+import 'package:flutter/foundation.dart' show Factory;
+import 'package:flutter/gestures.dart' show OneSequenceGestureRecognizer;
 import 'package:flutter/rendering.dart' show PlatformViewHitTestBehavior;
 // fvp'ning mdk-sdk'ga past-darajali (shim'siz) kirish nuqtasi. Pleyer
 // boshqaruvi endi to'g'ridan-to'g'ri shu API orqali (mdk.Player) amalga
