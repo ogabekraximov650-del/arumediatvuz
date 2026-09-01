@@ -420,6 +420,23 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       Platform.isAndroid ? _SurfaceMode.surfaceView : _SurfaceMode.texture;
   bool get _useSurfaceView => _surfaceMode == _SurfaceMode.surfaceView;
   Map<String, Object>? _surfaceParams;
+
+  // ── NEGA GlobalKey ───────────────────────────────────────────
+  // Fullscreen'ga o'tganda butun ekran boshqa vidjet daraxtiga
+  // almashadi (_buildNormalScreen -> _buildFullscreenPlayer). Oddiy
+  // kalit bilan bu SurfaceView'ning YO'Q QILINIB, yangisining
+  // yaratilishini bildiradi; yangi surface yaratilayotgan payt
+  // eskisining o'chirilishi esa native tomonda pleyerning chizish
+  // nishonini uzib qo'yadi — natijada fullscreen'da video umuman
+  // ko'rinmaydi (foydalanuvchida aynan shu bo'lgan).
+  //
+  // GlobalKey bilan Flutter vidjetni yo'q qilmaydi, balki yangi
+  // joyga KO'CHIRADI (reparent) — SurfaceView va uning native
+  // ulanishi buzilmasdan saqlanadi.
+  GlobalKey _surfaceViewKey = GlobalKey(debugLabel: 'fvp-surface');
+  // Platform view yaratilgandagi video nisbati. View faqat nisbat
+  // sezilarli o'zgarganda qayta yaratiladi.
+  double? _surfaceAspect;
   Map<String, dynamic>? _currentEp;
   String? _selectedQuality;
   bool _playerLoading = false;
