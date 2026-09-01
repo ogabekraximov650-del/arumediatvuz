@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import '../theme/app_background.dart';
 import '../widgets/glass.dart';
@@ -14,30 +15,93 @@ class RootScreen extends StatefulWidget {
   State<RootScreen> createState() => _RootScreenState();
 }
 
-class _RootScreenState extends State<RootScreen> {
+class _RootScreenState extends State<RootScreen>
+    with SingleTickerProviderStateMixin {
   int _index = 0;
   late final PageController _pageController;
+
+  // ── PASTKI PANELDAGI "SUZUVCHI" TUGMA HOLATI ─────────────────
+  // Avval u to'g'ridan-to'g'ri PageController'ning `page` qiymatiga
+  // bog'langan edi. Endi alohida qiymat: sahifa BARMOQ bilan
+  // surilganda u PageController'ni kuzatadi, tugma bosilganda esa
+  // o'zining silliq animatsiyasi bilan siljiydi (pastdagi izohga
+  // qarang — sahifa o'zi sakrab o'tadi).
+  final ValueNotifier<double> _navPos = ValueNotifier<double>(0);
+  late final AnimationController _navAnim;
+  Animation<double>? _navTween;
+  bool _jumping = false;
 
   @override
   void initState() {
     super.initState();
-    _pageController = PageController();
+    _pageController = PageController()..addListener(_onPageScroll);
+    _navAnim = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 280),
+    )..addListener(() {
+        final t = _navTween;
+        if (t != null) _navPos.value = t.value;
+      });
   }
 
   @override
   void dispose() {
+    _pageController.removeListener(_onPageScroll);
     _pageController.dispose();
+    _navAnim.dispose();
+    _navPos.dispose();
     super.dispose();
   }
 
+  void _onPageScroll() {
+    if (_jumping) return;
+    if (!_pageController.hasClients) return;
+    final p = _pageController.page;
+    if (p != null) _navPos.value = p;
+  }
+
+  // ── NEGA UZOQ SAHIFAGA "SAKRAB" O'TILADI ─────────────────────
+  //
+  // Avval har qanday tugma uchun `animateToPage` ishlatilardi. U
+  // sahifalarni BIRMA-BIR aylanib o'tadi: masalan Bosh sahifadan
+  // Profilga o'tishda PageView yo'l-yo'lakay Qidiruv, Katalog va
+  // Kutubxona ekranlarini ham QURIB chiqishga majbur bo'ladi — hammasi
+  // 320 ms ichida. Har bir ekran birinchi marta qurilayotgani uchun
+  // (initState, ro'yxatlar, rasm vidjetlari) bu ish bitta kadrga
+  // sig'may, ilova bir zumga QOTIB qolardi — foydalanuvchi buni
+  // "birinchi marta boshqa sahifaga o'tishda ilova qotib qoladi" deb
+  // ta'riflagan.
+  //
+  // Endi:
+  //   * qo'shni sahifaga — avvalgidek silliq animatsiya (yo'lda birorta
+  //     ham ortiqcha ekran yo'q);
+  //   * uzoqroq sahifaga — `jumpToPage`, ya'ni FAQAT kerakli ekran
+  //     quriladi, oradagilar umuman tegilmaydi.
+  // Pastdagi suzuvchi tugma esa ikkala holatda ham silliq siljiydi.
   void _onTabTap(int i) {
     if (i == _index) return;
+    final from = _navPos.value;
     setState(() => _index = i);
-    _pageController.animateToPage(
-      i,
-      duration: const Duration(milliseconds: 320),
-      curve: Curves.easeOutCubic,
+    if ((i - from).abs() <= 1.001) {
+      _pageController.animateToPage(
+        i,
+        duration: const Duration(milliseconds: 320),
+        curve: Curves.easeOutCubic,
+      );
+      return;
+    }
+    _jumping = true;
+    _pageController.jumpToPage(i);
+    _navTween = Tween<double>(begin: from, end: i.toDouble()).animate(
+      CurvedAnimation(parent: _navAnim, curve: Curves.easeOutCubic),
     );
+    _navAnim
+      ..stop()
+      ..value = 0
+      ..forward().whenComplete(() {
+        _jumping = false;
+        _navPos.value = i.toDouble();
+      });
   }
 
   @override
@@ -50,6 +114,9 @@ class _RootScreenState extends State<RootScreen> {
           bottom: false,
           child: PageView(
             controller: _pageController,
+            // Qo'shni sahifa OLDINDAN (ilova bo'sh turganda) quriladi —
+            // shu sabab unga o'tilganda quriladigan ish qolmaydi.
+            allowImplicitScrolling: true,
             onPageChanged: (i) => setState(() => _index = i),
             children: const [
               _KeepAlivePage(child: HomeScreen()),
@@ -62,7 +129,7 @@ class _RootScreenState extends State<RootScreen> {
         ),
         bottomNavigationBar: _BottomNav(
           currentIndex: _index,
-          pageController: _pageController,
+          position: _navPos,
           onTap: _onTabTap,
         ),
       ),
@@ -94,12 +161,14 @@ class _KeepAlivePageState extends State<_KeepAlivePage>
 // Blur yo'q — faqat Container + BoxShadow. 60fps+ istalgan qurilmada.
 class _BottomNav extends StatelessWidget {
   final int currentIndex;
-  final PageController pageController;
+
+  /// Suzuvchi tugmaning joriy o'rni (0..4 oralig'idagi kasr son).
+  final ValueListenable<double> position;
   final ValueChanged<int> onTap;
 
   const _BottomNav({
     required this.currentIndex,
-    required this.pageController,
+    required this.position,
     required this.onTap,
   });
 
@@ -137,13 +206,9 @@ class _BottomNav extends StatelessWidget {
             ),
           ],
         ),
-        child: AnimatedBuilder(
-          animation: pageController,
-          builder: (context, _) {
-            final page = pageController.hasClients
-                ? (pageController.page ?? currentIndex.toDouble())
-                : currentIndex.toDouble();
-
+        child: ValueListenableBuilder<double>(
+          valueListenable: position,
+          builder: (context, page, _) {
             return LayoutBuilder(
               builder: (context, constraints) {
                 final itemWidth = constraints.maxWidth / _items.length;

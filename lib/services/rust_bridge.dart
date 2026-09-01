@@ -51,6 +51,17 @@ typedef _VideoCacheStartDart = int Function(Pointer<Utf8>);
 typedef _VideoCacheNetBytesC = Uint64 Function();
 typedef _VideoCacheNetBytesDart = int Function();
 
+// ── Video yuklab olish (progress / boshqaruv) ───────────────────
+//
+// `rust_video_cache_stats` BITTA chaqiruvda bir nechta URL uchun holat
+// qaytaradi — shu sabab ekranda 3-4 ta sifat ochilganda ham FFI
+// chaqiruvlari soni bitta bo'lib qoladi.
+typedef _VideoStatsC = Pointer<Utf8> Function(Pointer<Utf8>);
+typedef _VideoStatsDart = Pointer<Utf8> Function(Pointer<Utf8>);
+
+typedef _VideoUrlActionC = Int32 Function(Pointer<Utf8>);
+typedef _VideoUrlActionDart = int Function(Pointer<Utf8>);
+
 typedef _CryptoGenKeyC = Pointer<Utf8> Function();
 typedef _CryptoGenKeyDart = Pointer<Utf8> Function();
 typedef _CryptoSetKeyC = Int32 Function(Pointer<Utf8>);
@@ -73,6 +84,10 @@ class RustCore {
   late final _VideoCacheStartDart _videoCacheStart;
   late final _VideoCacheNetBytesDart _videoCacheNetBytes;
   late final _VideoCacheNetBytesDart _videoCacheServedBytes;
+  late final _VideoStatsDart _videoStats;
+  late final _VideoUrlActionDart _videoDownload;
+  late final _VideoUrlActionDart _videoPause;
+  late final _VideoUrlActionDart _videoDelete;
   late final _CryptoGenKeyDart _cryptoGenKey;
   late final _CryptoSetKeyDart _cryptoSetKey;
 
@@ -116,6 +131,15 @@ class RustCore {
     _videoCacheServedBytes =
         _lib.lookupFunction<_VideoCacheNetBytesC, _VideoCacheNetBytesDart>(
             'rust_video_cache_served_bytes');
+    _videoStats = _lib.lookupFunction<_VideoStatsC, _VideoStatsDart>(
+        'rust_video_cache_stats');
+    _videoDownload =
+        _lib.lookupFunction<_VideoUrlActionC, _VideoUrlActionDart>(
+            'rust_video_cache_download');
+    _videoPause = _lib.lookupFunction<_VideoUrlActionC, _VideoUrlActionDart>(
+        'rust_video_cache_pause');
+    _videoDelete = _lib.lookupFunction<_VideoUrlActionC, _VideoUrlActionDart>(
+        'rust_video_cache_delete');
     _cryptoGenKey = _lib.lookupFunction<_CryptoGenKeyC, _CryptoGenKeyDart>(
         'rust_crypto_generate_key');
     _cryptoSetKey = _lib.lookupFunction<_CryptoSetKeyC, _CryptoSetKeyDart>(
@@ -391,6 +415,51 @@ class RustCore {
       return _videoCacheServedBytes();
     } catch (_) {
       return 0;
+    }
+  }
+
+  // ── Video yuklab olish: holat va boshqaruv ───────────────────
+  //
+  // Bu chaqiruvlarning HECH BIRI tarmoqqa chiqmaydi va HECH BIRI
+  // kutmaydi (bloklamaydi): `videoStats` faqat xotiradagi hisobni
+  // o'qiydi, `videoDownload`/`videoDelete` esa ishni Rust tomonidagi
+  // fon ish oqimiga topshirib darhol qaytadi. Shu sabab ularni UI
+  // oqimidan soniyasiga bir necha marta chaqirish xavfsiz.
+
+  /// Berilgan URL'lar uchun: {url: {total, downloaded, downloading}}.
+  Map<String, Map<String, dynamic>> videoStats(List<String> urls) {
+    if (!_loaded || urls.isEmpty) return const {};
+    final ptr = jsonEncode(urls).toNativeUtf8();
+    try {
+      final json = _readAndFree(_videoStats(ptr));
+      if (json == null || json.isEmpty) return const {};
+      final decoded = jsonDecode(json) as Map<String, dynamic>;
+      return decoded.map((k, v) => MapEntry(k, (v as Map).cast<String, dynamic>()));
+    } catch (_) {
+      return const {};
+    } finally {
+      malloc.free(ptr);
+    }
+  }
+
+  /// Videoni to'liq yuklab olishni boshlaydi (faqat YETISHMAYOTGAN
+  /// bo'laklar olinadi — ya'ni to'xtatilgan joydan davom etadi).
+  void videoDownload(String url) => _videoUrlAction(_videoDownload, url);
+
+  /// Yuklab olishni to'xtatadi. Olingan bo'laklar joyida qoladi.
+  void videoPause(String url) => _videoUrlAction(_videoPause, url);
+
+  /// Shu sifatdagi videoning keshini butunlay o'chiradi.
+  void videoDelete(String url) => _videoUrlAction(_videoDelete, url);
+
+  void _videoUrlAction(_VideoUrlActionDart fn, String url) {
+    if (!_loaded || url.isEmpty) return;
+    final ptr = url.toNativeUtf8();
+    try {
+      fn(ptr);
+    } catch (_) {
+    } finally {
+      malloc.free(ptr);
     }
   }
 }

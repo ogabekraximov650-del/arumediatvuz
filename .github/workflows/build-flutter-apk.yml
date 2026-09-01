@@ -170,7 +170,7 @@ jobs:
       # Shu sabab APK build'dan keyin apksigner bilan QAYTA imzolanadi:
       # v1 + v2 + v3 — ya'ni eski ham, yangi ham qurilmalar qabul
       # qiladi. Kalit — Gradle yaratgan standart debug kaliti.
-      - name: APK'ni v1+v2+v3 imzo bilan qayta imzolash
+      - name: APK'ni BARCHA imzo sxemalari bilan (v1..v4) qayta imzolash
         run: |
           set -e
           APK="build/app/outputs/flutter-apk/app-release.apk"
@@ -184,13 +184,28 @@ jobs:
           fi
           APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
           echo "apksigner: $APKSIGNER"
-          "$APKSIGNER" sign \
-            --ks "$KS" --ks-pass pass:android --key-pass pass:android \
-            --ks-key-alias androiddebugkey \
-            --v1-signing-enabled true \
-            --v2-signing-enabled true \
-            --v3-signing-enabled true \
-            "$APK"
+
+          # v1 — Android 6 va undan eskilar UCHUN SHART (aks holda
+          #      "Paketni tahlil qilishda muammo" chiqadi);
+          # v2 — Android 7+;
+          # v3 — Android 9+ (kalitni almashtirishga ruxsat beradi);
+          # v4 — Android 11+ (adb bilan tezkor o'rnatish uchun; alohida
+          #      .idsig fayl yaratadi va oddiy o'rnatishga xalaqit
+          #      bermaydi). Eski build-tools v4 ni bilmasligi mumkin —
+          #      shunday holatda v1+v2+v3 bilan qayta imzolanadi.
+          sign_apk() {
+            "$APKSIGNER" sign \
+              --ks "$KS" --ks-pass pass:android --key-pass pass:android \
+              --ks-key-alias androiddebugkey \
+              --v1-signing-enabled true \
+              --v2-signing-enabled true \
+              --v3-signing-enabled true \
+              "$@" "$APK"
+          }
+          if ! sign_apk --v4-signing-enabled true; then
+            echo "⚠️  v4 imzo qo'llab-quvvatlanmadi — v1+v2+v3 bilan imzolanmoqda"
+            sign_apk
+          fi
           echo "── Imzo tekshiruvi ──"
           "$APKSIGNER" verify -v "$APK"
 
