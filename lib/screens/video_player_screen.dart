@@ -41,6 +41,7 @@ import 'package:http/http.dart' as http;
 // ExoPlayer oddiy HTTP Range so'rovlari bilan ishlaydi.
 import 'package:video_player/video_player.dart';
 
+import '../services/download_manager.dart';
 import '../services/rust_bridge.dart';
 import '../services/video_cache_server.dart';
 import '../theme/app_background.dart';
@@ -82,6 +83,12 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   bool _isScrubbing = false;
 
   Map<String, dynamic>? _currentEp;
+  // Hozir ijro etilayotgan videoning ASL (worker'dagi) manzili —
+  // pleyer progress chizig'idagi "yuklab olingan" oq qism shu manzil
+  // bo'yicha real vaqtda hisoblanadi.
+  String _currentUrl = '';
+  // Ro'yxatda YOYILGAN (sifatlari ko'rsatilgan) qismlar kalitlari.
+  final Set<String> _expandedEps = {};
   String? _selectedQuality;
   bool _playerLoading = false;
   int _playToken = 0;
@@ -136,6 +143,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    DownloadManager.instance.unwatch(this);
     _tabCtrl.dispose();
     _hideTimer?.cancel();
     _leftSeekHideTimer?.cancel();
@@ -194,6 +202,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
             _episodes = fresh;
             _loadingEps = false;
           });
+          _syncWatchedUrls();
         }
         return;
       }
@@ -296,6 +305,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     final myToken = ++_playToken;
     setState(() {
       _currentEp = ep;
+      _currentUrl = url;
       _showControls = true;
       _playerLoading = true;
       _playerError = null;
@@ -398,6 +408,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       _controller = ctrl;
       _playerLoading = false;
     });
+    // Progress chizig'idagi "yuklab olingan" qism shu videoni kuzata
+    // boshlaydi.
+    _syncWatchedUrls();
     _startHealthWatchdog();
     _scheduleHide();
   }
@@ -661,7 +674,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // lekin bu qatlam platformaga bo'ladigan chaqiruvlar sonini
     // yanada kamaytiradi.
     _seekDebounceTimer?.cancel();
-    _seekDebounceTimer = Timer(const Duration(milliseconds: 90), () {
+    _seekDebounceTimer = Timer(const Duration(milliseconds: 45), () {
       final base = _pendingSeekBase;
       final delta = _pendingSeekDeltaSeconds;
       _pendingSeekBase = null;
@@ -772,9 +785,23 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
         rounds++;
         if (!mounted || _controller != c) return;
         try {
-          await c.seekTo(target).timeout(const Duration(seconds: 10));
+          // ── NEGA ANIQ 1 SONIYA ────────────────────────────────
+          // `seekTo` Future'i pleyer YANGI joydan kadr tayyorlaganda
+          // hal bo'ladi. Agar o'sha joydagi bo'lak hali worker'dan
+          // yuklanmagan bo'lsa, bu kutish uzoq cho'zilishi mumkin —
+          // va o'sha davrda foydalanuvchining KEYINGI sek'lari
+          // navbatda turib qolardi (avval 10 soniyagacha!).
+          //
+          // Endi biz javobni eng ko'pi 1 soniya kutamiz. Kutish
+          // tugagach navbatdagi (eng oxirgi) nuqta DARHOL yuboriladi
+          // — ya'ni foydalanuvchi qanchalik tez sek qilsa ham,
+          // buyruq 1 soniya ichida pleyerga yetib boradi. Pleyer esa
+          // fayl tayyor bo'lgunicha o'zi kutadi (bufer aylanasi
+          // ko'rinib turadi) — ya'ni "faqat yuklab olinishini kutish"
+          // qoladi, bizning navbatimiz emas.
+          await c.seekTo(target).timeout(const Duration(seconds: 1));
         } catch (e) {
-          VideoCacheServer.log('seekTo xato/kechikish: $e');
+          VideoCacheServer.log('seekTo kechikdi/xato: $e');
         }
         final next = _queuedSeek;
         _queuedSeek = null;
@@ -1044,9 +1071,13 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     final name = widget.season['nomi'] ?? '';
     final bolimId =
         widget.season['bolim_id'] ?? widget.season['season_id'] ?? '';
-    final turi = widget.season['turi'] ?? '';
     final yili = widget.season['yili'] ?? '';
     final janri = widget.season['janri'] ?? '';
+    // Video ostidagi yorliqlar: "N-qism" (hozir ochilgan epizod) va
+    // "N-bo'lim" (mavsum). Avval bu yerda "1-bo'lim" va "TV" turardi —
+    // "TV" (turi) hech qanday foydali ma'lumot bermasdi, epizod raqami
+    // esa umuman ko'rinmasdi.
+    final qismNo = _currentEp?['epizod_number']?.toString() ?? '';
     final tavsif = widget.season['tavsif'] ?? '';
 
     return AppBackground(
@@ -1096,12 +1127,12 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                   scrollDirection: Axis.horizontal,
                   padding: const EdgeInsets.symmetric(horizontal: 16),
                   children: [
+                    if (qismNo.isNotEmpty) ...[
+                      _Badge('$qismNo-qism'),
+                      const SizedBox(width: 6),
+                    ],
                     if (bolimId.toString().isNotEmpty)
                       _Badge('$bolimId-bo\'lim'),
-                    if (turi.toString().isNotEmpty) ...[
-                      const SizedBox(width: 6),
-                      _Badge(turi.toString())
-                    ],
                     if (yili.toString().isNotEmpty) ...[
                       const SizedBox(width: 6),
                       _Badge(yili.toString())
@@ -1582,9 +1613,24 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   // Faqat slayder/vaqtni eng tor ko'lamda yangilaydi.
   Widget _bottomBarReactive({required bool isFullscreen}) {
     final ctrl = _controller;
-    Widget bar(VideoPlayerValue? value) => _BottomBar(
+    // Progress chizig'idagi OQ (yuklab olingan) qism uchun: joriy video
+    // qancha yuklanganini DownloadManager real vaqtda beradi.
+    Widget bar(VideoPlayerValue? value) => AnimatedBuilder(
+          animation: DownloadManager.instance,
+          builder: (context, _) => _bottomBar(value, isFullscreen),
+        );
+    if (ctrl == null) return bar(null);
+    return ValueListenableBuilder<VideoPlayerValue>(
+      valueListenable: ctrl,
+      builder: (_, value, __) => bar(value),
+    );
+  }
+
+  Widget _bottomBar(VideoPlayerValue? value, bool isFullscreen) => _BottomBar(
           position: value?.position ?? Duration.zero,
           duration: value?.duration ?? Duration.zero,
+          downloadedRatio:
+              DownloadManager.instance.statOf(_currentUrl).ratio,
           fmt: _fmt,
           onSeek: (d) {
             // MUHIM: progress chizig'idan kelgan sek ham DEBOUNCE
@@ -1608,11 +1654,98 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
             _scheduleHide();
           },
         );
-    if (ctrl == null) return bar(null);
-    return ValueListenableBuilder<VideoPlayerValue>(
-      valueListenable: ctrl,
-      builder: (_, value, __) => bar(value),
+
+  // ── QISMLAR RO'YXATI ────────────────────────────────────────────
+  //
+  // Tartib TESKARI: eng oxirgi qism ENG YUQORIDA turadi. Sabab oddiy —
+  // foydalanuvchi odatda oxirgi chiqqan qismni qidiradi; avval buning
+  // uchun ro'yxatning oxirigacha aylantirish kerak edi.
+  List<Map<String, dynamic>> get _orderedEps {
+    final eps = [..._playableEps];
+    eps.sort((a, b) => _epNumOf(b).compareTo(_epNumOf(a)));
+    return eps;
+  }
+
+  static int _epNumOf(Map<String, dynamic> ep) =>
+      int.tryParse('${ep['epizod_number'] ?? ''}') ?? 0;
+
+  /// Epizodni ro'yxatda BARQAROR tanib olish uchun kalit (ochilgan
+  /// qismlar shu kalit bilan eslab qolinadi).
+  static String _epKeyOf(Map<String, dynamic> ep) =>
+      '${ep['epizod_id'] ?? ep['epizod_number'] ?? ''}';
+
+  /// Shu epizodda mavjud sifatlar (yuqoridan pastga: 1080p -> 360p).
+  List<_QualityInfo> _qualityInfos(Map<String, dynamic> ep) {
+    return _availableQualities(ep)
+        .map((q) => _QualityInfo(
+              label: q,
+              url: (ep['url_$q'] ?? '').toString(),
+              sizeLabel: (ep['size_$q'] ?? '').toString(),
+            ))
+        .where((q) => q.url.isNotEmpty)
+        .toList();
+  }
+
+  /// Yuklab olish holati REAL VAQTDA faqat EKRANDA KO'RINIB TURGAN
+  /// videolar uchun so'raladi: hozir ijro etilayotgani va ochilgan
+  /// (yoyilgan) qismlarning sifatlari. Shu bilan keraksiz ish
+  /// bajarilmaydi.
+  void _syncWatchedUrls() {
+    final urls = <String>{};
+    final cur = _currentEp;
+    if (cur != null) {
+      final u = _getUrl(cur);
+      if (u.isNotEmpty) urls.add(u);
+    }
+    for (final ep in _episodes) {
+      if (!_expandedEps.contains(_epKeyOf(ep))) continue;
+      for (final q in _qualityInfos(ep)) {
+        urls.add(q.url);
+      }
+    }
+    DownloadManager.instance.watch(this, urls);
+  }
+
+  void _toggleExpanded(String epKey) {
+    setState(() {
+      if (!_expandedEps.remove(epKey)) _expandedEps.add(epKey);
+    });
+    _syncWatchedUrls();
+  }
+
+  /// O'chirishdan oldin tasdiq so'raydi — bir marta bosish bilan
+  /// yuklab olingan video yo'qolib qolmasligi uchun.
+  Future<void> _confirmDeleteQuality(_QualityInfo q) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF15151F),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text('Tozalash',
+            style: TextStyle(
+                color: Colors.white,
+                fontSize: 17,
+                fontWeight: FontWeight.w700)),
+        content: Text(
+          'Rostanham ${q.label} sifatidagi videoni tozalab tashlaysizmi?',
+          style: const TextStyle(color: Colors.white70, fontSize: 14),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Bekor qilish',
+                style: TextStyle(color: Colors.white54)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text('Ha',
+                style: TextStyle(
+                    color: AppColors.accent, fontWeight: FontWeight.w700)),
+          ),
+        ],
+      ),
     );
+    if (ok == true) DownloadManager.instance.delete(q.url);
   }
 
   Widget _buildEpisodeTab() {
@@ -1621,10 +1754,10 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
           child: CircularProgressIndicator(
               valueColor: AlwaysStoppedAnimation(AppColors.accent)));
     }
-    final eps = _playableEps;
+    final eps = _orderedEps;
     if (eps.isEmpty) {
       return Center(
-          child: Text('Epizodlar topilmadi',
+          child: Text('Qismlar topilmadi',
               style: TextStyle(color: Colors.white.withOpacity(0.5))));
     }
     return ListView.builder(
@@ -1632,83 +1765,29 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       itemCount: eps.length,
       itemBuilder: (_, i) {
         final ep = eps[i];
-        final epNum = ep['epizod_number'] ?? i;
-        final epName = (ep['epizod_name'] ?? '').toString();
+        final epKey = _epKeyOf(ep);
         final isCurrent =
             _currentEp != null && _currentEp!['epizod_id'] == ep['epizod_id'];
-        String qLabel = '';
-        for (final k in ['1080p', '720p', '480p', '360p']) {
-          if (((ep['url_$k'] as String?) ?? '').isNotEmpty) {
-            qLabel = k;
-            break;
-          }
-        }
-        return GlassTappable(
-          onTap: () => _playEpisode(ep),
-          child: Container(
-            margin: const EdgeInsets.only(bottom: 10),
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-            decoration: BoxDecoration(
-              color: isCurrent
-                  ? AppColors.accent.withOpacity(0.14)
-                  : Colors.white.withOpacity(0.07),
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(
-                  color: isCurrent
-                      ? AppColors.accent.withOpacity(0.5)
-                      : Colors.white12),
-            ),
-            child: Row(
-              children: [
-                Container(
-                  width: 42,
-                  height: 42,
-                  decoration: BoxDecoration(
-                    color: isCurrent
-                        ? AppColors.accent.withOpacity(0.28)
-                        : Colors.white.withOpacity(0.08),
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: Icon(
-                    isCurrent ? Icons.pause_rounded : Icons.play_arrow_rounded,
-                    color: isCurrent ? AppColors.accent : Colors.white54,
-                    size: 22,
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(epName.isNotEmpty ? epName : '$epNum-epizod',
-                          style: TextStyle(
-                              color:
-                                  isCurrent ? AppColors.accent : Colors.white,
-                              fontWeight: FontWeight.w600,
-                              fontSize: 14)),
-                      Text('$epNum-epizod',
-                          style: TextStyle(
-                              color: Colors.white.withOpacity(0.45),
-                              fontSize: 12)),
-                    ],
-                  ),
-                ),
-                if (qLabel.isNotEmpty)
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                    decoration: BoxDecoration(
-                        color: AppColors.accent.withOpacity(0.85),
-                        borderRadius: BorderRadius.circular(6)),
-                    child: Text(qLabel,
-                        style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 10,
-                            fontWeight: FontWeight.w700)),
-                  ),
-              ],
-            ),
-          ),
+        return _EpisodeTile(
+          key: ValueKey(epKey),
+          number: ep['epizod_number']?.toString() ?? '${i + 1}',
+          isCurrent: isCurrent,
+          // Tugmadagi ikonka foydalanuvchining NIYATINI ko'rsatadi
+          // (pleyerdagi markaziy tugma bilan bir xil mantiq).
+          isPlaying: isCurrent && _intendedPlaying,
+          expanded: _expandedEps.contains(epKey),
+          qualities: _qualityInfos(ep),
+          // Ijro etilayotgan qism ustiga YANA bir marta bosilsa —
+          // video pauza bo'ladi (va yana bosilsa davom etadi).
+          onTap: () {
+            if (isCurrent) {
+              _togglePlayPause();
+            } else {
+              _playEpisode(ep);
+            }
+          },
+          onToggleExpand: () => _toggleExpanded(epKey),
+          onDelete: _confirmDeleteQuality,
         );
       },
     );
@@ -1882,6 +1961,287 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
 // ko'rsatadi — muammoni adb/logcat'siz, qurilmaning o'zida ko'rish
 // uchun. Muammo aniqlangach bu widget va uni chaqirgan joy olib
 // tashlanishi mumkin.
+// ── QISM TUGMASI VA UNING SIFATLAR RO'YXATI ────────────────────────
+//
+// Tugmaning o'ng chetida BITTA tugma bor va uning ichida uchta ikonka
+// turadi: uchburchak (yoyish/yig'ish), yuklab olish va chiqitdon.
+// Unga bosilganda uchburchak yuqoriga qaraydi va tugmaning bo'yi
+// cho'zilib, pastida shu qismning BARCHA sifatlari chiqadi. Har bir
+// sifat o'z holati (foiz, hajm, progress chizig'i) va o'z
+// tugmalari (yuklab olish / tozalash) bilan.
+
+/// Bitta sifat haqidagi ma'lumot: yorlig'i, manzili va (bazadagi)
+/// hajmi. Hajm bazada matn sifatida saqlanadi ("240MB" kabi) va u
+/// faqat HALI hech narsa yuklanmagan, ya'ni haqiqiy hajm noma'lum
+/// bo'lgan holatda ko'rsatiladi.
+class _QualityInfo {
+  final String label;
+  final String url;
+  final String sizeLabel;
+  const _QualityInfo({
+    required this.label,
+    required this.url,
+    required this.sizeLabel,
+  });
+}
+
+/// Baytni "120" / "1.4" ko'rinishidagi MB soniga aylantiradi.
+String _mb(int bytes) {
+  final mb = bytes / (1024 * 1024);
+  return mb >= 10 ? mb.toStringAsFixed(0) : mb.toStringAsFixed(1);
+}
+
+class _EpisodeTile extends StatelessWidget {
+  final String number;
+  final bool isCurrent;
+  final bool isPlaying;
+  final bool expanded;
+  final List<_QualityInfo> qualities;
+  final VoidCallback onTap;
+  final VoidCallback onToggleExpand;
+  final Future<void> Function(_QualityInfo) onDelete;
+
+  const _EpisodeTile({
+    super.key,
+    required this.number,
+    required this.isCurrent,
+    required this.isPlaying,
+    required this.expanded,
+    required this.qualities,
+    required this.onTap,
+    required this.onToggleExpand,
+    required this.onDelete,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      decoration: BoxDecoration(
+        color: isCurrent
+            ? AppColors.accent.withOpacity(0.14)
+            : Colors.white.withOpacity(0.07),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+            color: isCurrent
+                ? AppColors.accent.withOpacity(0.5)
+                : Colors.white12),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: onTap,
+                  child: Padding(
+                    // Bo'yi biroz kichraytirildi (vertikal 12 -> 8).
+                    padding: const EdgeInsets.fromLTRB(12, 8, 6, 8),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 36,
+                          height: 36,
+                          decoration: BoxDecoration(
+                            color: isCurrent
+                                ? AppColors.accent.withOpacity(0.28)
+                                : Colors.white.withOpacity(0.08),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Icon(
+                            isPlaying && isCurrent
+                                ? Icons.pause_rounded
+                                : Icons.play_arrow_rounded,
+                            color:
+                                isCurrent ? AppColors.accent : Colors.white54,
+                            size: 20,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Text('$number-qism',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                  color: isCurrent
+                                      ? AppColors.accent
+                                      : Colors.white,
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 14)),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: onToggleExpand,
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(4, 8, 10, 8),
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withOpacity(0.08),
+                      borderRadius: BorderRadius.circular(9),
+                      border: Border.all(color: Colors.white24),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                            expanded
+                                ? Icons.keyboard_arrow_up_rounded
+                                : Icons.keyboard_arrow_down_rounded,
+                            color: Colors.white,
+                            size: 17),
+                        const SizedBox(width: 5),
+                        const Icon(Icons.download_rounded,
+                            color: Colors.white70, size: 15),
+                        const SizedBox(width: 5),
+                        const Icon(Icons.delete_outline_rounded,
+                            color: Colors.white70, size: 15),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          if (expanded)
+            ...qualities.map((q) => _QualityRow(
+                  info: q,
+                  onDelete: () => onDelete(q),
+                )),
+        ],
+      ),
+    );
+  }
+}
+
+/// Bitta sifat qatori: "1080p / 50% / 120 / 240MB", tagida progress
+/// chizig'i, o'ng tarafda yuklab olish va tozalash tugmalari.
+///
+/// Progress REAL VAQTDA yangilanadi: DownloadManager Rust yadrosidagi
+/// hisobni 500 ms da bir marta o'qib turadi va o'zgargan bo'lsagina
+/// xabar beradi. Video shunchaki KO'RILAYOTGANDA ham foiz o'sib
+/// boraveradi — chunki ko'rish paytida ham aynan shu bo'laklar diskka
+/// yozilyapti.
+class _QualityRow extends StatelessWidget {
+  final _QualityInfo info;
+  final VoidCallback onDelete;
+
+  const _QualityRow({required this.info, required this.onDelete});
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: DownloadManager.instance,
+      builder: (context, _) {
+        final st = DownloadManager.instance.statOf(info.url);
+        final totalLabel = st.total > 0
+            ? '${_mb(st.total)}MB'
+            : (info.sizeLabel.isNotEmpty ? info.sizeLabel : '—');
+        final line =
+            '${info.label} / ${st.percent}% / ${_mb(st.downloaded)} / $totalLabel';
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(12, 0, 8, 10),
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(line,
+                        style: TextStyle(
+                            color: st.complete
+                                ? Colors.white
+                                : Colors.white.withOpacity(0.72),
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600)),
+                    const SizedBox(height: 5),
+                    // Chiziq o'ng chetga YETMAYDI — o'ng tarafda
+                    // tugmalar turadi.
+                    Padding(
+                      padding: const EdgeInsets.only(right: 12),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(3),
+                        child: LinearProgressIndicator(
+                          value: st.ratio,
+                          minHeight: 4,
+                          backgroundColor: Colors.white.withOpacity(0.10),
+                          valueColor: AlwaysStoppedAnimation(
+                              st.complete ? Colors.white : AppColors.accent),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              _MiniIconButton(
+                // Yuklanayotganda pleyerdagidek IKKI CHIZIQ (pauza)
+                // ko'rinadi; yana bosilsa yuklash to'xtaydi va ikonka
+                // avvalgi holatiga qaytadi.
+                icon: st.downloading
+                    ? Icons.pause_rounded
+                    : Icons.download_rounded,
+                highlighted: st.downloading,
+                onTap: () {
+                  if (st.downloading) {
+                    DownloadManager.instance.pause(info.url);
+                  } else {
+                    DownloadManager.instance.download(info.url);
+                  }
+                },
+              ),
+              const SizedBox(width: 2),
+              _MiniIconButton(
+                  icon: Icons.delete_outline_rounded, onTap: onDelete),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _MiniIconButton extends StatelessWidget {
+  final IconData icon;
+  final VoidCallback onTap;
+  final bool highlighted;
+
+  const _MiniIconButton({
+    required this.icon,
+    required this.onTap,
+    this.highlighted = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: Container(
+        margin: const EdgeInsets.only(left: 4),
+        width: 34,
+        height: 34,
+        decoration: BoxDecoration(
+          color: highlighted
+              ? AppColors.accent.withOpacity(0.22)
+              : Colors.white.withOpacity(0.08),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Icon(icon,
+            size: 18,
+            color: highlighted ? AppColors.accent : Colors.white70),
+      ),
+    );
+  }
+}
+
 class _Badge extends StatelessWidget {
   final String label;
   const _Badge(this.label);
@@ -1990,23 +2350,35 @@ class _SeekBadgeState extends State<_SeekBadge>
   }
 }
 
-// ── Progress chizig'i: BITTA muhim tuzatish shu yerda ────────────
-// Avval Slider.onChanged HAR bir drag harakatida ctrl.seekTo() ni
-// chaqirar edi — barmoq bilan surganda soniyasiga o'nlab tarmoq
-// seek so'rovi ketib, ular navbatga to'planib 9-12 soniyagacha
-// qotib qolishga sabab bo'lgan. Endi drag paytida faqat mahalliy
-// _dragValue yangilanadi (hech qanday tarmoq so'rovisiz, darhol),
-// video esa faqat barmoq QO'YIB YUBORILGANDA (onChangeEnd) BITTA
-// marta sek qilinadi.
+// ── PLEYERNING PASTKI PANELI ────────────────────────────────────
+//
+// Panel endi ekranning IKKALA CHETIGACHA to'lib turadi: progress
+// chizig'i chap chetdan boshlanadi, vaqt / HQ / fullscreen esa o'ng
+// chetga surilgan. Butun qator biroz pastga tushirilgan.
+//
+// Progress chizig'i endi Material Slider EMAS, o'zimiz chizadigan
+// chiziq. Sabab: Slider bir vaqtda faqat IKKI rangni (o'tilgan /
+// o'tilmagan) ko'rsata oladi, bizga esa UCHTA qatlam kerak:
+//   * ACCENT  — ijro etilgan qism;
+//   * OQ      — diskka yuklab olingan qism (real vaqtda o'sib boradi);
+//   * SHAFFOF — hali yuklanmagan qism.
+//
+// Barmoq bilan surish mantig'i o'zgarmadi: surish davomida pleyerga
+// UMUMAN tegilmaydi (faqat chiziqning ko'rinishi yangilanadi), sek
+// esa barmoq uzilganda BITTA marta yuboriladi.
 class _BottomBar extends StatefulWidget {
   final Duration position;
   final Duration duration;
+
+  /// Diskka yuklab olingan ulush (0..1) — oq qismning uzunligi.
+  final double downloadedRatio;
+
   final String Function(Duration) fmt;
   final ValueChanged<Duration> onSeek;
   final VoidCallback onQualityTap;
   final VoidCallback onFullscreen;
   final bool isFullscreen;
-  // Barmoq slayderga qo'yilganda/uzilganda xabar beradi — markaziy
+  // Barmoq chiziqqa qo'yilganda/uzilganda xabar beradi — markaziy
   // tugmaning halqasi shu paytda aylanadi.
   final VoidCallback onScrubStart;
   final VoidCallback onScrubEnd;
@@ -2014,6 +2386,7 @@ class _BottomBar extends StatefulWidget {
   const _BottomBar({
     required this.position,
     required this.duration,
+    required this.downloadedRatio,
     required this.fmt,
     required this.onSeek,
     required this.onQualityTap,
@@ -2030,9 +2403,17 @@ class _BottomBar extends StatefulWidget {
 class _BottomBarState extends State<_BottomBar> {
   double? _dragValue;
 
+  void _commit(double v) {
+    if (widget.duration.inMilliseconds > 0) {
+      widget.onSeek(Duration(
+          milliseconds: (v * widget.duration.inMilliseconds).round()));
+    }
+    setState(() => _dragValue = null);
+    widget.onScrubEnd();
+  }
+
   @override
   Widget build(BuildContext context) {
-    final accent = AppColors.accent;
     final liveRatio = widget.duration.inMilliseconds > 0
         ? (widget.position.inMilliseconds / widget.duration.inMilliseconds)
             .clamp(0.0, 1.0)
@@ -2046,49 +2427,34 @@ class _BottomBarState extends State<_BottomBar> {
             : widget.position;
 
     return Padding(
-      padding: const EdgeInsets.fromLTRB(4, 0, 8, 10),
+      // Ikkala chetgacha to'liq; pastdan atigi 2px — ya'ni butun qator
+      // avvalgisiga qaraganda pastroqda turadi.
+      padding: const EdgeInsets.fromLTRB(0, 0, 4, 2),
       child: Row(
         children: [
           Expanded(
-            child: SliderTheme(
-              data: SliderThemeData(
-                trackHeight: 2.5,
-                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5),
-                overlayShape: const RoundSliderOverlayShape(overlayRadius: 10),
-                thumbColor: accent,
-                activeTrackColor: accent,
-                inactiveTrackColor: Colors.white.withOpacity(0.28),
-                overlayColor: accent.withOpacity(0.2),
-              ),
-              child: Slider(
-                value: ratio,
-                onChangeStart: (v) {
-                  setState(() => _dragValue = v);
-                  widget.onScrubStart();
-                },
-                onChanged: (v) {
-                  setState(() => _dragValue = v);
-                },
-                onChangeEnd: (v) {
-                  if (widget.duration.inMilliseconds > 0) {
-                    widget.onSeek(Duration(
-                        milliseconds:
-                            (v * widget.duration.inMilliseconds).round()));
-                  }
-                  setState(() => _dragValue = null);
-                  widget.onScrubEnd();
-                },
-              ),
+            child: _VideoProgressBar(
+              played: ratio,
+              downloaded: widget.downloadedRatio,
+              onDragStart: () {
+                setState(() => _dragValue = ratio);
+                widget.onScrubStart();
+              },
+              onDragUpdate: (v) => setState(() => _dragValue = v),
+              onDragEnd: _commit,
+              onTapSeek: _commit,
             ),
           ),
-          Text(widget.fmt(shownPosition),
-              style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w500)),
-          Text('/${widget.fmt(widget.duration)}',
-              style: const TextStyle(color: Colors.white, fontSize: 11)),
           const SizedBox(width: 6),
+          // Vaqt: joriy pozitsiya ham, UMUMIY davomiylik ham TO'LIQ OQ.
+          Text(
+            '${widget.fmt(shownPosition)}/${widget.fmt(widget.duration)}',
+            style: const TextStyle(
+                color: Colors.white,
+                fontSize: 11,
+                fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(width: 8),
           GestureDetector(
             onTap: widget.onQualityTap,
             child: Container(
@@ -2104,21 +2470,125 @@ class _BottomBarState extends State<_BottomBar> {
                       fontWeight: FontWeight.w700)),
             ),
           ),
-          const SizedBox(width: 4),
+          const SizedBox(width: 6),
           GestureDetector(
             onTap: widget.onFullscreen,
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 5),
+              padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
               child: Icon(
                   widget.isFullscreen
                       ? Icons.fullscreen_exit_rounded
                       : Icons.fullscreen_rounded,
                   color: Colors.white,
-                  size: 20),
+                  // Avval 20 edi — barmoq bilan aniq tegish uchun
+                  // kattalashtirildi.
+                  size: 27),
             ),
           ),
         ],
       ),
+    );
+  }
+}
+
+/// Uch qatlamli progress chizig'i (shaffof / oq / accent) + tutqich.
+class _VideoProgressBar extends StatefulWidget {
+  /// Ijro etilgan ulush (0..1).
+  final double played;
+
+  /// Diskka yuklab olingan ulush (0..1).
+  final double downloaded;
+
+  final VoidCallback onDragStart;
+  final ValueChanged<double> onDragUpdate;
+  final ValueChanged<double> onDragEnd;
+  final ValueChanged<double> onTapSeek;
+
+  const _VideoProgressBar({
+    required this.played,
+    required this.downloaded,
+    required this.onDragStart,
+    required this.onDragUpdate,
+    required this.onDragEnd,
+    required this.onTapSeek,
+  });
+
+  @override
+  State<_VideoProgressBar> createState() => _VideoProgressBarState();
+}
+
+class _VideoProgressBarState extends State<_VideoProgressBar> {
+  static const double _thumb = 11;
+  static const double _track = 3.5;
+
+  /// Barmoq oxirgi marta turgan nuqta (0..1). `onHorizontalDragEnd`
+  /// pozitsiya bermaydi, shu sabab uni surish davomida eslab boramiz.
+  double _last = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    final played = widget.played;
+    return LayoutBuilder(
+      builder: (context, c) {
+        final w = c.maxWidth;
+        double ratioAt(double dx) => w <= 0 ? 0.0 : (dx / w).clamp(0.0, 1.0);
+
+        Widget layer(double value, Color color) => Align(
+              alignment: Alignment.centerLeft,
+              child: SizedBox(
+                width: (w * value.clamp(0.0, 1.0)),
+                child: Container(
+                  height: _track,
+                  decoration: BoxDecoration(
+                    color: color,
+                    borderRadius: BorderRadius.circular(_track / 2),
+                  ),
+                ),
+              ),
+            );
+
+        return GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTapDown: (d) => widget.onTapSeek(ratioAt(d.localPosition.dx)),
+          onHorizontalDragStart: (d) {
+            _last = ratioAt(d.localPosition.dx);
+            widget.onDragStart();
+            widget.onDragUpdate(_last);
+          },
+          onHorizontalDragUpdate: (d) {
+            _last = ratioAt(d.localPosition.dx);
+            widget.onDragUpdate(_last);
+          },
+          onHorizontalDragEnd: (_) => widget.onDragEnd(_last),
+          onHorizontalDragCancel: () => widget.onDragEnd(_last),
+          child: SizedBox(
+            height: 26,
+            child: Stack(
+              alignment: Alignment.centerLeft,
+              children: [
+                // Yuklanmagan qism ATAYLAB shaffof qoldirilgan.
+                layer(1.0, Colors.transparent),
+                // Diskda tayyor turgan qism — real vaqtda o'sib boradi.
+                layer(widget.downloaded, Colors.white.withOpacity(0.85)),
+                // Ijro etilgan qism.
+                layer(played, AppColors.accent),
+                Positioned(
+                  left: (w * played.clamp(0.0, 1.0) - _thumb / 2)
+                      .clamp(0.0, w > _thumb ? w - _thumb : 0.0),
+                  child: Container(
+                    width: _thumb,
+                    height: _thumb,
+                    decoration: BoxDecoration(
+                      color: AppColors.accent,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 }
