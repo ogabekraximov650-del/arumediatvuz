@@ -2,7 +2,10 @@ name: Build Flutter APK
 
 on:
   push:
-    branches: [main]
+    # `main`dan tashqari ish (feature) branchlari uchun ham APK
+    # yig'iladi — o'zgarishni main'ga qo'shishdan OLDIN qurilmada
+    # sinab ko'rish uchun.
+    branches: [main, 'claude/**']
     paths:
       - 'lib/**'
       - 'rust/**'
