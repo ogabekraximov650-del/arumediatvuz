@@ -248,10 +248,17 @@ class _PlayerCtrl extends ValueNotifier<_PV> {
     if (_disposed) return null;
     _switching = true;
     try {
-      // Joriy ijroni to'xtatamiz — yangi media eskisining ustiga
-      // "chala" holatda tushmasligi uchun.
+      // MUHIM: bu yerda `state = stopped` QILINMAYDI.
+      //
+      // Avval shunday edi va bu Android'da SurfaceView bilan
+      // birgalikda videoning "qotib qolishi"ga olib kelardi: to'liq
+      // to'xtash native tomonda chizish nishonini (surface) bo'shatib
+      // yuboradi, yangi media esa endi hech qayerga chizilmaydi —
+      // ovoz ketadi-yu, rasm qotib qoladi. mdk-sdk'da media
+      // almashtirishning to'g'ri yo'li — shunchaki `media` ni
+      // o'rnatib, `prepare()` chaqirish; u eskisini o'zi yopadi.
       try {
-        player.state = mdk.PlaybackState.stopped;
+        player.state = mdk.PlaybackState.paused;
       } catch (_) {}
       value = value.copyWith(
         isInitialized: false,
@@ -263,10 +270,26 @@ class _PlayerCtrl extends ValueNotifier<_PV> {
       player.media = url;
       final startMs =
           (startAt != null && startAt > Duration.zero) ? startAt.inMilliseconds : 0;
-      final ret = await player
+      var ret = await player
           .prepare(position: startMs)
           .timeout(const Duration(seconds: 20), onTimeout: () => -10);
       if (_disposed) return null;
+      if (ret == -1) {
+        // -1 = "already loading or loaded" (fvp/player.dart izohi):
+        // eski media hali to'liq yopilmagan. Faqat SHU holatda to'liq
+        // to'xtatib, bir marta qayta urinamiz.
+        VideoCacheServer.log('prepare() -1 qaytardi — to\'xtatib qayta urinilyapti');
+        try {
+          player.state = mdk.PlaybackState.stopped;
+        } catch (_) {}
+        await Future.delayed(const Duration(milliseconds: 120));
+        if (_disposed) return null;
+        player.media = url;
+        ret = await player
+            .prepare(position: startMs)
+            .timeout(const Duration(seconds: 20), onTimeout: () => -10);
+        if (_disposed) return null;
+      }
       if (ret < 0) {
         VideoCacheServer.log('prepare() muvaffaqiyatsiz: kod=$ret');
         return null;
@@ -681,15 +704,44 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // Android'da SurfaceView (platform view), boshqa platformalarda
     // Flutter teksturasi — _buildVideoSurface() izohiga qarang.
     if (_useSurfaceView) {
-      final (w, h) = _clampVideoSize(size);
-      setState(() {
-        _surfaceParams = <String, Object>{
-          'player': ctrl.player.nativeHandle,
-          'width': w,
-          'height': h,
-          'tunnel': false,
-        };
-      });
+      // ── SurfaceView'ni IMKON QADAR QAYTA YARATMASLIK ──────────
+      // Surface bir marta yaratilib, Player'ga native tarzda
+      // biriktiriladi. Har bir yangi epizodda uni qayta yaratish
+      // (a) keraksiz, chunki Player o'sha-o'sha; (b) XAVFLI: Flutter
+      // avval yangi view'ni yaratib, keyin eskisini o'chiradi —
+      // eskisining o'chirilishi esa native tomonda surface'ni
+      // bo'shatadi va yangi rasm hech qayerga chizilmay qoladi
+      // (foydalanuvchida "epizod almashtirganda video qotib qoldi"
+      // aynan shu edi).
+      //
+      // Shu sabab view faqat IKKI holatda qayta yaratiladi:
+      //   * hali umuman yaratilmagan bo'lsa;
+      //   * yangi videoning tomonlar nisbati sezilarli farq qilsa
+      //     (aks holda rasm cho'zilib ketardi) — bunda avval eskisi
+      //     olib tashlanadi, BIR KADR kutiladi, keyin yangisi
+      //     qo'yiladi (qat'iy tartib, poyga yo'q).
+      final aspect = size.width / size.height;
+      final needNew = _surfaceParams == null ||
+          _surfaceAspect == null ||
+          (aspect - _surfaceAspect!).abs() > 0.02;
+      if (needNew) {
+        final (w, h) = _clampVideoSize(size);
+        if (_surfaceParams != null) {
+          setState(() => _surfaceParams = null);
+          await WidgetsBinding.instance.endOfFrame;
+          if (!mounted || myToken != _playToken) return;
+        }
+        setState(() {
+          _surfaceViewKey = GlobalKey(debugLabel: 'fvp-surface');
+          _surfaceAspect = aspect;
+          _surfaceParams = <String, Object>{
+            'player': ctrl.player.nativeHandle,
+            'width': w,
+            'height': h,
+            'tunnel': false,
+          };
+        });
+      }
     } else {
       final (maxW, maxH) = _textureLimits();
       final tex = await ctrl.player
@@ -826,9 +878,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     }
     final layoutDirection = Directionality.maybeOf(context) ?? TextDirection.ltr;
     return PlatformViewLink(
-      // Kalit: video o'lchami yoki Player almashsa, platform view
-      // qaytadan yaratiladi (surface yangi o'lchamga moslanadi).
-      key: ValueKey('fvp-surface-${params['player']}-${params['width']}x${params['height']}'),
+      // GlobalKey — yuqoridagi izohga qarang: fullscreen'ga o'tishda
+      // SurfaceView qayta yaratilmaydi, faqat ko'chiriladi.
+      key: _surfaceViewKey,
       viewType: 'fvp/video-view',
       surfaceFactory: (context, controller) => AndroidViewSurface(
         controller: controller as AndroidViewController,
@@ -1488,6 +1540,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                           ? _SurfaceMode.texture
                           : _SurfaceMode.surfaceView;
                       _surfaceParams = null;
+                      _surfaceAspect = null;
                     });
                     _playEpisode(ep,
                         resumeAt: at, resumePlaying: wasPlaying);
