@@ -22,7 +22,7 @@
 //     — yetishmayotgan bo'laklar javob yozilayotgan payt yuklab
 //     olinadi, shu sabab keraksiz qayta ulanishlar bo'lmaydi.
 //   - Oldindan yuklash SURILUVCHI OYNA bilan: ijro nuqtasidan keyin
-//     eng ko'pi PREFETCH_WINDOW ta bo'lak (~24 MB) keshga olinadi.
+//     hamisha PREFETCH_WINDOW ta bo'lak (10 MB) tayyor turadi.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -74,20 +74,26 @@ const MAX_CONNS: usize = 64;
 /// oladi — natijada HECH BIRI o'z vaqtida tugamaydi, pleyer esa
 /// javob kutib qotib qoladi. Endi bir vaqtda eng ko'pi 6 ta yuklash
 /// bo'ladi; qolganlari navbat kutadi (rad etilmaydi).
-const MAX_NET_FETCHES: usize = 10;
+const MAX_NET_FETCHES: usize = 6;
 static NET_FETCHES: AtomicUsize = AtomicUsize::new(0);
 
-/// Oldindan yuklash OYNASI: ijro nuqtasidan keyin ENG KO'PI BILAN shu
-/// qadar bo'lak keshga olinadi (~24 MB — 24 × 1 MiB). Video ochilishi
-/// bilan aynan shu ~5 MB oldindan yuklab olinadi; pleyer oldinga
-/// siljigan sari (masalan 2-bo'lakka o'tsa) oyna ham u bilan birga
-/// suriladi (52-bo'lak yuklanadi) — HAR DOIM ijro nuqtasidan atigi
-/// ~5 MB oldinda turadi, BUTUN fayl OLDINDAN yuklanmaydi. Bu foydalanuvchi
-/// trafigini tejaydi (video bir necha soniya ko'rilib tashlansa ham,
-/// faqat shu ~5 MB sarflanadi). Foydalanuvchi videoni O'RTAGA (sek)
-/// olib borsa ham xuddi shunday ishlaydi — oyna YANGI nuqtadan qayta
-/// hisoblanadi, oldingi (endi keraksiz) yuklashlar darhol to'xtatiladi.
-const PREFETCH_WINDOW: u64 = 24;
+/// ── OLDINDAN YUKLASH OYNASI: HAR DOIM 10 MB TAYYOR ──────────────
+///
+/// Qoida oddiy: ijro nuqtasidan keyin HAMISHA 10 ta bo'lak (10 MB)
+/// keshda tayyor turadi, undan ortig'i EMAS.
+///
+///   * pleyer 1-bo'lakni ko'rsatayotgan bo'lsa — 11-bo'lakkacha
+///     yuklanadi;
+///   * pleyer 2-bo'lakka o'tsa — 12-bo'lak yuklanadi (oyna bir
+///     qadam suriladi);
+///   * foydalanuvchi 21-bo'lakka sek qilsa — oyna YANGI nuqtadan
+///     qayta hisoblanadi va 31-bo'lakkacha yuklanadi, eskisi
+///     (endi keraksiz) darhol to'xtatiladi.
+///
+/// NEGA AYNAN SHUNDAY: bu foydalanuvchi trafigini tejaydi. Video bir
+/// necha soniya ko'rilib tashlansa ham, faqat shu ~10 MB sarflanadi —
+/// butun fayl bekorga yuklab olinmaydi.
+const PREFETCH_WINDOW: u64 = 10;
 
 /// Oldindan yuklashda bir vaqtda ishlaydigan ish oqimlari soni.
 ///
@@ -95,9 +101,10 @@ const PREFETCH_WINDOW: u64 = 24;
 /// haqiqiy tezlik "bo'lak hajmi ÷ so'rov kechikishi" bilan cheklanadi:
 /// 1 MiB va 200 ms kechikishda bu atigi ~5 MB/s, mobil tarmoqda esa
 /// ancha kam. Natijada bufer to'lolmay, video to'xtab-to'xtab ketardi.
-/// 4 ta oqim bilan bir vaqtda 4 ta bo'lak olinadi va tezlik shunga
-/// mos ravishda oshadi (tarmoq imkoni qadar).
-const PREFETCH_THREADS: usize = 4;
+/// 3 ta oqim bilan bir vaqtda 3 ta bo'lak olinadi va tezlik shunga
+/// mos ravishda oshadi. Oyna 10 MB bo'lgani uchun bundan ortig'i
+/// keraksiz — u faqat trafikni oldinga surib yuborardi.
+const PREFETCH_THREADS: usize = 3;
 
 // ── Umumiy holat ─────────────────────────────────────────────────────
 

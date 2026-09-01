@@ -90,9 +90,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   // ── Ikki marta bosib sek qilishda tarmoqqa yuboriladigan seekTo
   // so'rovini debounce qilish uchun: tez-tez ketma-ket bosilganda
   // faqat OXIRGI holatga BITTA marta sek qilinadi.
-  Timer? _seekDebounceTimer;
-  Duration? _pendingSeekBase;
-  int _pendingSeekDeltaSeconds = 0;
+
 
   bool _isFullscreen = false;
   bool _showControls = true;
@@ -140,7 +138,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _hideTimer?.cancel();
     _leftSeekHideTimer?.cancel();
     _rightSeekHideTimer?.cancel();
-    _seekDebounceTimer?.cancel();
+    _seekIdleTimer?.cancel();
     _pendingSingleTapTimer?.cancel();
     _healthTimer?.cancel();
     _recoveryStreakResetTimer?.cancel();
@@ -304,10 +302,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
 
     // Sek navbatini tozalaymiz — eski epizodga tegishli so'rovlar
     // yangisiga tushib qolmasligi kerak.
-    _seekDebounceTimer?.cancel();
+    _seekIdleTimer?.cancel();
+    _pendingTarget = null;
     _queuedSeek = null;
-    _pendingSeekBase = null;
-    _pendingSeekDeltaSeconds = 0;
     _seekBusy = false;
     _healthTimer?.cancel();
 
@@ -631,6 +628,18 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     if (now.difference(_lastPlayPauseTap).inMilliseconds < 280) return;
     _lastPlayPauseTap = now;
 
+    // Kutilayotgan sek bo'lsa — foydalanuvchi "endi ket" demoqda:
+    // 3 soniyani kutmasdan darhol bajaramiz.
+    if (_pendingTarget != null) {
+      _seekIdleTimer?.cancel();
+      _seekIdleTimer = null;
+      setState(() => _intendedPlaying = true);
+      _resumeAfterSeek = true;
+      _commitPendingSeek();
+      _scheduleHide();
+      return;
+    }
+
     if (ctrl.value.isPlaying) {
       setState(() => _intendedPlaying = false);
       ctrl.pause();
@@ -641,108 +650,120 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _scheduleHide();
   }
 
-  // Ketma-ket tez-tez bosilgan double-tap seklarni yig'ib, faqat OXIRGI
-  // holatga BITTA marta ctrl.seekTo() chaqiradi (debounce ~220ms).
-  // Bu tarmoqqa ortiqcha seek so'rovlari ketib, ularning navbatga
-  // to'planib video "qotib qolishi"ning oldini oladi. Vizual jamlanish
-  // (_leftSeekAccum/_rightSeekAccum va ularning ko'rsatkichi) darhol,
-  // hech qanday kechikishsiz yangilanadi — foydalanuvchi taplarning
-  // "his qilinishini" yo'qotmaydi, faqat haqiqiy tarmoq/dekod so'rovi
-  // kechiktiriladi.
-  void _scheduleSeek(int deltaSeconds) {
-    final ctrl = _controller;
-    if (ctrl == null || !ctrl.value.isInitialized) return;
+  // ══════════════════════════════════════════════════════════════
+  //  SEK: "YIG'IB, KEYIN BITTA MARTA" (foydalanuvchi taklifi)
+  // ══════════════════════════════════════════════════════════════
+  //
+  // MUAMMO: har bir sek — dekoder uchun qimmat ish. U kalit kadrni
+  // topib, undan boshlab qayta dekod qiladi. Foydalanuvchi tez-tez
+  // sek qilsa, bu ishlar ketma-ket kelib, video har safar bir lahza
+  // "qotib" ketadi.
+  //
+  // YECHIM: sek qilinayotgan payt pleyerga UMUMAN tegilmaydi.
+  //   1) birinchi sek buyrug'ida video PAUZA qilinadi (dekoder tinch
+  //      qoladi, ekrandagi kadr muzlab turadi);
+  //   2) keyingi barcha sek buyruqlari faqat MAQSAD NUQTASINI
+  //      o'zgartiradi — progress chizig'i va vaqt darhol yangilanadi,
+  //      lekin tarmoqqa ham, dekoderga ham hech narsa bormaydi;
+  //   3) foydalanuvchi _seekIdle (3 soniya) davomida boshqa sek
+  //      qilmasa — AYNAN BITTA sek yuboriladi va video o'sha joydan
+  //      davom etadi.
+  //
+  // Tugmadagi ikonka bu davrda o'zgarmaydi (foydalanuvchi niyati
+  // saqlanadi), uni o'rab turgan halqa esa aylanib turadi — ya'ni
+  // "sek kutilmoqda" degani.
+  static const Duration _seekIdle = Duration(seconds: 3);
 
-    _pendingSeekBase ??= ctrl.value.position;
-    _pendingSeekDeltaSeconds += deltaSeconds;
-
-    // Ketma-ket bosilgan taplar bitta so'rovga birlashtiriladi
-    // (debounce). ExoPlayer sek so'rovlarini o'zi ham birlashtiradi,
-    // lekin bu qatlam platformaga bo'ladigan chaqiruvlar sonini
-    // yanada kamaytiradi.
-    _seekDebounceTimer?.cancel();
-    _seekDebounceTimer = Timer(const Duration(milliseconds: 90), () {
-      final base = _pendingSeekBase;
-      final delta = _pendingSeekDeltaSeconds;
-      _pendingSeekBase = null;
-      _pendingSeekDeltaSeconds = 0;
-      _seekDebounceTimer = null;
-
-      final c = _controller;
-      if (base == null || c == null || !c.value.isInitialized) return;
-      final dur = c.value.duration;
-      var t = base + Duration(seconds: delta);
-      if (t < Duration.zero) t = Duration.zero;
-      // Oldinga sek qilib video oxiriga (yoki undan nariga) yetib borsa,
-      // ctrl.seekTo(duration) chaqirish pleyerni "qotirib qo'yishi"
-      // mumkin (EOF holati). Avval bunday holatda video BOSHIGA
-      // sakrardi — bu ham kutilmagan, ham EOF muammosini keltirib
-      // chiqarardi. Endi shunchaki oxiridan 1 soniya oldinga
-      // "qisiladi" (clamp) — pleyer EOF holatiga tushmaydi.
-      t = _clampSeekTarget(t, dur);
-      _runSeek(c, t);
-    });
-  }
-
-  // Progress chizig'idan (yoki boshqa MUTLAQ pozitsiyadan) kelgan sek.
-  // Ikki marta bosib sek qilish bilan BITTA umumiy debounce navbatini
-  // baham ko'radi — shu sabab foydalanuvchi qanchalik tez bossa/sursa
-  // ham, pleyerga sek buyruqlari to'planib ketmaydi.
-  void _scheduleSeekTo(Duration target) {
-    final ctrl = _controller;
-    if (ctrl == null || !ctrl.value.isInitialized) return;
-
-    // Nisbiy (ikki marta bosish) navbati bekor qilinadi — oxirgi
-    // harakat ustun.
-    _pendingSeekBase = null;
-    _pendingSeekDeltaSeconds = 0;
-    _seekDebounceTimer?.cancel();
-    _seekDebounceTimer = null;
-
-    // MUHIM: progress chizig'idan kelgan sek KECHIKTIRILMAYDI.
-    //
-    // Bu chaqiruv barmoq slayderdan UZILGANDA (onChangeEnd) bitta
-    // marta keladi — ya'ni u allaqachon "yakuniy" nuqta. Uni yana
-    // 110 ms kutish foyda bermaydi, faqat javobni sekinlashtiradi.
-    // (Surish davomida esa pleyerga umuman tegilmaydi — faqat
-    // slayderning o'z ko'rinishi yangilanadi.)
-    final dur = ctrl.value.duration;
-    var t = target;
-    if (t < Duration.zero) t = Duration.zero;
-    // Slayder oxirigacha surilganda pleyer EOF holatiga tushib
-    // qolmasligi uchun oxiridan 1 soniya oldinga qisiladi.
-    t = _clampSeekTarget(t, dur);
-    _runSeek(ctrl, t);
-  }
-
-  // Barcha sek chaqiruvlari SHU yerdan o'tadi. Bir vaqtning o'zida
-  // faqat BITTA sek bajariladi: oldingisi tugamaguncha yangisi
-  // yuborilmaydi, o'rniga eng oxirgi so'ralgan nuqta eslab qolinib,
-  // joriysi tugagach bir marta qo'llaniladi. Bu pleyer ichida sek
-  // buyruqlari navbatga to'planib, uni qotirib qo'yishining oldini
-  // oladi — foydalanuvchi qanchalik tez/ko'p sek qilsa ham.
+  // ── Ichki holat ──────────────────────────────────────────────
+  // Bir vaqtda faqat BITTA `seekTo` uchib turadi; undan keyingilari
+  // "keyingi nuqta" sifatida saqlanadi (_runSeek izohiga qarang).
   bool _seekBusy = false;
   Duration? _queuedSeek;
   Timer? _healthTimer;
-  // Foydalanuvchi OXIRGI marta sek so'ragan / sek tugagan payt.
-  // Sog'liq kuzatuvchisi shu vaqtlarga qarab "sek davom etyapti"
-  // holatini qotib qolish deb xato hisoblamaydi.
   DateTime _lastSeekRequest = DateTime.fromMillisecondsSinceEpoch(0);
   DateTime _lastSeekDone = DateTime.fromMillisecondsSinceEpoch(0);
-  // UMUMIY qotish kuzatuvi: pozitsiya o'zgarmay turgan takrorlar soni
-  // va oxirgi ko'rilgan pozitsiya. _startHealthWatchdog izohiga qarang.
+  // Sog'liq kuzatuvchisi uchun: pozitsiya o'zgarmay turgan takrorlar.
   int _stuckTicks = 0;
   Duration? _lastWatchPosition;
 
   // Sek nuqtasini xavfsiz oraliqqa qisadi: [0 .. duration-1s] — video
-  // ENG OXIRIGA sek qilinishining oldini oladi: EOF holatiga tushish
-  // demukserni keraksiz "tugadi" yo'liga olib boradi.
+  // ENG OXIRIGA sek qilinishining oldini oladi (EOF holatiga tushish
+  // demukserni keraksiz "tugadi" yo'liga olib boradi).
   static Duration _clampSeekTarget(Duration t, Duration dur) {
     if (t < Duration.zero) return Duration.zero;
     if (dur <= Duration.zero) return t;
     final limit = dur - const Duration(seconds: 1);
     if (limit <= Duration.zero) return Duration.zero;
     return t > limit ? limit : t;
+  }
+
+  // Kutilayotgan sek nuqtasi. Null bo'lmasa — UI shu qiymatni
+  // ko'rsatadi (pleyerning haqiqiy pozitsiyasini emas).
+  Duration? _pendingTarget;
+  Timer? _seekIdleTimer;
+  // Sek boshlanganda ijro ketayotganmidi — tugagach shunga qaytamiz.
+  bool _resumeAfterSeek = false;
+
+  /// Sek uchun boshlang'ich nuqta: kutilayotgan maqsad bo'lsa —
+  /// o'sha, aks holda pleyerning joriy pozitsiyasi.
+  Duration get _seekBase {
+    final p = _pendingTarget;
+    if (p != null) return p;
+    final c = _controller;
+    return c?.value.position ?? Duration.zero;
+  }
+
+  /// Nisbiy sek (ekranga ikki marta bosish).
+  void _scheduleSeek(int deltaSeconds) {
+    _requestSeek(_seekBase + Duration(seconds: deltaSeconds));
+  }
+
+  /// Mutlaq sek (progress chizig'i).
+  void _scheduleSeekTo(Duration target) => _requestSeek(target);
+
+  void _requestSeek(Duration target) {
+    final ctrl = _controller;
+    if (ctrl == null || !ctrl.value.isInitialized) return;
+
+    // Birinchi sek: ijroni to'xtatamiz va keyin qaytishni eslab
+    // qolamiz.
+    if (_pendingTarget == null) {
+      _resumeAfterSeek = _intendedPlaying && ctrl.value.isPlaying;
+      if (ctrl.value.isPlaying) {
+        ctrl.pause();
+      }
+    }
+
+    var t = target;
+    if (t < Duration.zero) t = Duration.zero;
+    t = _clampSeekTarget(t, ctrl.value.duration);
+
+    setState(() => _pendingTarget = t);
+    _scheduleHide();
+
+    // Har bir yangi sek 3 soniyalik taymerni QAYTADAN boshlaydi.
+    _seekIdleTimer?.cancel();
+    _seekIdleTimer = Timer(_seekIdle, _commitPendingSeek);
+  }
+
+  /// 3 soniya tinchlikdan keyin: BITTA sek va ijroni davom ettirish.
+  Future<void> _commitPendingSeek() async {
+    _seekIdleTimer = null;
+    final target = _pendingTarget;
+    final c = _controller;
+    if (target == null || c == null || !mounted) {
+      if (mounted) setState(() => _pendingTarget = null);
+      return;
+    }
+    await _runSeek(c, target);
+    if (!mounted || _controller != c) return;
+    setState(() => _pendingTarget = null);
+    if (_resumeAfterSeek) {
+      _resumeAfterSeek = false;
+      try {
+        await c.play();
+      } catch (_) {}
+    }
   }
 
   // ── SEK: "eng oxirgisi yutadi" ─────────────────────────────
@@ -807,7 +828,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // HAQIQIY chegaralari bilan cheklanadi — ya'ni ekranda ko'ringan
     // son bilan haqiqiy sakrash bir xil bo'ladi.
     final v = ctrl.value;
-    final base = _pendingSeekBase ?? v.position;
+    final base = _seekBase;
     final dur = v.duration;
     final maxForward = dur > Duration.zero
         ? (_clampSeekTarget(dur, dur) - base).inSeconds
@@ -831,7 +852,10 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
 
     if (isLeft) {
       _leftSeekHideTimer?.cancel();
-      _leftSeekHideTimer = Timer(const Duration(seconds: 2), () {
+      // Sek 3 soniya tinchlikdan keyin bajarilgani uchun ko'rsatkich
+      // ham shu vaqtgacha turadi (avval 2 soniyada yo'qolib, hali
+      // sek bo'lmagan holda foydalanuvchini chalg'itardi).
+      _leftSeekHideTimer = Timer(_seekIdle + const Duration(milliseconds: 400), () {
         if (mounted) {
           setState(() {
             _showLeftSeek = false;
@@ -841,7 +865,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       });
     } else {
       _rightSeekHideTimer?.cancel();
-      _rightSeekHideTimer = Timer(const Duration(seconds: 2), () {
+      _rightSeekHideTimer = Timer(_seekIdle + const Duration(milliseconds: 400), () {
         if (mounted) {
           setState(() {
             _showRightSeek = false;
@@ -1352,8 +1376,11 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                   // shu paytdagina ular turgan tor zonalar chetlab
                   // o'tiladi. Kontrollar yashiringanda esa ekranning
                   // MUTLAQO hamma joyi (markazdan tashqari) sek qiladi.
+                  // Pastki boshqaruv paneli oddiy rejimda kattaroq
+                  // (tugmalar qulay bo'lishi uchun) — shu sabab uning
+                  // ustidagi "sek qilinmaydigan" zona ham balandroq.
                   final bottomGuard =
-                      _showControls ? (isFullscreen ? 78.0 : 64.0) : 0.0;
+                      _showControls ? (isFullscreen ? 78.0 : 86.0) : 0.0;
                   final topGuard = (_showControls && isFullscreen) ? 60.0 : 0.0;
                   return Listener(
                     behavior: HitTestBehavior.translucent,
@@ -1509,11 +1536,12 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
         final busy = !value.isInitialized ||
             value.isBuffering ||
             _isScrubbing ||
-            _seekBusy;
+            _seekBusy ||
+            _pendingTarget != null;
         final dur = value.duration.inMilliseconds;
-        final progress = dur > 0
-            ? (value.position.inMilliseconds / dur).clamp(0.0, 1.0)
-            : 0.0;
+        final shown = _pendingTarget ?? value.position;
+        final progress =
+            dur > 0 ? (shown.inMilliseconds / dur).clamp(0.0, 1.0) : 0.0;
         return GestureDetector(
           onTap: _togglePlayPause,
           child: _centerButton(
@@ -1583,7 +1611,11 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   Widget _bottomBarReactive({required bool isFullscreen}) {
     final ctrl = _controller;
     Widget bar(VideoPlayerValue? value) => _BottomBar(
-          position: value?.position ?? Duration.zero,
+          // Sek kutilayotgan bo'lsa — chiziq va vaqt O'SHA nuqtani
+          // ko'rsatadi (pleyer hali eski joyda muzlab turgan bo'lsa
+          // ham). Foydalanuvchi shu bilan qayerga borayotganini
+          // darhol ko'radi.
+          position: _pendingTarget ?? value?.position ?? Duration.zero,
           duration: value?.duration ?? Duration.zero,
           fmt: _fmt,
           onSeek: (d) {
@@ -2045,16 +2077,33 @@ class _BottomBarState extends State<_BottomBar> {
                     (_dragValue! * widget.duration.inMilliseconds).round())
             : widget.position;
 
+    // ── O'LCHAMLAR ────────────────────────────────────────────
+    // Oddiy (fullscreen bo'lmagan) rejimda pleyer oynasi kichik
+    // bo'lgani uchun boshqaruv elementlari ham kichik chiqardi va
+    // ularni barmoq bilan bosish noqulay edi. Endi oddiy rejimda
+    // ular KATTAROQ: chiziq qalinroq, tugma va yozuvlar yirikroq,
+    // pastki qism to'liqroq ko'rinadi. Fullscreen'da esa ekran
+    // allaqachon keng — u yerda o'lchamlar biroz jamroq.
+    final compact = !widget.isFullscreen;
+    final trackHeight = compact ? 4.0 : 3.0;
+    final thumbRadius = compact ? 8.0 : 6.0;
+    final timeFont = compact ? 14.0 : 12.0;
+    final iconSize = compact ? 26.0 : 22.0;
+    final hqFont = compact ? 13.0 : 11.0;
+
     return Padding(
-      padding: const EdgeInsets.fromLTRB(4, 0, 8, 10),
+      padding: EdgeInsets.fromLTRB(compact ? 8 : 6, 0, compact ? 10 : 8,
+          compact ? 14 : 10),
       child: Row(
         children: [
           Expanded(
             child: SliderTheme(
               data: SliderThemeData(
-                trackHeight: 2.5,
-                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5),
-                overlayShape: const RoundSliderOverlayShape(overlayRadius: 10),
+                trackHeight: trackHeight,
+                thumbShape:
+                    RoundSliderThumbShape(enabledThumbRadius: thumbRadius),
+                overlayShape:
+                    RoundSliderOverlayShape(overlayRadius: thumbRadius * 2.2),
                 thumbColor: accent,
                 activeTrackColor: accent,
                 inactiveTrackColor: Colors.white.withOpacity(0.28),
@@ -2082,39 +2131,42 @@ class _BottomBarState extends State<_BottomBar> {
             ),
           ),
           Text(widget.fmt(shownPosition),
-              style: const TextStyle(
+              style: TextStyle(
                   color: Colors.white,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w500)),
+                  fontSize: timeFont,
+                  fontWeight: FontWeight.w600)),
           Text('/${widget.fmt(widget.duration)}',
-              style: const TextStyle(color: Colors.white, fontSize: 11)),
-          const SizedBox(width: 6),
+              style: TextStyle(
+                  color: Colors.white70, fontSize: timeFont)),
+          SizedBox(width: compact ? 10 : 6),
           GestureDetector(
             onTap: widget.onQualityTap,
             child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+              padding: EdgeInsets.symmetric(
+                  horizontal: compact ? 10 : 7, vertical: compact ? 6 : 3),
               decoration: BoxDecoration(
                   color: Colors.white.withOpacity(0.15),
-                  borderRadius: BorderRadius.circular(5),
+                  borderRadius: BorderRadius.circular(7),
                   border: Border.all(color: Colors.white30)),
-              child: const Text('HQ',
+              child: Text('HQ',
                   style: TextStyle(
                       color: Colors.white,
-                      fontSize: 10,
+                      fontSize: hqFont,
                       fontWeight: FontWeight.w700)),
             ),
           ),
-          const SizedBox(width: 4),
+          SizedBox(width: compact ? 6 : 4),
           GestureDetector(
             onTap: widget.onFullscreen,
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 5),
+              padding: EdgeInsets.symmetric(
+                  horizontal: compact ? 8 : 5, vertical: compact ? 6 : 2),
               child: Icon(
                   widget.isFullscreen
                       ? Icons.fullscreen_exit_rounded
                       : Icons.fullscreen_rounded,
                   color: Colors.white,
-                  size: 20),
+                  size: iconSize),
             ),
           ),
         ],
