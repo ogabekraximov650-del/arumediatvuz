@@ -537,15 +537,31 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // Oynani bufer uchidan hisoblash uni ikki barobar kengaytirib
     // yuborardi — shu sabab haqiqiy nuqtani o'zimiz aytamiz.
     // Soniyada bir marta yetarli (chaqiruv juda arzon).
+    _reportPositionThrottled(c.value.position);
+  }
+
+  /// Ijro nuqtasini yadroga xabar qiladi — soniyada bir martadan
+  /// ko'p emas.
+  ///
+  /// MUHIM: yadro bu xabarga QAT'IY tayanadi — javob oynasi
+  /// ("oldinda nechta bo'lak yuklansin") aynan shu nuqtadan
+  /// hisoblanadi. Xabar 30 soniyadan ortiq yangilanmasa, yadro uni
+  /// eskirgan deb hisoblab so'rovning o'z boshlanish nuqtasiga
+  /// qaytadi (video_cache.rs -> PLAY_POS_FRESH_MS). Shu sabab u
+  /// ikki joydan yuboriladi: controller yangilanishlaridan va
+  /// sog'liq kuzatuvchisi taymeridan — biri jim qolsa ikkinchisi
+  /// ishlaydi.
+  void _reportPositionThrottled(Duration pos) {
+    if (_currentUrl.isEmpty) return;
     final now = DateTime.now();
-    if (now.difference(_lastPosReport) >= const Duration(seconds: 1)) {
-      _lastPosReport = now;
-      _reportPosition(c.value.position);
-    }
+    if (now.difference(_lastPosReport) < const Duration(seconds: 1)) return;
+    _lastPosReport = now;
+    RustCore.instance.videoSetPosition(_currentUrl, pos.inMilliseconds);
   }
 
   void _reportPosition(Duration pos) {
     if (_currentUrl.isEmpty) return;
+    _lastPosReport = DateTime.now();
     RustCore.instance.videoSetPosition(_currentUrl, pos.inMilliseconds);
   }
 
@@ -567,6 +583,11 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       if (c == null) return;
       final VideoPlayerValue v = c.value;
       if (!v.isInitialized || v.duration <= Duration.zero) return;
+
+      // Ijro nuqtasi — yadrodagi javob oynasi uchun. Controller
+      // yangilanishlari siyraklashsa ham bu taymer uni yangilab
+      // turadi.
+      _reportPositionThrottled(v.position);
 
       // Video oxiriga yaqin joyda takrorlash (loop) ishlaydi va
       // pozitsiya bir lahza "joyida turgandek" ko'rinishi mumkin —
@@ -858,6 +879,13 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       if (mounted) setState(() => _pendingTarget = null);
       return;
     }
+    // ── SEKDAN OLDIN xabar qilamiz ────────────────────────────
+    // ExoPlayer sek buyrug'ini olishi bilan YANGI bayt oralig'ini
+    // so'raydi. Agar yadro hali eski nuqtani bilsa, javob oynasi
+    // eski joyda hisoblanib, yangi joyga atigi bitta bo'lak
+    // berilardi (ya'ni sekdan keyin video sekin ochilardi). Shu
+    // sabab nuqta sek BOSHLANISHIDAN oldin ham yuboriladi.
+    _reportPosition(target);
     await _runSeek(c, target);
     if (!mounted || _controller != c) return;
 
@@ -872,10 +900,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // bajariladi.
     if (_pendingTarget != target) return;
 
-    // Sekdan keyin ijro nuqtasi keskin o'zgardi — oldindan yuklash
-    // oynasi eski joyda qolib ketmasligi uchun darhol xabar qilamiz
-    // (taymerli xabarni kutmasdan).
-    _lastPosReport = DateTime.now();
+    // Sekdan keyin yana bir bor — endi sek HAQIQATAN o'sha nuqtada
+    // tugagani aniq.
     _reportPosition(target);
 
     setState(() => _pendingTarget = null);
@@ -1487,9 +1513,11 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
 
           // ── Sek ko'rsatkichlari — asosiy kontrollardan mustaqil,
           // faqat bosilgan tarafda chiqadi va 2s dan keyin yo'qoladi.
-          // Doiraviy shaklda, play/pause tugmasidan biroz kattaroq
-          // (avval 2 barobar edi — portret rejimda ekranni to'sib
-          // qo'yadigan darajada katta ko'rinardi).
+          //
+          // O'LCHAMI: markazdagi play/pause tugmasini o'rab turgan
+          // AYLANMA HALQA bilan AYNAN TENG (`_playPauseDiameter`).
+          // Avval u 1.3 barobar kattaroq edi va portret (fullscreen
+          // emas) rejimda ekranning katta qismini to'sib qo'yardi.
           // MUHIM: play/pause tugmasi (markaz) bilan video cheti
           // o'rtasidagi nuqtaga joylashtirilgan — chetga emas.
           if (_showLeftSeek)
@@ -1499,7 +1527,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                 child: _SeekBadge(
                   seconds: _leftSeekAccum,
                   isLeft: true,
-                  diameter: _playPauseDiameter(isFullscreen) * 1.3,
+                  diameter: _playPauseDiameter(isFullscreen),
                 ),
               ),
             ),
@@ -1510,7 +1538,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                 child: _SeekBadge(
                   seconds: _rightSeekAccum,
                   isLeft: false,
-                  diameter: _playPauseDiameter(isFullscreen) * 1.3,
+                  diameter: _playPauseDiameter(isFullscreen),
                 ),
               ),
             ),
@@ -2664,7 +2692,10 @@ class _SeekBadgeState extends State<_SeekBadge>
         style: TextStyle(
             color: Colors.white,
             fontWeight: FontWeight.w700,
-            fontSize: widget.diameter * 0.13));
+            // Doira endi markaziy halqa bilan teng (kichikroq), shu
+            // sabab ichidagi belgilar nisbatan biroz kattalashtirildi
+            // — aks holda ular yo'qolib ketardi.
+            fontSize: widget.diameter * 0.15));
 
     return Container(
       width: widget.diameter,
@@ -2677,7 +2708,11 @@ class _SeekBadgeState extends State<_SeekBadge>
       child: Column(
         mainAxisSize: MainAxisSize.min,
         mainAxisAlignment: MainAxisAlignment.center,
-        children: [chevrons, const SizedBox(height: 8), text],
+        children: [
+          chevrons,
+          SizedBox(height: widget.diameter * 0.07),
+          text,
+        ],
       ),
     );
   }
@@ -2702,7 +2737,7 @@ class _SeekBadgeState extends State<_SeekBadge>
             return Opacity(
               opacity: opacity.clamp(0.3, 1.0),
               child:
-                  Icon(icon, color: Colors.white, size: widget.diameter * 0.19),
+                  Icon(icon, color: Colors.white, size: widget.diameter * 0.21),
             );
           }),
         );

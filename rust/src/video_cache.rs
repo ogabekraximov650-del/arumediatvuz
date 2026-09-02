@@ -659,6 +659,18 @@ fn chunk_on_disk_len(plain_len: u64) -> u64 {
     }
 }
 
+/// Bo'lak diskda TO'LIQ turibdimi (shifr ochilmaydi — faqat fayl
+/// uzunligi tekshiriladi, ya'ni juda arzon).
+fn chunk_cached(dir: &PathBuf, index: u64, total: u64) -> bool {
+    let plain = chunk_plain_len(index, total);
+    if plain == 0 {
+        return false;
+    }
+    fs::metadata(dir.join(chunk_name(index)))
+        .map(|m| m.len() == chunk_on_disk_len(plain))
+        .unwrap_or(false)
+}
+
 /// Keshdagi bo'lak faylini o'qiydi va (shifrlash yoqilgan bo'lsa)
 /// ochadi. Hajm yoki shifr mos kelmasa (masalan eski, boshqa
 /// o'lchamdagi qoldiq fayl) — `None`: chaqiruvchi buni "keshda yo'q"
@@ -780,6 +792,28 @@ struct CacheMeta {
     /// 0 bo'lib o'qiladi va shu bilan "eskirgan" deb aniqlanadi.
     #[serde(default)]
     chunk_size: u64,
+    /// Videoning DAVOMIYLIGI (soniya). U MP4 konteynerining
+    /// `moov` -> `mvhd` atomidan bir marta o'qiladi va SHU YERDA
+    /// doimiy saqlanadi.
+    ///
+    /// NEGA META'GA YOZILADI: oldindan yuklash oynasi ham, "pleyer
+    /// hozir qaysi bo'lakni ko'rsatyapti" hisobi ham aynan shu
+    /// songa tayanadi:
+    ///
+    ///     bo'lak_indeksi = (ijro_soniyasi / davomiylik) * hajm / 1 MiB
+    ///     bo'lak #i      = [i * davomiylik * 1MiB / hajm ...] soniyalar
+    ///
+    /// ya'ni "chunk 1 = 00:00-00:08, chunk 2 = 00:08-00:16" jadvali
+    /// shu ikki sondan (davomiylik + hajm) to'liq kelib chiqadi va
+    /// uni alohida ro'yxat qilib saqlash shart emas.
+    ///
+    /// Ilgari davomiylik faqat XOTIRADA turardi: ilova qayta
+    /// ochilganda u yo'qolar, 1-bo'lak esa keshda bo'lmasa qaytadan
+    /// aniqlab ham bo'lmasdi — natijada oyna zaxira (10 bo'lak)
+    /// qiymatda qolib ketardi. Endi u bir marta aniqlanadi va
+    /// meta.json'da abadiy qoladi.
+    #[serde(default)]
+    duration_secs: f64,
 }
 
 fn ensure_meta(shared: &Shared, dir: &PathBuf, url: &str) -> Result<CacheMeta, String> {
@@ -862,6 +896,10 @@ fn ensure_meta(shared: &Shared, dir: &PathBuf, url: &str) -> Result<CacheMeta, S
         total_size: size,
         content_type,
         chunk_size: CHUNK_SIZE,
+        // Davomiylik faylning ICHIDA — u 1-bo'lak keshga tushgandan
+        // keyin `duration_secs()` tomonidan hisoblanib, shu yerga
+        // qayta yoziladi.
+        duration_secs: 0.0,
     };
     if let Ok(json) = serde_json::to_string(&meta) {
         let _ = fs::write(&meta_path, json);
@@ -1320,6 +1358,17 @@ fn pick_task() -> Option<(String, String)> {
     Some((key, st.url.clone()))
 }
 
+/// Bitta yuklash bosqichining natijasi.
+enum DlOutcome {
+    /// Videoning HAMMA bo'lagi diskda — vazifa tugadi.
+    Done,
+    /// Foydalanuvchi pauza qildi.
+    Paused,
+    /// Bir qismi olindi, lekin hammasi emas. Bu XATO EMAS: vazifa
+    /// navbatda qoladi va DARHOL (kutmasdan) davom ettiriladi.
+    Partial(u64),
+}
+
 fn pool_worker() {
     loop {
         let Some((key, url)) = pick_task() else {
@@ -1337,16 +1386,46 @@ fn pool_worker() {
         let still_wanted = map.get(&key).map(|s| s.wanted).unwrap_or(false);
         match outcome {
             // To'liq yuklandi — vazifa navbatdan chiqadi.
-            Ok(true) => {
+            Ok(DlOutcome::Done) => {
                 map.remove(&key);
                 log(format!("Yuklab olish TUGADI: {key}"));
             }
             // Foydalanuvchi pauza qildi.
-            Ok(false) => {
+            Ok(DlOutcome::Paused) => {
                 map.remove(&key);
             }
-            // Xato — TO'XTATILMAYDI: kechikib qayta uriniladi va
-            // aynan to'xtagan bo'lagidan davom etadi.
+            // ── ENG MUHIM O'ZGARISH (yuklab olish tezligi) ─────────
+            // Bir necha bo'lak olindi, ba'zilari esa olinmadi (tarmoq
+            // xatosi yoki o'sha bo'lak ayni payt pleyer qo'lida edi).
+            // AVVAL bunday holat ham "xato" hisoblanib, butun vazifa
+            // 2 -> 4 -> 8 -> 16 -> 32 soniya KUTARDI. Zaif mobil
+            // tarmoqda xato deyarli har bosqichda uchraydi, natijada
+            // yuklash vaqtining ko'p qismi KUTISHGA ketardi va tezlik
+            // 0.2-0.5 MB/s ga tushib qolardi — garchi 12 ta oqim
+            // tayyor turgan bo'lsa ham.
+            //
+            // Endi ILGARILASH BO'LSA — kutish YO'Q: vazifa darhol
+            // davom etadi va faqat yetishmayotgan bo'laklar olinadi.
+            Ok(DlOutcome::Partial(done)) => {
+                if !still_wanted {
+                    map.remove(&key);
+                } else if let Some(st) = map.get_mut(&key) {
+                    st.running = false;
+                    st.failures = 0;
+                    // Ilgarilash bo'lgan bo'lsa deyarli tanaffussiz
+                    // davom etamiz; bo'lmasa (hamma bo'lak ayni payt
+                    // pleyer qo'lida edi) — bir soniya kutamiz, ya'ni
+                    // bo'sh aylanish bo'lmaydi.
+                    let pause = if done > 0 { 200 } else { 1000 };
+                    st.next_try = Instant::now() + Duration::from_millis(pause);
+                    log(format!(
+                        "Yuklab olish davom etmoqda ({key}): shu bosqichda {done} bo'lak olindi"
+                    ));
+                }
+            }
+            // HECH QANDAY ilgarilash bo'lmadi (masalan internet
+            // butunlay uzilgan) — faqat SHU holatda kechikib qayta
+            // uriniladi va aynan to'xtagan bo'lagidan davom etadi.
             Err(e) => {
                 if !still_wanted {
                     map.remove(&key);
@@ -1364,17 +1443,32 @@ fn pool_worker() {
     }
 }
 
-/// Bitta videoni yuklaydi. Qaytaradi:
-///   Ok(true)  — to'liq yuklandi;
-///   Ok(false) — foydalanuvchi to'xtatdi;
-///   Err(..)   — xato (keyinroq qayta uriniladi).
+/// Bitta bo'lakni olishga urinishning natijasi.
+enum ChunkRes {
+    /// Tarmoqdan olindi va diskka tushdi.
+    Ok,
+    /// Ayni payt boshqa oqim (pleyer) olyapti — chetga qo'yiladi va
+    /// navbat oxirida qaytib olinadi. XATO EMAS.
+    Deferred,
+    /// Bir necha urinishdan keyin ham olinmadi.
+    Failed(String),
+}
+
+/// Bitta videoni yuklaydi (bitta bosqich).
 ///
 /// Bo'laklar DOWNLOAD_THREADS ta oqimda PARALLEL olinadi: navbat —
 /// oddiy atomik hisoblagich, har bir oqim keyingi raqamni olib o'sha
 /// bo'lakni yuklaydi. Shu bilan tarmoq kechikishi "yashiriladi" va
-/// tezlik ijro uchun ishlatiladigan oldindan yuklashdan ham yuqori
-/// bo'ladi. Xotira global MAX_NET_FETCHES chegarasi bilan himoyalangan.
-fn run_download(key: &str, url: &str) -> Result<bool, String> {
+/// tezlik faqat foydalanuvchining internetiga bog'liq bo'ladi.
+///
+/// ── QAT'IY QOIDA: BITTA BO'LAKNING XATOSI QOLGANINI TO'XTATMAYDI ──
+/// Ilgari birinchi xatoda 12 ta oqimning HAMMASI to'xtardi va butun
+/// vazifa uzoq kutishga ketardi. Endi xato bo'lgan bo'lak uchun
+/// o'sha oqimning O'ZI qisqa tanaffus bilan 3 marta urinib ko'radi;
+/// baribir olinmasa — chetga yoziladi va oqim KEYINGI bo'lakka
+/// o'tadi. Bosqich oxirida yetishmaganlari bo'lsa, vazifa darhol
+/// yangi bosqich bilan davom etadi.
+fn run_download(key: &str, url: &str) -> Result<DlOutcome, String> {
     let Some(shared) = SHARED.get() else {
         return Err("kesh-server ishga tushmagan".to_string());
     };
@@ -1399,9 +1493,13 @@ fn run_download(key: &str, url: &str) -> Result<bool, String> {
     let deferred: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
     // Foydalanuvchi pauza bosdimi (oqimlar buni ko'rib chiqadi).
     let paused = Arc::new(AtomicBool::new(false));
-    // Birinchi xato — u butun vazifani to'xtatadi va yuqoriga
-    // qaytariladi, ya'ni qayta urinish mantig'i avvalgidek ishlaydi.
+    // Birinchi xato — faqat jurnal va xabar uchun; u endi qolgan
+    // oqimlarni TO'XTATMAYDI.
     let first_err: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    // Shu bosqichda TARMOQDAN muvaffaqiyatli olingan bo'laklar soni.
+    let done_count = Arc::new(AtomicU64::new(0));
+    // Uch urinishdan keyin ham olinmagan bo'laklar soni.
+    let failed_count = Arc::new(AtomicU64::new(0));
 
     let mut workers = Vec::with_capacity(DOWNLOAD_THREADS);
     for _ in 0..DOWNLOAD_THREADS {
@@ -1409,6 +1507,8 @@ fn run_download(key: &str, url: &str) -> Result<bool, String> {
         let deferred = Arc::clone(&deferred);
         let paused = Arc::clone(&paused);
         let first_err = Arc::clone(&first_err);
+        let done_count = Arc::clone(&done_count);
+        let failed_count = Arc::clone(&failed_count);
         let (k, d, u) = (key.to_string(), dir.clone(), url.to_string());
         let h = thread::Builder::new()
             .name("video-download-w".into())
@@ -1417,11 +1517,6 @@ fn run_download(key: &str, url: &str) -> Result<bool, String> {
             .stack_size(256 * 1024)
             .spawn(move || loop {
                 if paused.load(Ordering::SeqCst) {
-                    break;
-                }
-                // Sherik oqimlardan biri xatoga uchragan bo'lsa —
-                // qolganlari ham to'xtaydi (qayta urinish yuqorida).
-                if first_err.lock().map(|e| e.is_some()).unwrap_or(true) {
                     break;
                 }
                 // ── IKKI BOSQICH ─────────────────────────────────
@@ -1459,55 +1554,89 @@ fn run_download(key: &str, url: &str) -> Result<bool, String> {
 
                 // Bo'lakni AYNI PAYTDA pleyer (yoki oldindan yuklash)
                 // olayotgan bo'lsa, uni KUTMAYMIZ: chetga qo'yamiz va
-                // keyingi bo'lakka o'tamiz. Aks holda video ochiq
-                // turganda yuklab olishning hamma oqimlari birinchi
-                // bo'laklarda 6 soniyagacha kutib qolardi va yuklash
-                // sudralib ketardi (`chunk_in_flight` izohiga qarang).
+                // keyingi bo'lakka o'tamiz.
                 if !second_pass && chunk_in_flight(shared, &k, i) {
-                    if let Ok(mut d) = deferred.lock() {
-                        d.push(i);
+                    if let Ok(mut dd) = deferred.lock() {
+                        dd.push(i);
                     }
                     continue;
                 }
 
-                let fetched = fetch_and_store_chunk(
-                    shared,
-                    &k,
-                    &d,
-                    &u,
-                    i,
-                    chunk_start,
-                    chunk_end,
-                    expected_len,
-                    total,
-                    // `true` — navbatda kutmaydi (yuqoridagi
-                    // DOWNLOAD_THREADS izohiga qarang).
-                    true,
-                );
-                let problem = match fetched {
-                    Err(e) => Some(e),
-                    // Bo'lak QAYTDI, lekin diskda to'liq turibdimi?
-                    // Yarim olingan bo'lsa qoldiq saqlangan bo'ladi va
-                    // keyingi urinish o'sha joydan davom etadi — shu
-                    // sabab buni xato deb belgilaymiz.
-                    Ok(_) => {
-                        let landed = fs::metadata(&path)
-                            .map(|m| m.len() == on_disk_len)
-                            .unwrap_or(false);
-                        if landed {
-                            None
-                        } else {
-                            Some(format!("bo'lak #{i} to'liq olinmadi"))
-                        }
-                    }
+                // Birinchi bosqichda — hech narsani kutmaydigan
+                // "Download" ustuvorligi; ikkinchi (qoldiq) bosqichda
+                // esa kutishga ham ruxsat beriladi.
+                let prio = if second_pass {
+                    FetchPrio::Player
+                } else {
+                    FetchPrio::Download
                 };
-                if let Some(e) = problem {
-                    if let Ok(mut slot) = first_err.lock() {
-                        if slot.is_none() {
-                            *slot = Some(e);
+
+                let mut res = ChunkRes::Failed("urinilmadi".to_string());
+                for attempt in 0..3u32 {
+                    if !download_active(&k) {
+                        paused.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                    match fetch_and_store_chunk(
+                        shared,
+                        &k,
+                        &d,
+                        &u,
+                        i,
+                        chunk_start,
+                        chunk_end,
+                        expected_len,
+                        total,
+                        prio,
+                    ) {
+                        Ok(_) => {
+                            // Bo'lak QAYTDI, lekin diskda to'liq
+                            // turibdimi? Yarim olingan bo'lsa qoldiq
+                            // saqlangan bo'ladi va keyingi urinish
+                            // o'sha joydan davom etadi.
+                            let landed = fs::metadata(&path)
+                                .map(|m| m.len() == on_disk_len)
+                                .unwrap_or(false);
+                            if landed {
+                                res = ChunkRes::Ok;
+                                break;
+                            }
+                            res = ChunkRes::Failed(format!("bo'lak #{i} to'liq olinmadi"));
+                        }
+                        Err(e) if e == BUSY_ERR => {
+                            res = ChunkRes::Deferred;
+                            break;
+                        }
+                        Err(e) => {
+                            res = ChunkRes::Failed(e);
                         }
                     }
-                    break;
+                    // Qisqa tanaffus — tarmoq bir lahzaga uzilgan
+                    // bo'lsa shu yerda tiklanadi (uzoq kutish YO'Q).
+                    // Oxirgi urinishdan keyin kutish MA'NOSIZ.
+                    if attempt < 2 {
+                        thread::sleep(Duration::from_millis(300 * (attempt as u64 + 1)));
+                    }
+                }
+
+                match res {
+                    ChunkRes::Ok => {
+                        done_count.fetch_add(1, Ordering::SeqCst);
+                    }
+                    ChunkRes::Deferred => {
+                        if let Ok(mut dd) = deferred.lock() {
+                            dd.push(i);
+                        }
+                    }
+                    ChunkRes::Failed(e) => {
+                        failed_count.fetch_add(1, Ordering::SeqCst);
+                        if let Ok(mut slot) = first_err.lock() {
+                            if slot.is_none() {
+                                *slot = Some(e);
+                            }
+                        }
+                        // TO'XTAMAYMIZ — keyingi bo'lakka o'tamiz.
+                    }
                 }
             });
         match h {
@@ -1523,13 +1652,28 @@ fn run_download(key: &str, url: &str) -> Result<bool, String> {
         let _ = w.join();
     }
 
-    if let Some(e) = first_err.lock().ok().and_then(|mut s| s.take()) {
-        return Err(e);
-    }
     if paused.load(Ordering::SeqCst) || !download_active(key) {
-        return Ok(false);
+        return Ok(DlOutcome::Paused);
     }
-    Ok(true)
+
+    // YAKUNIY HAQIQAT — DISK. Chetga qo'yilgan bo'lak poyga sabab
+    // e'tibordan chetda qolgan bo'lsa ham, bu tekshiruv uni ko'radi.
+    let missing = (0..count).filter(|i| !chunk_cached(&dir, *i, total)).count() as u64;
+    if missing == 0 {
+        return Ok(DlOutcome::Done);
+    }
+    let done = done_count.load(Ordering::SeqCst);
+    let failed = failed_count.load(Ordering::SeqCst);
+    if done > 0 || failed == 0 {
+        // Ilgarilash bor (yoki xato umuman bo'lmagan, faqat band
+        // bo'laklar qolgan) — kutmasdan davom etamiz.
+        return Ok(DlOutcome::Partial(done));
+    }
+    Err(first_err
+        .lock()
+        .ok()
+        .and_then(|mut s| s.take())
+        .unwrap_or_else(|| format!("{missing} ta bo'lak olinmadi")))
 }
 
 /// Yuklab olishni boshlaydi yoki davom ettiradi. DARHOL qaytadi.
@@ -1752,7 +1896,16 @@ fn read_or_fetch_chunk(
     }
     // Bu yo'l — PLEYERGA xizmat ko'rsatish yo'li, ya'ni ustuvor.
     fetch_and_store_chunk(
-        shared, key, dir, url, index, start, end, expected_len, expected_total, true,
+        shared,
+        key,
+        dir,
+        url,
+        index,
+        start,
+        end,
+        expected_len,
+        expected_total,
+        FetchPrio::Player,
     )
 }
 
@@ -1766,15 +1919,29 @@ fn invalidate_cache(dir: &PathBuf) {
     }
 }
 
-/// `no_queue` — bu so'rov navbatda KUTMAYDI, darhol tarmoqqa chiqadi.
-///
-/// Ikki holatda `true` bo'ladi:
-///   * PLEYER bo'lakni hozir kutyapti — kutish videoni to'xtatadi;
-///   * FOYDALANUVCHI yuklab olish tugmasini bosgan — talab bo'yicha
-///     u hech qanday cheklovga uchramasligi kerak.
-///
-/// `false` faqat OLDINDAN yuklash (prefetch) uchun qoladi: u fon
-/// ishi bo'lgani uchun MAX_NET_FETCHES navbatida kutishi mumkin.
+/// Bo'lakni kim so'rayotgani — kutish qoidalari shunga qarab
+/// belgilanadi.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FetchPrio {
+    /// PLEYER bo'lakni HOZIR kutyapti. Navbatda turmaydi; bo'lakni
+    /// boshqa oqim olayotgan bo'lsa uni 6 soniyagacha kutadi (ikki
+    /// marta yuklab olmaslik uchun), keyin o'zi oladi.
+    Player,
+    /// FOYDALANUVCHI yuklab olish tugmasini bosgan. Navbatda ham
+    /// turmaydi, band bo'lakni ham UMUMAN kutmaydi — `BUSY_ERR`
+    /// qaytadi va yuklovchi uni chetga qo'yib keyingi bo'lakka
+    /// o'tadi. Shu bilan yuklab olish oqimlari pleyer olayotgan
+    /// bo'laklarda kutib qolmaydi.
+    Download,
+    /// Fon'da OLDINDAN yuklash. Yagona qatlam — u MAX_NET_FETCHES
+    /// navbatida kutishi mumkin.
+    Prefetch,
+}
+
+/// "Bo'lakni ayni payt boshqa oqim olyapti" — bu XATO EMAS, faqat
+/// "keyinroq qaytib kel" degan belgi.
+const BUSY_ERR: &str = "__band__";
+
 fn fetch_and_store_chunk(
     shared: &Shared,
     key: &str,
@@ -1785,7 +1952,7 @@ fn fetch_and_store_chunk(
     end: u64,
     expected_len: usize,
     expected_total: u64,
-    no_queue: bool,
+    prio: FetchPrio,
 ) -> Result<Vec<u8>, String> {
     let final_path = dir.join(chunk_name(index));
     let flight_key = format!("{key}#{index}");
@@ -1821,6 +1988,13 @@ fn fetch_and_store_chunk(
         if let Some(bytes) = read_cached_chunk(dir, key, index, expected_len) {
             return Ok(bytes);
         }
+        // YUKLAB OLISH hech qachon kutmaydi: band bo'lak chetga
+        // qo'yiladi va oqim darhol keyingi bo'lakka o'tadi. Aks
+        // holda video ochiq turganda yuklovchining hamma oqimlari
+        // pleyer olayotgan bo'laklarda 6 soniyagacha osilib qolardi.
+        if prio == FetchPrio::Download {
+            return Err(BUSY_ERR.to_string());
+        }
         if Instant::now() >= wait_deadline {
             log(format!(
                 "Bo'lak #{index} kutish muddati tugadi — mustaqil yuklab olinadi"
@@ -1842,7 +2016,7 @@ fn fetch_and_store_chunk(
         // baribir yuklab olinadi, chunki javobsiz qolish eng yomon
         // holat.
         let queue_deadline = Instant::now() + Duration::from_secs(8);
-        if no_queue {
+        if prio != FetchPrio::Prefetch {
             // Pleyer kutyapti yoki foydalanuvchi yuklab olishni
             // boshlagan — navbatga umuman turmaymiz.
             NET_FETCHES.fetch_add(1, Ordering::SeqCst);
@@ -2132,6 +2306,18 @@ static PLAY_POS_MS: AtomicU64 = AtomicU64::new(0);
 /// Ijro nuqtasi QAYSI video uchun ekanini bildiruvchi kalit hashi.
 /// 0 = hali xabar qilinmagan.
 static PLAY_POS_KEY: AtomicU64 = AtomicU64::new(0);
+/// Ijro nuqtasi OXIRGI MARTA qachon xabar qilingan (server ishga
+/// tushgandan beri o'tgan millisekund).
+///
+/// NEGA KERAK: cheklov aynan shu songa tayanadi, ya'ni son ESKIRGAN
+/// bo'lsa cheklov ham noto'g'ri joyda ishlaydi. Masalan ilova fonga
+/// ketib, pleyer to'xtab qolsa, oxirgi xabar bir necha daqiqa
+/// oldingi bo'lishi mumkin. Bunday holatda ijro nuqtasi
+/// ISHLATILMAYDI — o'rniga so'rovning O'ZIDAGI boshlanish nuqtasi
+/// olinadi (u har doim haqiqiy).
+static PLAY_POS_AT_MS: AtomicU64 = AtomicU64::new(0);
+/// Ijro nuqtasi shu muddatdan eski bo'lsa — ishonilmaydi.
+const PLAY_POS_FRESH_MS: u64 = 30_000;
 
 /// Kalitni raqamga o'giradi (atomik solishtirish uchun).
 fn key_tag(key: &str) -> u64 {
@@ -2160,6 +2346,16 @@ fn playing_chunk(key: &str, total: u64, secs: f64) -> Option<u64> {
     if PLAY_POS_KEY.load(Ordering::Relaxed) != key_tag(key) {
         return None;
     }
+    // Xabar eskirgan bo'lsa (pleyer yopilgan, ilova fonda va h.k.)
+    // unga ishonmaymiz.
+    let now_ms = SHARED
+        .get()
+        .map(|s| s.start.elapsed().as_millis() as u64)
+        .unwrap_or(0);
+    let at = PLAY_POS_AT_MS.load(Ordering::Relaxed);
+    if at == 0 || now_ms.saturating_sub(at) > PLAY_POS_FRESH_MS {
+        return None;
+    }
     let pos_s = PLAY_POS_MS.load(Ordering::Relaxed) as f64 / 1000.0;
     if pos_s < 0.0 {
         return None;
@@ -2182,6 +2378,14 @@ pub extern "C" fn rust_video_cache_set_position(
     }
     PLAY_POS_KEY.store(key_tag(&cache_key(url)), Ordering::Relaxed);
     PLAY_POS_MS.store(position_ms, Ordering::Relaxed);
+    PLAY_POS_AT_MS.store(
+        SHARED
+            .get()
+            .map(|s| s.start.elapsed().as_millis() as u64)
+            .unwrap_or(0)
+            .max(1),
+        Ordering::Relaxed,
+    );
     1
 }
 
@@ -2285,9 +2489,60 @@ fn mp4_duration_secs(data: &[u8]) -> Option<f64> {
     None
 }
 
-/// Videoning davomiyligi (soniya). Bir marta hisoblanib, xotirada
-/// saqlanadi. TARMOQQA CHIQMAYDI — faqat diskdagi 1-bo'lakni o'qiydi.
-/// Bo'lak hali yo'q bo'lsa 0.0 qaytadi (keyingi urinishda aniqlanadi).
+/// meta.json'dagi davomiylikni o'qiydi (0.0 = yozilmagan).
+fn meta_duration_from_disk(dir: &PathBuf) -> f64 {
+    let Ok(raw) = fs::read_to_string(dir.join("meta.json")) else {
+        return 0.0;
+    };
+    match serde_json::from_str::<CacheMeta>(&raw) {
+        Ok(m) if m.chunk_size == CHUNK_SIZE && m.duration_secs > 0.0 => m.duration_secs,
+        _ => 0.0,
+    }
+}
+
+/// Aniqlangan davomiylikni meta.json'ga QO'SHIB yozadi (qolgan
+/// maydonlar o'zgarmaydi). Bir marta bajariladi.
+fn store_meta_duration(dir: &PathBuf, secs: f64) {
+    if secs <= 0.0 {
+        return;
+    }
+    let path = dir.join("meta.json");
+    let Ok(raw) = fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(mut meta) = serde_json::from_str::<CacheMeta>(&raw) else {
+        return;
+    };
+    if meta.duration_secs > 0.0 {
+        return;
+    }
+    meta.duration_secs = secs;
+    if let Ok(json) = serde_json::to_string(&meta) {
+        // ATOM yozuv (tmp -> rename): boshqa oqim aynan shu paytda
+        // meta.json'ni o'qiyotgan bo'lsa, yarim yozilgan faylni
+        // ko'rib qolmasin.
+        let tmp = dir.join(format!("meta.{}.tmp", micros_now()));
+        if fs::write(&tmp, json).is_ok() {
+            if fs::rename(&tmp, &path).is_err() {
+                let _ = fs::remove_file(&tmp);
+            }
+        } else {
+            let _ = fs::remove_file(&tmp);
+        }
+    }
+}
+
+/// Videoning davomiyligi (soniya).
+///
+/// Uch bosqichli: xotira -> meta.json -> MP4 `mvhd` (1-bo'lakdan).
+/// TARMOQQA UMUMAN CHIQMAYDI. Bir marta aniqlangach meta.json'ga
+/// yoziladi, ya'ni ilova qayta ochilganda qaytadan hisoblash
+/// (va 1-bo'lakni o'qish) shart bo'lmaydi.
+///
+/// Shu son bilan "qaysi bo'lak qaysi soniyalarga to'g'ri keladi"
+/// jadvali to'liq aniqlanadi (CacheMeta::duration_secs izohiga
+/// qarang) — pleyerdagi ijro nuqtasi aynan shu orqali bo'lak
+/// indeksiga o'giriladi.
 fn duration_secs(key: &str, dir: &PathBuf, total: u64) -> f64 {
     if let Ok(m) = durations().lock() {
         if let Some((d, at)) = m.get(key) {
@@ -2304,6 +2559,15 @@ fn duration_secs(key: &str, dir: &PathBuf, total: u64) -> f64 {
             }
         }
     }
+    // 2-bosqich: meta.json (oldingi sessiyada aniqlangan bo'lishi
+    // mumkin — 1-bo'lak keshdan o'chirilgan bo'lsa ham qoladi).
+    let stored = meta_duration_from_disk(dir);
+    if stored > 0.0 {
+        if let Ok(mut m) = durations().lock() {
+            m.insert(key.to_string(), (stored, Instant::now()));
+        }
+        return stored;
+    }
     let first_len = chunk_plain_len(0, total) as usize;
     let Some(head) = read_cached_chunk(dir, key, 0, first_len) else {
         if let Ok(mut m) = durations().lock() {
@@ -2316,8 +2580,9 @@ fn duration_secs(key: &str, dir: &PathBuf, total: u64) -> f64 {
         m.insert(key.to_string(), (secs, Instant::now()));
     }
     if secs > 0.0 {
+        store_meta_duration(dir, secs);
         log(format!(
-            "Davomiylik aniqlandi: {key} = {:.0} soniya ({:.1} daqiqa)",
+            "Davomiylik aniqlandi: {key} = {:.0} soniya ({:.1} daqiqa), meta.json'ga yozildi",
             secs,
             secs / 60.0
         ));
@@ -2370,6 +2635,15 @@ fn maybe_prefetch(
     total: u64,
     current_chunk: u64,
 ) {
+    // ── FOYDALANUVCHI YUKLAB OLISHNI BOSHLAGAN BO'LSA ──────────
+    // Bu videoni allaqachon 12 ta oqim cheklovsiz yuklab olyapti —
+    // oldindan yuklashning ustiga qo'shilishi shunchaki bir xil
+    // tarmoq uchun raqobat bo'lardi (va bir xil bo'laklarni
+    // ikkilantirardi). Shu sabab bu yerda hech narsa qilinmaydi.
+    if download_active(key) {
+        return;
+    }
+
     // Joriy videoni belgilab qo'yamiz — boshqa video ochilsa, bu yerda
     // ishlayotgan yuklash o'zini to'xtatadi.
     {
@@ -2446,8 +2720,16 @@ fn maybe_prefetch(
                             }
                         }
                         let _ = fetch_and_store_chunk(
-                            shared, &k, &d, &u, i, chunk_start, chunk_end, expected_len,
-                            total, false,
+                            shared,
+                            &k,
+                            &d,
+                            &u,
+                            i,
+                            chunk_start,
+                            chunk_end,
+                            expected_len,
+                            total,
+                            FetchPrio::Prefetch,
                         );
                     });
                 if let Ok(h) = h {
@@ -2520,20 +2802,70 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
         return Ok(());
     }
 
-    // ── JAVOB QISQARTIRILMAYDI ────────────────────────────────
+    // ═══════════════════════════════════════════════════════════
+    //  JAVOB OYNASI: TARMOQQA IJRO NUQTASIDAN OLDINGA
+    //  `window` TA BO'LAKDAN ORTIQ CHIQILMAYDI
+    // ═══════════════════════════════════════════════════════════
     //
-    // Avval javob "keshda uzluksiz mavjud" joygacha qisqartirilardi:
-    // yetishmayotgan birinchi bo'lakda javob tugar, pleyer esa qolganini
-    // olish uchun YANGI ulanish ochishga majbur bo'lardi. Har bir
-    // qayta ulanish — bu yangi TCP + HTTP so'rov, ya'ni qo'shimcha
-    // kechikish; ijro davomida ular yig'ilib, videoni "to'xtab-to'xtab"
-    // ko'rsatardi.
+    // ── MUAMMO NIMA EDI ────────────────────────────────────────
+    // Bu yerda javob HECH QANDAY cheklovsiz berilardi: pleyer
+    // "bytes=0-" deb so'rasa, server butun faylni bitta javobda
+    // uzatishga kirishardi va YETISHMAYOTGAN bo'laklarni o'sha
+    // payt, birin-ketin worker'dan yuklab olardi. Ya'ni oldindan
+    // yuklash oynasi (10 MB) faqat FON to'ldiruvchisiga tegishli
+    // edi — javobning o'ziga emas. Pleyer o'z buferini to'ldirgani
+    // sari server ham to'xtovsiz yuklab beraverardi va 166 MB'lik
+    // video amalda to'liq yuklanib chiqardi.
     //
-    // Endi server oddiy HTTP serverdek ishlaydi: so'ralgan oraliq
-    // BITTA javobda, uzluksiz beriladi. Yetishmayotgan bo'laklar
-    // javob yozilayotgan payt, shu yerning o'zida yuklab olinadi
-    // (pastdagi tsiklga qarang), oldindan yuklash esa ijro nuqtasidan
-    // oldinda ishlab, ularning ko'pini allaqachon tayyorlab qo'yadi.
+    // ── ENDI QANDAY ────────────────────────────────────────────
+    // Javobning OXIRI oldindan hisoblanadi va Content-Length aynan
+    // shunga qo'yiladi (HTTP jihatidan mutlaqo to'g'ri 206 javob —
+    // pleyer qolganini keyinroq yangi so'rov bilan oladi):
+    //
+    //     oxirgi_bo'lak = ijro_bo'lagi + oyna
+    //
+    // Foydalanuvchi tilida (bo'laklar 1 dan sanalganda):
+    //   * pleyer 1-bo'lakni ko'rsatyapti -> 7-bo'lakkacha olinadi;
+    //   * pleyer 2-bo'lakka o'tdi        -> 8-bo'lak olinadi;
+    //   * pleyer 3-bo'lakka o'tmaguncha  -> 9-bo'lak OLINMAYDI.
+    //
+    // "Ijro bo'lagi" — Dart tomoni xabar qilgan HAQIQIY ijro
+    // nuqtasidan hisoblanadi (meta.json'dagi davomiylik + fayl
+    // hajmi orqali: `playing_chunk`). Xabar eskirgan bo'lsa,
+    // so'rovning o'z boshlanish nuqtasi olinadi.
+    //
+    // ── IKKI ISTISNO ───────────────────────────────────────────
+    // 1) KESHDA TAYYOR turgan bo'laklar BEPUL: ular uchun tarmoqqa
+    //    chiqilmaydi, shu sabab javob ular ustidan cheklovsiz
+    //    davom etadi. To'liq yuklab olingan video, avvalgidek,
+    //    bitta uzluksiz javobda beriladi.
+    // 2) Foydalanuvchi YUKLAB OLISH tugmasini bosgan bo'lsa
+    //    (`download_active`), bu videoda hech qanday cheklov
+    //    qolmaydi — talab shunday. Pauza bosilsa cheklov o'z-o'zidan
+    //    qaytadi.
+    let chunk_count = total.div_ceil(CHUNK_SIZE);
+    let secs = duration_secs(&key, &dir, total);
+    let window = prefetch_window_for(total, secs);
+    let start_chunk = start / CHUNK_SIZE;
+    let unlimited = download_active(&key);
+    if !unlimited && chunk_count > 0 {
+        let origin = playing_chunk(&key, total, secs).unwrap_or(start_chunk);
+        // `.max(start_chunk)` — ijro nuqtasi so'ralgan joydan
+        // orqada bo'lsa ham javob KAMIDA bitta bo'lak beradi
+        // (aks holda pleyer bo'sh javob olib qotib qolardi).
+        let mut limit = origin.saturating_add(window).max(start_chunk);
+        // Keshda tayyor turganlari ustidan cheklovsiz davom etamiz.
+        while limit + 1 < chunk_count && chunk_cached(&dir, limit + 1, total) {
+            limit += 1;
+        }
+        let cap_end = ((limit + 1) * CHUNK_SIZE).saturating_sub(1).min(total - 1);
+        if end > cap_end {
+            log(format!(
+                "Javob oynasi: ijro #{origin}, oyna {window} -> #{limit} bo'lakkacha                  ({start}-{cap_end}, so'ralgani {end})"
+            ));
+            end = cap_end;
+        }
+    }
 
     let content_length = end - start + 1;
     if is_range {
@@ -2922,6 +3254,106 @@ mod tests {
             !dir.join(chunk_name(5)).exists(),
             "yarim qolgan bo'lak o'chirilmadi"
         );
+
+        // ── 11) JAVOB OYNASI: TARMOQQA OYNADAN ORTIQ CHIQILMAYDI ──
+        //
+        // Bu ENG MUHIM yangi qoida. Alohida video yasaymiz:
+        //   hajm       = 20 MiB (20 ta bo'lak)
+        //   davomiylik = 600 s (10 daqiqa) -> 2 MiB/daqiqa -> oyna 2
+        // Keshda faqat 0-bo'lak bor, qolganlari yo'q va manba
+        // (127.0.0.1:9) mavjud emas.
+        //
+        // Pleyer "bytes=0-" deb butun faylni so'raydi. Javob esa
+        // 0 + 2 = 2-indeksli bo'lakda TUGASHI kerak, ya'ni jami
+        // 3 MiB (3 ta bo'lak) — undan ortig'i EMAS.
+        const W_NAME: &str = "oyna.mp4";
+        const W_TOTAL: u64 = 20 * CHUNK_SIZE;
+        let w_dir = root.join("video_byte_cache").join(W_NAME);
+        fs::create_dir_all(&w_dir).unwrap();
+        fs::write(
+            w_dir.join("meta.json"),
+            format!(
+                "{{\"total_size\":{W_TOTAL},\"content_type\":\"video/mp4\",\
+                 \"chunk_size\":{CHUNK_SIZE},\"duration_secs\":600.0}}"
+            ),
+        )
+        .unwrap();
+        // Faqat 0-bo'lak keshda.
+        {
+            let len = CHUNK_SIZE as usize;
+            let data: Vec<u8> = (0..len).map(|k| (k % 251) as u8).collect();
+            let (k, iv) = crypto::derive_chunk_key_iv(W_NAME, 0).unwrap();
+            fs::write(w_dir.join(chunk_name(0)), crypto::encrypt_chunk(&data, &k, &iv)).unwrap();
+        }
+        // Ijro nuqtasi xabari BOSHQA video uchun — bu videoga
+        // taalluqli emas, shu sabab so'rovning o'z boshlanishi
+        // olinadi.
+        PLAY_POS_KEY.store(0, Ordering::Relaxed);
+
+        let w_req = |range: &str| -> (u16, String, usize) {
+            let mut st = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            st.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+            st.write_all(
+                format!(
+                    "GET /v?u=http%3A%2F%2F127.0.0.1%3A9%2F{W_NAME} HTTP/1.1\r\n                     Host: x\r\nRange: {range}\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+            let mut br = BufReader::new(st);
+            let mut status_line = String::new();
+            br.read_line(&mut status_line).unwrap();
+            let status: u16 = status_line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            let mut cr = String::new();
+            loop {
+                let mut line = String::new();
+                if br.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                    break;
+                }
+                if let Some(v) = line.strip_prefix("Content-Range: ") {
+                    cr = v.trim().to_string();
+                }
+            }
+            let mut body = Vec::new();
+            let _ = br.read_to_end(&mut body);
+            (status, cr, body.len())
+        };
+
+        let (status, cr, _) = w_req("bytes=0-");
+        assert_eq!(status, 206);
+        assert_eq!(
+            cr,
+            format!("bytes 0-{}/{W_TOTAL}", 3 * CHUNK_SIZE - 1),
+            "javob oynadan (0 + 2 bo'lak) tashqariga chiqib ketdi"
+        );
+
+        // O'RTADAN so'ralganda ham xuddi shunday: 10-bo'lakdan
+        // boshlansa, 12-bo'lakda tugaydi.
+        let (status, cr, _) = w_req(&format!("bytes={}-", 10 * CHUNK_SIZE));
+        assert_eq!(status, 206);
+        assert_eq!(
+            cr,
+            format!("bytes {}-{}/{W_TOTAL}", 10 * CHUNK_SIZE, 13 * CHUNK_SIZE - 1),
+            "o'rtadan so'ralgan javob oynadan chiqib ketdi"
+        );
+
+        // YUKLAB OLISH tugmasi bosilgan bo'lsa — cheklov YO'Q.
+        let w_url = format!("http://127.0.0.1:9/{W_NAME}");
+        let c_w = std::ffi::CString::new(w_url.clone()).unwrap();
+        assert_eq!(rust_video_cache_download(c_w.as_ptr()), 1);
+        let (status, cr, _) = w_req("bytes=0-");
+        assert_eq!(status, 206);
+        assert_eq!(
+            cr,
+            format!("bytes 0-{}/{W_TOTAL}", W_TOTAL - 1),
+            "yuklab olish paytida ham cheklov qo'llanib qoldi"
+        );
+        let c_w2 = std::ffi::CString::new(w_url).unwrap();
+        rust_video_cache_pause(c_w2.as_ptr());
 
         let _ = fs::remove_dir_all(&root);
     }
