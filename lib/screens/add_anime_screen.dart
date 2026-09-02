@@ -244,13 +244,19 @@ class _AddAnimeScreenState extends State<AddAnimeScreen> {
                             child: _selectedImage != null
                                 ? ClipRRect(
                                     borderRadius: BorderRadius.circular(16),
+                                    // Galereyadan olingan rasm 12 MP
+                                    // bo'lishi mumkin (~48 MB xotira) —
+                                    // ko'rish oynasi uchun shuncha
+                                    // kerak emas.
                                     child: Image.file(_selectedImage!,
+                                        cacheWidth: 1080,
                                         fit: BoxFit.cover),
                                   )
                                 : _photoUrl != null
                                     ? ClipRRect(
                                         borderRadius: BorderRadius.circular(16),
                                         child: Image.network(_photoUrl!,
+                                            cacheWidth: 1080,
                                             fit: BoxFit.cover),
                                       )
                                     : Column(

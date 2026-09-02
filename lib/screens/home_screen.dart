@@ -304,8 +304,15 @@ class SeasonCard extends StatelessWidget {
                 CachedNetworkImage(
                   imageUrl: photoUrl,
                   fit: BoxFit.cover,
-                  memCacheWidth: 720,
-                  filterQuality: FilterQuality.high,
+                  // Katak ikki ustunli gridda ~166 dp keng — 540 px
+                  // yetarli (720 dan pastga tushirildi: xotira ~44%
+                  // tejaladi, ko'zga farq bilinmaydi).
+                  memCacheWidth: 540,
+                  // `high` (kubik) har bir kadrda qayta hisoblanadi va
+                  // surish paytida GPU vaqtini yeydi. Rasm allaqachon
+                  // ko'rinadigan o'lchamda dekodlangani uchun `medium`
+                  // bilan farq ko'rinmaydi, lekin arzonroq.
+                  filterQuality: FilterQuality.medium,
                   placeholder: (_, __) => Container(
                     color: AppColors.card,
                     child: Center(

@@ -280,9 +280,14 @@ class _AnimeManagementScreenState extends State<AnimeManagementScreen> {
                                                         BorderRadius.circular(
                                                             14),
                                                     image: DecorationImage(
-                                                      image: CachedNetworkImageProvider(
-                                                          anime['photo_url'] ??
-                                                              ''),
+                                                      // 76 dp -> 228 px.
+                                                      image: ResizeImage(
+                                                        CachedNetworkImageProvider(
+                                                            anime['photo_url'] ??
+                                                                ''),
+                                                        width: 228,
+                                                        allowUpscaling: false,
+                                                      ),
                                                       fit: BoxFit.cover,
                                                       onError: (_, __) {},
                                                     ),

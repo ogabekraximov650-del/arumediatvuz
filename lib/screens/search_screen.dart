@@ -216,8 +216,12 @@ class _SeasonSearchCard extends StatelessWidget {
                   borderRadius:
                       const BorderRadius.vertical(top: Radius.circular(18)),
                   image: DecorationImage(
-                    image:
-                        CachedNetworkImageProvider(season['photo_url'] ?? ''),
+                    // Ikki ustunli katak ~166 dp keng -> 540 px.
+                    image: ResizeImage(
+                      CachedNetworkImageProvider(season['photo_url'] ?? ''),
+                      width: 540,
+                      allowUpscaling: false,
+                    ),
                     fit: BoxFit.cover,
                     onError: (_, __) {},
                   ),

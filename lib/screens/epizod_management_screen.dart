@@ -186,8 +186,12 @@ class _EpizodManagementScreenState extends State<EpizodManagementScreen> {
                           borderRadius: BorderRadius.circular(12),
                           image: seasonPhoto != null && seasonPhoto.isNotEmpty
                               ? DecorationImage(
-                                  image:
-                                      CachedNetworkImageProvider(seasonPhoto),
+                                  // 48 dp -> 144 px.
+                                  image: ResizeImage(
+                                    CachedNetworkImageProvider(seasonPhoto),
+                                    width: 144,
+                                    allowUpscaling: false,
+                                  ),
                                   fit: BoxFit.cover,
                                   onError: (_, __) {},
                                 )

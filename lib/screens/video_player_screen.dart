@@ -2035,6 +2035,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                         imageUrl: photoUrl,
                         width: 50,
                         height: 50,
+                        // 50 dp li ikonka — xotiraga 150 px tushadi.
+                        memCacheWidth: 150,
                         fit: BoxFit.cover,
                         errorWidget: (_, __, ___) => Container(
                             width: 50,

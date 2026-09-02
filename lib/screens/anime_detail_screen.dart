@@ -47,8 +47,16 @@ class AnimeDetailScreen extends StatelessWidget {
                       decoration: BoxDecoration(
                         borderRadius: BorderRadius.circular(22),
                         image: DecorationImage(
-                          image: CachedNetworkImageProvider(
-                            anime['photo_url'] ?? '',
+                          // Ekran bo'ylab 240 dp balandlikdagi banner —
+                          // 1080 px odatiy telefon ekrani kengligi,
+                          // ya'ni sifat yo'qolmaydi, lekin undan
+                          // kattaroq manba keraksiz xotira egallamaydi.
+                          image: ResizeImage(
+                            CachedNetworkImageProvider(
+                              anime['photo_url'] ?? '',
+                            ),
+                            width: 1080,
+                            allowUpscaling: false,
                           ),
                           fit: BoxFit.cover,
                           onError: (_, __) {},

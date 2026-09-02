@@ -204,7 +204,15 @@ class _SeasonManagementScreenState extends State<SeasonManagementScreen> {
                         decoration: BoxDecoration(
                           borderRadius: BorderRadius.circular(12),
                           image: DecorationImage(
-                            image: CachedNetworkImageProvider(animePhoto ?? ''),
+                            // 48 dp li ikonka — 144 px yetarli.
+                            // (Izoh uchun: ResizeImage dekodlash
+                            // o'lchamini cheklaydi, ya'ni 1080p poster
+                            // ham xotiraga kichik holda tushadi.)
+                            image: ResizeImage(
+                              CachedNetworkImageProvider(animePhoto ?? ''),
+                              width: 144,
+                              allowUpscaling: false,
+                            ),
                             fit: BoxFit.cover,
                             onError: (_, __) {},
                           ),
@@ -305,9 +313,13 @@ class _SeasonManagementScreenState extends State<SeasonManagementScreen> {
                                                 borderRadius:
                                                     BorderRadius.circular(12),
                                                 image: DecorationImage(
-                                                  image:
-                                                      CachedNetworkImageProvider(
-                                                          s['photo_url'] ?? ''),
+                                                  // 64 dp -> 192 px.
+                                                  image: ResizeImage(
+                                                    CachedNetworkImageProvider(
+                                                        s['photo_url'] ?? ''),
+                                                    width: 192,
+                                                    allowUpscaling: false,
+                                                  ),
                                                   fit: BoxFit.cover,
                                                   onError: (_, __) {},
                                                 ),
