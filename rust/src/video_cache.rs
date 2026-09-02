@@ -268,6 +268,9 @@ pub extern "C" fn rust_video_cache_start(cache_dir_ptr: *const c_char) -> i32 {
                         }
                         let spawned = thread::Builder::new()
                             .name("video-cache-conn".into())
+                            // Bu oqim faqat bitta bo'lakni uzatadi —
+                            // katta stek kerak emas (xotira tejaladi).
+                            .stack_size(512 * 1024)
                             .spawn(move || {
                                 if let Err(e) = handle_connection(stream) {
                                     log(format!("XATO (ulanish): {e}"));
@@ -734,6 +737,11 @@ struct StatEntry {
     have_bytes: u64,
     /// Disk bir marta skanerlab bo'lindimi.
     scanned: bool,
+    /// meta.json oxirgi marta qachon tekshirilgan. Hajm hali noma'lum
+    /// bo'lganda (video hech qachon ochilmagan) uni HAR SAFAR diskdan
+    /// o'qish keraksiz: oflayn rejimda ekran bir vaqtda o'nlab
+    /// qismning holatini so'raydi.
+    checked_at: Option<Instant>,
 }
 
 impl StatEntry {
@@ -743,6 +751,7 @@ impl StatEntry {
             have: HashSet::new(),
             have_bytes: 0,
             scanned: false,
+            checked_at: None,
         }
     }
 }
@@ -752,19 +761,6 @@ static STATS: OnceLock<Mutex<HashMap<String, StatEntry>>> = OnceLock::new();
 fn stats() -> &'static Mutex<HashMap<String, StatEntry>> {
     STATS.get_or_init(|| Mutex::new(HashMap::new()))
 }
-
-/// Hozir fon'da yuklab olinayotgan videolar: kalit -> "to'xta" bayrog'i.
-/// Yozuv mavjudligining o'zi "yuklanmoqda" degani.
-static DOWNLOADS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
-
-fn downloads() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
-    DOWNLOADS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Alohida (foydalanuvchi so'ragan) yuklab olish uchun ish oqimlari soni.
-/// Ijro paytidagi oldindan yuklashdan KAM: video ko'rish har doim
-/// ustuvor bo'lishi kerak, yuklab olish esa fon'da sekinroq ketaversin.
-const DOWNLOAD_THREADS: usize = 3;
 
 /// Berilgan indeksdagi bo'lakning OCHIQ (shifrlanmagan) uzunligi.
 fn chunk_plain_len(index: u64, total: u64) -> u64 {
@@ -862,10 +858,23 @@ fn stat_snapshot(key: &str, dir: &PathBuf) -> (u64, u64) {
     }
     // Hajm hali noma'lum — meta.json (kichik fayl) o'qiladi. U paydo
     // bo'lgach BIR MARTA to'liq skanerlash qilinadi.
+    // Hajm noma'lum bo'lsa, meta.json 3 soniyada bir martadan ko'p
+    // o'qilmaydi.
+    {
+        let map = stats().lock().unwrap();
+        if let Some(e) = map.get(key) {
+            if let Some(t) = e.checked_at {
+                if e.total == 0 && t.elapsed() < Duration::from_secs(3) {
+                    return (0, e.have_bytes);
+                }
+            }
+        }
+    }
     let total = meta_total_from_disk(dir);
     if total == 0 {
         let mut map = stats().lock().unwrap();
         let e = map.entry(key.to_string()).or_insert_with(StatEntry::empty);
+        e.checked_at = Some(Instant::now());
         return (0, e.have_bytes);
     }
     // Skanerlash DISKKA tayanadi va u YAKUNIY haqiqat hisoblanadi:
@@ -887,6 +896,7 @@ fn stat_snapshot(key: &str, dir: &PathBuf) -> (u64, u64) {
     e.have = have;
     e.total = total;
     e.scanned = true;
+    e.checked_at = Some(Instant::now());
     (e.total, e.have_bytes)
 }
 
@@ -899,120 +909,260 @@ fn stat_reset(key: &str, keep_total: u64) {
             have: HashSet::new(),
             have_bytes: 0,
             scanned: keep_total > 0,
+            checked_at: Some(Instant::now()),
         },
     );
 }
 
+// ── YUKLAB OLISH NAVBATI ("Telegram uslubi") ───────────────────────
+//
+// TALAB: foydalanuvchi yuklab olish tugmasini XOHLAGAN PAYTDA,
+// XOHLAGANCHA bosa olsin; ilova hech qachon yiqilmasin; uzilish yoki
+// xato bo'lsa yuklash O'ZI to'xtagan joyidan davom etsin.
+//
+// AVVALGI TIZIMDAGI KAMCHILIK: har bir sifat uchun ALOHIDA 1 + 3 ta
+// ish oqimi ochilardi. Foydalanuvchi bir necha sifatni yonma-yon
+// bosса, o'nlab ish oqimi paydo bo'lib, ularning har biri o'z 1 MiB
+// buferi bilan xotirani band qilardi va bir xil tarmoq uchun
+// raqobatlashardi — natijada ilova xotira yetishmasligidan o'chib
+// qolardi. Xato bo'lganda esa yuklash JIMGINA to'xtardi: tugmani
+// qayta bosish ham hech narsa bermasdi.
+//
+// YANGI TIZIM — bitta MARKAZIY navbat va CHEGARALANGAN ish oqimlari:
+//   * butun ilovada bor-yo'g'i DOWNLOAD_WORKERS ta ish oqimi bo'ladi,
+//     nechta sifat navbatga qo'yilishidan qat'i nazar;
+//   * har bir vazifa bo'laklarni KETMA-KET oladi — ya'ni bir vaqtda
+//     xotirada eng ko'pi 1 MiB'dan turadi;
+//   * xato bo'lsa vazifa navbatdan CHIQMAYDI: kechikish bilan (2, 4,
+//     8 ... 60 soniya) o'zi qayta uriniladi va aynan to'xtagan
+//     bo'lagidan davom etadi;
+//   * "pauza" — shunchaki "xohlanmagan" deb belgilash; ish oqimi
+//     navbatdagi bo'lakdan oldin buni tekshiradi va darhol chiqadi.
+//
+// Shu sabab tugmani necha marta bosilsa ham yangi ish oqimi
+// ochilmaydi — faqat vazifaning holati o'zgaradi.
+
+/// Butun ilova bo'yicha bir vaqtda yuklanadigan videolar soni.
+/// Ijro (pleyer) har doim ustuvor bo'lishi uchun ataylab kichik.
+const DOWNLOAD_WORKERS: usize = 2;
+
+struct DownloadState {
+    url: String,
+    /// Foydalanuvchi yuklashni xohlaydimi. Pauza bosilsa `false` —
+    /// ish oqimi navbatdagi bo'lakdan oldin buni ko'rib to'xtaydi.
+    wanted: bool,
+    /// Hozir ish oqimi shu vazifa ustida ishlayaptimi.
+    running: bool,
+    /// Ketma-ket muvaffaqiyatsiz urinishlar soni (kechikish uchun).
+    failures: u32,
+    /// Shu vaqtdan oldin qayta urinilmaydi.
+    next_try: Instant,
+}
+
+static DOWNLOADS: OnceLock<Mutex<HashMap<String, DownloadState>>> = OnceLock::new();
+static DL_POOL: AtomicBool = AtomicBool::new(false);
+
+fn downloads() -> &'static Mutex<HashMap<String, DownloadState>> {
+    DOWNLOADS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Yuklash NAVBATDA yoki KETAYAPTIMI (foydalanuvchi uchun ikkalasi
+/// ham "yuklanmoqda" degani).
 fn download_active(key: &str) -> bool {
-    downloads().lock().unwrap().contains_key(key)
+    downloads()
+        .lock()
+        .map(|m| m.get(key).map(|s| s.wanted).unwrap_or(false))
+        .unwrap_or(false)
 }
 
-/// Yuklab olishni boshlaydi (allaqachon ketayotgan bo'lsa — hech narsa
-/// qilmaydi). DARHOL qaytadi: butun ish fon ish oqimlarida bajariladi.
-fn start_download(url: &str) -> bool {
-    let Some(shared) = SHARED.get() else {
-        return false;
-    };
-    let key = cache_key(url);
-    let stop = {
-        let mut d = downloads().lock().unwrap();
-        if d.contains_key(&key) {
-            return true;
-        }
-        let flag = Arc::new(AtomicBool::new(false));
-        d.insert(key.clone(), Arc::clone(&flag));
-        flag
-    };
-
-    let (key2, url2) = (key.clone(), url.to_string());
-    let spawned = thread::Builder::new()
-        .name("video-cache-download".into())
-        .spawn(move || {
-            download_worker(shared, &key2, &url2, stop);
-            downloads().lock().unwrap().remove(&key2);
-            log(format!("Yuklab olish yakunlandi: {key2}"));
-        });
-    if spawned.is_err() {
-        downloads().lock().unwrap().remove(&key);
-        return false;
-    }
-    true
+/// Xato sabab kutib turgan vazifa (UI buni ko'rsatishi mumkin).
+fn download_failing(key: &str) -> bool {
+    downloads()
+        .lock()
+        .map(|m| m.get(key).map(|s| s.failures > 0).unwrap_or(false))
+        .unwrap_or(false)
 }
 
-fn stop_download(key: &str) {
-    if let Some(flag) = downloads().lock().unwrap().get(key) {
-        flag.store(true, Ordering::SeqCst);
-    }
-}
-
-fn download_worker(shared: &'static Shared, key: &str, url: &str, stop: Arc<AtomicBool>) {
-    let dir = shared.cache_root.join(key);
-    if fs::create_dir_all(&dir).is_err() {
+/// Ish oqimlari havzasini bir marta ishga tushiradi.
+fn ensure_pool() {
+    if DL_POOL.swap(true, Ordering::SeqCst) {
         return;
     }
-    // Hajmni aniqlash uchun BIR MARTA tarmoqqa chiqiladi (meta.json
-    // allaqachon bo'lsa — chiqilmaydi).
-    let meta = match ensure_meta(shared, &dir, url) {
-        Ok(m) => m,
-        Err(e) => {
-            log(format!("Yuklab olish boshlanmadi ({key}): {e}"));
-            return;
+    for n in 0..DOWNLOAD_WORKERS {
+        let spawned = thread::Builder::new()
+            .name(format!("video-download-{n}"))
+            // Kichik stek yetarli: bu oqim faqat bitta bo'lakni
+            // oladi va diskka yozadi.
+            .stack_size(256 * 1024)
+            .spawn(pool_worker);
+        if spawned.is_err() {
+            log("XATO: yuklab olish ish oqimi ochilmadi".to_string());
         }
+    }
+}
+
+/// Navbatdan bajarishga tayyor vazifani tanlaydi.
+fn pick_task() -> Option<(String, String)> {
+    let now = Instant::now();
+    let mut map = downloads().lock().ok()?;
+    let key = map
+        .iter()
+        .find(|(_, s)| s.wanted && !s.running && s.next_try <= now)
+        .map(|(k, _)| k.clone())?;
+    let st = map.get_mut(&key)?;
+    st.running = true;
+    Some((key, st.url.clone()))
+}
+
+fn pool_worker() {
+    loop {
+        let Some((key, url)) = pick_task() else {
+            // Ish yo'q — havza tinch turadi (protsessor sarflanmaydi).
+            thread::sleep(Duration::from_millis(400));
+            continue;
+        };
+
+        let outcome = run_download(&key, &url);
+
+        let mut map = match downloads().lock() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let still_wanted = map.get(&key).map(|s| s.wanted).unwrap_or(false);
+        match outcome {
+            // To'liq yuklandi — vazifa navbatdan chiqadi.
+            Ok(true) => {
+                map.remove(&key);
+                log(format!("Yuklab olish TUGADI: {key}"));
+            }
+            // Foydalanuvchi pauza qildi.
+            Ok(false) => {
+                map.remove(&key);
+            }
+            // Xato — TO'XTATILMAYDI: kechikib qayta uriniladi va
+            // aynan to'xtagan bo'lagidan davom etadi.
+            Err(e) => {
+                if !still_wanted {
+                    map.remove(&key);
+                } else if let Some(st) = map.get_mut(&key) {
+                    st.running = false;
+                    st.failures = st.failures.saturating_add(1);
+                    let wait = 2u64.saturating_pow(st.failures.min(5)).min(60);
+                    st.next_try = Instant::now() + Duration::from_secs(wait);
+                    log(format!(
+                        "Yuklab olish uzildi ({key}): {e} — {wait}s dan keyin davom etadi"
+                    ));
+                }
+            }
+        }
+    }
+}
+
+/// Bitta videoni yuklaydi. Qaytaradi:
+///   Ok(true)  — to'liq yuklandi;
+///   Ok(false) — foydalanuvchi to'xtatdi;
+///   Err(..)   — xato (keyinroq qayta uriniladi).
+///
+/// Bo'laklar KETMA-KET olinadi: xotirada bir vaqtda faqat bittasi
+/// turadi va tarmoq pleyer bilan raqobatlashmaydi.
+fn run_download(key: &str, url: &str) -> Result<bool, String> {
+    let Some(shared) = SHARED.get() else {
+        return Err("kesh-server ishga tushmagan".to_string());
     };
+    let dir = shared.cache_root.join(key);
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    // Hajmni aniqlash (meta.json bo'lsa — tarmoqqa chiqilmaydi).
+    let meta = ensure_meta(shared, &dir, url)?;
     let total = meta.total_size;
     if total == 0 {
-        return;
+        return Err("hajm aniqlanmadi".to_string());
     }
-    // Yarim qolgan qoldiqlar shu yerda tozalanadi va hisob yangilanadi.
+    // Yarim qolgan qoldiqlar tozalanadi va hisob yangilanadi.
     let _ = stat_snapshot(key, &dir);
 
     let count = total.div_ceil(CHUNK_SIZE);
-    let cursor = Arc::new(AtomicU64::new(0));
-    let mut workers = Vec::with_capacity(DOWNLOAD_THREADS);
-    for _ in 0..DOWNLOAD_THREADS {
-        let cursor = Arc::clone(&cursor);
-        let stop = Arc::clone(&stop);
-        let (k, d, u) = (key.to_string(), dir.clone(), url.to_string());
-        let h = thread::Builder::new()
-            .name("video-cache-download-w".into())
-            .spawn(move || loop {
-                if stop.load(Ordering::Relaxed) {
-                    break;
-                }
-                let i = cursor.fetch_add(1, Ordering::SeqCst);
-                if i >= count {
-                    break;
-                }
-                let chunk_start = i * CHUNK_SIZE;
-                let chunk_end = (chunk_start + CHUNK_SIZE - 1).min(total - 1);
-                let expected_len = (chunk_end - chunk_start + 1) as usize;
+    for i in 0..count {
+        if !download_active(key) {
+            return Ok(false);
+        }
+        let chunk_start = i * CHUNK_SIZE;
+        let chunk_end = (chunk_start + CHUNK_SIZE - 1).min(total - 1);
+        let expected_len = (chunk_end - chunk_start + 1) as usize;
 
-                // Diskda TO'LIQ bor bo'lsa — tarmoqqa umuman chiqilmaydi.
-                if let Ok(m) = fs::metadata(d.join(chunk_name(i))) {
-                    if m.len() == chunk_on_disk_len(expected_len as u64) {
-                        stat_note_chunk(&k, i, expected_len as u64);
-                        continue;
-                    }
-                }
-                let _ = fetch_and_store_chunk(
-                    shared,
-                    &k,
-                    &d,
-                    &u,
-                    i,
-                    chunk_start,
-                    chunk_end,
-                    expected_len,
-                    total,
-                    false,
-                );
-            });
-        if let Ok(h) = h {
-            workers.push(h);
+        // Diskda TO'LIQ bor bo'lsa — tarmoqqa umuman chiqilmaydi
+        // (aynan shu sabab yuklash to'xtagan joyidan davom etadi).
+        if let Ok(m) = fs::metadata(dir.join(chunk_name(i))) {
+            if m.len() == chunk_on_disk_len(expected_len as u64) {
+                stat_note_chunk(key, i, expected_len as u64);
+                continue;
+            }
+        }
+        fetch_and_store_chunk(
+            shared,
+            key,
+            &dir,
+            url,
+            i,
+            chunk_start,
+            chunk_end,
+            expected_len,
+            total,
+            false,
+        )?;
+    }
+    Ok(true)
+}
+
+/// Yuklab olishni boshlaydi yoki davom ettiradi. DARHOL qaytadi.
+/// Bir necha marta bosilsa ham yangi ish oqimi ochilmaydi.
+fn start_download(url: &str) -> bool {
+    if SHARED.get().is_none() {
+        return false;
+    }
+    ensure_pool();
+    let key = cache_key(url);
+    let Ok(mut map) = downloads().lock() else {
+        return false;
+    };
+    match map.get_mut(&key) {
+        Some(st) => {
+            // Allaqachon navbatda — foydalanuvchi qayta bosgan bo'lsa
+            // kutishni bekor qilib, darhol davom ettiramiz.
+            st.wanted = true;
+            st.failures = 0;
+            st.next_try = Instant::now();
+        }
+        None => {
+            map.insert(
+                key.clone(),
+                DownloadState {
+                    url: url.to_string(),
+                    wanted: true,
+                    running: false,
+                    failures: 0,
+                    next_try: Instant::now(),
+                },
+            );
         }
     }
-    for w in workers {
-        let _ = w.join();
+    log(format!("Yuklab olish navbatga qo'yildi: {key}"));
+    true
+}
+
+/// Pauza: vazifa navbatdan olinadi. Yuklangan bo'laklar joyida
+/// qoladi — keyin xohlagan paytda o'sha joydan davom etadi.
+fn stop_download(key: &str) {
+    if let Ok(mut map) = downloads().lock() {
+        if let Some(st) = map.get_mut(key) {
+            st.wanted = false;
+        }
+        // Ish oqimi hozir band bo'lsa, u navbatdagi bo'lakdan oldin
+        // `wanted`ni ko'rib chiqadi; yozuvning o'zi shu yerda olib
+        // tashlanadi.
+        if map.get(key).map(|s| !s.running).unwrap_or(false) {
+            map.remove(key);
+        }
     }
 }
 
@@ -1043,11 +1193,19 @@ fn delete_cached(url: &str) -> bool {
             // Yuklab olish ish oqimlari to'xtashini kutamiz (eng ko'pi
             // 5 soniya) — aks holda ular o'chirilgandan keyin yana yozib
             // qo'yishi mumkin.
-            for _ in 0..100 {
-                if !download_active(&key2) {
+            for _ in 0..200 {
+                let busy = downloads()
+                    .lock()
+                    .map(|m| m.get(&key2).map(|s| s.running).unwrap_or(false))
+                    .unwrap_or(false);
+                if !busy {
                     break;
                 }
                 thread::sleep(Duration::from_millis(50));
+            }
+            // Vazifa qolgan bo'lsa — butunlay olib tashlanadi.
+            if let Ok(mut m) = downloads().lock() {
+                m.remove(&key2);
             }
             // Bo'lak fayllari va meta.json o'chiriladi, papkaning o'zi
             // qoladi (keyingi ochilishda qaytadan ishlatiladi).
@@ -1094,6 +1252,12 @@ pub extern "C" fn rust_video_cache_stats(urls_json_ptr: *const c_char) -> *mut c
         item.insert(
             "downloading".to_string(),
             serde_json::json!(download_active(&key)),
+        );
+        // Tarmoq uzilgan va qayta urinish kutilayotgan bo'lsa — UI
+        // buni ko'rsatishi mumkin (yuklash TO'XTAGANI YO'Q).
+        item.insert(
+            "retrying".to_string(),
+            serde_json::json!(download_failing(&key)),
         );
         out.insert(url, serde_json::Value::Object(item));
     }
@@ -1517,6 +1681,7 @@ fn maybe_prefetch(
                 let (k, d, u) = (key2.clone(), dir2.clone(), url2.clone());
                 let h = thread::Builder::new()
                     .name("video-cache-prefetch-w".into())
+                    .stack_size(256 * 1024)
                     .spawn(move || loop {
                         let i = cursor.fetch_add(1, Ordering::SeqCst);
                         if i >= until {

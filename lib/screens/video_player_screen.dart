@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
@@ -89,6 +90,14 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   String _currentUrl = '';
   // Ro'yxatda YOYILGAN (sifatlari ko'rsatilgan) qismlar kalitlari.
   final Set<String> _expandedEps = {};
+
+  // ── OFLAYN REJIM ─────────────────────────────────────────────
+  // Internet yo'q bo'lganda faqat TO'LIQ yuklab olingan sifatlar va
+  // ular tegishli qismlar ko'rsatiladi — chunki qolganlarini ochib
+  // ham bo'lmaydi va foydalanuvchini "ishlamayapti" deb chalkashtirish
+  // keraksiz.
+  bool _offline = false;
+  StreamSubscription<List<ConnectivityResult>>? _connSub;
   String? _selectedQuality;
   bool _playerLoading = false;
   int _playToken = 0;
@@ -134,6 +143,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _tabCtrl = TabController(length: 3, vsync: this);
+    _watchConnectivity();
     _loadEpisodes();
     _loadSeasons();
   }
@@ -141,6 +151,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _connSub?.cancel();
     DownloadManager.instance.unwatch(this);
     _tabCtrl.dispose();
     _hideTimer?.cancel();
@@ -244,8 +255,46 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     if (mounted && _loadingSeasons) setState(() => _loadingSeasons = false);
   }
 
+  // ── OFLAYN REJIM ─────────────────────────────────────────────
+
+  Future<void> _watchConnectivity() async {
+    void apply(List<ConnectivityResult> r) {
+      final off = r.every((e) => e == ConnectivityResult.none);
+      if (off == _offline) return;
+      if (mounted) setState(() => _offline = off);
+      // Oflayn'da BARCHA qismlarning holati kerak (qaysi biri to'liq
+      // yuklanganini bilish uchun), onlayn'da esa faqat ekrandagilar.
+      _syncWatchedUrls();
+    }
+
+    try {
+      apply(await Connectivity().checkConnectivity());
+    } catch (_) {}
+    _connSub = Connectivity().onConnectivityChanged.listen(apply);
+  }
+
+  /// Shu sifat TO'LIQ yuklab olinganmi.
+  bool _isComplete(String url) =>
+      url.isNotEmpty && DownloadManager.instance.statOf(url).complete;
+
+  /// Oflayn rejimda ko'rsatiladigan sifatlar: faqat to'liq
+  /// yuklanganlari.
+  bool _qualityVisible(String url) => !_offline || _isComplete(url);
+
   // ── Player yordamchilari ───────────────────────────────────────
   String _getUrl(Map<String, dynamic> ep) {
+    // Oflayn: faqat TO'LIQ yuklangan sifat o'ynatiladi.
+    if (_offline) {
+      if (_selectedQuality != null) {
+        final u = (ep['url_$_selectedQuality'] as String?) ?? '';
+        if (_isComplete(u)) return u;
+      }
+      for (final k in ['1080p', '720p', '480p', '360p']) {
+        final v = (ep['url_$k'] as String?) ?? '';
+        if (_isComplete(v)) return v;
+      }
+      return '';
+    }
     if (_selectedQuality != null) {
       final u = (ep['url_$_selectedQuality'] as String?) ?? '';
       if (u.isNotEmpty) return u;
@@ -1219,13 +1268,31 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
               ),
               const SizedBox(height: 8),
               Expanded(
-                child: TabBarView(
-                  controller: _tabCtrl,
-                  children: [
-                    _buildEpisodeTab(),
-                    _buildSeasonsTab(),
-                    _buildInfoTab(tavsif.toString()),
-                  ],
+                // ── NEGA TabBarView EMAS ──────────────────────────
+                // TabBarView sahifalarni PageView kabi yonma-yon
+                // joylashtiradi va bir tabdan boshqasiga o'tganda
+                // ORADAGI tabni ham qurishga majbur bo'ladi — hammasi
+                // ~300 ms lik animatsiya ichida. "Epizodlar"dan
+                // "Ma'lumot"ga o'tishda esa ikkita tab birdan
+                // quriladi (biri rasm yuklaydigan ro'yxat) va ilova
+                // bir zumga QOTIB qolardi.
+                //
+                // IndexedStack esa faqat TANLANGAN tabni ko'rsatadi,
+                // qolganlari o'z holatini saqlab turadi. Pastdagi
+                // `_lazyTab` yordamida tab BIRINCHI MARTA ochilgandagina
+                // quriladi — ya'ni hech qachon ortiqcha ish
+                // bajarilmaydi.
+                child: AnimatedBuilder(
+                  animation: _tabCtrl,
+                  builder: (context, _) => IndexedStack(
+                    index: _tabCtrl.index,
+                    sizing: StackFit.expand,
+                    children: [
+                      _lazyTab(0, _buildEpisodeTab),
+                      _lazyTab(1, _buildSeasonsTab),
+                      _lazyTab(2, () => _buildInfoTab(tavsif.toString())),
+                    ],
+                  ),
                 ),
               ),
             ],
@@ -1233,6 +1300,16 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
         ),
       ),
     );
+  }
+
+  /// Tab BIRINCHI MARTA ochilgandagina quriladi; keyin esa o'z
+  /// holati bilan yashab turadi (qayta ochilganda darhol chiqadi).
+  final Set<int> _builtTabs = {0};
+
+  Widget _lazyTab(int index, Widget Function() build) {
+    if (_tabCtrl.index == index) _builtTabs.add(index);
+    if (!_builtTabs.contains(index)) return const SizedBox.shrink();
+    return build();
   }
 
   Widget _buildFullscreenPlayer() {
@@ -1716,7 +1793,11 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   // foydalanuvchi odatda oxirgi chiqqan qismni qidiradi; avval buning
   // uchun ro'yxatning oxirigacha aylantirish kerak edi.
   List<Map<String, dynamic>> get _orderedEps {
-    final eps = [..._playableEps];
+    var eps = [..._playableEps];
+    // Oflayn: faqat kamida bitta sifati TO'LIQ yuklangan qismlar.
+    if (_offline) {
+      eps = eps.where(_hasCompleteQuality).toList();
+    }
     eps.sort((a, b) => _epNumOf(b).compareTo(_epNumOf(a)));
     return eps;
   }
@@ -1737,8 +1818,16 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
               url: (ep['url_$q'] ?? '').toString(),
               sizeLabel: (ep['size_$q'] ?? '').toString(),
             ))
-        .where((q) => q.url.isNotEmpty)
+        .where((q) => q.url.isNotEmpty && _qualityVisible(q.url))
         .toList();
+  }
+
+  /// Qismning BIRORTA sifati to'liq yuklanganmi (oflayn ro'yxat uchun).
+  bool _hasCompleteQuality(Map<String, dynamic> ep) {
+    for (final q in _availableQualities(ep)) {
+      if (_isComplete((ep['url_$q'] ?? '').toString())) return true;
+    }
+    return false;
   }
 
   /// Yuklab olish holati REAL VAQTDA faqat EKRANDA KO'RINIB TURGAN
@@ -1753,9 +1842,15 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       if (u.isNotEmpty) urls.add(u);
     }
     for (final ep in _episodes) {
-      if (!_expandedEps.contains(_epKeyOf(ep))) continue;
-      for (final q in _qualityInfos(ep)) {
-        urls.add(q.url);
+      // Oflayn rejimda HAR BIR qismning holati kerak: qaysi biri
+      // to'liq yuklanganini bilmasak, ro'yxatni filtrlab bo'lmaydi.
+      // (Bunday paytda so'rash oralig'i ham avtomatik siyraklashadi —
+      // DownloadManager'dagi `_interval`ga qarang.)
+      final expanded = _expandedEps.contains(_epKeyOf(ep));
+      if (!expanded && !_offline) continue;
+      for (final q in _availableQualities(ep)) {
+        final u = (ep['url_$q'] ?? '').toString();
+        if (u.isNotEmpty) urls.add(u);
       }
     }
     DownloadManager.instance.watch(this, urls);
@@ -2201,7 +2296,8 @@ class _QualityRow extends StatelessWidget {
             ? '${_mb(st.total)}MB'
             : (info.sizeLabel.isNotEmpty ? info.sizeLabel : '—');
         final line =
-            '${info.label} / ${st.percent}% / ${_mb(st.downloaded)} / $totalLabel';
+            '${info.label} / ${st.percent}% / ${_mb(st.downloaded)} / $totalLabel'
+            '${st.retrying ? ' · qayta urinilmoqda' : ''}';
         return Padding(
           padding: const EdgeInsets.fromLTRB(12, 0, 8, 10),
           child: Row(
@@ -2236,22 +2332,25 @@ class _QualityRow extends StatelessWidget {
                   ],
                 ),
               ),
-              _MiniIconButton(
-                // Yuklanayotganda pleyerdagidek IKKI CHIZIQ (pauza)
-                // ko'rinadi; yana bosilsa yuklash to'xtaydi va ikonka
-                // avvalgi holatiga qaytadi.
-                icon: st.downloading
-                    ? Icons.pause_rounded
-                    : Icons.download_rounded,
-                highlighted: st.downloading,
-                onTap: () {
-                  if (st.downloading) {
-                    DownloadManager.instance.pause(info.url);
-                  } else {
-                    DownloadManager.instance.download(info.url);
-                  }
-                },
-              ),
+              // TO'LIQ yuklangan sifatda yuklab olish tugmasi
+              // KO'RSATILMAYDI — olinadigan narsa qolmagan.
+              if (!st.complete)
+                _MiniIconButton(
+                  // Yuklanayotganda pleyerdagidek IKKI CHIZIQ (pauza)
+                  // ko'rinadi; yana bosilsa yuklash to'xtaydi va ikonka
+                  // avvalgi holatiga qaytadi.
+                  icon: st.downloading
+                      ? Icons.pause_rounded
+                      : Icons.download_rounded,
+                  highlighted: st.downloading,
+                  onTap: () {
+                    if (st.downloading) {
+                      DownloadManager.instance.pause(info.url);
+                    } else {
+                      DownloadManager.instance.download(info.url);
+                    }
+                  },
+                ),
               const SizedBox(width: 2),
               _MiniIconButton(
                   icon: Icons.delete_outline_rounded, onTap: onDelete),
@@ -2280,17 +2379,18 @@ class _MiniIconButton extends StatelessWidget {
       behavior: HitTestBehavior.opaque,
       onTap: onTap,
       child: Container(
-        margin: const EdgeInsets.only(left: 4),
-        width: 34,
-        height: 34,
+        margin: const EdgeInsets.only(left: 5),
+        // Barmoq bilan aniq tegish uchun kattaroq (34 -> 44).
+        width: 44,
+        height: 44,
         decoration: BoxDecoration(
           color: highlighted
               ? AppColors.accent.withOpacity(0.22)
               : Colors.white.withOpacity(0.08),
-          borderRadius: BorderRadius.circular(10),
+          borderRadius: BorderRadius.circular(12),
         ),
         child: Icon(icon,
-            size: 18,
+            size: 23,
             color: highlighted ? AppColors.accent : Colors.white70),
       ),
     );

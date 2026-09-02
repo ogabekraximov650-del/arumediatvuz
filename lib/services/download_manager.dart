@@ -21,6 +21,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import 'rust_bridge.dart';
+import 'video_cache_server.dart';
 
 /// Bitta video (aniq bir sifat) uchun yuklab olish holati.
 @immutable
@@ -32,13 +33,20 @@ class VideoCacheStat {
   /// Diskda tayyor turgan hajm (bayt).
   final int downloaded;
 
-  /// Hozir fon'da yuklab olinyaptimi.
+  /// Hozir fon'da yuklab olinyaptimi (navbatda turgani ham shunga
+  /// kiradi).
   final bool downloading;
+
+  /// Tarmoq uzilib, qayta urinish kutilyaptimi. Yuklash TO'XTAGANI
+  /// YO'Q — Rust yadrosi o'zi qayta uradi va to'xtagan bo'lagidan
+  /// davom etadi.
+  final bool retrying;
 
   const VideoCacheStat({
     this.total = 0,
     this.downloaded = 0,
     this.downloading = false,
+    this.retrying = false,
   });
 
   static const empty = VideoCacheStat();
@@ -55,10 +63,11 @@ class VideoCacheStat {
       other is VideoCacheStat &&
       other.total == total &&
       other.downloaded == downloaded &&
-      other.downloading == downloading;
+      other.downloading == downloading &&
+      other.retrying == retrying;
 
   @override
-  int get hashCode => Object.hash(total, downloaded, downloading);
+  int get hashCode => Object.hash(total, downloaded, downloading, retrying);
 }
 
 class DownloadManager extends ChangeNotifier {
@@ -101,6 +110,14 @@ class DownloadManager extends ChangeNotifier {
         ..._active,
       };
 
+  /// So'rab turish oralig'i. Ekranda bir nechta sifat ko'rinib
+  /// turganda (odatiy holat) tez — progress silliq o'ssin. Oflayn
+  /// rejimda esa BARCHA qismlarning holati so'raladi; u yerda hech
+  /// narsa yuklanmayotgani uchun tez-tez so'rash keraksiz.
+  Duration get _interval => _tracked.length <= 16
+      ? const Duration(milliseconds: 500)
+      : const Duration(seconds: 2);
+
   void _sync() {
     if (_tracked.isEmpty) {
       _timer?.cancel();
@@ -108,8 +125,15 @@ class DownloadManager extends ChangeNotifier {
       return;
     }
     _poll();
-    _timer ??= Timer.periodic(const Duration(milliseconds: 500), (_) => _poll());
+    final want = _interval;
+    if (_timer == null || _timerInterval != want) {
+      _timer?.cancel();
+      _timerInterval = want;
+      _timer = Timer.periodic(want, (_) => _poll());
+    }
   }
+
+  Duration? _timerInterval;
 
   void _poll() {
     final urls = _tracked.toList();
@@ -126,6 +150,7 @@ class DownloadManager extends ChangeNotifier {
         total: (v['total'] as num?)?.toInt() ?? 0,
         downloaded: (v['downloaded'] as num?)?.toInt() ?? 0,
         downloading: v['downloading'] == true,
+        retrying: v['retrying'] == true,
       );
       if (_stats[entry.key] != stat) {
         _stats[entry.key] = stat;
@@ -146,7 +171,17 @@ class DownloadManager extends ChangeNotifier {
   /// olinadi.
   void download(String url) {
     if (url.isEmpty) return;
+    // Odatiy holat: kesh-server ilova ochilishida allaqachon ishga
+    // tushgan — yuklash shu zahoti boshlanadi.
     RustCore.instance.videoDownload(url);
+    // Kutilmagan holatda (server hali tayyor emas) uni tayyorlab,
+    // buyruqni QAYTA yuboramiz — shu sabab tugma hech qachon
+    // "ishlamay qolmaydi". Buyruq takrorlansa ham yangi yuklash
+    // boshlanmaydi: Rust tomonida vazifa bitta va o'zgarmaydi.
+    VideoCacheServer.instance.ensureStarted().then((_) {
+      RustCore.instance.videoDownload(url);
+      _poll();
+    });
     _active.add(url);
     // Tugmaning ko'rinishi darhol o'zgarishi uchun holatni "yuklanyapti"
     // deb belgilab qo'yamiz — keyingi so'rovda Rust'dan kelgan haqiqiy

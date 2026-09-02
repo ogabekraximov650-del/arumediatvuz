@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'screens/root_screen.dart';
 import 'services/app_keys.dart';
 import 'services/rust_bridge.dart';
+import 'services/video_cache_server.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -25,6 +26,12 @@ Future<void> main() async {
   // Shifrlash kalitini Keystore'dan olib Rust'ga uzatamiz.
   // Muvaffaqiyatsiz bo'lsa ilova shifrlashsiz, avvalgidek ishlaydi.
   await AppKeys.init();
+
+  // Mahalliy video kesh-serveri SHU YERDA ishga tushadi (avval u faqat
+  // birinchi video ochilganda ishga tushardi). Shu sabab endi
+  // foydalanuvchi videoni umuman ochmasdan ham "yuklab olish"ni bosa
+  // oladi — kesh tizimi ilova ochilishi bilan tayyor turadi.
+  await VideoCacheServer.instance.ensureStarted();
 
   runApp(const FulutterApp());
 }

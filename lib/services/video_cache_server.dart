@@ -54,6 +54,22 @@ class VideoCacheServer {
   // Rust tomoni javob bermasa ham, chaqiruvchi (video_player_screen.dart)
   // buni ushlab, ASL (kesh'siz) URL bilan to'g'ridan-to'g'ri o'ynatishga
   // qaytadi.
+  /// Serverni ILOVA OCHILISHIDA ishga tushiradi.
+  ///
+  /// NEGA KERAK: avval server faqat BIRINCHI VIDEO OCHILGANDA ishga
+  /// tushardi. Natijada foydalanuvchi videoni ochmasdan turib "yuklab
+  /// olish"ni bossa, Rust yadrosidagi kesh tizimi hali umuman
+  /// yo'q edi — tugma bosilardi-yu, hech narsa bo'lmasdi.
+  /// Ishga tushirish arzon: bitta mahalliy port ochiladi va bitta
+  /// native ish oqimi boshlanadi (tarmoqqa chiqilmaydi).
+  Future<void> ensureStarted() async {
+    try {
+      await _ensureStarted().timeout(const Duration(seconds: 5));
+    } catch (e) {
+      log('Kesh-serverni oldindan ishga tushirib bo\'lmadi: $e');
+    }
+  }
+
   Future<Uri> proxyUri(String originalUrl) async {
     log('proxyUri chaqirildi: ${_shortUrl(originalUrl)}');
     final port = await _ensureStarted().timeout(const Duration(seconds: 5));

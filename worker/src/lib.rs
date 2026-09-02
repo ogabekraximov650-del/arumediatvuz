@@ -14,11 +14,13 @@
 // to'liq URL bilan saqlangan) qatorlar ham to'g'ri ishlaydi — resolve_url
 // qiymat allaqachon "http" bilan boshlansa uni o'zgartirmasdan qaytaradi.
 //
-// /api/image/:filename — B2 proxy, 450MB'lik bo'laklarga bo'lib Cloudflare
-// Cache API orqali keshlaydi (400 kunga). Bir bo'lak birinchi so'ralganda
-// B2'dan stream orqali (xotiraga to'liq yig'ilmasdan) olinib keshga yoziladi;
-// keyingi barcha so'rovlar to'g'ridan-to'g'ri keshdan xizmat qiladi — B2'ga
-// umuman murojaat qilinmaydi. Bu B2 xarajatini kamaytiradi va tezlikni oshiradi.
+// /api/image/:filename — B2 proxy. Video 1 MiB'lik bo'laklarga bo'lib
+// Cloudflare Cache API orqali keshlanadi (400 kunga) — bo'lak o'lchami
+// ILOVANING bo'lak o'lchami bilan bir xil, shu sabab worker hech qachon
+// 1 MiB'dan ortiq xotira ishlatmaydi (fayl 10 GB bo'lsa ham). Bo'lak
+// birinchi so'ralganda B2'dan olinadi va o'sha zahoti keshga yoziladi;
+// keyingi barcha so'rovlar — boshqa foydalanuvchilardan ham — B2'ga
+// umuman chiqmasdan keshdan beriladi.
 //
 // Cascade delete:
 // DELETE anime → barcha epizod videolari + season rasmlari B2dan → epizod_db → season_db → anime_db
@@ -238,7 +240,36 @@ fn b64(input: &str) -> String {
     out
 }
 
+/// B2 avtorizatsiya tokeni 24 soat amal qiladi, shu sabab u
+/// Cloudflare keshida 12 soatga saqlanadi.
+///
+/// NEGA: har bir kesh-miss uchun B2'ga alohida `b2_authorize_account`
+/// so'rovi ketardi. Bu ham qo'shimcha kechikish (har bir bo'lak uchun
+/// +1 tashqi so'rov), ham B2 tomonidagi keraksiz tranzaksiya edi.
+/// Endi token bir marta olinadi va 12 soat davomida hamma so'rovlar
+/// uni baham ko'radi.
+const AUTH_CACHE_SECONDS: u64 = 12 * 60 * 60;
+
 async fn b2_auth(env: &Env) -> Result<Value> {
+    let cache = Cache::default();
+    let key = Request::new("https://fulutter-chunk-cache.internal/_b2auth", Method::Get)?;
+    if let Some(mut cached) = cache.get(&key, false).await? {
+        if let Ok(v) = cached.json::<Value>().await {
+            if v["authorizationToken"].is_string() {
+                return Ok(v);
+            }
+        }
+    }
+    let fresh = b2_auth_fetch(env).await?;
+    if let Ok(mut to_cache) = Response::from_json(&fresh) {
+        let h = to_cache.headers_mut();
+        let _ = h.set("Cache-Control", &format!("public, max-age={AUTH_CACHE_SECONDS}"));
+        let _ = cache.put(&key, to_cache).await;
+    }
+    Ok(fresh)
+}
+
+async fn b2_auth_fetch(env: &Env) -> Result<Value> {
     let cred = b64(&format!("{}:{}", env.secret("B2_KEY_ID")?, env.secret("B2_APPLICATION_KEY")?));
     let mut h = Headers::new();
     h.set("Authorization", &format!("Basic {cred}"))?;
@@ -296,14 +327,42 @@ async fn b2_get_upload_url(env: &Env) -> Result<Value> {
     Ok(d)
 }
 
-// ── 450MB bo'lak-kesh tizimi ──────────────────────────────────
-// Katta video fayllar 450MB'lik "virtual bo'lak"larga bo'lib
-// Cloudflare Cache API'da alohida-alohida saqlanadi (Cloudflare'ning
-// bitta obyekt uchun keshlash hajm chegarasidan oshib ketmaslik uchun).
-// Kesh kaliti: "{b2_fayl_nomi}chunk{raqam}" — Turso'dagi bare fayl nomi
-// bilan bir xil formatda, faqat "chunkN" qo'shimchasi bilan.
+// ── 1 MiB BO'LAK-KESH TIZIMI ──────────────────────────────────
+//
+// ⚠️ NEGA 450MB'DAN 1 MiB'GA O'TILDI (jiddiy nosozlik tuzatildi):
+//
+// Avval fayl 450MB'lik "virtual bo'lak"larga bo'linib, HAR BIR bo'lak
+// Cloudflare keshiga BUTUNLIGICHA saqlanardi. Mijoz atigi 1 MB
+// so'raganda ham worker o'sha butun bo'lakni `.bytes()` bilan
+// XOTIRAGA YIG'ib, keyin kerakli qismini kesib berardi.
+//
+// Cloudflare Worker'ning xotira chegarasi — 128 MB. Ya'ni 166 MB'lik
+// video uchun bu kod XOTIRAGA SIG'MAY, worker HAR BIR so'rovda
+// yiqilardi: ilovada video umuman ochilmasdi ("Videoni yuklab
+// bo'lmadi"). Kichik (4-9 MB) fayllar ishlagani uchun muammo darrov
+// ko'rinmagan edi.
+//
+// YANGI TIZIM: kesh bo'lagi ILOVANING bo'lak o'lchami bilan AYNAN
+// bir xil — 1 MiB. Natijada:
+//   * worker hech qachon 1 MiB'dan ortiq xotira ishlatmaydi — fayl
+//     hajmi 10 MB ham, 10 GB ham bo'lsin, farqi yo'q;
+//   * so'ralgan bo'lak keshdan to'g'ridan-to'g'ri beriladi;
+//   * kesh bo'sh bo'lsa B2'dan AYNAN o'sha 1 MiB olinadi (avval
+//     birinchi so'rovda B2'dan 450 MB tortib olinardi!) va o'sha
+//     baytlarning o'zi ham keshga yoziladi, ham mijozga beriladi —
+//     ya'ni B2'ga IKKI marta emas, BIR marta murojaat qilinadi.
+//
+// Kesh kaliti ham yangilandi ("/m{N}") — eski 450MB'lik yozuvlar
+// hech qachon o'qilmaydi (ular kesh muddati tugagach o'zi yo'qoladi).
+//
+// Range'siz so'rovlar (rasm yuklash) alohida yo'ldan boradi: kichik
+// fayl butunligicha keshlanadi, katta fayl esa xotiraga yig'ilmasdan
+// OQIM (stream) sifatida o'tkaziladi.
 
-const CHUNK_SIZE: u64 = 450 * 1024 * 1024; // 450MB
+/// Kesh bo'lagi — ilovadagi bo'lak o'lchami bilan bir xil.
+const CACHE_CHUNK: u64 = 1024 * 1024; // 1 MiB
+/// Range'siz (butunlay) keshlanadigan eng katta fayl — rasmlar uchun.
+const FULL_CACHE_MAX: u64 = 12 * 1024 * 1024; // 12 MiB
 const CHUNK_CACHE_SECONDS: u64 = 400 * 24 * 60 * 60; // 400 kun
 
 /// "bytes=START-END?" ni (start, end_yoki_None) ga ajratadi.
@@ -352,197 +411,193 @@ async fn b2_fetch_range(env: &Env, file_name: &str, start: u64, end: u64) -> Res
     Ok((b2_resp, total))
 }
 
-/// B2'ning kichik (mijoz to'g'ridan-to'g'ri kutayotgan) javobini
-/// standart headerlar bilan klientga qaytarish uchun tayyorlaydi.
-/// Bu yo'l faqat KESH MISS holatida, kichik hajmli javob uchun
-/// ishlatiladi — xotiraga to'liq yig'ish xavfsiz.
-///
-/// MUHIM: B2'ga qilingan ICHKI so'rov har doim aniq Range bilan
-/// yuboriladi (shu sabab B2 har doim 206 qaytaradi) — lekin agar
-/// ASL MIJOZ (masalan oddiy rasm so'ragan <img>/CachedNetworkImage)
-/// umuman Range header YUBORMAGAN bo'lsa, unga ham 200 (TO'LIQ
-/// kontent) qaytarishimiz kerak, B2'dan kelgan 206 emas — aks holda
-/// ko'plab HTTP klientlar (jumladan Flutter'ning NetworkImage'i)
-/// kutilmagan 206 statusni xato deb hisoblab, rasm/faylni yuklolmay
-/// qoladi. `has_range` — aynan ASL mijoz so'rovida Range header
-/// bo'lgan-bo'lmaganini bildiradi.
-async fn finalize_b2_response(mut b2_resp: Response, has_range: bool) -> Result<Response> {
-    let status = if has_range { b2_resp.status_code() } else { 200 };
-    let ct = b2_resp.headers().get("Content-Type")?.unwrap_or_else(|| "application/octet-stream".to_string());
-    let content_range = b2_resp.headers().get("Content-Range")?;
-    let content_length = b2_resp.headers().get("Content-Length")?;
-    let bytes = b2_resp.bytes().await?;
-    let mut resp = Response::from_bytes(bytes)?.with_status(status);
-    set_cors(&mut resp);
-    let rh = resp.headers_mut();
-    rh.set("Content-Type", &ct)?;
-    rh.set("Accept-Ranges", "bytes")?;
-    rh.set("Cache-Control", "public, max-age=86400")?;
-    if has_range {
-        if let Some(cr) = content_range { rh.set("Content-Range", &cr)?; }
-    }
-    if let Some(cl) = content_length { rh.set("Content-Length", &cl)?; }
+fn cache_key_url(file_name: &str, suffix: &str) -> String {
+    format!("https://fulutter-chunk-cache.internal/{file_name}/{suffix}")
+}
+
+/// Keshga yozish uchun javob tayyorlaydi (baytlar allaqachon qo'lda —
+/// eng ko'pi 1 MiB, shu sabab xavfsiz).
+fn cacheable(bytes: Vec<u8>, ct: &str, total: u64) -> Result<Response> {
+    let len = bytes.len();
+    let mut resp = Response::from_bytes(bytes)?;
+    let h = resp.headers_mut();
+    h.set("Content-Type", ct)?;
+    h.set("Content-Length", &len.to_string())?;
+    h.set("Accept-Ranges", "bytes")?;
+    h.set("Cache-Control", &format!("public, max-age={CHUNK_CACHE_SECONDS}"))?;
+    h.set("X-Total-Size", &total.to_string())?;
     Ok(resp)
 }
 
-/// Keshdan (bo'lak ichidan) kelgan javobni klientga qaytarish uchun
-/// tayyorlaydi.
+/// B2 proxy. Range bor-yo'qligiga qarab ikki yo'ldan biri tanlanadi.
+async fn b2_proxy(env: &Env, file_name: &str, range: Option<String>) -> Result<Response> {
+    match range.as_deref().and_then(parse_range) {
+        Some((start, end_opt)) => b2_proxy_range(env, file_name, start, end_opt).await,
+        None => b2_proxy_full(env, file_name).await,
+    }
+}
+
+/// ── RANGE BILAN (video) ──────────────────────────────────────
 ///
-/// MUHIM TUZATISH: avval bu funksiya Cloudflare Cache API'ning "Range
-/// so'rovini o'zi avtomatik kesib beradi" degan (NOTO'G'RI chiqqan)
-/// taxminga tayangan edi — amalda esa `cache.get()` lookup so'roviga
-/// Range header qo'yilgan bo'lsa ham, u har doim TO'LIQ keshlangan
-/// bo'lakni (butun faylni, agar u 450MB'dan kichik bo'lsa) status 200
-/// bilan qaytarardi — mijoz (video pleyer) atigi 1MB so'ragan bo'lsa
-/// ham. Bu esa mijoz tomonida yoki butun faylni behuda yuklashga, yoki
-/// pleyer buni tushunolmay "yuklanmoqda" holatida abadiy qotib
-/// qolishiga sabab bo'lardi.
-///
-/// Endi kesh javobining status/Content-Range'iga ISHONMAYDI — o'rniga
-/// keshdagi to'liq baytlardan mijoz haqiqatda so'ragan `rel_start..=rel_end`
-/// oralig'ini QO'LDA kesib oladi.
-///
-/// MUHIM: `has_range` — ASL mijoz so'rovida Range header bo'lgan-
-/// bo'lmaganini bildiradi (`finalize_b2_response`dagi bilan bir xil
-/// sabab — 200/206 farqi ko'plab HTTP klientlar, jumladan Flutter'ning
-/// rasm yuklovchisi, uchun muhim). Range bo'lmasa — TO'LIQ kontent
-/// 200 status bilan, Content-Range'siz qaytariladi.
-async fn finalize_cached_response(
-    mut cached: Response,
-    chunk_abs_start: u64,
-    rel_start: u64,
-    rel_end: u64,
-    has_range: bool,
+/// Ilova (mahalliy Rust kesh-serveri) har doim ANIQ 1 MiB'lik,
+/// chegaraga to'g'ri tekislangan oraliq so'raydi — ya'ni bu yerdagi
+/// kesh bo'lagi bilan bir xil. Shu sabab odatda hech narsa kesilmaydi:
+/// keshdagi bo'lak o'zi so'ralgan bo'lakdir.
+async fn b2_proxy_range(
+    env: &Env,
+    file_name: &str,
+    req_start: u64,
+    req_end_opt: Option<u64>,
 ) -> Result<Response> {
-    let ct = cached.headers().get("Content-Type")?.unwrap_or_else(|| "application/octet-stream".to_string());
-    let total_size = cached.headers().get("X-Total-Size")?.and_then(|s| s.parse::<u64>().ok());
-    let bytes = cached.bytes().await?;
+    let idx = req_start / CACHE_CHUNK;
+    let chunk_start = idx * CACHE_CHUNK;
+    let chunk_end = chunk_start + CACHE_CHUNK - 1;
+
+    let cache = Cache::default();
+    let key = Request::new(&cache_key_url(file_name, &format!("m{idx}")), Method::Get)?;
+
+    // Keshdan yoki B2'dan — HAR IKKALA holatda ham xotirada eng ko'pi
+    // 1 MiB bo'ladi.
+    let (bytes, total, ct) = match cache.get(&key, false).await? {
+        Some(mut cached) => {
+            let ct = cached
+                .headers()
+                .get("Content-Type")?
+                .unwrap_or_else(|| "application/octet-stream".to_string());
+            let total = cached
+                .headers()
+                .get("X-Total-Size")?
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
+            (cached.bytes().await?, total, ct)
+        }
+        None => {
+            let (mut b2, total) = b2_fetch_range(env, file_name, chunk_start, chunk_end).await?;
+            let ct = b2
+                .headers()
+                .get("Content-Type")?
+                .unwrap_or_else(|| "application/octet-stream".to_string());
+            let bytes = b2.bytes().await?;
+            // O'sha baytlarning nusxasi keshga yoziladi — B2'ga
+            // ikkinchi marta chiqilmaydi.
+            if !bytes.is_empty() {
+                let to_cache = cacheable(bytes.clone(), &ct, total)?;
+                cache.put(&key, to_cache).await?;
+            }
+            (bytes, total, ct)
+        }
+    };
+
     let avail = bytes.len() as u64;
-
     if avail == 0 {
-        let mut resp = Response::from_bytes(Vec::new())?.with_status(204);
+        let mut resp = Response::empty()?.with_status(416);
         set_cors(&mut resp);
         return Ok(resp);
     }
 
-    if !has_range {
-        // Mijoz Range so'ramagan (masalan oddiy rasm yuklash) —
-        // butun keshlangan tanani 200 bilan, kesmasdan qaytaramiz.
-        let mut resp = Response::from_bytes(bytes.clone())?.with_status(200);
-        set_cors(&mut resp);
-        let rh = resp.headers_mut();
-        rh.set("Content-Type", &ct)?;
-        rh.set("Accept-Ranges", "bytes")?;
-        rh.set("Cache-Control", "public, max-age=86400")?;
-        rh.set("Content-Length", &avail.to_string())?;
-        return Ok(resp);
-    }
-
-    let s = rel_start.min(avail - 1);
-    let e = rel_end.min(avail - 1);
-    let sliced: Vec<u8> = if s <= e {
-        bytes[s as usize..=e as usize].to_vec()
+    // Mijoz so'ragan qismni bo'lak ichidan kesib olamiz (odatda
+    // butun bo'lak — hech narsa kesilmaydi).
+    let rel_start = req_start.saturating_sub(chunk_start).min(avail - 1);
+    let rel_end = req_end_opt
+        .map(|e| e.saturating_sub(chunk_start))
+        .unwrap_or(avail - 1)
+        .min(avail - 1);
+    let sliced: Vec<u8> = if rel_start <= rel_end {
+        bytes[rel_start as usize..=rel_end as usize].to_vec()
     } else {
         Vec::new()
     };
+    let sliced_len = sliced.len();
 
-    let mut resp = Response::from_bytes(sliced.clone())?.with_status(206);
+    let mut resp = Response::from_bytes(sliced)?.with_status(206);
     set_cors(&mut resp);
-    let rh = resp.headers_mut();
-    rh.set("Content-Type", &ct)?;
-    rh.set("Accept-Ranges", "bytes")?;
-    rh.set("Cache-Control", "public, max-age=86400")?;
-    let abs_s = chunk_abs_start + s;
-    let abs_e = chunk_abs_start + e;
-    let total_str = total_size.map(|t| t.to_string()).unwrap_or_else(|| (chunk_abs_start + avail).to_string());
-    rh.set("Content-Range", &format!("bytes {abs_s}-{abs_e}/{total_str}"))?;
-    rh.set("Content-Length", &sliced.len().to_string())?;
+    let h = resp.headers_mut();
+    h.set("Content-Type", &ct)?;
+    h.set("Accept-Ranges", "bytes")?;
+    h.set("Cache-Control", "public, max-age=86400")?;
+    h.set("Content-Length", &sliced_len.to_string())?;
+    let abs_s = chunk_start + rel_start;
+    let abs_e = chunk_start + rel_end;
+    let total_str = if total > 0 {
+        total.to_string()
+    } else {
+        (chunk_start + avail).to_string()
+    };
+    h.set("Content-Range", &format!("bytes {abs_s}-{abs_e}/{total_str}"))?;
     Ok(resp)
 }
 
-/// B2 proxy — video Range so'rovlarini 450MB'lik bo'laklarga bo'lib
-/// Cloudflare Cache API orqali keshlaydi. Bir bo'lak birinchi
-/// so'ralganda B2'dan STREAM orqali (xotiraga to'liq yig'ilmasdan)
-/// olinib, to'liq holda keshga yoziladi (400 kunga). Keyingi barcha
-/// so'rovlar — hattoki boshqa foydalanuvchilardan ham — B2'ga
-/// umuman murojaat qilinmasdan to'g'ridan-to'g'ri keshdan xizmat
-/// qiladi; Cloudflare Cache API Range so'rovlarni o'zi avtomatik
-/// kesib beradi.
-async fn b2_proxy(env: &Env, file_name: &str, range: Option<String>) -> Result<Response> {
-    // Asl mijoz so'rovida Range header bo'lgan-bo'lmaganini eslab
-    // qolamiz — bu keshdan/B2'dan qaytariladigan javobning 200 (to'liq)
-    // yoki 206 (qisman) bo'lishini belgilaydi (pastdagi izohlarga qarang).
-    let has_range = range.is_some();
-    let (req_start, req_end_opt) = range
-        .as_deref()
-        .and_then(parse_range)
-        .unwrap_or((0, None));
-
-    let chunk_index = req_start / CHUNK_SIZE;
-    let chunk_abs_start = chunk_index * CHUNK_SIZE;
-    let chunk_abs_end = chunk_abs_start + CHUNK_SIZE - 1;
-
-    // Kesh kaliti: B2 fayl nomi + bo'lak raqami, masalan "abc123.mp4chunk0"
-    let cache_url = format!("https://fulutter-chunk-cache.internal/{file_name}chunk{chunk_index}");
+/// ── RANGE'SIZ (rasmlar va oddiy yuklashlar) ──────────────────
+///
+/// Kichik fayl butunligicha keshlanadi. Katta fayl esa XOTIRAGA
+/// YIG'ILMASDAN, oqim (stream) sifatida o'tkaziladi — worker
+/// xotirasi hech qachon to'lib ketmaydi.
+async fn b2_proxy_full(env: &Env, file_name: &str) -> Result<Response> {
     let cache = Cache::default();
+    let key = Request::new(&cache_key_url(file_name, "full"), Method::Get)?;
 
-    // Mijoz so'ragan ABSOLYUT oraliqni bo'lak ICHIDAGI 0-based
-    // nisbiy oraliqqa o'giramiz. Agar so'rov bo'lak chegarasidan
-    // oshib ketsa, shu bo'lak oxirigacha bilan cheklaymiz — pleyer
-    // qolgan qismini avtomatik ravishda keyingi so'rov bilan so'raydi.
-    let rel_start = req_start.saturating_sub(chunk_abs_start).min(CHUNK_SIZE - 1);
-    let rel_end = req_end_opt
-        .map(|e| e.saturating_sub(chunk_abs_start))
-        .unwrap_or(CHUNK_SIZE - 1)
-        .min(CHUNK_SIZE - 1);
-
-    let mut lookup_headers = Headers::new();
-    lookup_headers.set("Range", &format!("bytes={rel_start}-{rel_end}"))?;
-    let lookup_req = Request::new_with_init(
-        &cache_url,
-        RequestInit::new().with_method(Method::Get).with_headers(lookup_headers),
-    )?;
-
-    // ── KESH HIT: to'g'ridan-to'g'ri keshdan, B2'ga murojaat yo'q ──
-    // MUHIM: Cache::get/put uchun kalit QARZ OLINGAN (&Request) bo'lishi
-    // kerak — CacheKey faqat From<&Request> ni amalga oshiradi, egalik
-    // qilingan Request emas (workers-rs 0.8.5).
-    if let Some(cached) = cache.get(&lookup_req, false).await? {
-        return finalize_cached_response(cached, chunk_abs_start, rel_start, rel_end, has_range).await;
+    if let Some(mut cached) = cache.get(&key, false).await? {
+        let ct = cached
+            .headers()
+            .get("Content-Type")?
+            .unwrap_or_else(|| "application/octet-stream".to_string());
+        let cl = cached.headers().get("Content-Length")?;
+        // Keshdagi tanani OQIM sifatida uzatamiz — xotiraga
+        // yig'ilmaydi.
+        let stream = cached.stream()?;
+        let mut resp = Response::from_stream(stream)?.with_status(200);
+        set_cors(&mut resp);
+        let h = resp.headers_mut();
+        h.set("Content-Type", &ct)?;
+        h.set("Accept-Ranges", "bytes")?;
+        h.set("Cache-Control", "public, max-age=86400")?;
+        if let Some(cl) = cl {
+            h.set("Content-Length", &cl)?;
+        }
+        return Ok(resp);
     }
 
-    // ── KESH MISS: bo'lakni B2'dan bitta marta STREAM orqali olib,
-    // Cloudflare keshiga to'liq yozamiz (xotiraga yig'ilmaydi). ──
-    let (mut b2_full, total_size) = b2_fetch_range(env, file_name, chunk_abs_start, chunk_abs_end).await?;
-    let chunk_len = {
-        let cr = b2_full.headers().get("Content-Range")?.unwrap_or_default();
-        parse_content_range(&cr).map(|(s, e, _)| e - s + 1).unwrap_or(0)
-    };
-    // B2'ning HAQIQIY Content-Type'ini saqlab qolamiz (masalan
-    // "image/jpeg", "video/mp4") — avval bu yerga doim
-    // "application/octet-stream" yozib qo'yilardi, shu sabab keshdan
-    // qaytgan javoblarning Content-Type'i har doim noto'g'ri edi.
-    let real_ct = b2_full.headers().get("Content-Type")?.unwrap_or_else(|| "application/octet-stream".to_string());
+    // Birinchi so'rov: eng ko'pi FULL_CACHE_MAX so'raymiz. Javobning
+    // Content-Range'i faylning HAQIQIY hajmini aytadi.
+    let (mut probe, total) = b2_fetch_range(env, file_name, 0, FULL_CACHE_MAX - 1).await?;
+    let ct = probe
+        .headers()
+        .get("Content-Type")?
+        .unwrap_or_else(|| "application/octet-stream".to_string());
 
-    let stream = b2_full.stream()?;
-    let mut to_cache = Response::from_stream(stream)?;
-    {
-        let ch = to_cache.headers_mut();
-        ch.set("Content-Type", &real_ct)?;
-        ch.set("Content-Length", &chunk_len.to_string())?;
-        ch.set("Cache-Control", &format!("public, max-age={CHUNK_CACHE_SECONDS}"))?;
-        ch.set("Accept-Ranges", "bytes")?;
-        ch.set("X-Total-Size", &total_size.to_string())?;
+    if total > 0 && total <= FULL_CACHE_MAX {
+        // Butun fayl qo'limizda — keshlaymiz va qaytaramiz.
+        let bytes = probe.bytes().await?;
+        let len = bytes.len();
+        if !bytes.is_empty() {
+            let to_cache = cacheable(bytes.clone(), &ct, total)?;
+            cache.put(&key, to_cache).await?;
+        }
+        let mut resp = Response::from_bytes(bytes)?.with_status(200);
+        set_cors(&mut resp);
+        let h = resp.headers_mut();
+        h.set("Content-Type", &ct)?;
+        h.set("Accept-Ranges", "bytes")?;
+        h.set("Cache-Control", "public, max-age=86400")?;
+        h.set("Content-Length", &len.to_string())?;
+        return Ok(resp);
     }
-    let put_key = Request::new(&cache_url, Method::Get)?;
-    cache.put(&put_key, to_cache).await?;
 
-    // ── Mijozga darhol javob: kichik, alohida to'g'ridan-to'g'ri
-    // B2 so'rovi orqali (bo'lak butunlay keshlangancha kutmasdan). ──
-    let last_byte = if total_size > 0 { total_size - 1 } else { chunk_abs_start + chunk_len.max(1) - 1 };
-    let req_end = req_end_opt.unwrap_or(last_byte).min(last_byte);
-    let (client_resp, _) = b2_fetch_range(env, file_name, req_start, req_end).await?;
-    finalize_b2_response(client_resp, has_range).await
+    // Katta fayl Range'siz so'ralgan (kutilmagan holat) — oqim
+    // sifatida o'tkazamiz, keshga yozmaymiz.
+    let last = total.saturating_sub(1);
+    let (mut b2, _) = b2_fetch_range(env, file_name, 0, last).await?;
+    let stream = b2.stream()?;
+    let mut resp = Response::from_stream(stream)?.with_status(200);
+    set_cors(&mut resp);
+    let h = resp.headers_mut();
+    h.set("Content-Type", &ct)?;
+    h.set("Accept-Ranges", "bytes")?;
+    h.set("Cache-Control", "public, max-age=86400")?;
+    if total > 0 {
+        h.set("Content-Length", &total.to_string())?;
+    }
+    Ok(resp)
 }
 
 /// B2'dan bitta faylni o'chirish. Qiymat bare fayl nomi (yangi format)

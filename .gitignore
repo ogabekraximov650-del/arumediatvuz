@@ -17,6 +17,8 @@ jniLibs-out/
 # CI'da versiya farqiga olib kelmasligi uchun hozircha chetlab
 # turiladi (avvalgi holat shunday edi).
 rust/target/
+worker/target/
+worker/Cargo.lock
 rust/Cargo.lock
 
 # ── Muharrir / OS ───────────────────────────────────────────────
