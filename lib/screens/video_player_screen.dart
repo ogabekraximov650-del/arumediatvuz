@@ -2145,7 +2145,19 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
         ],
       ),
     );
-    if (ok == true) DownloadManager.instance.delete(q.url);
+    if (ok != true) return;
+    DownloadManager.instance.delete(q.url);
+
+    // ── HOZIR IJRO ETILAYOTGAN SIFAT O'CHIRILGAN BO'LSA ────────
+    // Kesh papkasi shu zahoti yo'q qilinadi, ya'ni pleyer o'qib
+    // turgan oqim uziladi. Uni o'z holiga tashlab qo'ysak, ekranda
+    // "Videoni yuklab bo'lmadi" chiqib qolardi. Shu sabab pleyer
+    // AYNAN SHU joydan qaytadan ochiladi — video worker'dan
+    // yangidan yuklana boshlaydi.
+    if (q.url == _currentUrl) {
+      final at = _controller?.value.position ?? Duration.zero;
+      _recoverPlayer(at);
+    }
   }
 
   Widget _buildEpisodeTab() {

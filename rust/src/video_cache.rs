@@ -105,6 +105,37 @@ static NET_FETCHES: AtomicUsize = AtomicUsize::new(0);
 /// `prefetch_window_for` ga qarang.
 const PREFETCH_WINDOW: u64 = 10;
 
+/// ── ASOSIY QOIDA: PLEYER BUFERIDA 30 SONIYALIK VIDEO ───────────
+///
+/// Server pleyerga ijro nuqtasidan OLDINGA shu qadar video beradi —
+/// undan ortig'ini EMAS. Ya'ni:
+///
+///   * pleyer buferida 30 soniyadan KAM video qolsa — server
+///     navbatdagi bo'lakni beradi;
+///   * 30 soniyadan ORTIQ bo'lsa — server hech narsa bermaydi va
+///     worker'ga umuman murojaat qilmaydi.
+///
+/// Aynan shu YouTube va boshqa striming ilovalaridagi xulq: video
+/// ochilganda faqat ijroga yetadigan qismi olinadi, qolgani esa
+/// KO'RILGAN SARI, kerak bo'lgandagina.
+///
+/// Bo'lakda necha soniya video borligi faylning O'Z jadvalidan aniq
+/// bilinadi (`CacheMeta::chunk_start_ms`) — shu sabab bu qoida
+/// bitreyt o'zgarib tursa ham to'g'ri ishlaydi: jim sahnada 2 ta
+/// bo'lak yetadi, jangovar sahnada 8 ta kerak bo'ladi.
+const BUFFER_SECONDS: u64 = 30;
+
+/// So'ralgan joy bufer chegarasidan narida bo'lsa (ya'ni pleyerning
+/// buferi ALLAQACHON to'la), javob shu muddatgacha ushlab turiladi.
+/// Shu vaqt ichida ijro oldinga siljisa, chegara o'z-o'zidan
+/// ochiladi va bo'lak beriladi.
+///
+/// 4 soniya ATAYLAB tanlangan: ExoPlayer'ning HTTP o'qish
+/// timeout'i 8 soniya, ya'ni bu chegaradan xavfsiz uzoqda. Kutish
+/// pleyerni HECH QACHON to'xtatib qo'ymaydi — chunki u faqat
+/// pleyerda kamida 30 soniyalik video BOR bo'lganda ishlaydi.
+const HOLD_MS: u64 = 4000;
+
 /// Oynaning eng katta ruxsat etilgan kengligi (bo'lak = MiB).
 ///
 /// QOIDA O'ZGARMAYDI: oyna HAR DOIM "hajm ÷ davomiylik", ya'ni bir
@@ -131,6 +162,12 @@ const MAX_PREFETCH_WINDOW: u64 = 128;
 /// mos ravishda oshadi. Oyna 10 MB bo'lgani uchun bundan ortig'i
 /// keraksiz — u faqat trafikni oldinga surib yuborardi.
 const PREFETCH_THREADS: usize = 3;
+
+/// O'chirilayotgan papkalar shu prefiks bilan nomlanadi. Ular
+/// "video" emas — kesh skanerlash ularni e'tiborsiz qoldiradi, ilova
+/// ishga tushganda esa qolib ketganlari tozalanadi (masalan ilova
+/// o'chirish o'rtasida yopilgan bo'lsa).
+const TRASH_PREFIX: &str = ".axlat_";
 
 // ── Umumiy holat ─────────────────────────────────────────────────────
 
@@ -305,6 +342,12 @@ pub extern "C" fn rust_video_cache_start(cache_dir_ptr: *const c_char) -> i32 {
                 }
                 let key = entry.file_name().to_string_lossy().to_string();
                 if key.is_empty() {
+                    continue;
+                }
+                // Oldingi sessiyada o'chirish oxirigacha yetmagan
+                // bo'lsa — qoldiq papka shu yerda yo'q qilinadi.
+                if key.starts_with(TRASH_PREFIX) {
+                    let _ = fs::remove_dir_all(entry.path());
                     continue;
                 }
                 let (total, have) = stat_snapshot(&key, &entry.path());
@@ -1768,6 +1811,8 @@ fn delete_cached(url: &str) -> bool {
     };
     let key = cache_key(url);
     stop_download(&key);
+
+    // ── XOTIRADAGI HAMMA IZ DARHOL TOZALANADI ──────────────────
     // Hajm saqlanadi (u manbadan olingan, o'chirilishi shart emas) —
     // shu bilan ro'yxatda "0% / 0 / 240MB" ko'rinadi.
     let total = {
@@ -1775,16 +1820,55 @@ fn delete_cached(url: &str) -> bool {
         map.get(&key).map(|e| e.total).unwrap_or(0)
     };
     stat_reset(&key, total);
+    // Davomiylik va bo'lak-vaqt jadvali ham yangi fayl uchun
+    // qaytadan hisoblanishi kerak.
+    forget_derived(&key);
+    if let Ok(mut m) = shared.net_by_file.lock() {
+        m.remove(&key);
+    }
 
+    // ═══════════════════════════════════════════════════════════
+    //  PAPKA BUTUNLAY O'CHIRILADI — VA AYNI SHU LAHZADA
+    // ═══════════════════════════════════════════════════════════
+    //
+    // ── AVVALGI XATO ────────────────────────────────────────────
+    // Avval fayllar FON ish oqimida, yuklovchilar to'xtashini 5
+    // SONIYAGACHA kutib turgandan keyin o'chirilardi. Shu 5 soniya
+    // ichida foydalanuvchi videoni qayta ochsa, pleyer yangi
+    // meta.json va bo'laklarni yozib ulgurar, keyin esa o'chiruvchi
+    // oqim ularni ham supurib tashlardi. Natijada video "qayta
+    // yuklanmay" qolar va ekranda "Videoni yuklab bo'lmadi" chiqardi
+    // — foydalanuvchi ko'rgan xato aynan shu edi.
+    //
+    // ── ENDI ────────────────────────────────────────────────────
+    // Papka BIR LAHZADA boshqa nomga ko'chiriladi (`rename` — atom
+    // va bir zumda bajariladigan amal). Shu paytdan boshlab eski nom
+    // bo'sh: keyin yozilgan HAR QANDAY bo'lak YANGI, toza papkaga
+    // tushadi va hech qachon o'chirilmaydi. Axlat papkasi esa fon'da
+    // butunlay (`remove_dir_all` — ichidagi hamma fayl bilan)
+    // yo'q qilinadi.
     let dir = shared.cache_root.join(&key);
+    let trash = shared
+        .cache_root
+        .join(format!("{TRASH_PREFIX}{}_{}", key, micros_now()));
+    let moved = fs::rename(&dir, &trash).is_ok();
+    if !moved {
+        // Papka yo'q bo'lsa ham shu yerga tushamiz — zarari yo'q.
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     let key2 = key.clone();
     let spawned = thread::Builder::new()
         .name("video-cache-delete".into())
+        .stack_size(256 * 1024)
         .spawn(move || {
-            // Yuklab olish ish oqimlari to'xtashini kutamiz (eng ko'pi
-            // 5 soniya) — aks holda ular o'chirilgandan keyin yana yozib
-            // qo'yishi mumkin.
-            for _ in 0..200 {
+            if moved {
+                let _ = fs::remove_dir_all(&trash);
+            }
+            // Yuklab olish vazifasi qolgan bo'lsa — olib tashlanadi.
+            // (Ish oqimi navbatdagi bo'lakdan oldin `wanted`ni
+            // ko'rib o'zi to'xtaydi.)
+            for _ in 0..40 {
                 let busy = downloads()
                     .lock()
                     .map(|m| m.get(&key2).map(|s| s.running).unwrap_or(false))
@@ -1794,22 +1878,15 @@ fn delete_cached(url: &str) -> bool {
                 }
                 thread::sleep(Duration::from_millis(50));
             }
-            // Vazifa qolgan bo'lsa — butunlay olib tashlanadi.
             if let Ok(mut m) = downloads().lock() {
                 m.remove(&key2);
             }
-            // Bo'lak fayllari va meta.json o'chiriladi, papkaning o'zi
-            // qoladi (keyingi ochilishda qaytadan ishlatiladi).
-            if let Ok(entries) = fs::read_dir(&dir) {
-                for entry in entries.flatten() {
-                    let _ = fs::remove_file(entry.path());
-                }
-            }
-            stats().lock().unwrap().remove(&key2);
-            forget_derived(&key2);
-            log(format!("Kesh tozalandi: {key2}"));
+            log(format!("Kesh butunlay tozalandi (papka bilan): {key2}"));
         });
-    spawned.is_ok()
+    // Fayllar ALLAQACHON (rename bilan) yo'q qilingan — fon oqimi
+    // ochilmasa ham natija to'g'ri.
+    let _ = spawned;
+    true
 }
 
 // ── FFI: yuklab olish boshqaruvi va holati ──────────────────────────
@@ -2383,10 +2460,9 @@ fn key_tag(key: &str) -> u64 {
 /// Vaqtdan baytga o'tish videoning o'rtacha bitreyti bo'yicha
 /// hisoblanadi: bu H.265 uchun yetarli aniq va hech qanday
 /// qo'shimcha metadata talab qilmaydi.
-fn playing_chunk(key: &str, dir: &PathBuf, total: u64, secs: f64) -> Option<u64> {
-    if total == 0 {
-        return None;
-    }
+/// Dart tomoni xabar qilgan ijro nuqtasi (ms) — faqat SHU video
+/// uchun va faqat xabar YANGI bo'lsa.
+fn reported_pos_ms(key: &str) -> Option<u64> {
     if PLAY_POS_KEY.load(Ordering::Relaxed) != key_tag(key) {
         return None;
     }
@@ -2400,7 +2476,64 @@ fn playing_chunk(key: &str, dir: &PathBuf, total: u64, secs: f64) -> Option<u64>
     if at == 0 || now_ms.saturating_sub(at) > PLAY_POS_FRESH_MS {
         return None;
     }
-    let pos_ms = PLAY_POS_MS.load(Ordering::Relaxed);
+    Some(PLAY_POS_MS.load(Ordering::Relaxed))
+}
+
+/// ── BUFER CHEGARASI: ijro nuqtasidan 30 soniyalik video ────────
+///
+/// Qaytaradi: shu javobda berilishi mumkin bo'lgan OXIRGI bo'lak
+/// indeksi. Undan naridagi bo'lak uchun worker'ga umuman
+/// chiqilmaydi.
+///
+/// Ikki yo'l:
+///   * faylning ANIQ jadvali bor bo'lsa — "ijro vaqti + 30 s" dan
+///     oldin boshlanadigan oxirgi bo'lak (bitreyt qanday
+///     o'zgarishidan qat'i nazar to'g'ri);
+///   * jadval hali qurilmagan bo'lsa — o'rtacha bitreyt bo'yicha
+///     30 soniyalik hajm.
+///
+/// Keshda TAYYOR turgan bo'laklar bepul (tarmoqqa chiqilmaydi), shu
+/// sabab chegara ular ustidan cheklovsiz davom etadi.
+fn buffer_limit(
+    key: &str,
+    dir: &PathBuf,
+    total: u64,
+    secs: f64,
+    origin: u64,
+    chunk_count: u64,
+) -> u64 {
+    if chunk_count == 0 {
+        return 0;
+    }
+    let mut limit = match (time_index(key, dir, total), reported_pos_ms(key)) {
+        (Some(idx), Some(pos_ms)) => {
+            let deadline = pos_ms.saturating_add(BUFFER_SECONDS * 1000);
+            let mut l = origin;
+            while l + 1 < chunk_count {
+                match idx.get((l + 1) as usize) {
+                    Some(t) if (*t as u64) < deadline => l += 1,
+                    _ => break,
+                }
+            }
+            l
+        }
+        _ => origin.saturating_add(window_for_seconds(total, secs, BUFFER_SECONDS)),
+    };
+    if limit >= chunk_count {
+        limit = chunk_count - 1;
+    }
+    // Keshda bor bo'laklar tekin — javob ular ustidan davom etadi.
+    while limit + 1 < chunk_count && chunk_cached(dir, limit + 1, total) {
+        limit += 1;
+    }
+    limit
+}
+
+fn playing_chunk(key: &str, dir: &PathBuf, total: u64, secs: f64) -> Option<u64> {
+    if total == 0 {
+        return None;
+    }
+    let pos_ms = reported_pos_ms(key)?;
 
     // ── 1) ANIQ YO'L: faylning o'z jadvalidan ──────────────────
     // Har bir bo'lakda qaysi soniyadan boshlanishi ANIQ yozilgan
@@ -3200,21 +3333,17 @@ fn duration_secs(key: &str, dir: &PathBuf, total: u64) -> f64 {
     secs
 }
 
-/// Oldindan yuklash oynasi (bo'laklarda) — videoning bitreytiga
-/// qarab: bir daqiqalik video necha MiB bo'lsa, shuncha.
+/// `want` soniyalik video O'RTACHA necha bo'lakka to'g'ri keladi.
 ///
-/// Davomiylik hali aniqlanmagan bo'lsa (1-bo'lak keshda yo'q) —
-/// zaxira qiymat PREFETCH_WINDOW ishlatiladi.
-fn prefetch_window_for(total: u64, secs: f64) -> u64 {
-    if secs <= 0.0 || total == 0 {
+/// Bu ZAXIRA hisob: faylning aniq jadvali (`chunk_start_ms`) hali
+/// qurilmagan paytda ishlatiladi. Jadval tayyor bo'lgach chegara
+/// undan ANIQ olinadi va bu yerga umuman kelinmaydi.
+fn window_for_seconds(total: u64, secs: f64, want: u64) -> u64 {
+    if secs <= 0.0 || total == 0 || want == 0 {
         return PREFETCH_WINDOW;
     }
-    let mib = total as f64 / (1024.0 * 1024.0);
-    let minutes = secs / 60.0;
-    if minutes <= 0.0 {
-        return PREFETCH_WINDOW;
-    }
-    let w = (mib / minutes).floor() as u64;
+    let bytes = total as f64 * (want as f64 / secs);
+    let w = (bytes / CHUNK_SIZE as f64).floor() as u64;
     w.clamp(1, MAX_PREFETCH_WINDOW)
 }
 
@@ -3275,9 +3404,6 @@ fn maybe_prefetch(
         .spawn(move || {
             let chunk_count = total.div_ceil(CHUNK_SIZE);
             let secs = duration_secs(&key2, &dir2, total);
-            // Oyna videoning bitreytidan hisoblanadi: "bir daqiqalik
-            // video necha MiB bo'lsa, shuncha bo'lak oldinda tursin".
-            let window = prefetch_window_for(total, secs);
             // ── OYNANING BOSHLANISH NUQTASI ───────────────────────
             // Oyna IJRO nuqtasidan hisoblanadi, bufer uchidan EMAS.
             // Pleyer o'zi ijro nuqtasidan bir necha bo'lak oldinga
@@ -3285,6 +3411,12 @@ fn maybe_prefetch(
             // boshlasak, ikkalasi qo'shilib ketadi va oyna ikki
             // barobar kengayadi (PLAY_POS_MS izohiga qarang).
             let origin = playing_chunk(&key2, &dir2, total, secs).unwrap_or(current_chunk);
+            // Oldindan yuklash ham AYNAN SHU chegara bilan ishlaydi:
+            // ijro nuqtasidan 30 soniyalik video, undan ortig'i emas.
+            // Ikkalasi bir xil chegarani ishlatgani uchun "bufer +
+            // oyna" qo'shilib ketishi mumkin emas.
+            let limit = buffer_limit(&key2, &dir2, total, secs, origin, chunk_count);
+            let window = limit.saturating_sub(origin);
             let (from, until) = prefetch_range(origin, chunk_count, window);
 
             // ── PARALLEL YUKLASH ──────────────────────────────────
@@ -3455,23 +3587,50 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
     //    qaytadi.
     let chunk_count = total.div_ceil(CHUNK_SIZE);
     let secs = duration_secs(&key, &dir, total);
-    let window = prefetch_window_for(total, secs);
     let start_chunk = start / CHUNK_SIZE;
     let unlimited = download_active(&key);
     if !unlimited && chunk_count > 0 {
-        let origin = playing_chunk(&key, &dir, total, secs).unwrap_or(start_chunk);
-        // `.max(start_chunk)` — ijro nuqtasi so'ralgan joydan
-        // orqada bo'lsa ham javob KAMIDA bitta bo'lak beradi
-        // (aks holda pleyer bo'sh javob olib qotib qolardi).
-        let mut limit = origin.saturating_add(window).max(start_chunk);
-        // Keshda tayyor turganlari ustidan cheklovsiz davom etamiz.
-        while limit + 1 < chunk_count && chunk_cached(&dir, limit + 1, total) {
-            limit += 1;
+        let mut origin = playing_chunk(&key, &dir, total, secs).unwrap_or(start_chunk);
+        let mut limit = buffer_limit(&key, &dir, total, secs, origin, chunk_count);
+
+        // ── PLEYER BUFERI TO'LA BO'LSA — JAVOB USHLAB TURILADI ──
+        //
+        // So'ralgan joy chegaradan narida bo'lsa, demak pleyerda
+        // ALLAQACHON 30 soniyadan ortiq video bor. Bunday holda
+        // darhol javob bermaymiz: eng ko'pi HOLD_MS kutamiz va shu
+        // vaqt ichida ijro oldinga siljisa, chegara o'zi ochiladi.
+        //
+        // NEGA BU KERAK: cheklovsiz holda pleyer (ExoPlayer) o'z
+        // ichki buferini to'ldirish uchun ketma-ket yangi so'rov
+        // ochaverardi va har safar bittadan bo'lak olib, amalda
+        // to'xtovsiz yuklab yotardi. Endi u faqat buferi
+        // 30 soniyadan kamayganda bo'lak oladi.
+        //
+        // Kutish pleyerni HECH QACHON to'xtatib qo'ymaydi — chunki
+        // u faqat bufer TO'LA bo'lganda ishlaydi.
+        if start_chunk > limit {
+            let mut waited = 0u64;
+            while start_chunk > limit && waited < HOLD_MS {
+                thread::sleep(Duration::from_millis(200));
+                waited += 200;
+                origin = playing_chunk(&key, &dir, total, secs).unwrap_or(start_chunk);
+                limit = buffer_limit(&key, &dir, total, secs, origin, chunk_count);
+            }
+            if waited > 0 {
+                log(format!(
+                    "Bufer to'la — javob {waited} ms ushlab turildi (ijro #{origin})"
+                ));
+            }
         }
+
+        // Ijro nuqtasi so'ralgan joydan orqada bo'lsa ham javob
+        // KAMIDA bitta bo'lak beradi (aks holda pleyer bo'sh javob
+        // olib qotib qolardi).
+        let limit = limit.max(start_chunk);
         let cap_end = ((limit + 1) * CHUNK_SIZE).saturating_sub(1).min(total - 1);
         if end > cap_end {
             log(format!(
-                "Javob oynasi: ijro #{origin}, oyna {window} -> #{limit} bo'lakkacha                  ({start}-{cap_end}, so'ralgani {end})"
+                "Bufer chegarasi: ijro #{origin} -> #{limit} bo'lak ({start}-{cap_end}, so'ralgani {end})"
             ));
             end = cap_end;
         }
@@ -3869,13 +4028,14 @@ mod tests {
         //
         // Bu ENG MUHIM yangi qoida. Alohida video yasaymiz:
         //   hajm       = 20 MiB (20 ta bo'lak)
-        //   davomiylik = 600 s (10 daqiqa) -> 2 MiB/daqiqa -> oyna 2
+        //   davomiylik = 600 s (10 daqiqa) -> 2 MiB/daqiqa
+        // 30 soniyalik bufer = 1 MiB = 1 bo'lak oyna.
         // Keshda faqat 0-bo'lak bor, qolganlari yo'q va manba
         // (127.0.0.1:9) mavjud emas.
         //
         // Pleyer "bytes=0-" deb butun faylni so'raydi. Javob esa
-        // 0 + 2 = 2-indeksli bo'lakda TUGASHI kerak, ya'ni jami
-        // 3 MiB (3 ta bo'lak) — undan ortig'i EMAS.
+        // 0 + 1 = 1-indeksli bo'lakda TUGASHI kerak, ya'ni jami
+        // 2 MiB (2 ta bo'lak) — undan ortig'i EMAS.
         const W_NAME: &str = "oyna.mp4";
         const W_TOTAL: u64 = 20 * CHUNK_SIZE;
         let w_dir = root.join("video_byte_cache").join(W_NAME);
@@ -3937,18 +4097,18 @@ mod tests {
         assert_eq!(status, 206);
         assert_eq!(
             cr,
-            format!("bytes 0-{}/{W_TOTAL}", 3 * CHUNK_SIZE - 1),
-            "javob oynadan (0 + 2 bo'lak) tashqariga chiqib ketdi"
+            format!("bytes 0-{}/{W_TOTAL}", 2 * CHUNK_SIZE - 1),
+            "javob bufer chegarasidan (0 + 1 bo'lak) tashqariga chiqdi"
         );
 
         // O'RTADAN so'ralganda ham xuddi shunday: 10-bo'lakdan
-        // boshlansa, 12-bo'lakda tugaydi.
+        // boshlansa, 11-bo'lakda tugaydi.
         let (status, cr, _) = w_req(&format!("bytes={}-", 10 * CHUNK_SIZE));
         assert_eq!(status, 206);
         assert_eq!(
             cr,
-            format!("bytes {}-{}/{W_TOTAL}", 10 * CHUNK_SIZE, 13 * CHUNK_SIZE - 1),
-            "o'rtadan so'ralgan javob oynadan chiqib ketdi"
+            format!("bytes {}-{}/{W_TOTAL}", 10 * CHUNK_SIZE, 12 * CHUNK_SIZE - 1),
+            "o'rtadan so'ralgan javob bufer chegarasidan chiqdi"
         );
 
         // YUKLAB OLISH tugmasi bosilgan bo'lsa — cheklov YO'Q.
@@ -4086,32 +4246,33 @@ mod tests {
         let total = (166.54 * 1024.0 * 1024.0) as u64; // 166.54 MiB
         let secs = 24.0 * 60.0 + 5.0; // 24:05 = 1445 soniya
         // 166.54 / 24.0833 = 6.91... -> 6 (7 ga YETMAGANI uchun)
-        assert_eq!(prefetch_window_for(total, secs), 6);
+        assert_eq!(window_for_seconds(total, secs, 60), 6);
+
+        // ASOSIY QOIDA — 30 soniyalik bufer: shuning yarmi.
+        assert_eq!(window_for_seconds(total, secs, BUFFER_SECONDS), 3);
 
         // Davomiylik hali noma'lum — zaxira qiymat.
-        assert_eq!(prefetch_window_for(total, 0.0), PREFETCH_WINDOW);
-        assert_eq!(prefetch_window_for(0, secs), PREFETCH_WINDOW);
+        assert_eq!(window_for_seconds(total, 0.0, 60), PREFETCH_WINDOW);
+        assert_eq!(window_for_seconds(0, secs, 60), PREFETCH_WINDOW);
 
         // Foydalanuvchining ikkinchi misoli: 1000 MiB / 25 daqiqa
-        // -> 40 bo'lak (ya'ni oldindan 40 MiB tayyor turadi).
+        // -> bir daqiqalik video 40 bo'lak, 30 soniyalik — 20.
+        assert_eq!(window_for_seconds(1000 * 1024 * 1024, 25.0 * 60.0, 60), 40);
         assert_eq!(
-            prefetch_window_for(1000 * 1024 * 1024, 25.0 * 60.0),
-            40
+            window_for_seconds(1000 * 1024 * 1024, 25.0 * 60.0, BUFFER_SECONDS),
+            20
         );
 
         // Yuqori bitreytli fayl ham qoidaga bo'ysunadi (chegara
         // endi 128, shu sabab 100 kesilmaydi).
-        assert_eq!(
-            prefetch_window_for(2500 * 1024 * 1024, 25.0 * 60.0),
-            100
-        );
+        assert_eq!(window_for_seconds(2500 * 1024 * 1024, 25.0 * 60.0, 60), 100);
 
         // Juda past bitreyt ham kamida 1 bo'lak beradi.
-        assert_eq!(prefetch_window_for(1024 * 1024, 3600.0), 1);
+        assert_eq!(window_for_seconds(1024 * 1024, 3600.0, 60), 1);
 
         // Buzuq metadata (1 soniyalik "1 GB" video) chegaralanadi.
         assert_eq!(
-            prefetch_window_for(1024 * 1024 * 1024, 1.0),
+            window_for_seconds(1024 * 1024 * 1024, 1.0, 60),
             MAX_PREFETCH_WINDOW
         );
     }
