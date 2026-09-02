@@ -331,17 +331,26 @@ async fn b2_get_upload_url(env: &Env) -> Result<Value> {
 // ── SO'RALGAN ORALIQNI KESHLASH TIZIMI ────────────────────────
 //
 // Video fayllar Cloudflare Cache API'da MIJOZ SO'RAGAN oraliqlar
-// bo'yicha saqlanadi: ilova har doim aniq 1 MiB'lik, tekislangan
-// oraliqni so'raydi, shu sabab kesh kalitlari barqaror va qayta
+// bo'yicha saqlanadi: ilova har doim aniq 4 MiB'lik, tekislangan
+// "guruh" so'raydi, shu sabab kesh kalitlari barqaror va qayta
 // ishlatiladi. Oraliq birinchi so'ralganda B2'dan BIR MARTA
 // olinadi, mijozga darhol beriladi va fon'da (`wait_until`) keshga
 // yoziladi (400 kunga). Keyingi barcha so'rovlar — boshqa
 // foydalanuvchilardan ham — B2'ga umuman chiqmasdan Cloudflare
 // chekkasidan xizmat qiladi.
 //
-// Xotira: bir so'rovda eng ko'pi 4 MB (RANGE_MAX) — worker'ning
-// 128 MB chegarasidan juda uzoq. Fayl 166 MB bo'lsin, 10 GB
-// bo'lsin, xotira sarfi bir xil.
+// Xotira: bir so'rovda eng ko'pi 8 MB (RANGE_MAX) — worker'ning
+// 128 MB chegarasidan uzoq. Fayl 166 MB bo'lsin, 10 GB bo'lsin,
+// xotira sarfi bir xil.
+//
+// ── B2 XARAJATI ──────────────────────────────────────────────
+// B2'da har bir yuklab olish so'rovi "Class B" tranzaksiya, ya'ni
+// pul. Ilova bo'laklarni 4 tadan guruh qilib so'ragani uchun
+// 166 MB'lik video B2'ga ATIGI ~42 ta so'rov qiladi (bo'lakma-bo'lak
+// bo'lganda 166 ta bo'lardi). Ustiga bu so'rovlar FAQAT keshda
+// bo'lmagan oraliqlar uchun ketadi — bir marta keshga tushgach,
+// o'sha oraliq 400 kun davomida barcha foydalanuvchilarga
+// Cloudflare chekkasidan, B2'ga umuman chiqmasdan xizmat qiladi.
 //
 // ✅ NIMA TUZATILDI (yuklab olish 0.2-0.5 MB/s da sudralardi):
 //
@@ -494,10 +503,18 @@ async fn b2_proxy_range(
     req_start: u64,
     req_end_opt: Option<u64>,
 ) -> Result<Response> {
-    // Bir so'rovda xotiraga olinadigan eng katta hajm. Ilova 1 MiB
-    // so'raydi; ochiq (oxiri ko'rsatilmagan) so'rov shu chegaragacha
-    // qisqartiriladi — bu HTTP jihatidan mutlaqo to'g'ri 206 javob.
-    const RANGE_MAX: u64 = 4 * 1024 * 1024;
+    // Bir so'rovda xotiraga olinadigan eng katta hajm.
+    //
+    // Ilova bo'laklarni 4 MiB'lik GURUH bilan so'raydi (B2
+    // tranzaksiyalarini kamaytirish uchun — `GROUP_CHUNKS` izohiga
+    // qarang), shu sabab 8 MB zaxira bilan yetarli. Ochiq (oxiri
+    // ko'rsatilmagan) so'rov shu chegaragacha qisqartiriladi — bu
+    // HTTP jihatidan mutlaqo to'g'ri 206 javob.
+    //
+    // Worker'ning 128 MB xotirasi bir nechta bir vaqtdagi so'rov
+    // o'rtasida bo'linadi, shu sabab bu chegara ATAYLAB kichik:
+    // 6 ta parallel so'rov ham eng ko'pi ~48 MB egallaydi.
+    const RANGE_MAX: u64 = 8 * 1024 * 1024;
 
     let req_end = req_end_opt
         .unwrap_or(req_start + RANGE_MAX - 1)

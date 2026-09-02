@@ -1340,7 +1340,32 @@ const DOWNLOAD_WORKERS: usize = 2;
 /// Yagona chegara — oqimlar soni, va u xotira uchun kerak: bir vaqtda
 /// eng ko'pi 12 x 1 MiB bufer bo'ladi. Tezlikni esa endi faqat
 /// foydalanuvchining tarmog'i belgilaydi.
-const DOWNLOAD_THREADS: usize = 12;
+const DOWNLOAD_THREADS: usize = 6;
+
+/// ── BITTA USTKI SO'ROVDA NECHTA BO'LAK OLINADI ────────────────
+///
+/// Diskda bo'laklar avvalgidek 1 MiB bo'lib, alohida shifrlangan
+/// holda saqlanadi — sek, foiz hisobi va uzilishdan keyin davom
+/// ettirish shunga tayanadi va o'zgarmaydi.
+///
+/// LEKIN worker'ga (va u orqali B2'ga) so'rov endi bo'lakma-bo'lak
+/// emas, GURUH bilan yuboriladi.
+///
+/// NEGA: har bir ustki so'rov B2'da bitta "Class B" tranzaksiya —
+/// ya'ni PUL. 1 MiB bo'lak bilan 166 MB'lik video = 166 ta so'rov
+/// edi. 4 tadan guruh bilan bu 42 ga tushadi, ya'ni B2 xarajati
+/// TO'RT BAROBAR kamayadi. Ustiga har bir so'rovning yo'l vaqti
+/// (latency) endi 1 MiB'ga emas, 4 MiB'ga taqsimlanadi — shu sabab
+/// yuklab olish TEZLIGI ham oshadi.
+///
+/// Xotira oshmaydi: javob oqimi bo'lakma-bo'lak o'qiladi, bir vaqtda
+/// faqat bitta 1 MiB bufer turadi (`fetch_and_store_chunk` ga
+/// qarang).
+///
+/// 4 ATAYLAB tanlangan: 4 MiB ~ bu ilovadagi videolar uchun 30-35
+/// soniyalik tasvir, ya'ni pleyerning bufer talabiga deyarli aniq
+/// mos keladi va ortiqcha trafik sarflanmaydi.
+const GROUP_CHUNKS: u64 = 4;
 
 struct DownloadState {
     url: String,
@@ -2062,37 +2087,62 @@ enum FetchPrio {
 /// "keyinroq qaytib kel" degan belgi.
 const BUSY_ERR: &str = "__band__";
 
+/// Bo'lakni diskka YAKUNIY holda yozadi (shifrlab, atom ravishda).
+fn write_full_chunk(dir: &PathBuf, key: &str, index: u64, plain: &[u8]) -> bool {
+    let on_disk: Vec<u8> = match crypto::derive_chunk_key_iv(key, index) {
+        Some((k, iv)) => crypto::encrypt_chunk(plain, &k, &iv),
+        None => plain.to_vec(),
+    };
+    let tmp = dir.join(format!("{}.{}.tmp", chunk_name(index), micros_now()));
+    if fs::write(&tmp, &on_disk).is_err() {
+        let _ = fs::remove_file(&tmp);
+        return false;
+    }
+    if fs::rename(&tmp, dir.join(chunk_name(index))).is_err() {
+        let _ = fs::remove_file(&tmp);
+        return false;
+    }
+    // Yakuniy bo'lak joyiga tushdi — eski qoldiq endi keraksiz.
+    remove_part(dir, index);
+    true
+}
+
 fn fetch_and_store_chunk(
     shared: &Shared,
     key: &str,
     dir: &PathBuf,
     url: &str,
     index: u64,
-    start: u64,
-    end: u64,
+    _start: u64,
+    _end: u64,
     expected_len: usize,
     expected_total: u64,
     prio: FetchPrio,
 ) -> Result<Vec<u8>, String> {
-    let final_path = dir.join(chunk_name(index));
-    let flight_key = format!("{key}#{index}");
+    let total = expected_total;
+    if total == 0 {
+        return Err("hajm noma'lum".to_string());
+    }
+    let chunk_count = total.div_ceil(CHUNK_SIZE);
+    if index >= chunk_count {
+        return Err(format!("bo'lak #{index} fayldan tashqarida"));
+    }
 
-    // Boshqa ish oqimi bu bo'lakni bizdan oldin allaqachon yuklab
-    // boshlagan bo'lishi mumkin — bunday holda diskda paydo bo'lishini
-    // (yoki bo'sh joy ochilishini) kutamiz, ikkinchi marta tarmoqqa
-    // chiqmaymiz.
+    // ── GURUH: bitta ustki so'rov nechta bo'lakni oladi ─────────
+    let group = index / GROUP_CHUNKS;
+    let g_first = group * GROUP_CHUNKS;
+    let g_last = (g_first + GROUP_CHUNKS - 1).min(chunk_count - 1);
+    // "Uchish" belgisi endi BO'LAK emas, GURUH bo'yicha: bir xil
+    // guruhni ikkita oqim baravar tortib olmasligi uchun.
+    let flight_key = format!("{key}#g{group}");
+
+    // Boshqa ish oqimi bu guruhni bizdan oldin allaqachon yuklab
+    // boshlagan bo'lishi mumkin — bunday holda kerakli bo'lak diskda
+    // paydo bo'lishini kutamiz, ikkinchi marta tarmoqqa chiqmaymiz.
     //
-    // MUHIM TUZATISH (sek qilganda "qotib qolish"ning asosiy sababi):
-    // avval bu kutish CHEKSIZ edi. Agar bo'lakni yuklab olayotgan ish
-    // oqimi sekin tarmoqda uzoq osilib qolsa, pleyerga xizmat
-    // ko'rsatayotgan ulanish shu yerda ABADIY aylanardi. Foydalanuvchi
-    // ketma-ket sek qilganda bunday "osilgan" ulanishlar to'planib,
-    // MAX_CONNS chegarasiga yetardi va undan keyingi so'rovlar RAD
-    // ETILARDI — pleyer javobsiz qolib qotib qolardi.
-    //
-    // Endi kutish 6 soniya bilan chegaralangan: shu vaqt ichida bo'lak
-    // paydo bo'lmasa, biz uni O'ZIMIZ yuklab olamiz. Ikki marta yuklab
-    // olish — qotib qolishdan ming marta yaxshiroq, ustiga-ustak
+    // Kutish 6 soniya bilan chegaralangan: shu vaqt ichida bo'lak
+    // paydo bo'lmasa, biz uni O'ZIMIZ olamiz. Ikki marta yuklab olish
+    // — pleyerning qotib qolishidan ming marta yaxshiroq, ustiga
     // diskka yozish atom (tmp -> rename) bo'lgani uchun xavfsiz.
     let wait_deadline = Instant::now() + Duration::from_secs(6);
     let mut we_own_flight = false;
@@ -2108,16 +2158,14 @@ fn fetch_and_store_chunk(
         if let Some(bytes) = read_cached_chunk(dir, key, index, expected_len) {
             return Ok(bytes);
         }
-        // YUKLAB OLISH hech qachon kutmaydi: band bo'lak chetga
-        // qo'yiladi va oqim darhol keyingi bo'lakka o'tadi. Aks
-        // holda video ochiq turganda yuklovchining hamma oqimlari
-        // pleyer olayotgan bo'laklarda 6 soniyagacha osilib qolardi.
+        // YUKLAB OLISH hech qachon kutmaydi: band guruh chetga
+        // qo'yiladi va oqim darhol keyingi bo'lakka o'tadi.
         if prio == FetchPrio::Download {
             return Err(BUSY_ERR.to_string());
         }
         if Instant::now() >= wait_deadline {
             log(format!(
-                "Bo'lak #{index} kutish muddati tugadi — mustaqil yuklab olinadi"
+                "Guruh #{group} kutish muddati tugadi — mustaqil yuklab olinadi"
             ));
             break;
         }
@@ -2125,7 +2173,7 @@ fn fetch_and_store_chunk(
     }
 
     let result = (|| -> Result<Vec<u8>, String> {
-        // Boshqa ish oqimi bizni kutayotganimiz orasida ulgurgan bo'lishi
+        // Boshqa ish oqimi biz kutayotganimizda ulgurgan bo'lishi
         // mumkin — yana bir bor tekshiramiz.
         if let Some(bytes) = read_cached_chunk(dir, key, index, expected_len) {
             return Ok(bytes);
@@ -2156,8 +2204,6 @@ fn fetch_and_store_chunk(
                     NET_FETCHES.fetch_add(1, Ordering::SeqCst);
                     break;
                 }
-                // Kutish paytida bo'lak boshqa oqim tomonidan yuklanib
-                // qolgan bo'lishi mumkin.
                 if let Some(bytes) = read_cached_chunk(dir, key, index, expected_len) {
                     return Ok(bytes);
                 }
@@ -2174,54 +2220,52 @@ fn fetch_and_store_chunk(
         }
         let _guard = FetchGuard;
 
-        // ── QOLDIQDAN DAVOM ETISH ────────────────────────────────
-        // Oldingi urinishda bu bo'lakning bir qismi olinib, tarmoq
-        // uzilgan bo'lishi mumkin. O'sha qism diskda saqlangan: uni
-        // o'qib olamiz va tarmoqdan FAQAT yetishmayotgan dumini
-        // so'raymiz. Shu bilan har bir urinish oldingisining ustiga
-        // qo'shiladi va bo'lak oxir-oqibat albatta tugaydi.
-        let prefix = read_part(dir, key, index, expected_len).unwrap_or_default();
-        let resume_from = start + prefix.len() as u64;
-        if !prefix.is_empty() {
-            log(format!(
-                "Bo'lak #{index}: qoldiqdan davom — {} bayt tayyor, {resume_from}-{end} so'raladi",
-                prefix.len()
-            ));
+        // ── GURUHNING QAYSI JOYIDAN BOSHLAYMIZ ─────────────────
+        // Guruh boshidagi TAYYOR bo'laklar qayta so'ralmaydi.
+        let mut from = g_first;
+        while from < index && chunk_cached(dir, from, total) {
+            from += 1;
         }
+        // ── QOLDIQDAN DAVOM ETISH ──────────────────────────────
+        // Oldingi urinishda shu bo'lakning bir qismi olinib, tarmoq
+        // uzilgan bo'lishi mumkin. O'sha qism diskda saqlangan: uni
+        // o'qib, tarmoqdan FAQAT yetishmayotgan dumini so'raymiz.
+        let from_len = chunk_plain_len(from, total) as usize;
+        let prefix = read_part(dir, key, from, from_len).unwrap_or_default();
+        let range_start = from * CHUNK_SIZE + prefix.len() as u64;
+        let range_end = ((g_last + 1) * CHUNK_SIZE).saturating_sub(1).min(total - 1);
+        if range_start > range_end {
+            return read_cached_chunk(dir, key, index, expected_len)
+                .ok_or_else(|| format!("bo'lak #{index} topilmadi"));
+        }
+
         log(format!(
-            "Bo'lak #{index} worker'dan yuklanmoqda ({resume_from}-{end})..."
+            "Guruh #{group} (bo'laklar {from}..={g_last}) worker'dan olinmoqda ({range_start}-{range_end})..."
         ));
-        let range = format!("bytes={resume_from}-{end}");
         let resp = shared
             .agent
             .get(url)
-            .set("Range", &range)
+            .set("Range", &format!("bytes={range_start}-{range_end}"))
             .call()
             .map_err(|e| e.to_string())?;
         let status = resp.status();
-        log(format!("Bo'lak #{index} javob: status={status}"));
 
-        // ── BUTUNLIK TEKSHIRUVI ────────────────────────────────────
-        // Yuklab olishdan OLDIN, serverning (Cloudflare kesh/B2)
-        // e'lon qilgan UMUMIY fayl hajmini "Content-Range: bytes s-e/TOTAL"
-        // dan olib, diskdagi meta.json'da saqlangan hajm bilan
-        // solishtiramiz. Agar mos kelmasa — demak manbadagi fayl
-        // o'zgargan (qayta yuklangan) va bizning keshimiz ESKIRGAN:
-        // bunday holda eski bo'laklarni saqlab qolish videoni buzib
-        // ko'rsatishga olib kelardi. Shu sabab kesh butunlay tozalanadi
-        // va keyingi ochishda hammasi yangidan, to'g'ri hajm bilan
-        // yuklab olinadi.
+        // ── BUTUNLIK TEKSHIRUVI ────────────────────────────────
+        // Serverning e'lon qilgan UMUMIY fayl hajmi diskdagi
+        // meta.json bilan mos kelmasa — manbadagi fayl o'zgargan va
+        // keshimiz ESKIRGAN. Bunday holda eski bo'laklarni saqlash
+        // videoni buzib ko'rsatishga olib kelardi.
         if let Some(cr) = resp.header("Content-Range") {
             if let Some(server_total_str) = cr.rsplit('/').next() {
                 if let Ok(server_total) = server_total_str.trim().parse::<u64>() {
-                    if expected_total > 0 && server_total != expected_total {
+                    if server_total != total {
                         log(format!(
-                            "XATO: hajm mos emas! meta.json={expected_total}, serverda={server_total} — kesh tozalanmoqda"
+                            "XATO: hajm mos emas! meta.json={total}, serverda={server_total} — kesh tozalanmoqda"
                         ));
                         invalidate_cache(dir);
                         forget_derived(key);
                         return Err(format!(
-                            "hajm mos emas (meta={expected_total}, server={server_total})"
+                            "hajm mos emas (meta={total}, server={server_total})"
                         ));
                     }
                 }
@@ -2229,27 +2273,24 @@ fn fetch_and_store_chunk(
         }
 
         // Manba Range'ni e'tiborsiz qoldirib TO'LIQ faylni (0-baytdan)
-        // 200 status bilan yuborishi mumkin — bunday holda kerakli
-        // qismni javob tanasining ICHKARISIDAN ajratib olamiz va kerakli
-        // baytlar to'planishi bilan o'qishni TO'XTATAMIZ (qolgan butun
-        // faylni behuda yuklab olmaslik uchun).
-        // Manba Range'ni e'tiborsiz qoldirsa, javob 0-baytdan
-        // boshlanadi — bunday holda bizda ALLAQACHON bor bo'lgan
-        // qoldiq ham tashlab yuboriladi (`resume_from`, `start` emas).
-        let ignores_range = status == 200;
-        let skip_bytes = if ignores_range { resume_from as usize } else { 0 };
+        // yuborishi mumkin — bunday holda kerakli joygacha bo'lgan
+        // baytlar tashlab yuboriladi.
+        let mut skip = if status == 200 { range_start as usize } else { 0 };
 
+        // ── OQIMNI BO'LAKMA-BO'LAK DISKKA YOZAMIZ ──────────────
+        // Xotirada bir vaqtda faqat BITTA bo'lak (1 MiB) turadi —
+        // guruh 4 MiB bo'lsa ham. To'lgan bo'lak darhol shifrlanib
+        // diskka tushadi, keyingisi noldan yig'iladi.
+        let mut cur = from;
+        let mut want = from_len;
+        let mut acc: Vec<u8> = prefix;
+        let mut wanted_bytes: Option<Vec<u8>> = None;
         let mut reader = resp.into_reader();
-        let mut collected: Vec<u8> = Vec::with_capacity(expected_len);
-        // Diskdagi qoldiq — yangi baytlar aynan uning ustiga qo'shiladi.
-        collected.extend_from_slice(&prefix);
-        let mut skipped = 0usize;
         let mut buf = [0u8; 64 * 1024];
-        // O'qish o'rtada uzilsa DARHOL chiqmaymiz: avval shu paytgacha
-        // yig'ilgan qismni diskka saqlab qo'yamiz (pastda), xatoni esa
-        // shundan keyin qaytaramiz.
         let mut read_err: Option<String> = None;
-        loop {
+        let mut got_net: u64 = 0;
+
+        'outer: loop {
             let n = match reader.read(&mut buf) {
                 Ok(n) => n,
                 Err(e) => {
@@ -2261,93 +2302,71 @@ fn fetch_and_store_chunk(
                 break;
             }
             let mut piece = &buf[..n];
-            if skipped < skip_bytes {
-                let to_skip = (skip_bytes - skipped).min(piece.len());
-                piece = &piece[to_skip..];
-                skipped += to_skip;
+            if skip > 0 {
+                let k = skip.min(piece.len());
+                piece = &piece[k..];
+                skip -= k;
                 if piece.is_empty() {
                     continue;
                 }
             }
-            let remaining = expected_len - collected.len();
-            let take = piece.len().min(remaining);
-            collected.extend_from_slice(&piece[..take]);
-            if collected.len() >= expected_len {
-                break;
+            got_net += piece.len() as u64;
+            while !piece.is_empty() {
+                if want == 0 || acc.len() >= want {
+                    break;
+                }
+                let take = (want - acc.len()).min(piece.len());
+                acc.extend_from_slice(&piece[..take]);
+                piece = &piece[take..];
+                if acc.len() < want {
+                    continue;
+                }
+                // Bo'lak to'ldi — diskka yozamiz.
+                if write_full_chunk(dir, key, cur, &acc) {
+                    stat_note_chunk(key, cur, want as u64);
+                }
+                if cur == index {
+                    wanted_bytes = Some(acc.clone());
+                }
+                if cur >= g_last {
+                    break 'outer;
+                }
+                cur += 1;
+                want = chunk_plain_len(cur, total) as usize;
+                acc = Vec::with_capacity(want);
             }
         }
-        // Tarmoqdan olingan baytlarning UMUMIY hisobi — foydalanuvchi
-        // ekranda "qancha MB ketdi"ni aniq ko'rishi uchun. Agar bu son
-        // o'smay tursa, demak barcha ma'lumot keshdan o'qilyapti va
-        // tarmoqqa umuman chiqilmayapti.
-        // DIQQAT: bu son faqat HOZIR tarmoqdan olingan baytlar —
-        // diskdagi qoldiq ikkinchi marta sanalmaydi.
-        let got = (collected.len() - prefix.len()) as u64;
-        let total_net = NET_BYTES.fetch_add(got, Ordering::Relaxed) + got;
-        // Shu FAYL uchun alohida hisob — "MB aynan qaysi faylga ketyapti"
-        // degan savolga to'g'ridan-to'g'ri javob beradi.
+
+        // Yarim qolgan bo'lak — qoldiq sifatida saqlanadi, keyingi
+        // urinish AYNAN shu joydan davom etadi.
+        if cur <= g_last && !acc.is_empty() && acc.len() < want {
+            write_part(dir, key, cur, &acc);
+            log(format!(
+                "Bo'lak #{cur} to'liq emas ({}/{want}) — qoldiq saqlandi",
+                acc.len()
+            ));
+        }
+
+        // Tarmoqdan olingan baytlarning umumiy hisobi.
+        let total_net = NET_BYTES.fetch_add(got_net, Ordering::Relaxed) + got_net;
         let file_net = {
             let mut m = shared.net_by_file.lock().unwrap();
             let e = m.entry(key.to_string()).or_insert(0);
-            *e += got;
+            *e += got_net;
             *e
         };
         log(format!(
-            "TARMOQDAN >>> fayl='{key}' bo'lak #{index} ({start}-{end}) {got}/{expected_len} bayt | shu fayl: {:.2} MB | jami: {:.2} MB | manba={url}",
+            "TARMOQDAN >>> fayl='{key}' guruh #{group} ({range_start}-{range_end}) {got_net} bayt | shu fayl: {:.2} MB | jami: {:.2} MB",
             file_net as f64 / (1024.0 * 1024.0),
             total_net as f64 / (1024.0 * 1024.0)
         ));
 
-        if collected.len() == expected_len {
-            // Diskka YOZISHDAN OLDIN shifrlanadi (bo'lak o'ziga xos
-            // kalit bilan — crypto.rs'ga qarang). Pleyerga (chaqiruvchi
-            // funksiyaga) esa OCHIQ bayt qaytariladi (pastdagi
-            // `Ok(collected)`) — u hech qachon shifrlangan holatni
-            // ko'rmaydi.
-            let on_disk: Vec<u8> = match crypto::derive_chunk_key_iv(key, index) {
-                Some((k, iv)) => crypto::encrypt_chunk(&collected, &k, &iv),
-                None => collected.clone(),
-            };
-            // Diskka faqat TO'LIQ bo'lak yuklab bo'lingandan keyin,
-            // vaqtinchalik nomdan YAKUNIY nomga ATOM ravishda ko'chirib
-            // yoziladi.
-            let tmp_path = dir.join(format!(
-                "{}.{}.tmp",
-                chunk_name(index),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_micros())
-                    .unwrap_or(0)
-            ));
-            fs::write(&tmp_path, &on_disk).map_err(|e| e.to_string())?;
-            if fs::rename(&tmp_path, &final_path).is_err() {
-                let _ = fs::remove_file(&tmp_path);
-            } else {
-                // YAKUNIY, TO'LIQ bo'lak joyiga tushdi — endi eski
-                // qoldiq keraksiz va O'CHIRILADI. Ya'ni qoldiq har doim
-                // yangi to'liq bo'lak bilan ALMASHTIRILADI.
-                remove_part(dir, index);
-                // Progress ko'rsatkichi REAL VAQTDA shu yerdan
-                // yangilanadi — video ko'rilayotganda ham, alohida
-                // yuklab olinayotganda ham.
-                stat_note_chunk(key, index, expected_len as u64);
-            }
-        } else if collected.len() > prefix.len() {
-            // TO'LIQ EMAS — lekin oldingi urinishdan ko'proq olindi.
-            // Yig'ilgan qism saqlanadi: keyingi urinish AYNAN shu
-            // joydan davom etadi, noldan emas.
-            write_part(dir, key, index, &collected);
-            log(format!(
-                "Bo'lak #{index} to'liq emas ({}/{expected_len}) — qoldiq saqlandi",
-                collected.len()
-            ));
+        match wanted_bytes {
+            Some(b) => Ok(b),
+            None => read_cached_chunk(dir, key, index, expected_len).ok_or_else(|| {
+                read_err.unwrap_or_else(|| format!("bo'lak #{index} to'liq olinmadi"))
+            }),
         }
-        if let Some(e) = read_err {
-            if collected.len() != expected_len {
-                return Err(e);
-            }
-        }
-        Ok(collected)
     })();
 
     if we_own_flight {
@@ -3795,6 +3814,110 @@ mod tests {
         }
     }
 
+
+    /// "bytes=S-E" yoki "bytes=S-" ni (s, e) ga ajratadi.
+    fn parse_test_range(range: &str, total: u64) -> (u64, u64) {
+        let spec = range.strip_prefix("bytes=").unwrap_or("");
+        let (s_str, e_str) = spec.split_once('-').unwrap_or((spec, ""));
+        let s: u64 = s_str.trim().parse().unwrap_or(0);
+        let e: u64 = if e_str.trim().is_empty() {
+            total - 1
+        } else {
+            e_str.trim().parse().unwrap_or(total - 1)
+        };
+        (s, e.min(total - 1))
+    }
+
+    /// Test uchun eng oddiy "manba" server: Range so'rovlarini
+    /// bajaradi va kelgan har bir Range'ni ro'yxatga yozadi.
+    /// Tana baytlari o'z pozitsiyasidan hosil bo'ladi, shu sabab
+    /// ma'lumot to'g'ri joydan kelganini tekshirish mumkin.
+    fn start_origin(total: u64) -> (u16, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let l2 = Arc::clone(&log);
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut st) = stream else { continue };
+                let l3 = Arc::clone(&l2);
+                thread::spawn(move || {
+                    let mut buf = [0u8; 4096];
+                    let n = st.read(&mut buf).unwrap_or(0);
+                    let text = String::from_utf8_lossy(&buf[..n]).to_string();
+                    if text.starts_with("HEAD") {
+                        let _ = st.write_all(
+                            b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        );
+                        return;
+                    }
+                    let mut range = String::new();
+                    for line in text.split("\r\n") {
+                        if let Some(v) = line.strip_prefix("Range: ") {
+                            range = v.trim().to_string();
+                        }
+                    }
+                    l3.lock().unwrap().push(range.clone());
+                    let (s, e) = parse_test_range(&range, total);
+                    let len = e - s + 1;
+                    let head = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Type: video/mp4\r\nContent-Length: {len}\r\nContent-Range: bytes {s}-{e}/{total}\r\nConnection: close\r\n\r\n"
+                    );
+                    let _ = st.write_all(head.as_bytes());
+                    let body: Vec<u8> = (s..=e).map(|i| (i % 251) as u8).collect();
+                    let _ = st.write_all(&body);
+                });
+            }
+        });
+        (port, log)
+    }
+
+    /// Ixtiyoriy manba URL'i bilan proksiga so'rov yuboradi.
+    fn request_url(
+        port: u16,
+        origin_url: &str,
+        range: Option<&str>,
+    ) -> (u16, String, usize, Vec<u8>) {
+        let encoded: String = origin_url
+            .chars()
+            .map(|c| match c {
+                ':' => "%3A".to_string(),
+                '/' => "%2F".to_string(),
+                c => c.to_string(),
+            })
+            .collect();
+        let mut st = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        st.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+        let mut req = format!("GET /v?u={encoded} HTTP/1.1\r\nHost: x\r\n");
+        if let Some(r) = range {
+            req.push_str(&format!("Range: {r}\r\n"));
+        }
+        req.push_str("\r\n");
+        st.write_all(req.as_bytes()).unwrap();
+        let mut br = BufReader::new(st);
+        let mut status_line = String::new();
+        br.read_line(&mut status_line).unwrap();
+        let status: u16 = status_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let mut cr = String::new();
+        loop {
+            let mut line = String::new();
+            if br.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                break;
+            }
+            if let Some(v) = line.strip_prefix("Content-Range: ") {
+                cr = v.trim().to_string();
+            }
+        }
+        let mut body = Vec::new();
+        let _ = br.read_to_end(&mut body);
+        let len = body.len();
+        (status, cr, len, body)
+    }
+
     /// So'rov yuboradi. `read_limit` — javob tanasidan necha bayt
     /// o'qilsin (None = hammasi). Qaytaradi: (status, content-range,
     /// o'qilgan bayt soni).
@@ -4022,6 +4145,58 @@ mod tests {
         assert!(
             !dir.join(chunk_name(5)).exists(),
             "yarim qolgan bo'lak o'chirilmadi"
+        );
+
+
+        // ── 12) GURUH BILAN OLISH (B2 xarajatini kamaytirish) ─────
+        //
+        // Ustki so'rov bo'lakma-bo'lak emas, GURUH bilan ketishi
+        // kerak: 10 ta bo'lakli fayl uchun 10 emas, ATIGI 3 ta
+        // so'rov (4 + 4 + 2 bo'lak).
+        //
+        // Buni tekshirish uchun soxta "manba" server ko'tariladi va
+        // unga kelgan har bir Range so'rovi sanaladi.
+        const G_TOTAL: u64 = 10 * CHUNK_SIZE;
+        let (o_port, o_log) = start_origin(G_TOTAL);
+        let g_name = "guruh.mp4";
+        let g_url = format!("http://127.0.0.1:{o_port}/{g_name}");
+
+        let (status, _cr, glen, gbody) = request_url(port, &g_url, Some("bytes=0-"));
+        assert_eq!(status, 206);
+        assert_eq!(glen as u64, G_TOTAL, "butun fayl kelmadi");
+        // Ma'lumot to'g'ri joydan kelgani (guruh bo'laklarga to'g'ri
+        // bo'lingani) — bo'lak chegaralarida ham tekshiriladi.
+        let cs = CHUNK_SIZE as usize;
+        for probe in [0usize, cs - 1, cs, 4 * cs - 1, 4 * cs, glen - 1] {
+            assert_eq!(gbody[probe], (probe % 251) as u8, "bayt {probe} noto'g'ri");
+        }
+
+        // Oldindan yuklash oqimi ham shu guruhlarni so'rashi mumkin,
+        // lekin "uchish" belgisi guruh bo'yicha bo'lgani uchun bir
+        // guruh IKKI MARTA so'ralmaydi.
+        let ranges: Vec<String> = o_log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| *r != "bytes=0-0")
+            .cloned()
+            .collect();
+        assert_eq!(
+            ranges.len(),
+            3,
+            "10 ta bo'lak uchun 3 ta guruh so'rovi kutilgandi, keldi: {ranges:?}"
+        );
+        assert_eq!(ranges[0], format!("bytes=0-{}", 4 * CHUNK_SIZE - 1));
+
+        // Ikkinchi marta so'ralganda TARMOQQA UMUMAN chiqilmaydi.
+        let before = o_log.lock().unwrap().len();
+        let (status, _, glen2, _) = request_url(port, &g_url, Some("bytes=0-"));
+        assert_eq!(status, 206);
+        assert_eq!(glen2 as u64, G_TOTAL);
+        assert_eq!(
+            o_log.lock().unwrap().len(),
+            before,
+            "keshda bor bo'lsa ham manbaga so'rov ketdi"
         );
 
         // ── 11) JAVOB OYNASI: TARMOQQA OYNADAN ORTIQ CHIQILMAYDI ──
