@@ -2230,13 +2230,15 @@ class _EpisodeTile extends StatelessWidget {
                 behavior: HitTestBehavior.opaque,
                 onTap: onToggleExpand,
                 child: Padding(
-                  padding: const EdgeInsets.fromLTRB(4, 8, 10, 8),
+                  padding: const EdgeInsets.fromLTRB(4, 6, 8, 6),
                   child: Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                    // Uch ikonkali tugma KATTALASHTIRILDI — barmoq
+                    // bilan tegish qulay bo'lsin (foydalanuvchi talabi).
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 11, vertical: 8),
                     decoration: BoxDecoration(
                       color: Colors.white.withOpacity(0.08),
-                      borderRadius: BorderRadius.circular(9),
+                      borderRadius: BorderRadius.circular(11),
                       border: Border.all(color: Colors.white24),
                     ),
                     child: Row(
@@ -2247,13 +2249,13 @@ class _EpisodeTile extends StatelessWidget {
                                 ? Icons.keyboard_arrow_up_rounded
                                 : Icons.keyboard_arrow_down_rounded,
                             color: Colors.white,
-                            size: 17),
-                        const SizedBox(width: 5),
+                            size: 23),
+                        const SizedBox(width: 8),
                         const Icon(Icons.download_rounded,
-                            color: Colors.white70, size: 15),
-                        const SizedBox(width: 5),
+                            color: Colors.white70, size: 21),
+                        const SizedBox(width: 8),
                         const Icon(Icons.delete_outline_rounded,
-                            color: Colors.white70, size: 15),
+                            color: Colors.white70, size: 21),
                       ],
                     ),
                   ),

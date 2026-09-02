@@ -361,6 +361,23 @@ async fn b2_get_upload_url(env: &Env) -> Result<Value> {
 
 /// Kesh bo'lagi — ilovadagi bo'lak o'lchami bilan bir xil.
 const CACHE_CHUNK: u64 = 1024 * 1024; // 1 MiB
+
+/// B2'ga BITTA so'rov bilan olinadigan oyna (bo'laklar soni).
+///
+/// NEGA: B2 haqi ikki narsadan iborat — uzatilgan trafik va SO'ROVLAR
+/// SONI. Trafik B2 va Cloudflare o'rtasida (Bandwidth Alliance) tekin,
+/// ya'ni amalda faqat so'rovlar soni qoladi. Agar har bir 1 MiB uchun
+/// alohida so'rov yuborilsa, 166 MB'lik video uchun 166 ta so'rov
+/// ketardi.
+///
+/// Endi kesh bo'sh bo'lganda B2'dan BITTA so'rov bilan 8 MiB olinadi
+/// va u DARHOL 8 ta alohida 1 MiB'lik kesh yozuviga bo'lib yoziladi.
+/// Natijada:
+///   * B2 so'rovlari 8 BAROBAR kamayadi (166 -> 21);
+///   * keshdan o'qish avvalgidek arzon qoladi (har safar atigi 1 MiB
+///     xotiraga olinadi — 8 MiB emas);
+///   * worker xotirasi eng ko'pi ~16 MB bo'ladi (chegara 128 MB).
+const FETCH_WINDOW: u64 = 8;
 /// Range'siz (butunlay) keshlanadigan eng katta fayl — rasmlar uchun.
 const FULL_CACHE_MAX: u64 = 12 * 1024 * 1024; // 12 MiB
 const CHUNK_CACHE_SECONDS: u64 = 400 * 24 * 60 * 60; // 400 kun
@@ -451,7 +468,6 @@ async fn b2_proxy_range(
 ) -> Result<Response> {
     let idx = req_start / CACHE_CHUNK;
     let chunk_start = idx * CACHE_CHUNK;
-    let chunk_end = chunk_start + CACHE_CHUNK - 1;
 
     let cache = Cache::default();
     let key = Request::new(&cache_key_url(file_name, &format!("m{idx}")), Method::Get)?;
@@ -472,19 +488,35 @@ async fn b2_proxy_range(
             (cached.bytes().await?, total, ct)
         }
         None => {
-            let (mut b2, total) = b2_fetch_range(env, file_name, chunk_start, chunk_end).await?;
+            // Kesh bo'sh — B2'dan BITTA so'rov bilan 8 MiB'lik oyna
+            // olinadi va u 8 ta alohida 1 MiB yozuvga bo'lib
+            // keshlanadi (FETCH_WINDOW izohiga qarang).
+            let win = idx / FETCH_WINDOW;
+            let win_start = win * FETCH_WINDOW * CACHE_CHUNK;
+            let win_end = win_start + FETCH_WINDOW * CACHE_CHUNK - 1;
+            let (mut b2, total) = b2_fetch_range(env, file_name, win_start, win_end).await?;
             let ct = b2
                 .headers()
                 .get("Content-Type")?
                 .unwrap_or_else(|| "application/octet-stream".to_string());
-            let bytes = b2.bytes().await?;
-            // O'sha baytlarning nusxasi keshga yoziladi — B2'ga
-            // ikkinchi marta chiqilmaydi.
-            if !bytes.is_empty() {
-                let to_cache = cacheable(bytes.clone(), &ct, total)?;
-                cache.put(&key, to_cache).await?;
+            let all = b2.bytes().await?;
+
+            let mut wanted: Vec<u8> = Vec::new();
+            for (n, piece) in all.chunks(CACHE_CHUNK as usize).enumerate() {
+                let piece_idx = win * FETCH_WINDOW + n as u64;
+                if piece_idx == idx {
+                    wanted = piece.to_vec();
+                }
+                let piece_key = Request::new(
+                    &cache_key_url(file_name, &format!("m{piece_idx}")),
+                    Method::Get,
+                )?;
+                let to_cache = cacheable(piece.to_vec(), &ct, total)?;
+                // Kesh yozuvi qo'shilmasa ham javob berish davom
+                // etadi — foydalanuvchi kutib qolmasligi kerak.
+                let _ = cache.put(&piece_key, to_cache).await;
             }
-            (bytes, total, ct)
+            (wanted, total, ct)
         }
     };
 
