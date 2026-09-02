@@ -106,11 +106,20 @@ static NET_FETCHES: AtomicUsize = AtomicUsize::new(0);
 const PREFETCH_WINDOW: u64 = 10;
 
 /// Oynaning eng katta ruxsat etilgan kengligi (bo'lak = MiB).
-/// Bitreytdan hisoblangan oyna "bir daqiqalik video" degani, ya'ni u
-/// tabiiy ravishda kichik. Bu chegara faqat buzuq metadata (masalan
-/// davomiyligi 1 soniya deb yozilgan katta fayl) xotira va trafikni
-/// yeb yubormasligi uchun.
-const MAX_PREFETCH_WINDOW: u64 = 64;
+///
+/// QOIDA O'ZGARMAYDI: oyna HAR DOIM "hajm ÷ davomiylik", ya'ni bir
+/// daqiqalik video necha MiB bo'lsa shuncha bo'lak. Bu chegara esa
+/// FAQAT buzuq metadata uchun (masalan davomiyligi 1 soniya deb
+/// yozilgan 1 GB'lik fayl) — u holda oyna 1000+ bo'lakka chiqib,
+/// butun faylni bir zumda tortib olardi.
+///
+/// 64 -> 128: 64 chegarasi ~9 Mbit/s dan yuqori bitreytli (masalan
+/// yuqori sifatli 4K) fayllarda haqiqiy qoidani buzardi — ularda
+/// bir daqiqalik video 64 MiB'dan katta bo'ladi. 128 bilan chegara
+/// ~18 Mbit/s gacha ko'tarildi, ya'ni amaliy fayllarda u umuman
+/// ishga tushmaydi va oyna har doim aynan "hajm ÷ davomiylik"
+/// bo'lib qoladi.
+const MAX_PREFETCH_WINDOW: u64 = 128;
 
 /// Oldindan yuklashda bir vaqtda ishlaydigan ish oqimlari soni.
 ///
@@ -4082,6 +4091,20 @@ mod tests {
         // Davomiylik hali noma'lum — zaxira qiymat.
         assert_eq!(prefetch_window_for(total, 0.0), PREFETCH_WINDOW);
         assert_eq!(prefetch_window_for(0, secs), PREFETCH_WINDOW);
+
+        // Foydalanuvchining ikkinchi misoli: 1000 MiB / 25 daqiqa
+        // -> 40 bo'lak (ya'ni oldindan 40 MiB tayyor turadi).
+        assert_eq!(
+            prefetch_window_for(1000 * 1024 * 1024, 25.0 * 60.0),
+            40
+        );
+
+        // Yuqori bitreytli fayl ham qoidaga bo'ysunadi (chegara
+        // endi 128, shu sabab 100 kesilmaydi).
+        assert_eq!(
+            prefetch_window_for(2500 * 1024 * 1024, 25.0 * 60.0),
+            100
+        );
 
         // Juda past bitreyt ham kamida 1 bo'lak beradi.
         assert_eq!(prefetch_window_for(1024 * 1024, 3600.0), 1);
