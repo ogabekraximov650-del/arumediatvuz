@@ -354,6 +354,12 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // tegmaydi (aynan shu tekshiruvsiz eski ochilish yangisining
     // controllerini o'chirib yuborib, "epizod almashtirganda ekran
     // qora bo'lib qoldi" holatini keltirib chiqarardi).
+    // Yangi qism — ijro nuqtasi noldan (yoki `resumeAt` dan)
+    // boshlanadi. Yadro oynani eski videoning nuqtasidan hisoblab
+    // qolmasligi uchun darhol xabar qilamiz.
+    _lastPosReport = DateTime.now();
+    RustCore.instance.videoSetPosition(url, (resumeAt ?? Duration.zero).inMilliseconds);
+
     final myToken = ++_playToken;
     setState(() {
       _currentEp = ep;
@@ -515,6 +521,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   // Controllerdan kelgan har bir yangilanish. Bu yerda faqat
   // XATO holatini kuzatamiz — qolgan yangilanishlarni UI o'zi
   // (ValueListenableBuilder orqali) oladi.
+  /// Ijro nuqtasi oxirgi marta qachon yadroga xabar qilingan.
+  DateTime _lastPosReport = DateTime.fromMillisecondsSinceEpoch(0);
+
   void _onControllerUpdate() {
     final c = _controller;
     if (c == null || !mounted) return;
@@ -522,6 +531,22 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       VideoCacheServer.log('Pleyer xatosi: ${c.value.errorDescription}');
       _recoverPlayer(c.value.position);
     }
+    // ── OLDINDAN YUKLASH OYNASI SHU NUQTADAN HISOBLANADI ───────
+    // Yadro o'zi faqat BUFER UCHINI biladi (u uzatgan oxirgi
+    // bo'lak), ijro nuqtasi esa undan bir necha bo'lak orqada.
+    // Oynani bufer uchidan hisoblash uni ikki barobar kengaytirib
+    // yuborardi — shu sabab haqiqiy nuqtani o'zimiz aytamiz.
+    // Soniyada bir marta yetarli (chaqiruv juda arzon).
+    final now = DateTime.now();
+    if (now.difference(_lastPosReport) >= const Duration(seconds: 1)) {
+      _lastPosReport = now;
+      _reportPosition(c.value.position);
+    }
+  }
+
+  void _reportPosition(Duration pos) {
+    if (_currentUrl.isEmpty) return;
+    RustCore.instance.videoSetPosition(_currentUrl, pos.inMilliseconds);
   }
 
   // ── SOG'LIQ KUZATUVCHISI (health watchdog) ────────────────────
@@ -847,6 +872,12 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // bajariladi.
     if (_pendingTarget != target) return;
 
+    // Sekdan keyin ijro nuqtasi keskin o'zgardi — oldindan yuklash
+    // oynasi eski joyda qolib ketmasligi uchun darhol xabar qilamiz
+    // (taymerli xabarni kutmasdan).
+    _lastPosReport = DateTime.now();
+    _reportPosition(target);
+
     setState(() => _pendingTarget = null);
     if (_resumeAfterSeek) {
       _resumeAfterSeek = false;
@@ -1170,16 +1201,12 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
 
   Widget _buildNormalScreen() {
     final name = widget.season['nomi'] ?? '';
-    final bolimId =
-        widget.season['bolim_id'] ?? widget.season['season_id'] ?? '';
-    final yili = widget.season['yili'] ?? '';
-    final janri = widget.season['janri'] ?? '';
-    // Video ostidagi yorliqlar: "N-qism" (hozir ochilgan epizod) va
-    // "N-bo'lim" (mavsum). Avval bu yerda "1-bo'lim" va "TV" turardi —
-    // "TV" (turi) hech qanday foydali ma'lumot bermasdi, epizod raqami
-    // esa umuman ko'rinmasdi.
-    final qismNo = _currentEp?['epizod_number']?.toString() ?? '';
     final tavsif = widget.season['tavsif'] ?? '';
+    // Video ostidagi "N-qism / N-bo'lim / yil / janr" yorliqlari OLIB
+    // TASHLANDI (foydalanuvchi talabi): qism raqami endi pastdagi
+    // boshqaruvda ("N-qism" tugmalari orasida) ko'rinadi, yil va janr
+    // esa "Ma'lumot" tabida bor. Shu bilan tablar to'g'ridan-to'g'ri
+    // videoning tagiga tushdi.
 
     return AppBackground(
       child: Scaffold(
@@ -1221,34 +1248,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                   child: _buildInlinePlayer(),
                 ),
               ),
-              const SizedBox(height: 8),
-              SizedBox(
-                height: 28,
-                child: ListView(
-                  scrollDirection: Axis.horizontal,
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  children: [
-                    if (qismNo.isNotEmpty) ...[
-                      _Badge('$qismNo-qism'),
-                      const SizedBox(width: 6),
-                    ],
-                    if (bolimId.toString().isNotEmpty)
-                      _Badge('$bolimId-bo\'lim'),
-                    if (yili.toString().isNotEmpty) ...[
-                      const SizedBox(width: 6),
-                      _Badge(yili.toString())
-                    ],
-                    if (janri.toString().isNotEmpty) ...[
-                      const SizedBox(width: 6),
-                      _Badge(janri.toString())
-                    ],
-                  ],
-                ),
-              ),
-              const SizedBox(height: 8),
-              // [<] N-qism [>] — qismlar tabining USTIDA.
-              _buildEpisodeNav(),
-              const SizedBox(height: 8),
+              const SizedBox(height: 10),
+              // Tartib (foydalanuvchi talabi):
+              //   video -> tablar -> [<] N-qism [>] -> qismlar ro'yxati
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16),
                 child: Glass(
@@ -1274,6 +1276,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                   ),
                 ),
               ),
+              const SizedBox(height: 8),
+              // [<]  N-qism  [>] — tablarning TAGIDA, ro'yxat ustida.
+              _buildEpisodeNav(),
               const SizedBox(height: 8),
               Expanded(
                 // ── NEGA TabBarView EMAS ──────────────────────────
@@ -1919,11 +1924,14 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   /// birinchi, taxminiy bosqichi uchun — keyin aniqlashtiriladi.
   static const double _kTileExtent = 60.0;
 
-  /// Ekran ochilishi bilan ro'yxatdagi BIRINCHI qism pleyerga
-  /// yuklanadi, lekin IJRO BOSHLANMAYDI. Pleyer ochilishi bilan
-  /// kesh-server videoning birinchi bo'lagini oladi va birinchi kadr
-  /// ekranda turadi — foydalanuvchi "play" bosishi bilan video
-  /// darhol ketadi, kutish bo'lmaydi.
+  /// Ekran ochilishi bilan ENG BIRINCHI qism (eng kichik raqamlisi,
+  /// ya'ni "0-qism") pleyerga yuklanadi — lekin IJRO BOSHLANMAYDI.
+  /// Kesh-server videoning birinchi bo'lagini oladi va birinchi kadr
+  /// ekranda turadi, ya'ni "play" bosilishi bilan video darhol
+  /// ketadi.
+  ///
+  /// Ro'yxat KAMAYISH tartibida saralangan (3, 2, 1, 0) — shu sabab
+  /// eng birinchi qism ro'yxatning OXIRIDA turadi.
   void _autoOpenFirstEpisode() {
     if (!mounted || _currentEp != null) return;
     if (_orderedEps.isEmpty) return;
@@ -1937,7 +1945,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       if (!mounted || _currentEp != null) return;
       final eps = _orderedEps;
       if (eps.isEmpty) return;
-      _playEpisode(eps.first, resumePlaying: false);
+      _playEpisode(eps.last, resumePlaying: false);
+      _centerOnEpisode(eps.last);
     });
   }
 
@@ -2017,23 +2026,25 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
         ? '${eps[i]['epizod_number'] ?? ''}-qism'
         : (eps.isEmpty ? '—' : 'Qismni tanlang');
 
+    // Tugmalar barmoq bilan qulay tegiladigan o'lchamda (Android'ning
+    // tavsiya etilgan 48 dp minimumidan katta).
     Widget btn(IconData icon, bool enabled, VoidCallback onTap) {
       return GestureDetector(
         behavior: HitTestBehavior.opaque,
         onTap: enabled ? onTap : null,
         child: Container(
-          width: 46,
-          height: 34,
+          width: 76,
+          height: 50,
           alignment: Alignment.center,
           decoration: BoxDecoration(
-            color: Colors.white.withOpacity(enabled ? 0.10 : 0.04),
-            borderRadius: BorderRadius.circular(11),
+            color: Colors.white.withOpacity(enabled ? 0.10 : 0.035),
+            borderRadius: BorderRadius.circular(14),
             border: Border.all(
-                color: Colors.white.withOpacity(enabled ? 0.18 : 0.06)),
+                color: Colors.white.withOpacity(enabled ? 0.20 : 0.06)),
           ),
           child: Icon(icon,
-              size: 22,
-              color: Colors.white.withOpacity(enabled ? 0.95 : 0.25)),
+              size: 30,
+              color: Colors.white.withOpacity(enabled ? 0.95 : 0.22)),
         ),
       );
     }
@@ -2041,8 +2052,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16),
       child: Glass(
-        borderRadius: 16,
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+        borderRadius: 18,
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
         child: Row(
           children: [
             btn(Icons.skip_previous_rounded, hasPrev, () => _stepEpisode(-1)),
@@ -2054,7 +2065,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     color: i >= 0 ? Colors.white : Colors.white54,
-                    fontSize: 14,
+                    fontSize: 18,
                     fontWeight: FontWeight.w700,
                   ),
                 ),
@@ -2615,29 +2626,6 @@ class _MiniIconButton extends StatelessWidget {
   }
 }
 
-class _Badge extends StatelessWidget {
-  final String label;
-  const _Badge(this.label);
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-      decoration: BoxDecoration(
-          color: Colors.white.withOpacity(0.1),
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: Colors.white24)),
-      child: Text(label,
-          style: const TextStyle(
-              color: Colors.white, fontSize: 12, fontWeight: FontWeight.w500)),
-    );
-  }
-}
-
-// Ikki marta bosib sek qilingandagi ko'rsatkich — DOIRA shaklida
-// (play/pause tugmasidan 2 barobar katta diametrda): 3 ta kichik
-// uchburchak yuqorida qator bo'lib ketma-ket miltillaydi, ularning
-// tagida "Ns" matni turadi. Play/pause tugmasi bilan video cheti
-// o'rtasiga joylashtiriladi (build metodida Align orqali).
 class _SeekBadge extends StatefulWidget {
   final int seconds;
   final bool isLeft;

@@ -59,6 +59,11 @@ typedef _VideoCacheNetBytesDart = int Function();
 typedef _VideoStatsC = Pointer<Utf8> Function(Pointer<Utf8>);
 typedef _VideoStatsDart = Pointer<Utf8> Function(Pointer<Utf8>);
 
+// Pleyer HOZIR qayerni ko'rsatayotgani (millisekundda). Rust yadrosi
+// oldindan yuklash oynasini aynan shu nuqtadan hisoblaydi.
+typedef _VideoSetPosC = Int32 Function(Pointer<Utf8>, Uint64);
+typedef _VideoSetPosDart = int Function(Pointer<Utf8>, int);
+
 typedef _VideoUrlActionC = Int32 Function(Pointer<Utf8>);
 typedef _VideoUrlActionDart = int Function(Pointer<Utf8>);
 
@@ -85,6 +90,7 @@ class RustCore {
   late final _VideoCacheNetBytesDart _videoCacheNetBytes;
   late final _VideoCacheNetBytesDart _videoCacheServedBytes;
   late final _VideoStatsDart _videoStats;
+  late final _VideoSetPosDart _videoSetPos;
   late final _VideoUrlActionDart _videoDownload;
   late final _VideoUrlActionDart _videoPause;
   late final _VideoUrlActionDart _videoDelete;
@@ -133,6 +139,8 @@ class RustCore {
             'rust_video_cache_served_bytes');
     _videoStats = _lib.lookupFunction<_VideoStatsC, _VideoStatsDart>(
         'rust_video_cache_stats');
+    _videoSetPos = _lib.lookupFunction<_VideoSetPosC, _VideoSetPosDart>(
+        'rust_video_cache_set_position');
     _videoDownload =
         _lib.lookupFunction<_VideoUrlActionC, _VideoUrlActionDart>(
             'rust_video_cache_download');
@@ -437,6 +445,27 @@ class RustCore {
       return decoded.map((k, v) => MapEntry(k, (v as Map).cast<String, dynamic>()));
     } catch (_) {
       return const {};
+    } finally {
+      malloc.free(ptr);
+    }
+  }
+
+  /// Pleyer HOZIR qayerni ko'rsatayotganini Rust yadrosiga bildiradi.
+  ///
+  /// Oldindan yuklash oynasi aynan shu nuqtadan hisoblanadi. Ilgari
+  /// yadro faqat O'ZI uzatgan oxirgi bo'lakni bilardi — u esa BUFER
+  /// UCHI, ya'ni ijro nuqtasidan bir necha bo'lak oldinda. Natijada
+  /// oyna pleyerning o'z buferi USTIGA qo'shilib, ikki barobar
+  /// kengayib ketardi.
+  ///
+  /// Juda arzon: Rust tomonida ikkita atomik yozuv, hech qanday
+  /// qulf yoki disk yo'q.
+  void videoSetPosition(String url, int positionMs) {
+    if (!_loaded || url.isEmpty) return;
+    final ptr = url.toNativeUtf8();
+    try {
+      _videoSetPos(ptr, positionMs < 0 ? 0 : positionMs);
+    } catch (_) {
     } finally {
       malloc.free(ptr);
     }
