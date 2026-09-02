@@ -814,6 +814,25 @@ struct CacheMeta {
     /// meta.json'da abadiy qoladi.
     #[serde(default)]
     duration_secs: f64,
+    /// ── ANIQ "BO'LAK -> SONIYA" JADVALI ────────────────────────
+    ///
+    /// `chunk_start_ms[i]` — i-bo'lakda BOSHLANADIGAN birinchi
+    /// video kadrning vaqti (millisekund). Ya'ni:
+    ///
+    ///     bo'lak 1: 00:00 dan
+    ///     bo'lak 2: 00:11 dan   (jim sahna — uzun)
+    ///     bo'lak 3: 00:14 dan   (jangovar sahna — qisqa)
+    ///
+    /// NEGA O'RTACHA BITREYT YETMAYDI: har bir bo'lak 1 MiB, lekin
+    /// undagi VIDEO uzunligi har xil. Shu sabab "soniya -> bo'lak"
+    /// ni o'rtacha bitreyt bilan hisoblash bir necha bo'lakka
+    /// adashadi. Bu jadval esa faylning O'ZIDAGI namuna
+    /// jadvallaridan (stts/stsz/stsc/stco) aniq hisoblanadi —
+    /// `build_block_index` ga qarang.
+    ///
+    /// Bir marta hisoblanib shu yerda saqlanadi (166 ta son ~1 KB).
+    #[serde(default)]
+    chunk_start_ms: Vec<u32>,
 }
 
 fn ensure_meta(shared: &Shared, dir: &PathBuf, url: &str) -> Result<CacheMeta, String> {
@@ -896,10 +915,11 @@ fn ensure_meta(shared: &Shared, dir: &PathBuf, url: &str) -> Result<CacheMeta, S
         total_size: size,
         content_type,
         chunk_size: CHUNK_SIZE,
-        // Davomiylik faylning ICHIDA — u 1-bo'lak keshga tushgandan
-        // keyin `duration_secs()` tomonidan hisoblanib, shu yerga
-        // qayta yoziladi.
+        // Davomiylik va bo'lak-vaqt jadvali faylning ICHIDA —
+        // ular 1-bo'lak keshga tushgandan keyin hisoblanib, shu
+        // yerga qayta yoziladi.
         duration_secs: 0.0,
+        chunk_start_ms: Vec::new(),
     };
     if let Ok(json) = serde_json::to_string(&meta) {
         let _ = fs::write(&meta_path, json);
@@ -1777,6 +1797,7 @@ fn delete_cached(url: &str) -> bool {
                 }
             }
             stats().lock().unwrap().remove(&key2);
+            forget_derived(&key2);
             log(format!("Kesh tozalandi: {key2}"));
         });
     spawned.is_ok()
@@ -1907,6 +1928,19 @@ fn read_or_fetch_chunk(
         expected_total,
         FetchPrio::Player,
     )
+}
+
+/// Shu video uchun XOTIRADAGI hosila ma'lumotlarni (davomiylik va
+/// bo'lak-vaqt jadvali) tashlaydi. Kesh tozalanganda yoki manbadagi
+/// fayl o'zgarganda chaqiriladi — aks holda eski jadval yangi
+/// faylga qo'llanib qolardi.
+fn forget_derived(key: &str) {
+    if let Ok(mut m) = durations().lock() {
+        m.remove(key);
+    }
+    if let Ok(mut m) = time_indexes().lock() {
+        m.remove(key);
+    }
 }
 
 /// Keshni butunlay tozalaydi (meta.json + barcha bo'lak fayllari).
@@ -2099,6 +2133,7 @@ fn fetch_and_store_chunk(
                             "XATO: hajm mos emas! meta.json={expected_total}, serverda={server_total} — kesh tozalanmoqda"
                         ));
                         invalidate_cache(dir);
+                        forget_derived(key);
                         return Err(format!(
                             "hajm mos emas (meta={expected_total}, server={server_total})"
                         ));
@@ -2339,8 +2374,8 @@ fn key_tag(key: &str) -> u64 {
 /// Vaqtdan baytga o'tish videoning o'rtacha bitreyti bo'yicha
 /// hisoblanadi: bu H.265 uchun yetarli aniq va hech qanday
 /// qo'shimcha metadata talab qilmaydi.
-fn playing_chunk(key: &str, total: u64, secs: f64) -> Option<u64> {
-    if secs <= 0.0 || total == 0 {
+fn playing_chunk(key: &str, dir: &PathBuf, total: u64, secs: f64) -> Option<u64> {
+    if total == 0 {
         return None;
     }
     if PLAY_POS_KEY.load(Ordering::Relaxed) != key_tag(key) {
@@ -2356,10 +2391,24 @@ fn playing_chunk(key: &str, total: u64, secs: f64) -> Option<u64> {
     if at == 0 || now_ms.saturating_sub(at) > PLAY_POS_FRESH_MS {
         return None;
     }
-    let pos_s = PLAY_POS_MS.load(Ordering::Relaxed) as f64 / 1000.0;
-    if pos_s < 0.0 {
+    let pos_ms = PLAY_POS_MS.load(Ordering::Relaxed);
+
+    // ── 1) ANIQ YO'L: faylning o'z jadvalidan ──────────────────
+    // Har bir bo'lakda qaysi soniyadan boshlanishi ANIQ yozilgan
+    // (`CacheMeta::chunk_start_ms`). Bu yerda hech qanday taxmin
+    // yo'q — bitreyt o'zgarib tursa ham javob to'g'ri bo'ladi.
+    if let Some(idx) = time_index(key, dir, total) {
+        return Some(block_for_ms(&idx, pos_ms));
+    }
+
+    // ── 2) ZAXIRA: o'rtacha bitreyt ────────────────────────────
+    // Jadval hali qurilmagan (1-bo'lak keshda yo'q yoki fayl
+    // g'ayrioddiy tuzilgan) — taxminiy hisob. Jadval tayyor
+    // bo'lishi bilan bu yo'ldan umuman foydalanilmaydi.
+    if secs <= 0.0 {
         return None;
     }
+    let pos_s = pos_ms as f64 / 1000.0;
     let byte = (total as f64 * (pos_s / secs)).clamp(0.0, (total - 1) as f64);
     Some(byte as u64 / CHUNK_SIZE)
 }
@@ -2489,6 +2538,523 @@ fn mp4_duration_secs(data: &[u8]) -> Option<f64> {
     None
 }
 
+// ═══════════════════════════════════════════════════════════════════
+//  ANIQ "BO'LAK <-> VAQT" JADVALI (MP4 namuna jadvallaridan)
+// ═══════════════════════════════════════════════════════════════════
+//
+// ── NEGA O'RTACHA BITREYT YETARLI EMAS ──────────────────────────
+//
+// Har bir bo'lak 1 MiB, LEKIN har bir bo'lakdagi VIDEO uzunligi
+// har xil: jim, qimirlamaydigan sahna 1 MiB'ga 20 soniya sig'adi,
+// jangovar sahna esa atigi 3 soniya. Shu sabab
+//
+//     bo'lak = (soniya / davomiylik) * hajm / 1 MiB
+//
+// formulasi faqat O'RTACHA to'g'ri bo'ladi — ayrim joylarda esa
+// bir necha bo'lakka adashadi. Adashish ikki tomonlama zarar:
+//   * oldinga adashsa — cheklov ishlamay, keragidan ko'p yuklanadi;
+//   * orqaga adashsa — pleyerga har safar bitta bo'lak berilib,
+//     keraksiz qayta ulanishlar ko'payadi.
+//
+// ── ANIQ JADVAL QAYERDAN OLINADI ────────────────────────────────
+//
+// MP4 faylining o'zida har bir kadr QAYSI BAYTDA va QAYSI VAQTDA
+// ekani ANIQ yozilgan — `moov` -> `trak` -> `mdia` -> `minf` ->
+// `stbl` ichidagi to'rtta jadvalda:
+//
+//   stts — har bir kadr necha "tik" davom etadi (vaqt);
+//   stsz — har bir kadrning bayt hajmi;
+//   stsc — bitta mp4-"chunk"ida nechta kadr borligi;
+//   stco/co64 — har bir mp4-"chunk"ning fayldagi bayt o'rni.
+//
+// Shu to'rttasidan har bir kadrning (bayt o'rni, vaqti) juftligi
+// aniq hisoblanadi. Undan esa bizga kerak bo'lgan yagona narsa
+// chiqadi:
+//
+//   chunk_start_ms[i] = i-bo'lakda BOSHLANADIGAN birinchi kadrning
+//                       vaqti (millisekund)
+//
+// Ya'ni aynan foydalanuvchi so'ragan jadval:
+//   bo'lak 1 -> 00:00 dan, bo'lak 2 -> 00:11 dan, bo'lak 3 -> 00:14 dan ...
+//
+// U bir marta hisoblanib meta.json'ga yoziladi (166 ta son ~1 KB).
+// Fayl bo'yicha hech qanday taxmin qilinmaydi.
+//
+// MUHIM (xavfsizlik): Cargo.toml'da `panic = "abort"` — ya'ni
+// tahlilchidagi HAR QANDAY chegaradan chiqish BUTUN ILOVANI
+// yiqitadi. Shu sabab bu yerdagi barcha o'qishlar `get()` orqali,
+// bitta ham to'g'ridan-to'g'ri indekslash yoki `unwrap` YO'Q.
+
+/// Namuna jadvallarini o'qishda bir jarayonda ko'rib chiqiladigan
+/// eng ko'p kadr soni — buzuq metadata cheksiz tsiklga olib
+/// kelmasligi uchun.
+const MAX_SAMPLES: u64 = 20_000_000;
+
+fn rd_u32(d: &[u8], at: usize) -> Option<u32> {
+    let s = d.get(at..at + 4)?;
+    Some(u32::from_be_bytes([s[0], s[1], s[2], s[3]]))
+}
+
+fn rd_u64(d: &[u8], at: usize) -> Option<u64> {
+    let s = d.get(at..at + 8)?;
+    Some(u64::from_be_bytes([
+        s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7],
+    ]))
+}
+
+/// Berilgan ma'lumot ichidagi YUQORI DARAJALI qutilar ro'yxati:
+/// (tur, tana). Buzuq joyda shunchaki to'xtaydi.
+fn mp4_boxes(data: &[u8]) -> Vec<([u8; 4], &[u8])> {
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    while pos + 8 <= data.len() {
+        let Some(raw) = rd_u32(data, pos) else { break };
+        let Some(t) = data.get(pos + 4..pos + 8) else { break };
+        let typ = [t[0], t[1], t[2], t[3]];
+        let (header, size) = if raw == 1 {
+            match rd_u64(data, pos + 8) {
+                Some(v) => (16usize, v),
+                None => break,
+            }
+        } else if raw == 0 {
+            (8usize, (data.len() - pos) as u64)
+        } else {
+            (8usize, raw as u64)
+        };
+        if size < header as u64 {
+            break;
+        }
+        let body_start = pos + header;
+        let body_end = ((pos as u64).saturating_add(size)).min(data.len() as u64) as usize;
+        if body_start > body_end {
+            break;
+        }
+        if let Some(b) = data.get(body_start..body_end) {
+            out.push((typ, b));
+        }
+        let next = (pos as u64).saturating_add(size);
+        if next <= pos as u64 || next > usize::MAX as u64 {
+            break;
+        }
+        pos = next as usize;
+        if out.len() > 4096 {
+            break;
+        }
+    }
+    out
+}
+
+fn find_box<'a>(data: &'a [u8], typ: &[u8; 4]) -> Option<&'a [u8]> {
+    mp4_boxes(data)
+        .into_iter()
+        .find(|(t, _)| t == typ)
+        .map(|(_, b)| b)
+}
+
+/// Bitta trekning namuna jadvallari.
+struct SampleTables {
+    /// Trek vaqt birligi (bir soniyadagi "tik" soni).
+    timescale: u32,
+    /// (kadrlar soni, har birining davomiyligi) juftliklari.
+    stts: Vec<(u32, u32)>,
+    /// Barcha kadr bir xil hajmda bo'lsa — o'sha hajm; 0 bo'lsa
+    /// `sizes` ishlatiladi.
+    uniform_size: u32,
+    sizes: Vec<u32>,
+    /// (birinchi mp4-chunk (1 dan), undagi kadrlar soni).
+    stsc: Vec<(u32, u32)>,
+    /// Har bir mp4-chunkning fayldagi bayt o'rni.
+    chunk_offsets: Vec<u64>,
+}
+
+fn parse_stts(b: &[u8]) -> Option<Vec<(u32, u32)>> {
+    let n = rd_u32(b, 4)? as usize;
+    if n > 4_000_000 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(n.min(65536));
+    for i in 0..n {
+        let at = 8 + i * 8;
+        out.push((rd_u32(b, at)?, rd_u32(b, at + 4)?));
+    }
+    Some(out)
+}
+
+fn parse_stsz(b: &[u8]) -> Option<(u32, Vec<u32>)> {
+    let uniform = rd_u32(b, 4)?;
+    let n = rd_u32(b, 8)? as usize;
+    if uniform != 0 {
+        return Some((uniform, Vec::new()));
+    }
+    if n as u64 > MAX_SAMPLES {
+        return None;
+    }
+    let mut out = Vec::with_capacity(n.min(1 << 20));
+    for i in 0..n {
+        out.push(rd_u32(b, 12 + i * 4)?);
+    }
+    Some((0, out))
+}
+
+fn parse_stsc(b: &[u8]) -> Option<Vec<(u32, u32)>> {
+    let n = rd_u32(b, 4)? as usize;
+    if n > 4_000_000 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(n.min(65536));
+    for i in 0..n {
+        let at = 8 + i * 12;
+        out.push((rd_u32(b, at)?, rd_u32(b, at + 4)?));
+    }
+    Some(out)
+}
+
+fn parse_chunk_offsets(stbl: &[u8]) -> Option<Vec<u64>> {
+    if let Some(b) = find_box(stbl, b"stco") {
+        let n = rd_u32(b, 4)? as usize;
+        if n as u64 > MAX_SAMPLES {
+            return None;
+        }
+        let mut out = Vec::with_capacity(n.min(1 << 20));
+        for i in 0..n {
+            out.push(rd_u32(b, 8 + i * 4)? as u64);
+        }
+        return Some(out);
+    }
+    let b = find_box(stbl, b"co64")?;
+    let n = rd_u32(b, 4)? as usize;
+    if n as u64 > MAX_SAMPLES {
+        return None;
+    }
+    let mut out = Vec::with_capacity(n.min(1 << 20));
+    for i in 0..n {
+        out.push(rd_u64(b, 8 + i * 8)?);
+    }
+    Some(out)
+}
+
+fn mdhd_timescale(mdia: &[u8]) -> Option<u32> {
+    let b = find_box(mdia, b"mdhd")?;
+    let version = *b.first()?;
+    if version == 0 {
+        rd_u32(b, 12)
+    } else {
+        rd_u32(b, 20)
+    }
+}
+
+fn is_video_track(mdia: &[u8]) -> bool {
+    match find_box(mdia, b"hdlr") {
+        Some(b) => b.get(8..12).map(|h| h == b"vide").unwrap_or(false),
+        None => false,
+    }
+}
+
+/// `moov` ichidan VIDEO trekning jadvallarini yig'adi.
+fn video_tables(moov: &[u8]) -> Option<SampleTables> {
+    for (typ, trak) in mp4_boxes(moov) {
+        if &typ != b"trak" {
+            continue;
+        }
+        let Some(mdia) = find_box(trak, b"mdia") else {
+            continue;
+        };
+        if !is_video_track(mdia) {
+            continue;
+        }
+        let Some(timescale) = mdhd_timescale(mdia) else {
+            continue;
+        };
+        if timescale == 0 {
+            continue;
+        }
+        let Some(minf) = find_box(mdia, b"minf") else {
+            continue;
+        };
+        let Some(stbl) = find_box(minf, b"stbl") else {
+            continue;
+        };
+        let stts = find_box(stbl, b"stts").and_then(parse_stts)?;
+        let (uniform_size, sizes) = find_box(stbl, b"stsz").and_then(parse_stsz)?;
+        let stsc = find_box(stbl, b"stsc").and_then(parse_stsc)?;
+        let chunk_offsets = parse_chunk_offsets(stbl)?;
+        if stts.is_empty() || stsc.is_empty() || chunk_offsets.is_empty() {
+            return None;
+        }
+        return Some(SampleTables {
+            timescale,
+            stts,
+            uniform_size,
+            sizes,
+            stsc,
+            chunk_offsets,
+        });
+    }
+    None
+}
+
+/// Jadvallardan "bo'lak -> boshlanish vaqti (ms)" ro'yxatini quradi.
+///
+/// Natija HAR DOIM o'smaydigan (non-decreasing) bo'ladi va uzunligi
+/// aynan bo'laklar soniga teng.
+fn build_block_index(t: &SampleTables, total: u64) -> Option<Vec<u32>> {
+    let n_blocks = total.div_ceil(CHUNK_SIZE) as usize;
+    if n_blocks == 0 {
+        return None;
+    }
+    // u32::MAX = "bu bo'lakda hali kadr uchramadi".
+    let mut block_ms = vec![u32::MAX; n_blocks];
+
+    // stts bo'ylab yuruvchi kursor: (qaysi qator, o'sha qatorda
+    // nechta kadr qoldi).
+    let mut run = 0usize;
+    let mut left_in_run = t.stts.first().map(|(c, _)| *c).unwrap_or(0) as u64;
+    let mut ticks: u64 = 0;
+
+    // stsc bo'ylab yuruvchi kursor.
+    let mut sc = 0usize;
+    let mut sample_idx: u64 = 0;
+    let mut filled = 0usize;
+
+    for (ci, off) in t.chunk_offsets.iter().enumerate() {
+        // Shu mp4-chunkda nechta kadr bor.
+        while sc + 1 < t.stsc.len() {
+            let next_first = t.stsc.get(sc + 1).map(|(f, _)| *f).unwrap_or(u32::MAX);
+            if (ci as u64 + 1) >= next_first as u64 {
+                sc += 1;
+            } else {
+                break;
+            }
+        }
+        let per_chunk = t.stsc.get(sc).map(|(_, s)| *s).unwrap_or(0) as u64;
+        let mut cur_off = *off;
+        for _ in 0..per_chunk {
+            if sample_idx >= MAX_SAMPLES {
+                return None;
+            }
+            // Kadr hajmi.
+            let size = if t.uniform_size != 0 {
+                t.uniform_size as u64
+            } else {
+                match t.sizes.get(sample_idx as usize) {
+                    Some(s) => *s as u64,
+                    None => break,
+                }
+            };
+            // Kadr vaqti.
+            let delta = t.stts.get(run).map(|(_, d)| *d).unwrap_or(0) as u64;
+            // Kadr qaysi bo'lakda BOSHLANADI.
+            let block = (cur_off / CHUNK_SIZE) as usize;
+            if let Some(slot) = block_ms.get_mut(block) {
+                if *slot == u32::MAX {
+                    let ms = ticks.saturating_mul(1000) / t.timescale as u64;
+                    *slot = ms.min(u32::MAX as u64 - 1) as u32;
+                    filled += 1;
+                }
+            }
+            cur_off = cur_off.saturating_add(size);
+            ticks = ticks.saturating_add(delta);
+            sample_idx += 1;
+            // stts kursorini surish.
+            if left_in_run > 0 {
+                left_in_run -= 1;
+            }
+            while left_in_run == 0 && run + 1 < t.stts.len() {
+                run += 1;
+                left_in_run = t.stts.get(run).map(|(c, _)| *c).unwrap_or(0) as u64;
+            }
+        }
+    }
+
+    if filled == 0 {
+        return None;
+    }
+
+    // Bo'sh qolgan bo'laklar (masalan faqat audio yotgan joylar)
+    // oldingi qiymat bilan to'ldiriladi; boshidagilar 0 bilan.
+    let mut last = 0u32;
+    for v in block_ms.iter_mut() {
+        if *v == u32::MAX {
+            *v = last;
+        } else {
+            if *v < last {
+                *v = last; // o'smaydigan bo'lib qolishi kafolatlanadi
+            }
+            last = *v;
+        }
+    }
+    Some(block_ms)
+}
+
+/// Berilgan vaqt (ms) QAYSI bo'lakda ekanini jadvaldan topadi.
+///
+/// Bir xil qiymatli ketma-ketlik uchrasa (kadr yotmagan bo'laklar)
+/// ENG BIRINCHISI olinadi — ya'ni ijro nuqtasi hech qachon
+/// oshirib yuborilmaydi (cheklov mo'ljaldan kengaymaydi).
+fn block_for_ms(index: &[u32], pos_ms: u64) -> u64 {
+    if index.is_empty() {
+        return 0;
+    }
+    let t = pos_ms.min(u32::MAX as u64) as u32;
+    let mut lo = 0usize;
+    let mut hi = index.len();
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        match index.get(mid) {
+            Some(v) if *v <= t => lo = mid + 1,
+            _ => hi = mid,
+        }
+    }
+    let mut i = lo.saturating_sub(1);
+    while i > 0 && index.get(i - 1) == index.get(i) {
+        i -= 1;
+    }
+    i as u64
+}
+
+/// Faylning boshidan keshda UZLUKSIZ mavjud bo'lgan baytlarni
+/// birlashtiradi (eng ko'pi `max_bytes`). TARMOQQA CHIQMAYDI.
+fn read_head_bytes(dir: &PathBuf, key: &str, total: u64, max_bytes: u64) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::new();
+    let mut i = 0u64;
+    while (out.len() as u64) < max_bytes {
+        let len = chunk_plain_len(i, total) as usize;
+        if len == 0 {
+            break;
+        }
+        match read_cached_chunk(dir, key, i, len) {
+            Some(b) => out.extend_from_slice(&b),
+            None => break,
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Faylning boshidan `moov` qutisining TANASINI (to'liq holda)
+/// qaytaradi. Keshda yetarli bayt bo'lmasa — `None`.
+fn moov_bytes(dir: &PathBuf, key: &str, total: u64) -> Option<Vec<u8>> {
+    let head = read_head_bytes(dir, key, total, CHUNK_SIZE);
+    if head.is_empty() {
+        return None;
+    }
+    // Yuqori darajali qutilar bo'ylab yurib `moov`ning fayldagi
+    // ABSOLYUT o'rni va hajmini topamiz.
+    let mut pos = 0u64;
+    let mut found: Option<(u64, u64)> = None; // (tana boshi, tana uzunligi)
+    while (pos as usize) + 8 <= head.len() {
+        let Some(raw) = rd_u32(&head, pos as usize) else {
+            break;
+        };
+        let Some(t) = head.get(pos as usize + 4..pos as usize + 8) else {
+            break;
+        };
+        let is_moov = t == b"moov";
+        let (header, size) = if raw == 1 {
+            match rd_u64(&head, pos as usize + 8) {
+                Some(v) => (16u64, v),
+                None => break,
+            }
+        } else if raw == 0 {
+            (8u64, total.saturating_sub(pos))
+        } else {
+            (8u64, raw as u64)
+        };
+        if size < header {
+            break;
+        }
+        if is_moov {
+            found = Some((pos + header, size - header));
+            break;
+        }
+        let next = pos.saturating_add(size);
+        if next <= pos {
+            break;
+        }
+        pos = next;
+    }
+    let (start, len) = found?;
+    let need = start.saturating_add(len);
+    // `moov` haddan tashqari katta bo'lsa (buzuq metadata) —
+    // umuman tegmaymiz.
+    if len == 0 || need > 32 * 1024 * 1024 {
+        return None;
+    }
+    if need <= head.len() as u64 {
+        return head.get(start as usize..need as usize).map(|s| s.to_vec());
+    }
+    // `moov` birinchi bo'lakka sig'magan — kerakli bo'laklar
+    // keshda bo'lsa o'qib olamiz (baribir tarmoqqa chiqilmaydi).
+    let more = read_head_bytes(dir, key, total, need);
+    if (more.len() as u64) < need {
+        return None;
+    }
+    more.get(start as usize..need as usize).map(|s| s.to_vec())
+}
+
+/// Xotiradagi jadvallar: kalit -> (jadval, oxirgi urinish vaqti).
+/// Bo'sh jadval = "hali qurilmadi" (3 soniyada bir marta qayta
+/// uriniladi).
+static TIME_INDEX: OnceLock<Mutex<HashMap<String, (Arc<Vec<u32>>, Instant)>>> = OnceLock::new();
+
+fn time_indexes() -> &'static Mutex<HashMap<String, (Arc<Vec<u32>>, Instant)>> {
+    TIME_INDEX.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// "Bo'lak -> boshlanish vaqti" jadvalini beradi.
+/// Uch bosqichli: xotira -> meta.json -> MP4 jadvallaridan qurish.
+/// TARMOQQA UMUMAN CHIQMAYDI.
+fn time_index(key: &str, dir: &PathBuf, total: u64) -> Option<Arc<Vec<u32>>> {
+    let expected = total.div_ceil(CHUNK_SIZE) as usize;
+    if expected == 0 {
+        return None;
+    }
+    if let Ok(m) = time_indexes().lock() {
+        if let Some((v, at)) = m.get(key) {
+            if v.len() == expected {
+                return Some(Arc::clone(v));
+            }
+            if at.elapsed() < Duration::from_secs(3) {
+                return None;
+            }
+        }
+    }
+    // meta.json'da saqlangan bo'lishi mumkin (oldingi sessiyadan).
+    let stored = meta_index_from_disk(dir);
+    if stored.len() == expected {
+        let arc = Arc::new(stored);
+        if let Ok(mut m) = time_indexes().lock() {
+            m.insert(key.to_string(), (Arc::clone(&arc), Instant::now()));
+        }
+        return Some(arc);
+    }
+    // Qurish: `moov` + namuna jadvallari.
+    let built = moov_bytes(dir, key, total)
+        .and_then(|moov| video_tables(&moov))
+        .and_then(|t| build_block_index(&t, total));
+    match built {
+        Some(idx) if idx.len() == expected => {
+            log(format!(
+                "Bo'lak-vaqt jadvali qurildi: {key} — {} ta bo'lak (oxirgisi {} s)",
+                idx.len(),
+                idx.last().copied().unwrap_or(0) / 1000
+            ));
+            store_meta_index(dir, &idx);
+            let arc = Arc::new(idx);
+            if let Ok(mut m) = time_indexes().lock() {
+                m.insert(key.to_string(), (Arc::clone(&arc), Instant::now()));
+            }
+            Some(arc)
+        }
+        _ => {
+            if let Ok(mut m) = time_indexes().lock() {
+                m.insert(key.to_string(), (Arc::new(Vec::new()), Instant::now()));
+            }
+            None
+        }
+    }
+}
+
 /// meta.json'dagi davomiylikni o'qiydi (0.0 = yozilmagan).
 fn meta_duration_from_disk(dir: &PathBuf) -> f64 {
     let Ok(raw) = fs::read_to_string(dir.join("meta.json")) else {
@@ -2500,12 +3066,21 @@ fn meta_duration_from_disk(dir: &PathBuf) -> f64 {
     }
 }
 
-/// Aniqlangan davomiylikni meta.json'ga QO'SHIB yozadi (qolgan
-/// maydonlar o'zgarmaydi). Bir marta bajariladi.
-fn store_meta_duration(dir: &PathBuf, secs: f64) {
-    if secs <= 0.0 {
-        return;
+/// meta.json'dagi "bo'lak -> soniya" jadvalini o'qiydi.
+fn meta_index_from_disk(dir: &PathBuf) -> Vec<u32> {
+    let Ok(raw) = fs::read_to_string(dir.join("meta.json")) else {
+        return Vec::new();
+    };
+    match serde_json::from_str::<CacheMeta>(&raw) {
+        Ok(m) if m.chunk_size == CHUNK_SIZE => m.chunk_start_ms,
+        _ => Vec::new(),
     }
+}
+
+/// meta.json'ni ATOM ravishda yangilaydi (tmp -> rename): boshqa
+/// oqim aynan shu paytda uni o'qiyotgan bo'lsa, yarim yozilgan
+/// faylni ko'rib qolmasin.
+fn update_meta(dir: &PathBuf, change: impl FnOnce(&mut CacheMeta) -> bool) {
     let path = dir.join("meta.json");
     let Ok(raw) = fs::read_to_string(&path) else {
         return;
@@ -2513,23 +3088,49 @@ fn store_meta_duration(dir: &PathBuf, secs: f64) {
     let Ok(mut meta) = serde_json::from_str::<CacheMeta>(&raw) else {
         return;
     };
-    if meta.duration_secs > 0.0 {
+    if !change(&mut meta) {
         return;
     }
-    meta.duration_secs = secs;
-    if let Ok(json) = serde_json::to_string(&meta) {
-        // ATOM yozuv (tmp -> rename): boshqa oqim aynan shu paytda
-        // meta.json'ni o'qiyotgan bo'lsa, yarim yozilgan faylni
-        // ko'rib qolmasin.
-        let tmp = dir.join(format!("meta.{}.tmp", micros_now()));
-        if fs::write(&tmp, json).is_ok() {
-            if fs::rename(&tmp, &path).is_err() {
-                let _ = fs::remove_file(&tmp);
-            }
-        } else {
+    let Ok(json) = serde_json::to_string(&meta) else {
+        return;
+    };
+    let tmp = dir.join(format!("meta.{}.tmp", micros_now()));
+    if fs::write(&tmp, json).is_ok() {
+        if fs::rename(&tmp, &path).is_err() {
             let _ = fs::remove_file(&tmp);
         }
+    } else {
+        let _ = fs::remove_file(&tmp);
     }
+}
+
+/// Aniqlangan davomiylikni meta.json'ga QO'SHIB yozadi (qolgan
+/// maydonlar o'zgarmaydi). Bir marta bajariladi.
+fn store_meta_duration(dir: &PathBuf, secs: f64) {
+    if secs <= 0.0 {
+        return;
+    }
+    update_meta(dir, |m| {
+        if m.duration_secs > 0.0 {
+            return false;
+        }
+        m.duration_secs = secs;
+        true
+    });
+}
+
+/// "Bo'lak -> soniya" jadvalini meta.json'ga yozadi.
+fn store_meta_index(dir: &PathBuf, index: &[u32]) {
+    if index.is_empty() {
+        return;
+    }
+    update_meta(dir, |m| {
+        if m.chunk_start_ms.len() == index.len() {
+            return false;
+        }
+        m.chunk_start_ms = index.to_vec();
+        true
+    });
 }
 
 /// Videoning davomiyligi (soniya).
@@ -2674,7 +3275,7 @@ fn maybe_prefetch(
             // o'qib qo'yadi; agar biz oynani o'sha buferning UCHIDAN
             // boshlasak, ikkalasi qo'shilib ketadi va oyna ikki
             // barobar kengayadi (PLAY_POS_MS izohiga qarang).
-            let origin = playing_chunk(&key2, total, secs).unwrap_or(current_chunk);
+            let origin = playing_chunk(&key2, &dir2, total, secs).unwrap_or(current_chunk);
             let (from, until) = prefetch_range(origin, chunk_count, window);
 
             // ── PARALLEL YUKLASH ──────────────────────────────────
@@ -2849,7 +3450,7 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
     let start_chunk = start / CHUNK_SIZE;
     let unlimited = download_active(&key);
     if !unlimited && chunk_count > 0 {
-        let origin = playing_chunk(&key, total, secs).unwrap_or(start_chunk);
+        let origin = playing_chunk(&key, &dir, total, secs).unwrap_or(start_chunk);
         // `.max(start_chunk)` — ijro nuqtasi so'ralgan joydan
         // orqada bo'lsa ham javob KAMIDA bitta bo'lak beradi
         // (aks holda pleyer bo'sh javob olib qotib qolardi).
@@ -3499,9 +4100,13 @@ mod tests {
         let total = 166 * 1024 * 1024; // ~166 MiB
         let secs = 24.0 * 60.0 + 5.0; // 24:05
 
+        // Jadval qurib bo'lmaydigan (bo'sh) papka — ya'ni bu test
+        // ZAXIRA (o'rtacha bitreyt) yo'lini tekshiradi.
+        let nodir = std::env::temp_dir().join(format!("yoq_{}", micros_now()));
+
         // Hali hech narsa xabar qilinmagan — nuqta noma'lum.
         PLAY_POS_KEY.store(0, Ordering::Relaxed);
-        assert!(playing_chunk("kino", total, secs).is_none());
+        assert!(playing_chunk("kino", &nodir, total, secs).is_none());
 
         // Dart tomoni ijro nuqtasini xabar qildi.
         let url = "http://127.0.0.1:9/kino";
@@ -3510,12 +4115,12 @@ mod tests {
 
         // Boshida (0 ms) -> 0-bo'lak.
         assert_eq!(rust_video_cache_set_position(c_url.as_ptr(), 0), 1);
-        assert_eq!(playing_chunk(&key, total, secs), Some(0));
+        assert_eq!(playing_chunk(&key, &nodir, total, secs), Some(0));
 
         // Yarmida -> taxminan yarim bo'lak.
         let half_ms = (secs * 1000.0 / 2.0) as u64;
         rust_video_cache_set_position(c_url.as_ptr(), half_ms);
-        let mid = playing_chunk(&key, total, secs).unwrap();
+        let mid = playing_chunk(&key, &nodir, total, secs).unwrap();
         let kutilgan = (total / 2) / CHUNK_SIZE;
         assert!(
             (mid as i64 - kutilgan as i64).abs() <= 1,
@@ -3523,7 +4128,7 @@ mod tests {
         );
 
         // BOSHQA videoning nuqtasi bu videoga TAALLUQLI EMAS.
-        assert!(playing_chunk("boshqa_kino", total, secs).is_none());
+        assert!(playing_chunk("boshqa_kino", &nodir, total, secs).is_none());
 
         // Oyna aynan shu nuqtadan boshlanadi: 10-bo'lakda turgan
         // pleyer uchun 6 lik oyna 11..17 ni qamraydi (16-bo'lak
@@ -3534,6 +4139,204 @@ mod tests {
         // Test global holatni o'zgartirdi — tozalab qo'yamiz.
         PLAY_POS_KEY.store(0, Ordering::Relaxed);
         PLAY_POS_MS.store(0, Ordering::Relaxed);
+    }
+
+
+    // ═══════════════════════════════════════════════════════════
+    //  ANIQ "BO'LAK -> SONIYA" JADVALI
+    // ═══════════════════════════════════════════════════════════
+    //
+    // Bu testdagi fayl ATAYLAB o'zgaruvchan bitreytli:
+    //   * 0-bo'lakda 11 soniyalik video (jim sahna — kadrlar kichik)
+    //   * 1-bo'lakda atigi 1 soniya   (jangovar sahna — kadr katta)
+    //   * 2-bo'lakda 2 soniya
+    // O'rtacha bitreyt bilan hisoblansa har bir bo'lak ~4.7 soniya
+    // chiqadi va javob NOTO'G'RI bo'ladi. Aniq jadval esa faylning
+    // o'z namuna jadvallaridan hisoblanadi.
+
+    /// MP4 qutisini yasaydi: [hajm(4)][tur(4)][tana].
+    fn bx(typ: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut v = Vec::with_capacity(8 + body.len());
+        v.extend_from_slice(&((8 + body.len()) as u32).to_be_bytes());
+        v.extend_from_slice(typ);
+        v.extend_from_slice(body);
+        v
+    }
+
+    fn u32b(v: u32) -> [u8; 4] {
+        v.to_be_bytes()
+    }
+
+    /// Test uchun bitta video trekli `moov` TANASINI yasaydi.
+    fn test_moov_body(offsets: &[u32], sizes: &[u32], timescale: u32, delta: u32) -> Vec<u8> {
+        // hdlr: vf(4) + pre_defined(4) + 'vide' + reserved(12) + nom(1)
+        let mut hdlr = Vec::new();
+        hdlr.extend_from_slice(&[0; 8]);
+        hdlr.extend_from_slice(b"vide");
+        hdlr.extend_from_slice(&[0; 13]);
+
+        // mdhd (v0): vf(4) + created(4) + modified(4) + timescale(4)
+        //            + duration(4) + til(2) + pre(2)
+        let mut mdhd = Vec::new();
+        mdhd.extend_from_slice(&[0; 12]);
+        mdhd.extend_from_slice(&u32b(timescale));
+        mdhd.extend_from_slice(&u32b(delta * sizes.len() as u32));
+        mdhd.extend_from_slice(&[0; 4]);
+
+        // stts: vf(4) + qatorlar soni(4) + (kadrlar soni, davomiylik)
+        let mut stts = Vec::new();
+        stts.extend_from_slice(&[0; 4]);
+        stts.extend_from_slice(&u32b(1));
+        stts.extend_from_slice(&u32b(sizes.len() as u32));
+        stts.extend_from_slice(&u32b(delta));
+
+        // stsz: vf(4) + bir xil hajm(4)=0 + soni(4) + hajmlar
+        let mut stsz = Vec::new();
+        stsz.extend_from_slice(&[0; 4]);
+        stsz.extend_from_slice(&u32b(0));
+        stsz.extend_from_slice(&u32b(sizes.len() as u32));
+        for s in sizes {
+            stsz.extend_from_slice(&u32b(*s));
+        }
+
+        // stsc: vf(4) + soni(4) + (birinchi chunk=1, har chunkda 1 kadr, sdi=1)
+        let mut stsc = Vec::new();
+        stsc.extend_from_slice(&[0; 4]);
+        stsc.extend_from_slice(&u32b(1));
+        stsc.extend_from_slice(&u32b(1));
+        stsc.extend_from_slice(&u32b(1));
+        stsc.extend_from_slice(&u32b(1));
+
+        // stco: vf(4) + soni(4) + o'rinlar
+        let mut stco = Vec::new();
+        stco.extend_from_slice(&[0; 4]);
+        stco.extend_from_slice(&u32b(offsets.len() as u32));
+        for o in offsets {
+            stco.extend_from_slice(&u32b(*o));
+        }
+
+        let mut stbl = Vec::new();
+        stbl.extend_from_slice(&bx(b"stts", &stts));
+        stbl.extend_from_slice(&bx(b"stsz", &stsz));
+        stbl.extend_from_slice(&bx(b"stsc", &stsc));
+        stbl.extend_from_slice(&bx(b"stco", &stco));
+
+        let minf = bx(b"stbl", &stbl);
+        let mut mdia = Vec::new();
+        mdia.extend_from_slice(&bx(b"hdlr", &hdlr));
+        mdia.extend_from_slice(&bx(b"mdhd", &mdhd));
+        mdia.extend_from_slice(&bx(b"minf", &minf));
+
+        let trak = bx(b"mdia", &mdia);
+        bx(b"trak", &trak)
+    }
+
+    /// 14 ta kadr: dastlabki 11 tasi kichik (jim sahna), keyingilari
+    /// katta. Har biri 1 soniya.
+    fn test_layout() -> (Vec<u32>, Vec<u32>, u64) {
+        let mut offsets = Vec::new();
+        let mut sizes = Vec::new();
+        let mut off = 0u32;
+        for _ in 0..10 {
+            offsets.push(off);
+            sizes.push(100_000);
+            off += 100_000;
+        }
+        // 10-kadr: 1_000_000 (hali 0-bo'lakda), hajmi katta
+        offsets.push(off);
+        sizes.push(600_000);
+        off += 600_000; // 1_600_000 -> 1-bo'lak
+        offsets.push(off);
+        sizes.push(600_000);
+        off += 600_000; // 2_200_000 -> 2-bo'lak
+        offsets.push(off);
+        sizes.push(600_000);
+        off += 600_000; // 2_800_000 -> 2-bo'lak
+        offsets.push(off);
+        sizes.push(300_000);
+        off += 300_000; // 3_100_000 = jami hajm
+        (offsets, sizes, off as u64)
+    }
+
+    #[test]
+    fn bolak_vaqt_jadvali_aniq_hisoblanadi() {
+        let (offsets, sizes, total) = test_layout();
+        let moov = test_moov_body(&offsets, &sizes, 1000, 1000);
+        let tables = video_tables(&moov).expect("video trek jadvallari o'qilmadi");
+        assert_eq!(tables.timescale, 1000);
+        assert_eq!(tables.chunk_offsets.len(), offsets.len());
+
+        let index = build_block_index(&tables, total).expect("jadval qurilmadi");
+        // 3_100_000 bayt -> 3 ta bo'lak.
+        assert_eq!(index.len(), 3);
+        assert_eq!(
+            index,
+            vec![0, 11_000, 12_000],
+            "bo'lak boshlanish vaqtlari noto'g'ri"
+        );
+
+        // ── ENG MUHIMI: soniya -> bo'lak ────────────────────────
+        // 5-soniya HALI 0-bo'lakda (o'rtacha bitreyt bilan
+        // hisoblansa 1-bo'lak chiqardi — aynan shu XATO edi).
+        assert_eq!(block_for_ms(&index, 0), 0);
+        assert_eq!(block_for_ms(&index, 5_000), 0);
+        assert_eq!(block_for_ms(&index, 10_999), 0);
+        assert_eq!(block_for_ms(&index, 11_000), 1);
+        assert_eq!(block_for_ms(&index, 11_500), 1);
+        assert_eq!(block_for_ms(&index, 12_000), 2);
+        assert_eq!(block_for_ms(&index, 999_999), 2);
+
+        // Taqqoslash uchun: o'rtacha bitreyt 5-soniyani 1-bo'lakka
+        // yuborardi (14 soniya / 3 bo'lak ≈ 4.7 s).
+        let secs = 14.0;
+        let taxminiy = ((total as f64 * (5.0 / secs)) as u64) / CHUNK_SIZE;
+        assert_eq!(taxminiy, 1, "taxminiy hisob namunasi kutilganidek emas");
+    }
+
+    /// TO'LIQ YO'L: kesh papkasidagi haqiqiy bo'lakdan jadval
+    /// qurilib, meta.json'ga yozilishi.
+    #[test]
+    fn jadval_keshdan_qurilib_metaga_yoziladi() {
+        enable_crypto();
+        let (offsets, sizes, total) = test_layout();
+        let moov_body = test_moov_body(&offsets, &sizes, 1000, 1000);
+
+        // Fayl boshi: ftyp + moov (faststart).
+        let mut head = Vec::new();
+        head.extend_from_slice(&bx(b"ftyp", &[0u8; 16]));
+        head.extend_from_slice(&bx(b"moov", &moov_body));
+        // 0-bo'lak aynan 1 MiB bo'lishi kerak.
+        head.resize(CHUNK_SIZE as usize, 0);
+
+        const NAME: &str = "vbr.mp4";
+        let root = std::env::temp_dir().join(format!("idx_test_{}", micros_now()));
+        let dir = root.join(NAME);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("meta.json"),
+            format!(
+                "{{\"total_size\":{total},\"content_type\":\"video/mp4\",\"chunk_size\":{CHUNK_SIZE}}}"
+            ),
+        )
+        .unwrap();
+        let (k, iv) = crypto::derive_chunk_key_iv(NAME, 0).unwrap();
+        fs::write(dir.join(chunk_name(0)), crypto::encrypt_chunk(&head, &k, &iv)).unwrap();
+
+        let idx = time_index(NAME, &dir, total).expect("jadval qurilmadi");
+        assert_eq!(&*idx, &vec![0u32, 11_000, 12_000]);
+
+        // meta.json'ga yozilganini tekshiramiz — ilova qayta
+        // ochilganda qaytadan hisoblash shart bo'lmasligi kerak.
+        let raw = fs::read_to_string(dir.join("meta.json")).unwrap();
+        let meta: CacheMeta = serde_json::from_str(&raw).unwrap();
+        assert_eq!(meta.chunk_start_ms, vec![0u32, 11_000, 12_000]);
+
+        // Xotira tozalangan holatda ham meta.json'dan o'qiladi.
+        time_indexes().lock().unwrap().remove(NAME);
+        let again = time_index(NAME, &dir, total).expect("meta.json'dan o'qilmadi");
+        assert_eq!(&*again, &vec![0u32, 11_000, 12_000]);
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// MP4 `moov` -> `mvhd` dan davomiylik o'qilishi.
