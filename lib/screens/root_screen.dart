@@ -60,36 +60,26 @@ class _RootScreenState extends State<RootScreen>
     if (p != null) _navPos.value = p;
   }
 
-  // ── NEGA UZOQ SAHIFAGA "SAKRAB" O'TILADI ─────────────────────
+  // ── SAHIFA "SUZMAYDI", DARHOL ALMASHADI ──────────────────────
   //
-  // Avval har qanday tugma uchun `animateToPage` ishlatilardi. U
-  // sahifalarni BIRMA-BIR aylanib o'tadi: masalan Bosh sahifadan
-  // Profilga o'tishda PageView yo'l-yo'lakay Qidiruv, Katalog va
-  // Kutubxona ekranlarini ham QURIB chiqishga majbur bo'ladi — hammasi
-  // 320 ms ichida. Har bir ekran birinchi marta qurilayotgani uchun
-  // (initState, ro'yxatlar, rasm vidjetlari) bu ish bitta kadrga
-  // sig'may, ilova bir zumga QOTIB qolardi — foydalanuvchi buni
-  // "birinchi marta boshqa sahifaga o'tishda ilova qotib qoladi" deb
-  // ta'riflagan.
+  // TALAB: qaysi sahifaga o'tilsa ham to'g'ridan-to'g'ri o'tsin —
+  // suzish (slayd) effektisiz. Harakatlanadigan yagona narsa —
+  // pastdagi pushti tugma.
   //
-  // Endi:
-  //   * qo'shni sahifaga — avvalgidek silliq animatsiya (yo'lda birorta
-  //     ham ortiqcha ekran yo'q);
-  //   * uzoqroq sahifaga — `jumpToPage`, ya'ni FAQAT kerakli ekran
-  //     quriladi, oradagilar umuman tegilmaydi.
-  // Pastdagi suzuvchi tugma esa ikkala holatda ham silliq siljiydi.
+  // Shu bilan birga bu ENG TEZ yo'l ham. Avval qo'shni sahifaga
+  // `animateToPage` ishlatilardi: u sahifalarni BIRMA-BIR aylanib
+  // o'tadi va yo'l-yo'lakay oradagi ekranlarni ham QURIB chiqishga
+  // majbur bo'ladi — hammasi 320 ms ichida. Har bir ekran birinchi
+  // marta qurilayotgani uchun (initState, ro'yxatlar, rasm vidjetlari)
+  // bu ish bitta kadrga sig'may, ilova bir zumga qotib qolardi.
+  //
+  // Endi HAR DOIM `jumpToPage`: faqat kerakli ekran quriladi,
+  // oradagilar umuman tegilmaydi. Pastdagi suzuvchi tugma esa
+  // o'zining 280 ms lik silliq animatsiyasi bilan siljiydi.
   void _onTabTap(int i) {
     if (i == _index) return;
     final from = _navPos.value;
     setState(() => _index = i);
-    if ((i - from).abs() <= 1.001) {
-      _pageController.animateToPage(
-        i,
-        duration: const Duration(milliseconds: 320),
-        curve: Curves.easeOutCubic,
-      );
-      return;
-    }
     _jumping = true;
     _pageController.jumpToPage(i);
     _navTween = Tween<double>(begin: from, end: i.toDouble()).animate(

@@ -154,6 +154,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _connSub?.cancel();
     // Surish o'rtasida ekran yopilsa, to'xtatish osilib qolmasin.
     _releaseDownloadUpdates();
+    _epScrollCtrl.dispose();
     DownloadManager.instance.unwatch(this);
     _tabCtrl.dispose();
     _hideTimer?.cancel();
@@ -198,6 +199,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
         _episodes = cached;
         _loadingEps = false;
       });
+      _autoOpenFirstEpisode();
     }
 
     try {
@@ -214,6 +216,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
             _loadingEps = false;
           });
           _syncWatchedUrls();
+          _autoOpenFirstEpisode();
         }
         return;
       }
@@ -1243,6 +1246,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                 ),
               ),
               const SizedBox(height: 8),
+              // [<] N-qism [>] — qismlar tabining USTIDA.
+              _buildEpisodeNav(),
+              const SizedBox(height: 8),
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16),
                 child: Glass(
@@ -1894,6 +1900,173 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     DownloadManager.instance.release();
   }
 
+  // ══════════════════════════════════════════════════════════════
+  //  QISMLAR BO'YICHA HARAKAT: [<] N-qism [>]
+  // ══════════════════════════════════════════════════════════════
+
+  /// Ro'yxatni surish uchun (tanlangan qismni o'rtaga olib kelish).
+  final ScrollController _epScrollCtrl = ScrollController();
+
+  /// Har bir qism qatorining kaliti — qatorni ANIQ o'rtaga joylash
+  /// uchun kerak (ochilgan qatorlarning bo'yi har xil bo'lgani sabab
+  /// faqat hisob-kitob bilan aniq chiqmaydi).
+  final Map<String, GlobalKey> _epTileKeys = {};
+
+  GlobalKey _epTileKey(String epKey) =>
+      _epTileKeys.putIfAbsent(epKey, () => GlobalKey());
+
+  /// YOPIQ qatorning taxminiy bo'yi (margin bilan). Surishning
+  /// birinchi, taxminiy bosqichi uchun — keyin aniqlashtiriladi.
+  static const double _kTileExtent = 60.0;
+
+  /// Ekran ochilishi bilan ro'yxatdagi BIRINCHI qism pleyerga
+  /// yuklanadi, lekin IJRO BOSHLANMAYDI. Pleyer ochilishi bilan
+  /// kesh-server videoning birinchi bo'lagini oladi va birinchi kadr
+  /// ekranda turadi — foydalanuvchi "play" bosishi bilan video
+  /// darhol ketadi, kutish bo'lmaydi.
+  void _autoOpenFirstEpisode() {
+    if (!mounted || _currentEp != null) return;
+    if (_orderedEps.isEmpty) return;
+    // MUHIM: birinchi KADRDAN KEYIN ochamiz.
+    // `_loadEpisodes` ro'yxatni keshdan o'qiganda bu metod hali
+    // `initState` ichida — ya'ni ilk build davomida — chaqirilishi
+    // mumkin. `_playEpisode` esa darhol `setState` qiladi va eski
+    // controllerni yopish uchun kadr kutadi; buni build o'rtasida
+    // qilib bo'lmaydi.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _currentEp != null) return;
+      final eps = _orderedEps;
+      if (eps.isEmpty) return;
+      _playEpisode(eps.first, resumePlaying: false);
+    });
+  }
+
+  /// Joriy qismning ro'yxatdagi o'rni (topilmasa -1).
+  int get _currentEpIndex {
+    final cur = _currentEp;
+    if (cur == null) return -1;
+    final key = _epKeyOf(cur);
+    final eps = _orderedEps;
+    for (var i = 0; i < eps.length; i++) {
+      if (_epKeyOf(eps[i]) == key) return i;
+    }
+    return -1;
+  }
+
+  /// `delta`: +1 — KEYINGI qism (raqami kattaroq), -1 — oldingisi.
+  ///
+  /// Ro'yxat KAMAYISH tartibida saralangan (3-qism, 2-qism, 1-qism...),
+  /// shu sabab "keyingi qism" indeksda YUQORIGA siljish demakdir.
+  void _stepEpisode(int delta) {
+    final eps = _orderedEps;
+    if (eps.isEmpty) return;
+    final i = _currentEpIndex;
+    final target = i < 0 ? 0 : i - delta;
+    if (target < 0 || target >= eps.length) return;
+    // Ijro holati saqlanadi: video ketayotgan bo'lsa yangi qism ham
+    // darhol ijro etiladi, pauzada bo'lsa pauzada ochiladi.
+    _playEpisode(eps[target], resumePlaying: _intendedPlaying);
+    _centerOnEpisode(eps[target]);
+  }
+
+  /// Tanlangan qism qatorini ro'yxatning O'RTASIGA olib keladi.
+  void _centerOnEpisode(Map<String, dynamic> ep) {
+    final epKey = _epKeyOf(ep);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_epScrollCtrl.hasClients) return;
+      final eps = _orderedEps;
+      final index = eps.indexWhere((e) => _epKeyOf(e) == epKey);
+      if (index < 0) return;
+
+      final pos = _epScrollCtrl.position;
+      // 1-bosqich: taxminiy o'ringa suramiz. Yopiq qatorlarning bo'yi
+      // bir xil bo'lgani uchun bu odatda aynan to'g'ri chiqadi.
+      final want =
+          index * _kTileExtent - (pos.viewportDimension - _kTileExtent) / 2;
+      final target =
+          want.clamp(pos.minScrollExtent, pos.maxScrollExtent).toDouble();
+      _epScrollCtrl
+          .animateTo(target,
+              duration: const Duration(milliseconds: 320),
+              curve: Curves.easeOutCubic)
+          .whenComplete(() {
+        // 2-bosqich: qator endi qurilgan — uni ANIQ o'rtaga joylaymiz
+        // (ro'yxatda ochilgan, balandroq qatorlar bo'lsa shu tuzatadi).
+        if (!mounted) return;
+        final ctx = _epTileKeys[epKey]?.currentContext;
+        if (ctx == null) return;
+        Scrollable.ensureVisible(
+          ctx,
+          alignment: 0.5,
+          duration: const Duration(milliseconds: 180),
+          curve: Curves.easeOut,
+        );
+      });
+    });
+  }
+
+  /// [<] N-qism [>] — qismlar tabining USTIDAGI boshqaruv.
+  /// Tugmalarda YOZUV yo'q, faqat ikonka.
+  Widget _buildEpisodeNav() {
+    final eps = _orderedEps;
+    final i = _currentEpIndex;
+    // Ro'yxat kamayish tartibida: keyingi qism indeksda yuqorida.
+    final hasNext = i > 0;
+    final hasPrev = i >= 0 && i < eps.length - 1;
+    final label = i >= 0
+        ? '${eps[i]['epizod_number'] ?? ''}-qism'
+        : (eps.isEmpty ? '—' : 'Qismni tanlang');
+
+    Widget btn(IconData icon, bool enabled, VoidCallback onTap) {
+      return GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: enabled ? onTap : null,
+        child: Container(
+          width: 46,
+          height: 34,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(enabled ? 0.10 : 0.04),
+            borderRadius: BorderRadius.circular(11),
+            border: Border.all(
+                color: Colors.white.withOpacity(enabled ? 0.18 : 0.06)),
+          ),
+          child: Icon(icon,
+              size: 22,
+              color: Colors.white.withOpacity(enabled ? 0.95 : 0.25)),
+        ),
+      );
+    }
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Glass(
+        borderRadius: 16,
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+        child: Row(
+          children: [
+            btn(Icons.skip_previous_rounded, hasPrev, () => _stepEpisode(-1)),
+            Expanded(
+              child: Center(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: i >= 0 ? Colors.white : Colors.white54,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ),
+            btn(Icons.skip_next_rounded, hasNext, () => _stepEpisode(1)),
+          ],
+        ),
+      ),
+    );
+  }
+
   void _toggleExpanded(String epKey) {
     setState(() {
       if (!_expandedEps.remove(epKey)) _expandedEps.add(epKey);
@@ -1949,6 +2122,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
               style: TextStyle(color: Colors.white.withOpacity(0.5))));
     }
     return ListView.builder(
+      controller: _epScrollCtrl,
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 120),
       itemCount: eps.length,
       itemBuilder: (_, i) {
@@ -1957,7 +2131,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
         final isCurrent =
             _currentEp != null && _currentEp!['epizod_id'] == ep['epizod_id'];
         return _EpisodeTile(
-          key: ValueKey(epKey),
+          // GlobalKey — qatorni aniq o'rtaga joylash uchun
+          // (`_centerOnEpisode`ga qarang).
+          key: _epTileKey(epKey),
           number: ep['epizod_number']?.toString() ?? '${i + 1}',
           isCurrent: isCurrent,
           // Tugmadagi ikonka foydalanuvchining NIYATINI ko'rsatadi
