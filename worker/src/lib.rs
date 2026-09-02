@@ -446,6 +446,55 @@ fn cacheable(bytes: Vec<u8>, ct: &str, total: u64) -> Result<Response> {
     Ok(resp)
 }
 
+/// Cache API Range'ni qo'llab-quvvatlaydimi — amaliy sinov.
+/// Keshga 4 MiB sinov obyekti yoziladi, so'ng undan "bytes=1048576-2097151"
+/// (2-chi MiB) so'raladi. Javob 206 va tanasi 1 MiB bo'lsa — Cache API
+/// oraliqni O'ZI kesib beradi degani.
+async fn cache_range_test() -> Result<Response> {
+    let cache = Cache::default();
+    let url = "https://fulutter-chunk-cache.internal/_ranget3";
+    let put_key = Request::new(url, Method::Get)?;
+
+    let size = 4 * 1024 * 1024usize;
+    let body: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+    let mut to_cache = Response::from_bytes(body)?;
+    {
+        let h = to_cache.headers_mut();
+        h.set("Content-Type", "video/mp4")?;
+        h.set("Content-Length", &size.to_string())?;
+        h.set("Accept-Ranges", "bytes")?;
+        h.set("Cache-Control", "public, max-age=600")?;
+    }
+    let put_err = cache.put(&put_key, to_cache).await.err().map(|e| e.to_string());
+
+    let mut h = Headers::new();
+    h.set("Range", "bytes=1048576-2097151")?;
+    let get_key = Request::new_with_init(
+        url,
+        RequestInit::new().with_method(Method::Get).with_headers(h),
+    )?;
+
+    let (status, cr, len) = match cache.get(&get_key, false).await? {
+        Some(mut c) => {
+            let st = c.status_code();
+            let cr = c.headers().get("Content-Range")?.unwrap_or_default();
+            let b = c.bytes().await?;
+            (st, cr, b.len())
+        }
+        None => (0, "kesh bo'sh".to_string(), 0),
+    };
+
+    let mut resp = Response::from_json(&json!({
+        "put_error": put_err,
+        "status": status,
+        "content_range": cr,
+        "body_len": len,
+        "range_supported": status == 206 && len == 1048576,
+    }))?;
+    set_cors(&mut resp);
+    Ok(resp)
+}
+
 /// B2 proxy. Range bor-yo'qligiga qarab ikki yo'ldan biri tanlanadi.
 async fn b2_proxy(env: &Env, file_name: &str, range: Option<String>) -> Result<Response> {
     match range.as_deref().and_then(parse_range) {
@@ -727,6 +776,15 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         let mut r = Response::empty()?;
         set_cors(&mut r);
         return Ok(r);
+    }
+
+    // ── VAQTINCHALIK DIAGNOSTIKA ─────────────────────────────
+    // Cloudflare Cache API keshdagi obyektdan BAYT ORALIG'INI o'zi
+    // kesib bera oladimi? Agar ha bo'lsa, katta (100 MB) bo'lakni
+    // keshda saqlab, undan 1 MB'ni XOTIRAGA YIG'MASDAN berish mumkin.
+    // Bu savolga faqat amaliy sinov javob beradi.
+    if method == Method::Get && path == "/api/_cachetest" {
+        return cache_range_test().await;
     }
 
     // B2 proxy — Range header bilan uzatiladi (video seek)
