@@ -152,6 +152,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _connSub?.cancel();
+    // Surish o'rtasida ekran yopilsa, to'xtatish osilib qolmasin.
+    _releaseDownloadUpdates();
     DownloadManager.instance.unwatch(this);
     _tabCtrl.dispose();
     _hideTimer?.cancel();
@@ -1259,7 +1261,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                     unselectedLabelStyle: const TextStyle(fontSize: 13),
                     dividerColor: Colors.transparent,
                     tabs: const [
-                      Tab(text: 'Epizodlar'),
+                      Tab(text: 'Qismlar'),
                       Tab(text: 'Bo\'limlar'),
                       Tab(text: 'Ma\'lumot'),
                     ],
@@ -1272,7 +1274,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                 // TabBarView sahifalarni PageView kabi yonma-yon
                 // joylashtiradi va bir tabdan boshqasiga o'tganda
                 // ORADAGI tabni ham qurishga majbur bo'ladi — hammasi
-                // ~300 ms lik animatsiya ichida. "Epizodlar"dan
+                // ~300 ms lik animatsiya ichida. "Qismlar"dan
                 // "Ma'lumot"ga o'tishda esa ikkita tab birdan
                 // quriladi (biri rasm yuklaydigan ro'yxat) va ilova
                 // bir zumga QOTIB qolardi.
@@ -1282,16 +1284,36 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                 // `_lazyTab` yordamida tab BIRINCHI MARTA ochilgandagina
                 // quriladi — ya'ni hech qachon ortiqcha ish
                 // bajarilmaydi.
-                child: AnimatedBuilder(
-                  animation: _tabCtrl,
-                  builder: (context, _) => IndexedStack(
-                    index: _tabCtrl.index,
-                    sizing: StackFit.expand,
-                    children: [
-                      _lazyTab(0, _buildEpisodeTab),
-                      _lazyTab(1, _buildSeasonsTab),
-                      _lazyTab(2, () => _buildInfoTab(tavsif.toString())),
-                    ],
+                //
+                // ── SURISH PAYTIDA SO'ROVLAR TO'XTAYDI ────────────
+                // Yuklab olish holati Rust yadrosidan SINXRON FFI
+                // bilan o'qiladi va bu ish UI oqimida bajariladi.
+                // U kadr tayyorlanayotgan paytga to'g'ri kelsa,
+                // ro'yxat barmoq ostida "tutilib" ko'rinadi. Shu
+                // sabab barmoq ekranda turganda so'rov umuman
+                // qilinmaydi; barmoq ko'tarilishi bilan holat darhol
+                // yangilanadi.
+                child: NotificationListener<ScrollNotification>(
+                  onNotification: (n) {
+                    if (n is ScrollStartNotification) {
+                      _holdDownloadUpdates();
+                    } else if (n is ScrollEndNotification) {
+                      _releaseDownloadUpdates();
+                    }
+                    // `false` — xabar yuqoriga o'tishda davom etadi.
+                    return false;
+                  },
+                  child: AnimatedBuilder(
+                    animation: _tabCtrl,
+                    builder: (context, _) => IndexedStack(
+                      index: _tabCtrl.index,
+                      sizing: StackFit.expand,
+                      children: [
+                        _lazyTab(0, _buildEpisodeTab),
+                        _lazyTab(1, _buildSeasonsTab),
+                        _lazyTab(2, () => _buildInfoTab(tavsif.toString())),
+                      ],
+                    ),
                   ),
                 ),
               ),
@@ -1360,7 +1382,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                   Icon(Icons.play_circle_outline_rounded,
                       color: Colors.white24, size: 52),
                   SizedBox(height: 8),
-                  Text('Epizodni tanlang',
+                  Text('Qismni tanlang',
                       style: TextStyle(color: Colors.white38, fontSize: 13)),
                 ],
               ),
@@ -1854,6 +1876,22 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       }
     }
     DownloadManager.instance.watch(this, urls);
+  }
+
+  /// Surish davomida holat so'rovi to'xtatilganmi (ikki marta
+  /// to'xtatib qo'ymaslik uchun).
+  bool _dlHeld = false;
+
+  void _holdDownloadUpdates() {
+    if (_dlHeld) return;
+    _dlHeld = true;
+    DownloadManager.instance.hold();
+  }
+
+  void _releaseDownloadUpdates() {
+    if (!_dlHeld) return;
+    _dlHeld = false;
+    DownloadManager.instance.release();
   }
 
   void _toggleExpanded(String epKey) {

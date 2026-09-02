@@ -74,7 +74,13 @@ const MAX_CONNS: usize = 64;
 /// oladi — natijada HECH BIRI o'z vaqtida tugamaydi, pleyer esa
 /// javob kutib qotib qoladi. Endi bir vaqtda eng ko'pi 6 ta yuklash
 /// bo'ladi; qolganlari navbat kutadi (rad etilmaydi).
-const MAX_NET_FETCHES: usize = 6;
+///
+/// 6 -> 8: yuklab olish endi DOWNLOAD_THREADS (4) ta oqimda ketadi,
+/// shu sabab pleyerning oldindan yuklashi (3 ta oqim) bilan birga
+/// 7 ta bo'ladi. Chegara 6 da qolsa, ular bir-birini navbatda ushlab
+/// qolardi. 8 — ikkalasiga ham joy beradi, lekin xotira sarfi hamon
+/// bashorat qilinadigan (eng ko'pi ~8 MiB bufer) bo'lib qoladi.
+const MAX_NET_FETCHES: usize = 8;
 static NET_FETCHES: AtomicUsize = AtomicUsize::new(0);
 
 /// ── OLDINDAN YUKLASH OYNASI: HAR DOIM 10 MB TAYYOR ──────────────
@@ -241,6 +247,51 @@ pub extern "C" fn rust_video_cache_start(cache_dir_ptr: *const c_char) -> i32 {
     };
     let _ = PORT.set(port);
     log(format!("Rust kesh-server ishga tushdi: 127.0.0.1:{port}"));
+
+    // ── KESHNI OLDINDAN SKANERLASH ────────────────────────────────
+    //
+    // Yuklab olish hisobi (qaysi bo'lak diskda bor, necha bayt tayyor)
+    // endi FON oqimida hisoblanadi — UI oqimi hech qachon diskni
+    // kutmasligi uchun (`stat_snapshot_fast` izohiga qarang). Lekin
+    // shu sabab hisob BIRINCHI so'ralganda hali tayyor bo'lmasligi
+    // mumkin, oflayn rejimda esa ro'yxat aynan shu hisobga qarab
+    // filtrlanadi — natijada ro'yxat bir lahzaga bo'sh ko'rinardi.
+    //
+    // Yechim: server ishga tushishi bilan (ya'ni ilova ochilganda,
+    // foydalanuvchi hali hech qayerga o'tmasdan oldin) butun kesh bir
+    // marta fon'da skanerlanadi. Ekran ochilganda hisob ALLAQACHON
+    // tayyor bo'ladi.
+    thread::Builder::new()
+        .name("video-cache-warmup".into())
+        .stack_size(256 * 1024)
+        .spawn(|| {
+            let Some(shared) = SHARED.get() else { return };
+            let Ok(entries) = fs::read_dir(&shared.cache_root) else {
+                return;
+            };
+            let mut n = 0usize;
+            for entry in entries.flatten() {
+                if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    continue;
+                }
+                let key = entry.file_name().to_string_lossy().to_string();
+                if key.is_empty() {
+                    continue;
+                }
+                let (total, have) = stat_snapshot(&key, &entry.path());
+                if total > 0 {
+                    n += 1;
+                    if let Ok(mut map) = stats().lock() {
+                        if let Some(e) = map.get_mut(&key) {
+                            e.scanned_at = Some(Instant::now());
+                        }
+                    }
+                    let _ = have;
+                }
+            }
+            log(format!("Kesh oldindan skanerlandi: {n} ta video"));
+        })
+        .ok();
 
     thread::Builder::new()
         .name("video-cache-accept".into())
@@ -608,6 +659,92 @@ fn read_cached_chunk(dir: &PathBuf, key: &str, index: u64, expected_len: usize) 
     Some(plain)
 }
 
+// ── YARIM YUKLANGAN BO'LAK ("qoldiq" fayl) ──────────────────────────
+//
+// TALAB: bo'lak to'liq yuklanmay uzilib qolsa, olingan qismi
+// YO'QOLMASIN — diskda saqlanib tursin va keyingi urinishda aynan
+// o'sha joydan davom etilsin. Bo'lak to'liq yig'ilgach esa qoldiq
+// O'CHIRILADI va uning o'rniga YAKUNIY, to'liq bo'lak yoziladi.
+//
+// NEGA MUHIM: ilgari 1 MiB bo'lakning 900 KB'i olinib tarmoq uzilsa,
+// o'sha 900 KB butunlay tashlanardi va keyingi urinish NOLDAN
+// boshlanardi. Zaif tarmoqda bu "abadiy qayta yuklash" halqasiga olib
+// kelardi — bo'lak hech qachon tugamasdi va foiz joyida turib qolardi.
+//
+// Qoldiq YAKUNIY bo'lakdan BOSHQA nom bilan saqlanadi
+// ("chunk_0000012.bin.part"), shu sabab uni hech qachon tayyor bo'lak
+// deb o'qib bo'lmaydi: `read_cached_chunk` faqat aniq nomdagi va aniq
+// hajmdagi faylni qabul qiladi.
+
+fn part_name(index: u64) -> String {
+    format!("{}.part", chunk_name(index))
+}
+
+fn part_label(key: &str, index: u64) -> String {
+    format!("{key}:part:{index}")
+}
+
+fn micros_now() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros())
+        .unwrap_or(0)
+}
+
+/// Diskdagi qoldiqni o'qiydi (shifr ochiladi). Buzuq, bo'sh yoki
+/// bo'lak hajmidan kichik emas bo'lsa — fayl o'chiriladi va `None`
+/// qaytariladi (bo'lak noldan olinadi).
+fn read_part(dir: &PathBuf, key: &str, index: u64, expected_len: usize) -> Option<Vec<u8>> {
+    let path = dir.join(part_name(index));
+    let raw = fs::read(&path).ok()?;
+    let plain = if crypto::is_enabled() {
+        match crypto::open_blob(&part_label(key, index), &raw) {
+            Some(p) => p,
+            None => {
+                let _ = fs::remove_file(&path);
+                return None;
+            }
+        }
+    } else {
+        raw
+    };
+    if plain.is_empty() || plain.len() >= expected_len {
+        let _ = fs::remove_file(&path);
+        return None;
+    }
+    Some(plain)
+}
+
+/// Qoldiqni diskka yozadi (atom: tmp -> rename), ya'ni ESKI qoldiq
+/// yangisi bilan ALMASHTIRILADI. Vaqtinchalik fayl ".tmp" bilan
+/// tugaydi — `scan_and_clean` egasiz qolganini keyin o'zi tozalaydi.
+fn write_part(dir: &PathBuf, key: &str, index: u64, plain: &[u8]) {
+    if plain.is_empty() {
+        return;
+    }
+    let blob = if crypto::is_enabled() {
+        match crypto::seal_blob(&part_label(key, index), plain) {
+            Some(b) => b,
+            None => return,
+        }
+    } else {
+        plain.to_vec()
+    };
+    let tmp = dir.join(format!("{}.{}.tmp", part_name(index), micros_now()));
+    if fs::write(&tmp, &blob).is_err() {
+        let _ = fs::remove_file(&tmp);
+        return;
+    }
+    if fs::rename(&tmp, dir.join(part_name(index))).is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+}
+
+/// Qoldiqni o'chiradi — bo'lak TO'LIQ yozilgandan keyin chaqiriladi.
+fn remove_part(dir: &PathBuf, index: u64) {
+    let _ = fs::remove_file(dir.join(part_name(index)));
+}
+
 // ── Meta (umumiy hajm + kontent turi) ───────────────────────────────
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -742,6 +879,13 @@ struct StatEntry {
     /// o'qish keraksiz: oflayn rejimda ekran bir vaqtda o'nlab
     /// qismning holatini so'raydi.
     checked_at: Option<Instant>,
+    /// Hozir FON oqimida skanerlash ketyaptimi (ikki marta
+    /// boshlanmasligi uchun).
+    scanning: bool,
+    /// Fon skanerlashi oxirgi marta qachon TUGAGAN. Hajm hali
+    /// noma'lum bo'lganda (meta.json yo'q) keraksiz qayta-qayta oqim
+    /// ochilmasligi uchun kerak.
+    scanned_at: Option<Instant>,
 }
 
 impl StatEntry {
@@ -752,11 +896,20 @@ impl StatEntry {
             have_bytes: 0,
             scanned: false,
             checked_at: None,
+            scanning: false,
+            scanned_at: None,
         }
     }
 }
 
 static STATS: OnceLock<Mutex<HashMap<String, StatEntry>>> = OnceLock::new();
+
+/// Fon'da bir vaqtda ishlaydigan skanerlash oqimlari soni va uning
+/// chegarasi. Skanerlash DISKKA tayanadi, ya'ni oqimlarni ko'paytirish
+/// tezlik bermaydi — chegara faqat oqim to'planib ketishining oldini
+/// oladi.
+static SCAN_THREADS: AtomicUsize = AtomicUsize::new(0);
+const MAX_SCAN_THREADS: usize = 2;
 
 fn stats() -> &'static Mutex<HashMap<String, StatEntry>> {
     STATS.get_or_init(|| Mutex::new(HashMap::new()))
@@ -827,8 +980,13 @@ fn scan_and_clean(dir: &PathBuf, total: u64) -> (HashSet<u64>, u64) {
         if m.len() == chunk_on_disk_len(plain) {
             have.insert(i);
             have_bytes += plain;
+            // Bo'lak to'liq — undan qolgan "qoldiq" fayl (agar bo'lsa)
+            // endi keraksiz.
+            remove_part(dir, i);
         } else {
-            // 2) To'liq bo'lmagan bo'lak — tozalanadi.
+            // 2) To'liq bo'lmagan YAKUNIY fayl — tozalanadi.
+            //    (".part" qoldig'iga TEGILMAYDI: u ataylab saqlanadi
+            //    va keyingi urinishda davom ettirish uchun kerak.)
             let _ = fs::remove_file(&path);
         }
     }
@@ -900,6 +1058,86 @@ fn stat_snapshot(key: &str, dir: &PathBuf) -> (u64, u64) {
     (e.total, e.have_bytes)
 }
 
+/// ── UI OQIMI UCHUN: HECH QACHON BLOKLANMAYDI ────────────────────
+///
+/// Bu funksiya Dart tomonidan, ya'ni Flutter'ning UI oqimida,
+/// soniyada bir necha marta chaqiriladi. Ilgari u to'g'ridan-to'g'ri
+/// `stat_snapshot` ni chaqirardi va u yerda `fs::read_dir` + har bir
+/// bo'lak uchun `fs::metadata` bajarilardi. 166 MB video = 166 ta
+/// fayl; ochilgan qismning bir necha sifati bilan bu MINGGA yaqin
+/// syscall degani — hammasi UI oqimida, yuklab olish oqimlari o'sha
+/// diskka yozib turgan paytda. Natijada qismlar ro'yxatini surganda
+/// kadrlar tashlanardi (15-25 fps).
+///
+/// Endi qoida qat'iy: BU YERDA DISKKA CHIQILMAYDI. Xotiradagi hisob
+/// darhol qaytariladi; diskni skanerlash kerak bo'lsa, u FON oqimida
+/// bir marta bajariladi va natija keyingi so'rovda tayyor bo'ladi.
+/// Hisobning o'zi (qaysi bo'lak bor, necha bayt) mutlaqo o'zgarmadi —
+/// faqat u ENDI BOSHQA OQIMDA hisoblanadi.
+fn stat_snapshot_fast(key: &str, dir: &PathBuf) -> (u64, u64) {
+    // Tayyor hisob bo'lsa — darhol qaytaramiz (eng keng tarqalgan yo'l).
+    let (total, have, need_scan) = {
+        let mut map = stats().lock().unwrap();
+        let e = map.entry(key.to_string()).or_insert_with(StatEntry::empty);
+        if e.scanned && e.total > 0 {
+            return (e.total, e.have_bytes);
+        }
+        // Skanerlash allaqachon ketyaptimi yoki hozirgina tugadimi?
+        let recently = e
+            .scanned_at
+            .map(|t| t.elapsed() < Duration::from_secs(1))
+            .unwrap_or(false);
+        let need = !e.scanning && !recently;
+        if need {
+            e.scanning = true;
+        }
+        (e.total, e.have_bytes, need)
+    };
+    if !need_scan {
+        return (total, have);
+    }
+
+    // Bir vaqtda ochiladigan skanerlash oqimlari CHEKLANADI. Oflayn
+    // rejimda ekran bir zumda o'nlab qismning holatini so'raydi —
+    // chegarasiz holda o'nlab oqim birdan ochilib, bir xil disk uchun
+    // raqobatlashardi. Chegaradan oshgani shunchaki KUTADI: keyingi
+    // so'rovda (bir necha yuz millisekunddan keyin) navbati keladi.
+    if SCAN_THREADS.fetch_add(1, Ordering::SeqCst) >= MAX_SCAN_THREADS {
+        SCAN_THREADS.fetch_sub(1, Ordering::SeqCst);
+        if let Ok(mut map) = stats().lock() {
+            if let Some(e) = map.get_mut(key) {
+                e.scanning = false;
+            }
+        }
+        return (total, have);
+    }
+
+    let (k, d) = (key.to_string(), dir.clone());
+    let spawned = thread::Builder::new()
+        .name("video-cache-scan".into())
+        .stack_size(256 * 1024)
+        .spawn(move || {
+            // Og'ir ish — FON oqimida (UI kutmaydi).
+            let _ = stat_snapshot(&k, &d);
+            if let Ok(mut map) = stats().lock() {
+                if let Some(e) = map.get_mut(&k) {
+                    e.scanning = false;
+                    e.scanned_at = Some(Instant::now());
+                }
+            }
+            SCAN_THREADS.fetch_sub(1, Ordering::SeqCst);
+        });
+    if spawned.is_err() {
+        SCAN_THREADS.fetch_sub(1, Ordering::SeqCst);
+        if let Ok(mut map) = stats().lock() {
+            if let Some(e) = map.get_mut(key) {
+                e.scanning = false;
+            }
+        }
+    }
+    (total, have)
+}
+
 fn stat_reset(key: &str, keep_total: u64) {
     let mut map = stats().lock().unwrap();
     map.insert(
@@ -910,6 +1148,8 @@ fn stat_reset(key: &str, keep_total: u64) {
             have_bytes: 0,
             scanned: keep_total > 0,
             checked_at: Some(Instant::now()),
+            scanning: false,
+            scanned_at: None,
         },
     );
 }
@@ -931,8 +1171,10 @@ fn stat_reset(key: &str, keep_total: u64) {
 // YANGI TIZIM — bitta MARKAZIY navbat va CHEGARALANGAN ish oqimlari:
 //   * butun ilovada bor-yo'g'i DOWNLOAD_WORKERS ta ish oqimi bo'ladi,
 //     nechta sifat navbatga qo'yilishidan qat'i nazar;
-//   * har bir vazifa bo'laklarni KETMA-KET oladi — ya'ni bir vaqtda
-//     xotirada eng ko'pi 1 MiB'dan turadi;
+//   * har bir vazifa bo'laklarni DOWNLOAD_THREADS ta oqimda parallel
+//     oladi (tezlik uchun), lekin bir vaqtdagi tarmoq so'rovlari soni
+//     MAX_NET_FETCHES bilan GLOBAL cheklangan — ya'ni nechta vazifa
+//     bo'lishidan qat'i nazar xotirada shundan ortiq bufer turmaydi;
 //   * xato bo'lsa vazifa navbatdan CHIQMAYDI: kechikish bilan (2, 4,
 //     8 ... 60 soniya) o'zi qayta uriniladi va aynan to'xtagan
 //     bo'lagidan davom etadi;
@@ -945,6 +1187,22 @@ fn stat_reset(key: &str, keep_total: u64) {
 /// Butun ilova bo'yicha bir vaqtda yuklanadigan videolar soni.
 /// Ijro (pleyer) har doim ustuvor bo'lishi uchun ataylab kichik.
 const DOWNLOAD_WORKERS: usize = 2;
+
+/// BITTA videoni yuklab olishda bir vaqtda ishlaydigan oqimlar soni.
+///
+/// NEGA KERAK: ilgari bo'laklar KETMA-KET olinardi — bitta so'rov
+/// tugamaguncha keyingisi boshlanmasdi. Bunda haqiqiy tezlik
+/// "bo'lak hajmi / so'rov kechikishi" bilan cheklanadi: 1 MiB va
+/// 200 ms kechikishda bu atigi ~5 MB/s, mobil tarmoqda ancha kam.
+/// Shu sabab VIDEONI KO'RISH (u 3 ta oqimda oldindan yuklaydi)
+/// yuklab olish tugmasidan TEZROQ ishlardi — foydalanuvchi buni
+/// to'g'ri ravishda teskari deb hisobladi.
+///
+/// Endi yuklab olish 4 ta oqimda ketadi, ya'ni ijro uchun
+/// ishlatiladigan oldindan yuklashdan ham tezroq. Xotira xavfsiz:
+/// bir vaqtdagi tarmoq so'rovlari soni MAX_NET_FETCHES bilan
+/// global cheklangan, ya'ni eng ko'pi shuncha MiB bufer bo'ladi.
+const DOWNLOAD_THREADS: usize = 4;
 
 struct DownloadState {
     url: String,
@@ -1063,8 +1321,11 @@ fn pool_worker() {
 ///   Ok(false) — foydalanuvchi to'xtatdi;
 ///   Err(..)   — xato (keyinroq qayta uriniladi).
 ///
-/// Bo'laklar KETMA-KET olinadi: xotirada bir vaqtda faqat bittasi
-/// turadi va tarmoq pleyer bilan raqobatlashmaydi.
+/// Bo'laklar DOWNLOAD_THREADS ta oqimda PARALLEL olinadi: navbat —
+/// oddiy atomik hisoblagich, har bir oqim keyingi raqamni olib o'sha
+/// bo'lakni yuklaydi. Shu bilan tarmoq kechikishi "yashiriladi" va
+/// tezlik ijro uchun ishlatiladigan oldindan yuklashdan ham yuqori
+/// bo'ladi. Xotira global MAX_NET_FETCHES chegarasi bilan himoyalangan.
 fn run_download(key: &str, url: &str) -> Result<bool, String> {
     let Some(shared) = SHARED.get() else {
         return Err("kesh-server ishga tushmagan".to_string());
@@ -1082,34 +1343,114 @@ fn run_download(key: &str, url: &str) -> Result<bool, String> {
     let _ = stat_snapshot(key, &dir);
 
     let count = total.div_ceil(CHUNK_SIZE);
-    for i in 0..count {
-        if !download_active(key) {
-            return Ok(false);
-        }
-        let chunk_start = i * CHUNK_SIZE;
-        let chunk_end = (chunk_start + CHUNK_SIZE - 1).min(total - 1);
-        let expected_len = (chunk_end - chunk_start + 1) as usize;
+    // Navbat: keyingi olinadigan bo'lak indeksi.
+    let cursor = Arc::new(AtomicU64::new(0));
+    // Foydalanuvchi pauza bosdimi (oqimlar buni ko'rib chiqadi).
+    let paused = Arc::new(AtomicBool::new(false));
+    // Birinchi xato — u butun vazifani to'xtatadi va yuqoriga
+    // qaytariladi, ya'ni qayta urinish mantig'i avvalgidek ishlaydi.
+    let first_err: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
-        // Diskda TO'LIQ bor bo'lsa — tarmoqqa umuman chiqilmaydi
-        // (aynan shu sabab yuklash to'xtagan joyidan davom etadi).
-        if let Ok(m) = fs::metadata(dir.join(chunk_name(i))) {
-            if m.len() == chunk_on_disk_len(expected_len as u64) {
-                stat_note_chunk(key, i, expected_len as u64);
-                continue;
-            }
+    let mut workers = Vec::with_capacity(DOWNLOAD_THREADS);
+    for _ in 0..DOWNLOAD_THREADS {
+        let cursor = Arc::clone(&cursor);
+        let paused = Arc::clone(&paused);
+        let first_err = Arc::clone(&first_err);
+        let (k, d, u) = (key.to_string(), dir.clone(), url.to_string());
+        let h = thread::Builder::new()
+            .name("video-download-w".into())
+            // Kichik stek yetarli: oqim faqat bitta bo'lakni oladi
+            // va diskka yozadi.
+            .stack_size(256 * 1024)
+            .spawn(move || loop {
+                if paused.load(Ordering::SeqCst) {
+                    break;
+                }
+                // Sherik oqimlardan biri xatoga uchragan bo'lsa —
+                // qolganlari ham to'xtaydi (qayta urinish yuqorida).
+                if first_err.lock().map(|e| e.is_some()).unwrap_or(true) {
+                    break;
+                }
+                let i = cursor.fetch_add(1, Ordering::SeqCst);
+                if i >= count {
+                    break;
+                }
+                if !download_active(&k) {
+                    paused.store(true, Ordering::SeqCst);
+                    break;
+                }
+
+                let chunk_start = i * CHUNK_SIZE;
+                let chunk_end = (chunk_start + CHUNK_SIZE - 1).min(total - 1);
+                let expected_len = (chunk_end - chunk_start + 1) as usize;
+                let on_disk_len = chunk_on_disk_len(expected_len as u64);
+                let path = d.join(chunk_name(i));
+
+                // Diskda TO'LIQ bor bo'lsa — tarmoqqa umuman
+                // chiqilmaydi (yuklash to'xtagan joyidan davom etadi).
+                if let Ok(m) = fs::metadata(&path) {
+                    if m.len() == on_disk_len {
+                        stat_note_chunk(&k, i, expected_len as u64);
+                        continue;
+                    }
+                }
+
+                let fetched = fetch_and_store_chunk(
+                    shared,
+                    &k,
+                    &d,
+                    &u,
+                    i,
+                    chunk_start,
+                    chunk_end,
+                    expected_len,
+                    total,
+                    false,
+                );
+                let problem = match fetched {
+                    Err(e) => Some(e),
+                    // Bo'lak QAYTDI, lekin diskda to'liq turibdimi?
+                    // Yarim olingan bo'lsa qoldiq saqlangan bo'ladi va
+                    // keyingi urinish o'sha joydan davom etadi — shu
+                    // sabab buni xato deb belgilaymiz.
+                    Ok(_) => {
+                        let landed = fs::metadata(&path)
+                            .map(|m| m.len() == on_disk_len)
+                            .unwrap_or(false);
+                        if landed {
+                            None
+                        } else {
+                            Some(format!("bo'lak #{i} to'liq olinmadi"))
+                        }
+                    }
+                };
+                if let Some(e) = problem {
+                    if let Ok(mut slot) = first_err.lock() {
+                        if slot.is_none() {
+                            *slot = Some(e);
+                        }
+                    }
+                    break;
+                }
+            });
+        match h {
+            Ok(h) => workers.push(h),
+            Err(_) => log("XATO: yuklab olish oqimi ochilmadi".to_string()),
         }
-        fetch_and_store_chunk(
-            shared,
-            key,
-            &dir,
-            url,
-            i,
-            chunk_start,
-            chunk_end,
-            expected_len,
-            total,
-            false,
-        )?;
+    }
+    // Birorta oqim ochilmagan bo'lsa — vazifa bajarilmadi.
+    if workers.is_empty() {
+        return Err("yuklab olish oqimlari ochilmadi".to_string());
+    }
+    for w in workers {
+        let _ = w.join();
+    }
+
+    if let Some(e) = first_err.lock().ok().and_then(|mut s| s.take()) {
+        return Err(e);
+    }
+    if paused.load(Ordering::SeqCst) || !download_active(key) {
+        return Ok(false);
     }
     Ok(true)
 }
@@ -1245,7 +1586,10 @@ pub extern "C" fn rust_video_cache_stats(urls_json_ptr: *const c_char) -> *mut c
         }
         let key = cache_key(&url);
         let dir = shared.cache_root.join(&key);
-        let (total, downloaded) = stat_snapshot(&key, &dir);
+        // MUHIM: bu FFI Flutter'ning UI oqimida ishlaydi — shu sabab
+        // bu yerda DISKKA CHIQILMAYDI (stat_snapshot_fast izohiga
+        // qarang). Aks holda ro'yxatni surish qotib-qotib ketardi.
+        let (total, downloaded) = stat_snapshot_fast(&key, &dir);
         let mut item = serde_json::Map::new();
         item.insert("total".to_string(), serde_json::json!(total));
         item.insert("downloaded".to_string(), serde_json::json!(downloaded));
@@ -1348,8 +1692,8 @@ fn invalidate_cache(dir: &PathBuf) {
 /// `priority` — bu bo'lakni PLEYER hozir kutyaptimi.
 ///
 /// Foydalanuvchi videoni ko'rayotgan paytda boshqa sifatni yuklab
-/// olishi mumkin. Yuklab olish 3 ta oqimda ketadi va bir vaqtdagi
-/// tarmoq so'rovlari chegarasi 6 ta — ya'ni ular pleyer kutayotgan
+/// olishi mumkin. Fon ishlari bir necha oqimda ketadi va bir vaqtdagi
+/// tarmoq so'rovlari chegarasi MAX_NET_FETCHES ta — ya'ni ular pleyer kutayotgan
 /// bo'lakni navbatda ushlab qolishi mumkin edi (natijada video
 /// to'xtab-to'xtab ketardi). Endi pleyerning so'rovi navbatni
 /// UMUMAN kutmaydi: u darhol tarmoqqa chiqadi. Fon ishlari
@@ -1459,8 +1803,24 @@ fn fetch_and_store_chunk(
         }
         let _guard = FetchGuard;
 
-        log(format!("Bo'lak #{index} worker'dan yuklanmoqda ({start}-{end})..."));
-        let range = format!("bytes={start}-{end}");
+        // ── QOLDIQDAN DAVOM ETISH ────────────────────────────────
+        // Oldingi urinishda bu bo'lakning bir qismi olinib, tarmoq
+        // uzilgan bo'lishi mumkin. O'sha qism diskda saqlangan: uni
+        // o'qib olamiz va tarmoqdan FAQAT yetishmayotgan dumini
+        // so'raymiz. Shu bilan har bir urinish oldingisining ustiga
+        // qo'shiladi va bo'lak oxir-oqibat albatta tugaydi.
+        let prefix = read_part(dir, key, index, expected_len).unwrap_or_default();
+        let resume_from = start + prefix.len() as u64;
+        if !prefix.is_empty() {
+            log(format!(
+                "Bo'lak #{index}: qoldiqdan davom — {} bayt tayyor, {resume_from}-{end} so'raladi",
+                prefix.len()
+            ));
+        }
+        log(format!(
+            "Bo'lak #{index} worker'dan yuklanmoqda ({resume_from}-{end})..."
+        ));
+        let range = format!("bytes={resume_from}-{end}");
         let resp = shared
             .agent
             .get(url)
@@ -1501,15 +1861,30 @@ fn fetch_and_store_chunk(
         // qismni javob tanasining ICHKARISIDAN ajratib olamiz va kerakli
         // baytlar to'planishi bilan o'qishni TO'XTATAMIZ (qolgan butun
         // faylni behuda yuklab olmaslik uchun).
+        // Manba Range'ni e'tiborsiz qoldirsa, javob 0-baytdan
+        // boshlanadi — bunday holda bizda ALLAQACHON bor bo'lgan
+        // qoldiq ham tashlab yuboriladi (`resume_from`, `start` emas).
         let ignores_range = status == 200;
-        let skip_bytes = if ignores_range { start as usize } else { 0 };
+        let skip_bytes = if ignores_range { resume_from as usize } else { 0 };
 
         let mut reader = resp.into_reader();
         let mut collected: Vec<u8> = Vec::with_capacity(expected_len);
+        // Diskdagi qoldiq — yangi baytlar aynan uning ustiga qo'shiladi.
+        collected.extend_from_slice(&prefix);
         let mut skipped = 0usize;
         let mut buf = [0u8; 64 * 1024];
+        // O'qish o'rtada uzilsa DARHOL chiqmaymiz: avval shu paytgacha
+        // yig'ilgan qismni diskka saqlab qo'yamiz (pastda), xatoni esa
+        // shundan keyin qaytaramiz.
+        let mut read_err: Option<String> = None;
         loop {
-            let n = reader.read(&mut buf).map_err(|e| e.to_string())?;
+            let n = match reader.read(&mut buf) {
+                Ok(n) => n,
+                Err(e) => {
+                    read_err = Some(e.to_string());
+                    break;
+                }
+            };
             if n == 0 {
                 break;
             }
@@ -1533,7 +1908,9 @@ fn fetch_and_store_chunk(
         // ekranda "qancha MB ketdi"ni aniq ko'rishi uchun. Agar bu son
         // o'smay tursa, demak barcha ma'lumot keshdan o'qilyapti va
         // tarmoqqa umuman chiqilmayapti.
-        let got = collected.len() as u64;
+        // DIQQAT: bu son faqat HOZIR tarmoqdan olingan baytlar —
+        // diskdagi qoldiq ikkinchi marta sanalmaydi.
+        let got = (collected.len() - prefix.len()) as u64;
         let total_net = NET_BYTES.fetch_add(got, Ordering::Relaxed) + got;
         // Shu FAYL uchun alohida hisob — "MB aynan qaysi faylga ketyapti"
         // degan savolga to'g'ridan-to'g'ri javob beradi.
@@ -1574,10 +1951,28 @@ fn fetch_and_store_chunk(
             if fs::rename(&tmp_path, &final_path).is_err() {
                 let _ = fs::remove_file(&tmp_path);
             } else {
+                // YAKUNIY, TO'LIQ bo'lak joyiga tushdi — endi eski
+                // qoldiq keraksiz va O'CHIRILADI. Ya'ni qoldiq har doim
+                // yangi to'liq bo'lak bilan ALMASHTIRILADI.
+                remove_part(dir, index);
                 // Progress ko'rsatkichi REAL VAQTDA shu yerdan
                 // yangilanadi — video ko'rilayotganda ham, alohida
                 // yuklab olinayotganda ham.
                 stat_note_chunk(key, index, expected_len as u64);
+            }
+        } else if collected.len() > prefix.len() {
+            // TO'LIQ EMAS — lekin oldingi urinishdan ko'proq olindi.
+            // Yig'ilgan qism saqlanadi: keyingi urinish AYNAN shu
+            // joydan davom etadi, noldan emas.
+            write_part(dir, key, index, &collected);
+            log(format!(
+                "Bo'lak #{index} to'liq emas ({}/{expected_len}) — qoldiq saqlandi",
+                collected.len()
+            ));
+        }
+        if let Some(e) = read_err {
+            if collected.len() != expected_len {
+                return Err(e);
             }
         }
         Ok(collected)
@@ -2129,10 +2524,19 @@ mod tests {
         // ── 8) YUKLAB OLISH HISOBI (progress) ─────────────────────
         // Yuqorida #3 bo'lak o'chirildi — demak hisob aynan bitta
         // bo'lakka kam bo'lishi kerak. TARMOQQA CHIQILMAYDI.
+        //
+        // Xotiradagi hisobni ataylab tozalaymiz, chunki bo'lak
+        // ILOVADAN TASHQARIDA o'chirildi: ilovaning o'zi o'chirganda
+        // hisob `stat_reset`/`stat_note_chunk` orqali darhol
+        // yangilanadi, bu yerda esa aynan DISKNI SKANERLASH mantig'i
+        // tekshirilyapti. (Server ishga tushganda kesh oldindan
+        // skanerlanadi va natija xotirada saqlanadi — shu sabab uni
+        // bo'shatmasak, eski hisob qaytardi.)
+        stats().lock().unwrap().remove(TEST_NAME);
         let test_url = format!("http://127.0.0.1:9/{TEST_NAME}");
         let urls_json = serde_json::to_string(&vec![test_url.clone()]).unwrap();
         let c_urls = std::ffi::CString::new(urls_json).unwrap();
-        let parsed = stats_json(c_urls.as_ptr());
+        let parsed = stats_json_ready(c_urls.as_ptr());
         let item = &parsed[&test_url];
         assert_eq!(item["total"].as_u64().unwrap(), TEST_TOTAL);
         assert_eq!(
@@ -2168,7 +2572,7 @@ mod tests {
         fill_cache(&root, Some(5));
         fs::write(dir.join(chunk_name(5)), vec![7u8; 4096]).unwrap();
         stats().lock().unwrap().remove(TEST_NAME);
-        let parsed = stats_json(c_urls.as_ptr());
+        let parsed = stats_json_ready(c_urls.as_ptr());
         assert_eq!(
             parsed[&test_url]["downloaded"].as_u64().unwrap(),
             TEST_TOTAL - CHUNK_SIZE,
@@ -2177,6 +2581,85 @@ mod tests {
         assert!(
             !dir.join(chunk_name(5)).exists(),
             "yarim qolgan bo'lak o'chirilmadi"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// YARIM QOLGAN BO'LAK: olingan qism SAQLANADI, bo'lak to'liq
+    /// yig'ilgach esa qoldiq O'CHIRILIB, o'rnida yakuniy to'liq bo'lak
+    /// qoladi.
+    #[test]
+    fn yarim_bolak_saqlanadi_va_toliq_bolak_bilan_almashtiriladi() {
+        enable_crypto();
+        let root = std::env::temp_dir().join(format!("qoldiq_test_{}", micros_now()));
+        let dir = root.join("kino");
+        fs::create_dir_all(&dir).unwrap();
+        let key = "kino";
+        let expected_len = CHUNK_SIZE as usize;
+
+        // Qoldiq yo'q — noldan boshlanadi.
+        assert!(read_part(&dir, key, 0, expected_len).is_none());
+
+        // 1) Bo'lakning bir qismi olindi va saqlandi.
+        let yarim: Vec<u8> = (0..700_000usize).map(|i| (i % 251) as u8).collect();
+        write_part(&dir, key, 0, &yarim);
+        assert!(
+            dir.join(part_name(0)).exists(),
+            "qoldiq fayli yaratilmadi"
+        );
+        // Diskda OCHIQ holda yotmaydi (shifrlangan).
+        let xom = fs::read(dir.join(part_name(0))).unwrap();
+        assert_ne!(xom, yarim, "qoldiq shifrlanmagan holda saqlandi");
+        // Va aynan o'sha baytlar qaytib o'qiladi.
+        assert_eq!(
+            read_part(&dir, key, 0, expected_len).unwrap(),
+            yarim,
+            "qoldiq buzilib qaytdi"
+        );
+
+        // 2) Keyingi urinish ko'proq oldi — eski qoldiq YANGISI bilan
+        //    almashtiriladi.
+        let kattaroq: Vec<u8> = (0..900_000usize).map(|i| (i % 251) as u8).collect();
+        write_part(&dir, key, 0, &kattaroq);
+        assert_eq!(read_part(&dir, key, 0, expected_len).unwrap().len(), 900_000);
+
+        // 3) Bo'lak TO'LIQ yig'ildi: yakuniy fayl yoziladi, qoldiq
+        //    o'chiriladi.
+        let toliq: Vec<u8> = (0..expected_len).map(|i| (i % 251) as u8).collect();
+        let (k, iv) = crypto::derive_chunk_key_iv(key, 0).unwrap();
+        fs::write(dir.join(chunk_name(0)), crypto::encrypt_chunk(&toliq, &k, &iv)).unwrap();
+        remove_part(&dir, 0);
+        assert!(
+            !dir.join(part_name(0)).exists(),
+            "to'liq bo'lakdan keyin qoldiq o'chirilmadi"
+        );
+        assert_eq!(
+            read_cached_chunk(&dir, key, 0, expected_len).unwrap(),
+            toliq,
+            "yakuniy bo'lak noto'g'ri o'qildi"
+        );
+
+        // 4) Qoldiq bo'lak hajmidan kichik EMAS bo'lsa — u buzuq
+        //    hisoblanadi va o'chiriladi.
+        write_part(&dir, key, 1, &toliq);
+        assert!(read_part(&dir, key, 1, expected_len).is_none());
+        assert!(!dir.join(part_name(1)).exists());
+
+        // 5) Skanerlash: to'liq bo'lak yonidagi egasiz qoldiq
+        //    tozalanadi, YARIM bo'lakniki esa TEGILMAYDI (u keyingi
+        //    urinishda davom ettirish uchun kerak).
+        write_part(&dir, key, 0, &yarim);
+        write_part(&dir, key, 2, &yarim);
+        let (have, _) = scan_and_clean(&dir, CHUNK_SIZE * 3);
+        assert!(have.contains(&0));
+        assert!(
+            !dir.join(part_name(0)).exists(),
+            "to'liq bo'lakning qoldig'i tozalanmadi"
+        );
+        assert!(
+            dir.join(part_name(2)).exists(),
+            "hali tugallanmagan bo'lakning qoldig'i o'chirib yuborildi"
         );
 
         let _ = fs::remove_dir_all(&root);
@@ -2220,5 +2703,34 @@ mod tests {
             .to_string();
         crate::ffi_utils::rust_free_string(raw);
         serde_json::from_str(&text).unwrap()
+    }
+
+    /// Xuddi `stats_json`, lekin FON skanerlashi tugashini kutadi.
+    ///
+    /// `rust_video_cache_stats` Flutter'ning UI oqimida chaqiriladi va
+    /// shu sabab u DISKKA CHIQMAYDI: kerak bo'lganda skanerlashni fon
+    /// oqimiga topshiradi va xotiradagi hisobni darhol qaytaradi
+    /// (`stat_snapshot_fast` izohiga qarang). Ya'ni birinchi chaqiruv
+    /// hali tayyor bo'lmagan hisobni ko'rsatishi mumkin. Test esa
+    /// YAKUNIY hisobni tekshiradi — shu sabab skanerlash tugagunicha
+    /// kutamiz (eng ko'pi ~2 soniya).
+    fn stats_json_ready(urls_ptr: *const std::os::raw::c_char) -> serde_json::Value {
+        let mut last = stats_json(urls_ptr);
+        for _ in 0..100 {
+            let done = stats()
+                .lock()
+                .map(|m| {
+                    m.get(TEST_NAME)
+                        .map(|e| e.scanned && !e.scanning)
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false);
+            if done {
+                return stats_json(urls_ptr);
+            }
+            thread::sleep(Duration::from_millis(20));
+            last = stats_json(urls_ptr);
+        }
+        last
     }
 }

@@ -12,9 +12,27 @@
 // Nima uchun so'rab turish (polling) tanlandi: Rust tomonidagi hisob
 // bir nechta native ish oqimida yangilanadi. Ularning har biridan
 // Dart'ga hodisa yuborish (NativeApi.postCObject) murakkab va nozik
-// bo'lardi; hisobni o'qish esa BEPUL — u xotiradagi bitta HashMap'dan
-// olinadi, diskka ham, tarmoqqa ham chiqmaydi. Shu sabab 500 ms da bir
-// marta so'rab turish eng sodda va eng ishonchli yo'l.
+// bo'lardi; hisobni o'qish esa ARZON — u xotiradagi bitta HashMap'dan
+// olinadi, diskka ham, tarmoqqa ham chiqmaydi. Shu sabab so'rab turish
+// eng sodda va eng ishonchli yo'l.
+//
+// ── SILLIQLIK UCHUN UCHTA QOIDA ────────────────────────────────────
+//
+// So'rov SINXRON FFI chaqiruvi bo'lgani uchun u Flutter'ning UI
+// oqimida bajariladi — ya'ni kadr tayyorlashni kechiktirishi mumkin.
+// Shu sabab:
+//
+//   1. Rust tomoni bu chaqiruvda DISKKA UMUMAN CHIQMAYDI. Kerak
+//      bo'lganda diskni skanerlash fon oqimiga topshiriladi
+//      (video_cache.rs -> `stat_snapshot_fast`). Ilgari aynan shu
+//      skanerlash UI oqimida bajarilardi: 166 MB video = 166 ta fayl,
+//      bir necha sifat bilan mingga yaqin syscall — natijada qismlar
+//      ro'yxatini surganda kadrlar tashlanardi.
+//   2. Ro'yxat SURILAYOTGAN paytda so'rov umuman qilinmaydi
+//      (`hold()` / `release()`). Barmoq ko'tarilishi bilan holat
+//      darhol yangilanadi.
+//   3. Oraliq holatga qarab moslashadi: yuklash ketayotganda tez
+//      (500 ms), tinch turganda siyrak.
 
 import 'dart:async';
 
@@ -110,21 +128,61 @@ class DownloadManager extends ChangeNotifier {
         ..._active,
       };
 
-  /// So'rab turish oralig'i. Ekranda bir nechta sifat ko'rinib
-  /// turganda (odatiy holat) tez — progress silliq o'ssin. Oflayn
-  /// rejimda esa BARCHA qismlarning holati so'raladi; u yerda hech
-  /// narsa yuklanmayotgani uchun tez-tez so'rash keraksiz.
-  Duration get _interval => _tracked.length <= 16
-      ? const Duration(milliseconds: 500)
-      : const Duration(seconds: 2);
+  /// ── SILLIQLIK: RO'YXAT SURILAYOTGANDA SO'ROV QILINMAYDI ────────
+  ///
+  /// `_poll()` Rust yadrosiga SINXRON FFI chaqiruv qiladi va javobni
+  /// JSON'dan o'giradi — ikkalasi ham Flutter'ning UI oqimida
+  /// bajariladi. Bu ish o'z-o'zidan arzon, lekin u AYNAN kadr
+  /// tayyorlanayotgan paytga to'g'ri kelsa, o'sha kadr kechikadi va
+  /// barmoq ostidagi ro'yxat "tutilib" ketadi.
+  ///
+  /// Shu sabab surish davomida so'rov butunlay to'xtatiladi. Barmoq
+  /// ko'tarilishi bilan holat DARHOL bir marta yangilanadi — ya'ni
+  /// foydalanuvchi hech qanday ma'lumotni yo'qotmaydi, faqat surish
+  /// paytidagi bir necha yuzinchi soniya kechikadi.
+  int _holds = 0;
+
+  /// Surish boshlandi — so'rovlar to'xtaydi.
+  void hold() => _holds++;
+
+  /// Surish tugadi — holat darhol yangilanadi.
+  void release() {
+    if (_holds == 0) return;
+    _holds--;
+    if (_holds == 0) _poll();
+  }
+
+  /// Biror videoning yuklab olinishi HOZIR ketyaptimi.
+  bool get _anyDownloading => _stats.values.any((s) => s.downloading);
+
+  /// So'rab turish oralig'i.
+  ///
+  /// Yuklab olish ketayotganda tez — foiz silliq o'ssin. Hech narsa
+  /// yuklanmayotgan bo'lsa esa holat faqat foydalanuvchi tugma
+  /// bosgandagina o'zgaradi (va u holda `_sync()` darhol chaqiriladi),
+  /// shu sabab tez-tez so'rash keraksiz UI ishi bo'lardi. Oflayn
+  /// rejimda bir vaqtda o'nlab qismning holati so'raladi — u yerda
+  /// oraliq yana ham siyrak.
+  Duration get _interval {
+    if (_anyDownloading) return const Duration(milliseconds: 500);
+    return _tracked.length <= 16
+        ? const Duration(seconds: 2)
+        : const Duration(seconds: 5);
+  }
 
   void _sync() {
     if (_tracked.isEmpty) {
       _timer?.cancel();
       _timer = null;
+      _timerInterval = null;
       return;
     }
     _poll();
+    _rearm();
+  }
+
+  /// Taymerni kerakli oraliqqa moslaydi (oraliq o'zgargan bo'lsa).
+  void _rearm() {
     final want = _interval;
     if (_timer == null || _timerInterval != want) {
       _timer?.cancel();
@@ -136,10 +194,13 @@ class DownloadManager extends ChangeNotifier {
   Duration? _timerInterval;
 
   void _poll() {
+    // Ro'yxat surilayotgan bo'lsa — UI oqimini band qilmaymiz.
+    if (_holds > 0) return;
     final urls = _tracked.toList();
     if (urls.isEmpty) {
       _timer?.cancel();
       _timer = null;
+      _timerInterval = null;
       return;
     }
     final raw = RustCore.instance.videoStats(urls);
@@ -164,6 +225,8 @@ class DownloadManager extends ChangeNotifier {
       }
     }
     if (changed) notifyListeners();
+    // Yuklash boshlangan/tugagan bo'lsa oraliq o'zgaradi.
+    _rearm();
   }
 
   /// Yuklab olishni boshlaydi. Videoning bir qismi allaqachon keshda
