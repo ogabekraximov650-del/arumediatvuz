@@ -2043,9 +2043,19 @@ fn fetch_and_store_chunk(
 // hisoblanadi: "bir daqiqalik video necha MB?" degan savolga javob
 // aynan shu — oynaning bo'lakdagi kengligi (1 bo'lak = 1 MiB).
 //
-//     oyna = floor(hajm_MiB / davomiylik_daqiqa)
+//     oyna = yax(yax(hajm_MiB) / yax(davomiylik_daqiqa))
 //
-// Masalan 166.54 MiB / 24:05 (24.08 daqiqa) = 6.91 -> 6 bo'lak.
+// "yax" — ENG YAQIN butun songa yaxlitlash (0.5 va undan yuqorisi
+// yuqoriga). Yaxlitlash UCHALA bosqichda ham qo'llanadi:
+//
+//     hajm    1.51 MiB  -> 2 MiB
+//     vaqt    1:31      -> 2 daqiqa
+//     natija  1.51      -> 2 bo'lak
+//
+// Masalan 166.54 MiB / 24:05:
+//     hajm   166.54 -> 167
+//     vaqt   24.08  -> 24
+//     natija 167/24 = 6.96 -> 7 bo'lak.
 //
 // Davomiylik HTTP metadatasida yo'q — u faylning ICHIDA, MP4
 // konteynerining `moov` -> `mvhd` atomida yotadi. Manba fayllar har
@@ -2182,18 +2192,27 @@ fn duration_secs(key: &str, dir: &PathBuf, total: u64) -> f64 {
 /// Oldindan yuklash oynasi (bo'laklarda) — videoning bitreytiga
 /// qarab: bir daqiqalik video necha MiB bo'lsa, shuncha.
 ///
+/// Hisob UCHALA bosqichda eng yaqin butun songa yaxlitlanadi
+/// (yuqoridagi izohga qarang): hajm, vaqt va natija.
+///
 /// Davomiylik hali aniqlanmagan bo'lsa (1-bo'lak keshda yo'q) —
 /// zaxira qiymat PREFETCH_WINDOW ishlatiladi.
 fn prefetch_window_for(total: u64, secs: f64) -> u64 {
     if secs <= 0.0 || total == 0 {
         return PREFETCH_WINDOW;
     }
-    let mib = total as f64 / (1024.0 * 1024.0);
-    let minutes = secs / 60.0;
-    if minutes <= 0.0 {
-        return PREFETCH_WINDOW;
+    // 1) Hajm: 1.51 MiB -> 2 MiB.
+    let mib = (total as f64 / (1024.0 * 1024.0)).round();
+    // 2) Vaqt: 1:31 -> 2 daqiqa.
+    let minutes = (secs / 60.0).round();
+    if minutes < 1.0 {
+        // Bir daqiqadan qisqa video: yaxlitlangan vaqt 0 bo'lib
+        // qoladi va unga bo'lib bo'lmaydi. Bunday video butunligicha
+        // "bir daqiqaga sig'adi", ya'ni bo'luvchi 1 deb olinadi.
+        return (mib.max(1.0) as u64).clamp(1, MAX_PREFETCH_WINDOW);
     }
-    let w = (mib / minutes).floor() as u64;
+    // 3) Natija: 1.51 -> 2 bo'lak.
+    let w = (mib / minutes).round() as u64;
     w.clamp(1, MAX_PREFETCH_WINDOW)
 }
 
@@ -2883,27 +2902,53 @@ mod tests {
         assert_eq!(prefetch_range(10, n, 6), (11, 17));
     }
 
-    /// OYNA VIDEONING BITREYTIDAN HISOBLANADI.
-    /// Foydalanuvchi bergan misol: 166.54 MiB / 24:05 -> 6 bo'lak.
+    /// OYNA VIDEONING BITREYTIDAN HISOBLANADI — VA UCHALA BOSQICHDA
+    /// ENG YAQIN BUTUN SONGA YAXLITLANADI.
     #[test]
     fn oyna_bitreytdan_hisoblanadi() {
-        let total = (166.54 * 1024.0 * 1024.0) as u64; // 166.54 MiB
-        let secs = 24.0 * 60.0 + 5.0; // 24:05 = 1445 soniya
-        // 166.54 / 24.0833 = 6.91... -> 6 (7 ga YETMAGANI uchun)
-        assert_eq!(prefetch_window_for(total, secs), 6);
+        fn mib(x: f64) -> u64 {
+            (x * 1024.0 * 1024.0) as u64
+        }
 
+        // ── Foydalanuvchi bergan uchta qoida ──────────────────────
+        // 1) HAJM: 1.51 MiB -> 2 MiB.
+        //    (1 daqiqalik video: 2 / 1 = 2 bo'lak)
+        assert_eq!(prefetch_window_for(mib(1.51), 60.0), 2);
+        //    1.49 esa pastga: 1 / 1 = 1.
+        assert_eq!(prefetch_window_for(mib(1.49), 60.0), 1);
+
+        // 2) VAQT: 1:31 -> 2 daqiqa.
+        //    (2 MiB / 2 daqiqa = 1 bo'lak)
+        assert_eq!(prefetch_window_for(mib(2.0), 91.0), 1);
+        //    1:29 esa 1 daqiqa: 2 / 1 = 2 bo'lak.
+        assert_eq!(prefetch_window_for(mib(2.0), 89.0), 2);
+
+        // 3) NATIJA: 1.51 -> 2 bo'lak.
+        //    151 MiB / 100 daqiqa = 1.51
+        assert_eq!(prefetch_window_for(mib(151.0), 6000.0), 2);
+        //    149 MiB / 100 daqiqa = 1.49 -> 1
+        assert_eq!(prefetch_window_for(mib(149.0), 6000.0), 1);
+
+        // ── To'liq misol: 166.54 MiB / 24:05 ─────────────────────
+        //    hajm   166.54 -> 167
+        //    vaqt   24.08  -> 24
+        //    natija 167/24 = 6.96 -> 7
+        assert_eq!(prefetch_window_for(mib(166.54), 24.0 * 60.0 + 5.0), 7);
+
+        // ── Chegaraviy holatlar ──────────────────────────────────
         // Davomiylik hali noma'lum — zaxira qiymat.
-        assert_eq!(prefetch_window_for(total, 0.0), PREFETCH_WINDOW);
-        assert_eq!(prefetch_window_for(0, secs), PREFETCH_WINDOW);
+        assert_eq!(prefetch_window_for(mib(166.54), 0.0), PREFETCH_WINDOW);
+        assert_eq!(prefetch_window_for(0, 1445.0), PREFETCH_WINDOW);
+
+        // Bir daqiqadan qisqa video: yaxlitlangan vaqt 0 bo'lib
+        // qoladi, shu sabab bo'luvchi 1 deb olinadi.
+        assert_eq!(prefetch_window_for(mib(8.0), 20.0), 8);
 
         // Juda past bitreyt ham kamida 1 bo'lak beradi.
-        assert_eq!(prefetch_window_for(1024 * 1024, 3600.0), 1);
+        assert_eq!(prefetch_window_for(mib(1.0), 3600.0), 1);
 
         // Buzuq metadata (1 soniyalik "1 GB" video) chegaralanadi.
-        assert_eq!(
-            prefetch_window_for(1024 * 1024 * 1024, 1.0),
-            MAX_PREFETCH_WINDOW
-        );
+        assert_eq!(prefetch_window_for(1024 * 1024 * 1024, 1.0), MAX_PREFETCH_WINDOW);
     }
 
     /// MP4 `moov` -> `mvhd` dan davomiylik o'qilishi.
