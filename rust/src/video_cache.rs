@@ -103,7 +103,16 @@ static NET_FETCHES: AtomicUsize = AtomicUsize::new(0);
 /// (masalan video endigina ochildi va 1-bo'lak hali keshda yo'q).
 /// Odatiy holatda oyna videoning BITREYTIDAN hisoblanadi —
 /// `prefetch_window_for` ga qarang.
-const PREFETCH_WINDOW: u64 = 10;
+/// Davomiylik hali aniqlanmagan paytdagi ZAXIRA oyna.
+///
+/// 10 -> 4: video ENDIGINA ochilganda 1-bo'lak hali keshda
+/// bo'lmaydi, ya'ni davomiylik ham noma'lum va chegara aynan shu
+/// zaxira qiymatdan olinadi. 10 bo'lganda kichik fayl (masalan
+/// 1 daqiqalik 10 MB video) pleyer ishga tushmasidan BUTUNLAY
+/// yuklanib qolardi. 4 MiB esa faylning sarlavhasini o'qib ijroni
+/// boshlashga yetadi; shundan keyin davomiylik aniqlanadi va
+/// chegara haqiqiy "30 soniya" qoidasiga o'tadi.
+const PREFETCH_WINDOW: u64 = 4;
 
 /// ── ASOSIY QOIDA: PLEYER BUFERIDA 30 SONIYALIK VIDEO ───────────
 ///
@@ -1414,7 +1423,10 @@ fn downloads() -> &'static Mutex<HashMap<String, DownloadState>> {
 /// aynan pleyer olayotgan birinchi bo'laklarga urilib, o'sha yerda
 /// kutib qolardi — yuklab olish shu sabab sudralib ketardi.
 fn chunk_in_flight(shared: &Shared, key: &str, index: u64) -> bool {
-    let flight_key = format!("{key}#{index}");
+    // Yuklovchi guruh bilan ishlaydi, shu sabab uning "uchish"
+    // kaliti ham guruh boshiga tekislangan bo'ladi.
+    let first = (index / GROUP_CHUNKS) * GROUP_CHUNKS;
+    let flight_key = format!("{key}#s{GROUP_CHUNKS}:{first}");
     shared
         .in_flight
         .lock()
@@ -1689,14 +1701,29 @@ fn run_download(key: &str, url: &str) -> Result<DlOutcome, String> {
                     continue;
                 }
 
-                // Birinchi bosqichda — hech narsani kutmaydigan
-                // "Download" ustuvorligi; ikkinchi (qoldiq) bosqichda
-                // esa kutishga ham ruxsat beriladi.
-                let prio = if second_pass {
-                    FetchPrio::Player
-                } else {
-                    FetchPrio::Download
-                };
+                // ── CHETGA QO'YILGAN BO'LAK (ikkinchi bosqich) ──
+                // Uni boshqa oqim GURUH bilan olayotgan bo'lishi
+                // mumkin. Shu sabab avval diskda paydo bo'lishini
+                // kutamiz. Ilgari bu yerda darhol bitta bo'lak
+                // so'ralardi va natijada bir xil ma'lumot ikki marta
+                // olinardi (guruh + alohida bo'lak).
+                if second_pass {
+                    let deadline = Instant::now() + Duration::from_secs(10);
+                    while Instant::now() < deadline {
+                        if chunk_cached(&d, i, total)
+                            || !download_active(&k)
+                            || !chunk_in_flight(shared, &k, i)
+                        {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(100));
+                    }
+                    if chunk_cached(&d, i, total) {
+                        stat_note_chunk(&k, i, expected_len as u64);
+                        continue;
+                    }
+                }
+                let prio = FetchPrio::Download;
 
                 let mut res = ChunkRes::Failed("urinilmadi".to_string());
                 for attempt in 0..3u32 {
@@ -2223,6 +2250,13 @@ fn maybe_warm(url: &str, key: &str, byte_pos: u64) {
         m.insert(tag.clone(), WarmState::Running);
     }
     let Some(warm_url) = warm_url_for(url, widx) else {
+        // Manzil kutilmagan shaklda — isitish umuman mumkin emas.
+        // MUHIM: holatni "Failed" qilib qo'yamiz, aks holda u
+        // abadiy "Running" bo'lib qolar va yuklab olish `wait_for_warm`
+        // ichida 90 soniya bekorga kutib turardi.
+        if let Ok(mut m) = warm_state().lock() {
+            m.insert(tag, WarmState::Failed);
+        }
         return;
     };
     let tag_for_thread = tag.clone();
@@ -2530,13 +2564,31 @@ fn fetch_and_store_chunk(
         return Err(format!("bo'lak #{index} fayldan tashqarida"));
     }
 
-    // ── GURUH: bitta ustki so'rov nechta bo'lakni oladi ─────────
-    let group = index / GROUP_CHUNKS;
-    let g_first = group * GROUP_CHUNKS;
-    let g_last = (g_first + GROUP_CHUNKS - 1).min(chunk_count - 1);
-    // "Uchish" belgisi endi BO'LAK emas, GURUH bo'yicha: bir xil
-    // guruhni ikkita oqim baravar tortib olmasligi uchun.
-    let flight_key = format!("{key}#g{group}");
+    // ── QANCHA OLINADI: PLEYER 1 MiB, YUKLOVCHI GURUH ──────────
+    //
+    // MUHIM QOIDA (foydalanuvchi trafigini tejash):
+    //   * PLEYER (va oldindan yuklash) har safar ATIGI BITTA 1 MiB
+    //     bo'lak oladi. Guruh bilan olinsa, 30 soniyalik bufer
+    //     chegarasi guruh chegarasigacha yaxlitlanib, keragidan
+    //     ko'p yuklanardi: 1 daqiqalik 10 MB'lik videoda pleyer
+    //     hali ishga tushmasidan butun fayl olinib qolardi.
+    //   * YUKLAB OLISH esa baribir butun faylni oladi, shu sabab u
+    //     4 tadan guruh bilan ishlaydi (kamroq so'rov, tezroq).
+    //
+    // Bu B2 xarajatiga TA'SIR QILMAYDI: fayl allaqachon Cloudflare
+    // keshiga isitilgan bo'ladi, ya'ni pleyerning bo'lak-bo'lak
+    // so'rovlari B2'ga umuman bormaydi — chekkadan xizmat qilinadi.
+    let span = if prio == FetchPrio::Download {
+        GROUP_CHUNKS
+    } else {
+        1
+    };
+    let g_first = (index / span) * span;
+    let g_last = (g_first + span - 1).min(chunk_count - 1);
+    // "Uchish" belgisi: bir xil oraliqni ikkita oqim baravar tortib
+    // olmasligi uchun. Kalitga `span` ham kiradi — pleyerning bitta
+    // bo'lagi bilan yuklovchining guruhi bir-birini chalkashtirmasin.
+    let flight_key = format!("{key}#s{span}:{g_first}");
 
     // Boshqa ish oqimi bu guruhni bizdan oldin allaqachon yuklab
     // boshlagan bo'lishi mumkin — bunday holda kerakli bo'lak diskda
@@ -2567,7 +2619,7 @@ fn fetch_and_store_chunk(
         }
         if Instant::now() >= wait_deadline {
             log(format!(
-                "Guruh #{group} kutish muddati tugadi — mustaqil yuklab olinadi"
+                "Bo'lak #{index} kutish muddati tugadi — mustaqil yuklab olinadi"
             ));
             break;
         }
@@ -2654,7 +2706,7 @@ fn fetch_and_store_chunk(
         }
 
         log(format!(
-            "Guruh #{group} (bo'laklar {from}..={g_last}) worker'dan olinmoqda ({range_start}-{range_end})..."
+            "Bo'laklar {from}..={g_last} worker'dan olinmoqda ({range_start}-{range_end})..."
         ));
         let resp = shared
             .agent
@@ -2770,7 +2822,7 @@ fn fetch_and_store_chunk(
             *e
         };
         log(format!(
-            "TARMOQDAN >>> fayl='{key}' guruh #{group} ({range_start}-{range_end}) {got_net} bayt | shu fayl: {:.2} MB | jami: {:.2} MB",
+            "TARMOQDAN >>> fayl='{key}' bo'laklar {from}..={g_last} ({range_start}-{range_end}) {got_net} bayt | shu fayl: {:.2} MB | jami: {:.2} MB",
             file_net as f64 / (1024.0 * 1024.0),
             total_net as f64 / (1024.0 * 1024.0)
         ));
@@ -4581,32 +4633,33 @@ mod tests {
         );
 
 
-        // ── 12) GURUH BILAN OLISH (B2 xarajatini kamaytirish) ─────
+        // ── 12) PLEYER 1 MiB OLADI, YUKLOVCHI GURUH BILAN ────────
         //
-        // Ustki so'rov bo'lakma-bo'lak emas, GURUH bilan ketishi
-        // kerak: 10 ta bo'lakli fayl uchun 10 emas, ATIGI 3 ta
-        // so'rov (4 + 4 + 2 bo'lak).
-        //
-        // Buni tekshirish uchun soxta "manba" server ko'tariladi va
-        // unga kelgan har bir Range so'rovi sanaladi.
+        // Bu ikkalasi ATAYLAB har xil:
+        //   * pleyer har safar ATIGI bitta 1 MiB bo'lak oladi —
+        //     aks holda 30 soniyalik chegara guruh chegarasigacha
+        //     yaxlitlanib, kichik faylda butun video yuklanib
+        //     qolardi (foydalanuvchi trafigi behuda ketardi);
+        //   * yuklab olish esa baribir butun faylni oladi, shu
+        //     sabab 4 tadan guruh bilan ishlaydi (kamroq so'rov).
         const G_TOTAL: u64 = 10 * CHUNK_SIZE;
         let (o_port, o_log) = start_origin(G_TOTAL);
-        let g_name = "guruh.mp4";
-        let g_url = format!("http://127.0.0.1:{o_port}/{g_name}");
+        let g_url = format!("http://127.0.0.1:{o_port}/pleyer.mp4");
 
+        // (a) PLEYER YO'LI ────────────────────────────────────
+        // Davomiylik hali noma'lum (1-bo'lak keshda yo'q), shu
+        // sabab zaxira oyna ishlaydi: 0 + PREFETCH_WINDOW.
         let (status, _cr, glen, gbody) = request_url(port, &g_url, Some("bytes=0-"));
         assert_eq!(status, 206);
-        assert_eq!(glen as u64, G_TOTAL, "butun fayl kelmadi");
-        // Ma'lumot to'g'ri joydan kelgani (guruh bo'laklarga to'g'ri
-        // bo'lingani) — bo'lak chegaralarida ham tekshiriladi.
+        assert_eq!(
+            glen as u64,
+            (PREFETCH_WINDOW + 1) * CHUNK_SIZE,
+            "javob bufer chegarasidan chiqdi"
+        );
         let cs = CHUNK_SIZE as usize;
-        for probe in [0usize, cs - 1, cs, 4 * cs - 1, 4 * cs, glen - 1] {
+        for probe in [0usize, cs - 1, cs, 2 * cs, glen - 1] {
             assert_eq!(gbody[probe], (probe % 251) as u8, "bayt {probe} noto'g'ri");
         }
-
-        // Oldindan yuklash oqimi ham shu guruhlarni so'rashi mumkin,
-        // lekin "uchish" belgisi guruh bo'yicha bo'lgani uchun bir
-        // guruh IKKI MARTA so'ralmaydi.
         let ranges: Vec<String> = o_log
             .lock()
             .unwrap()
@@ -4614,22 +4667,56 @@ mod tests {
             .filter(|r| *r != "bytes=0-0")
             .cloned()
             .collect();
-        assert_eq!(
-            ranges.len(),
-            3,
-            "10 ta bo'lak uchun 3 ta guruh so'rovi kutilgandi, keldi: {ranges:?}"
-        );
-        assert_eq!(ranges[0], format!("bytes=0-{}", 4 * CHUNK_SIZE - 1));
+        assert!(!ranges.is_empty(), "manbaga birorta so'rov ketmadi");
+        for r in &ranges {
+            let (rs, re) = parse_test_range(r, G_TOTAL);
+            assert_eq!(
+                re - rs + 1,
+                CHUNK_SIZE,
+                "pleyer 1 MiB'dan ortiq so'radi: {r}"
+            );
+        }
 
-        // Ikkinchi marta so'ralganda TARMOQQA UMUMAN chiqilmaydi.
-        let before = o_log.lock().unwrap().len();
-        let (status, _, glen2, _) = request_url(port, &g_url, Some("bytes=0-"));
-        assert_eq!(status, 206);
-        assert_eq!(glen2 as u64, G_TOTAL);
-        assert_eq!(
-            o_log.lock().unwrap().len(),
-            before,
-            "keshda bor bo'lsa ham manbaga so'rov ketdi"
+        // (b) YUKLAB OLISH YO'LI ──────────────────────────────
+        // Toza fayl (keshda hech narsa yo'q) — guruh bilan
+        // olinishi kerak.
+        let (o2_port, o2_log) = start_origin(G_TOTAL);
+        let d_name = "yuklash.mp4";
+        let d_url = format!("http://127.0.0.1:{o2_port}/{d_name}");
+        let c_d = std::ffi::CString::new(d_url.clone()).unwrap();
+        assert_eq!(rust_video_cache_download(c_d.as_ptr()), 1);
+
+        let d_dir = root.join("video_byte_cache").join(d_name);
+        let mut finished = false;
+        for _ in 0..300 {
+            if (0..10).all(|i| chunk_cached(&d_dir, i, G_TOTAL)) {
+                finished = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        assert!(finished, "yuklab olish tugamadi");
+
+        let d_ranges: Vec<String> = o2_log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| *r != "bytes=0-0")
+            .cloned()
+            .collect();
+        let group_bytes = GROUP_CHUNKS * CHUNK_SIZE;
+        assert!(
+            d_ranges.iter().any(|r| {
+                let (rs, re) = parse_test_range(r, G_TOTAL);
+                re - rs + 1 == group_bytes
+            }),
+            "yuklovchi guruh bilan so'ramadi: {d_ranges:?}"
+        );
+        // 10 ta bo'lak guruh bilan olinsa 3 tadan ko'p so'rov
+        // bo'lmasligi kerak (4 + 4 + 2).
+        assert!(
+            d_ranges.len() <= 3,
+            "yuklovchi keragidan ko'p so'rov yubordi: {d_ranges:?}"
         );
 
         // ── 11) JAVOB OYNASI: TARMOQQA OYNADAN ORTIQ CHIQILMAYDI ──

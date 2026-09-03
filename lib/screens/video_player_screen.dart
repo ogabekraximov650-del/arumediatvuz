@@ -1484,49 +1484,6 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
               ),
             ),
 
-          if (_currentEp != null && _playerLoading)
-            Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const SizedBox(
-                    width: 42,
-                    height: 42,
-                    child: CircularProgressIndicator(
-                        color: Colors.white54, strokeWidth: 3),
-                  ),
-                  // Worker videoni keshga ko'chirayotgan payt —
-                  // foydalanuvchi nima kutayotganini bilsin.
-                  if (_preparing) ...[
-                    const SizedBox(height: 14),
-                    const Text(
-                      'Video tayyorlanyabdi...',
-                      style: TextStyle(
-                        color: Colors.white70,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-
-          // ── Runtime buferlash indikatori: controller allaqachon
-          // initialize bo'lgan va ijro boshlangan, lekin tarmoq
-          // sekinlashib pleyer qayta buferlanayotganda (masalan sek
-          // qilingandan keyin) ko'rinadi. _playerLoading dan farqli —
-          // bu holat controller yashab turganda ham qayta-qayta
-          // yoqilib-o'chib turishi mumkin.
-          // Kontrollar KO'RINIB turganda buferlash markaziy tugmaning
-          // halqasi orqali ko'rsatiladi (_centerButton) — bu yerda
-          // ikkinchi aylanani chizish shart emas.
-          if (_currentEp != null &&
-              !_playerLoading &&
-              _playerError == null &&
-              !_showControls)
-            _bufferingReactive(),
-
           // ── Butun video maydoni ustida BITTA gesture detektor: bitta tap —
           // kontrollarni ko'rsatish/yashirish, ketma-ket ikki (yoki undan
           // ortiq) tap xuddi shu tarafda — sekundga sek qiladi. Taplar
@@ -1585,7 +1542,10 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
 
           if (_currentEp != null)
             AnimatedOpacity(
-              opacity: _showControls ? 1.0 : 0.0,
+              // Yuklanish/tayyorlanish paytida kontrollar MAJBURIY
+              // ko'rinadi — aks holda yagona aylanma halqa ham
+              // ko'rinmay qolardi.
+              opacity: (_showControls || _playerLoading) ? 1.0 : 0.0,
               duration: const Duration(milliseconds: 200),
               child: IgnorePointer(
                 ignoring: !_showControls,
@@ -1593,6 +1553,38 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                     child: _buildControls(isFullscreen: isFullscreen)),
               ),
             ),
+
+          // ── FAQAT BITTA AYLANMA CHIZIQ ────────────────────────
+          //
+          // Kutish holatining HAMMASI (video ochilishi, keshga
+          // saqlanishi, sek, progress chizig'ini surish, qayta
+          // buferlash) markazdagi play/pause tugmasini o'rab turgan
+          // BITTA halqa orqali ko'rsatiladi — `_centerButton`
+          // ichidagi aylanma `CircularProgressIndicator`.
+          //
+          // Ilgari bu yerda yana ikkita alohida aylana bor edi
+          // (ochilish spinneri va buferlash spinneri) — ular
+          // markazdagi halqa bilan bir vaqtda aylanib, ekranni
+          // chalkashtirardi. Ikkalasi ham OLIB TASHLANDI.
+          //
+          // Bu yerda faqat YOZUV qoladi va u aynan halqaning
+          // TAGIDA turadi (halqa diametri 76, ya'ni 60 px pastga
+          // surish uni halqa ostiga tushiradi).
+          if (_currentEp != null && _preparing)
+            Center(
+              child: Transform.translate(
+                offset: const Offset(0, 60),
+                child: const Text(
+                  'Video tayyorlanyabdi...',
+                  style: TextStyle(
+                    color: Colors.white70,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ),
+
 
           // ── Sek ko'rsatkichlari — asosiy kontrollardan mustaqil,
           // faqat bosilgan tarafda chiqadi va 2s dan keyin yo'qoladi.
@@ -1760,27 +1752,6 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
           ],
         ),
       ),
-    );
-  }
-
-  // Faqat isBuffering holatini eng tor ko'lamda kuzatadi — tarmoq
-  // sekinlashib pleyer qayta buferlanayotganda kichik spinner ko'rsatadi.
-  Widget _bufferingReactive() {
-    final ctrl = _controller;
-    if (ctrl == null) return const SizedBox.shrink();
-    return ValueListenableBuilder<VideoPlayerValue>(
-      valueListenable: ctrl,
-      builder: (_, value, __) {
-        if (!value.isBuffering) return const SizedBox.shrink();
-        return const Center(
-          child: SizedBox(
-            width: 34,
-            height: 34,
-            child: CircularProgressIndicator(
-                color: Colors.white54, strokeWidth: 2.5),
-          ),
-        );
-      },
     );
   }
 
