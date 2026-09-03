@@ -455,6 +455,144 @@ async fn b2_proxy(
     }
 }
 
+/// ── ISITISH OYNASI: BITTA KESH YOZUVI ─────────────────────────
+///
+/// Butun fayl (yoki uning 480 MB'lik bo'lagi) BITTA kesh yozuviga
+/// yoziladi. Shundan keyin ilova so'raydigan har qanday oraliq
+/// AYNAN SHU yozuvdan, Cloudflare chekkasidan kesib beriladi va
+/// B2'ga umuman chiqilmaydi.
+///
+/// NEGA AYNAN 480 MB:
+///   * kesh yozuvi qancha KATTA bo'lsa, bitta faylni to'liq
+///     qoplash uchun shuncha KAM isitish so'rovi kerak, ya'ni B2
+///     tranzaksiyalari shuncha kam;
+///   * Cloudflare Cache API'ning eng katta obyekt chegarasi
+///     512 MB — 480 bilan 32 MB zaxira qoladi;
+///   * 480 MiB aynan 4 MiB'ga karrali (480 / 4 = 120), shu sabab
+///     ilovaning 4 MiB'lik guruhlari oyna chegarasini HECH QACHON
+///     kesib o'tmaydi.
+const WARM_WINDOW: u64 = 480 * 1024 * 1024;
+
+/// Isitish belgisi shu muddat yashaydi — bir vaqtda bitta oyna
+/// uchun faqat BITTA isitish ketishini ta'minlaydi.
+const WARM_MARKER_SECONDS: u64 = 15 * 60;
+
+fn warm_marker_url(file_name: &str, widx: u64) -> String {
+    cache_key_url(file_name, &format!("warm{widx}"))
+}
+
+fn warm_window_url(file_name: &str, widx: u64) -> String {
+    cache_key_url(file_name, &format!("w{widx}"))
+}
+
+/// Oyna keshda BORMI (bitta bayt so'rab tekshiriladi — arzon).
+async fn warm_window_cached(file_name: &str, widx: u64) -> bool {
+    let mut h = Headers::new();
+    if h.set("Range", "bytes=0-0").is_err() {
+        return false;
+    }
+    let Ok(probe) = Request::new_with_init(
+        &warm_window_url(file_name, widx),
+        RequestInit::new().with_method(Method::Get).with_headers(h),
+    ) else {
+        return false;
+    };
+    matches!(Cache::default().get(&probe, false).await, Ok(Some(_)))
+}
+
+/// ═══════════════════════════════════════════════════════════════
+///  GET /api/warm/:filename[?w=N]  — OYNANI KESHGA ISITISH
+/// ═══════════════════════════════════════════════════════════════
+///
+/// ── NEGA ALOHIDA SO'ROV ─────────────────────────────────────────
+///
+/// Isitish ilgari `wait_until` (fon vazifasi) bilan qilinardi va
+/// AYNAN SHU uni buzardi: Cloudflare `waitUntil` uchun javob
+/// yuborilgandan keyin ATIGI 30 SONIYA beradi. 450 MB'ni 30
+/// soniyada ko'chirib bo'lmasdi — isitish o'rtada uzilar, keshga
+/// hech narsa tushmas, "isitish belgisi" esa qayta urinishni
+/// bloklab turardi. Natijada kesh HECH QACHON to'lmasdi va har bir
+/// so'rov B2'ga borardi.
+///
+/// Cloudflare qoidasi esa boshqacha: MIJOZ ULANIB TURGANDA
+/// so'rovning davomiyligiga CHEGARA YO'Q. Shu sabab isitish endi
+/// ALOHIDA, ODDIY so'rov sifatida bajariladi — ilova uni ochadi va
+/// tugaguncha ulanib turadi. Worker esa o'sha davomida "uyg'oq"
+/// qoladi va 448 MB'ni bemalol ko'chiradi.
+///
+/// Tana OQIM (quvur) orqali o'tadi — xotiraga umuman yig'ilmaydi,
+/// shu sabab worker'ning 128 MB chegarasi muammo bo'lmaydi.
+///
+/// Javob: {"status":"cached"|"warming"|"warmed"|"error"}
+async fn b2_warm(env: &Env, file_name: &str, widx: u64) -> Result<Response> {
+    let reply = |status: &str| -> Result<Response> {
+        let mut r = Response::ok(format!("{{\"status\":\"{status}\"}}"))?;
+        set_cors(&mut r);
+        r.headers_mut().set("Content-Type", "application/json")?;
+        r.headers_mut().set("Cache-Control", "no-store")?;
+        Ok(r)
+    };
+
+    // 1) Allaqachon keshdami — ish tamom.
+    if warm_window_cached(file_name, widx).await {
+        return reply("cached");
+    }
+
+    // 2) Boshqa birov aynan hozir isitayaptimi.
+    let cache = Cache::default();
+    let marker_key = Request::new(&warm_marker_url(file_name, widx), Method::Get)?;
+    if cache.get(&marker_key, false).await?.is_some() {
+        return reply("warming");
+    }
+    let mut marker = Response::ok("1")?;
+    marker
+        .headers_mut()
+        .set("Cache-Control", &format!("public, max-age={WARM_MARKER_SECONDS}"))?;
+    let _ = cache.put(&marker_key, marker).await;
+
+    // 3) B2 -> kesh, OQIM bilan. Mijoz ulanib turgani uchun vaqt
+    //    chegarasi yo'q.
+    let win_start = widx * WARM_WINDOW;
+    let win_end = win_start + WARM_WINDOW - 1;
+    let acc = b2_access(env).await?;
+    let req = b2_range_request(&acc, file_name, win_start, win_end)?;
+    let mut resp = Fetch::Request(req).send().await?;
+    let status = resp.status_code();
+    if status != 200 && status != 206 {
+        return reply("error");
+    }
+    let ct = resp
+        .headers()
+        .get("Content-Type")?
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    let cl = resp.headers().get("Content-Length")?;
+    let total = resp
+        .headers()
+        .get("Content-Range")?
+        .and_then(|c| parse_content_range(&c))
+        .map(|(_, _, t)| t)
+        .unwrap_or(0);
+
+    let stream = resp.stream()?;
+    let mut to_cache = Response::from_stream(stream)?;
+    {
+        let h = to_cache.headers_mut();
+        h.set("Content-Type", &ct)?;
+        if let Some(l) = cl {
+            h.set("Content-Length", &l)?;
+        }
+        h.set("Accept-Ranges", "bytes")?;
+        h.set("Cache-Control", &format!("public, max-age={CHUNK_CACHE_SECONDS}"))?;
+        h.set("X-Total-Size", &total.to_string())?;
+        h.set("X-Window-Start", &win_start.to_string())?;
+    }
+    let key = Request::new(&warm_window_url(file_name, widx), Method::Get)?;
+    match cache.put(&key, to_cache).await {
+        Ok(_) => reply("warmed"),
+        Err(_) => reply("error"),
+    }
+}
+
 /// ── RANGE BILAN (video) ──────────────────────────────────────
 ///
 /// ═════════════════════════════════════════════════════════════
@@ -521,10 +659,81 @@ async fn b2_proxy_range(
         .min(req_start + RANGE_MAX - 1);
 
     let cache = Cache::default();
+
+    // ── 1) ISITILGAN OYNA KESHIDA BORMI ──────────────────────
+    //
+    // Ilova video ochilganda (va yuklab olish boshlanganda)
+    // `/api/warm/...` ni chaqiradi va butun fayl BITTA kesh
+    // yozuviga tushadi. Shundan keyin har qanday oraliq AYNAN
+    // shu yozuvdan kesib beriladi — B2'ga umuman chiqilmaydi.
+    //
+    // Kesishni Cloudflare'ning O'ZI bajaradi: kesh so'roviga
+    // `Range` qo'yamiz va u faqat kerakli baytlarni 206 bilan
+    // qaytaradi. Ya'ni worker 448 MB'ni hech qachon xotiraga
+    // olmaydi.
+    let widx = req_start / WARM_WINDOW;
+    let win_start = widx * WARM_WINDOW;
+    if req_end < win_start + WARM_WINDOW {
+        let rel_start = req_start - win_start;
+        let rel_end = req_end - win_start;
+        let mut lookup_h = Headers::new();
+        lookup_h.set("Range", &format!("bytes={rel_start}-{rel_end}"))?;
+        let lookup = Request::new_with_init(
+            &warm_window_url(file_name, widx),
+            RequestInit::new().with_method(Method::Get).with_headers(lookup_h),
+        )?;
+        if let Some(mut hit) = cache.get(&lookup, false).await? {
+            // FAQAT 206 qabul qilinadi: 200 kelsa oraliq kesilmagan
+            // va butun oynani mijozga yuborish xato bo'lardi.
+            if hit.status_code() == 206 {
+                let ct = hit
+                    .headers()
+                    .get("Content-Type")?
+                    .unwrap_or_else(|| "application/octet-stream".to_string());
+                let cl = hit.headers().get("Content-Length")?;
+                let total = hit
+                    .headers()
+                    .get("X-Total-Size")?
+                    .and_then(|t| t.parse::<u64>().ok())
+                    .unwrap_or(0);
+                // Keshdagi Content-Range OYNA ichidagi nisbiy
+                // oraliqni ko'rsatadi — uni mutlaq oraliqqa
+                // o'giramiz.
+                let (abs_s, abs_e) = match hit
+                    .headers()
+                    .get("Content-Range")?
+                    .and_then(|c| parse_content_range(&c))
+                {
+                    Some((s, e, _)) => (win_start + s, win_start + e),
+                    None => (req_start, req_end),
+                };
+                let total_str = if total > 0 {
+                    total.to_string()
+                } else {
+                    (abs_e + 1).to_string()
+                };
+                let stream = hit.stream()?;
+                let mut resp = Response::from_stream(stream)?.with_status(206);
+                set_cors(&mut resp);
+                let h = resp.headers_mut();
+                h.set("Content-Type", &ct)?;
+                h.set("Accept-Ranges", "bytes")?;
+                h.set("Cache-Control", "public, max-age=86400")?;
+                if let Some(l) = cl {
+                    h.set("Content-Length", &l)?;
+                }
+                h.set("Content-Range", &format!("bytes {abs_s}-{abs_e}/{total_str}"))?;
+                h.set("X-Cache", "HIT-WINDOW")?;
+                return Ok(resp);
+            }
+        }
+    }
+
+    // ── 2) SHU ANIQ ORALIQ KESHIDA BORMI ─────────────────────
+    // Oyna hali isitilmagan bo'lsa, oldingi so'rovlardan qolgan
+    // aniq oraliqlar shu yerda topiladi.
     let cache_url = cache_key_url(file_name, &format!("r{req_start}-{req_end}"));
     let key = Request::new(&cache_url, Method::Get)?;
-
-    // ── KESH HIT ─────────────────────────────────────────────
     if let Some(mut hit) = cache.get(&key, false).await? {
         let ct = hit
             .headers()
@@ -554,11 +763,11 @@ async fn b2_proxy_range(
         };
         h.set("Content-Range", &format!("bytes {req_start}-{req_end}/{total_str}"))?;
         // Diagnostika: javob Cloudflare keshidan keldimi yoki B2'dan.
-        h.set("X-Cache", "HIT")?;
+        h.set("X-Cache", "HIT-RANGE")?;
         return Ok(resp);
     }
 
-    // ── KESH MISS: B2'dan BIR MARTA olamiz ───────────────────
+    // ── 3) KESH MISS: B2'dan BIR MARTA olamiz ────────────────
     let (mut b2, total) = b2_fetch_range(env, file_name, req_start, req_end).await?;
     let ct = b2
         .headers()
@@ -789,6 +998,17 @@ async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
     if method == Method::Get {
         if let Some(fname) = path.strip_prefix("/api/image/") {
             return b2_proxy(&env, &ctx, fname, range_header).await;
+        }
+        // Oynani keshga isitish — ilova video ochilganda BIR MARTA
+        // chaqiradi va so'rov tugaguncha ulanib turadi (b2_warm
+        // izohiga qarang).
+        if let Some(fname) = path.strip_prefix("/api/warm/") {
+            let widx = url
+                .query_pairs()
+                .find(|(k, _)| k == "w")
+                .and_then(|(_, v)| v.parse::<u64>().ok())
+                .unwrap_or(0);
+            return b2_warm(&env, fname, widx).await;
         }
     }
 

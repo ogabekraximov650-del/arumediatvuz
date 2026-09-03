@@ -191,6 +191,12 @@ struct Shared {
     // server yana hech narsa so'ray olmaydi — toki pleyer navbatdagi
     // bo'lakka o'tib, eshikni qayta ochmaguncha.
     prefetch_active: AtomicBool,
+    // Isitish so'rovlari uchun ALOHIDA agent: bu so'rov worker
+    // 480 MB'ni B2'dan keshga ko'chirib bo'lguncha javob bermaydi,
+    // ya'ni bir necha daqiqa davom etishi mumkin. Oddiy agentning
+    // 15 soniyalik o'qish chegarasi uni uzib qo'yardi — va ulanish
+    // uzilishi bilan worker ham to'xtardi.
+    warm_agent: ureq::Agent,
     // Har bir FAYL uchun alohida tarmoq hisobi: kalit — B2'dagi fayl
     // nomi (masalan "ep_1_2_720p_1788029552837.mp4"), qiymat — shu fayl
     // uchun TARMOQDAN olingan umumiy bayt. Shu bilan "MB aynan qaysi
@@ -287,12 +293,21 @@ pub extern "C" fn rust_video_cache_start(cache_dir_ptr: *const c_char) -> i32 {
         .max_idle_connections_per_host(64)
         .build();
 
+    // Isitish agenti: javobni uzoq kutadi (pastdagi `maybe_warm`
+    // izohiga qarang).
+    let warm_agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(15))
+        .timeout_read(Duration::from_secs(900))
+        .timeout_write(Duration::from_secs(30))
+        .build();
+
     let shared = Shared {
         cache_root,
         start: Instant::now(),
         in_flight: Mutex::new(HashSet::new()),
         logs: Mutex::new(Vec::new()),
         agent,
+        warm_agent,
         active_key: Mutex::new(String::new()),
         prefetch_active: AtomicBool::new(false),
         net_by_file: Mutex::new(HashMap::new()),
@@ -2087,6 +2102,180 @@ enum FetchPrio {
 /// "keyinroq qaytib kel" degan belgi.
 const BUSY_ERR: &str = "__band__";
 
+// ═══════════════════════════════════════════════════════════════
+//  OYNANI KESHGA ISITISH (worker'dagi `/api/warm/...`)
+// ═══════════════════════════════════════════════════════════════
+//
+// ── MAQSAD: B2 XARAJATINI ENG KAMIGA TUSHIRISH ─────────────────
+//
+// Worker B2'dan olgan ma'lumotni Cloudflare keshiga yozadi. Kesh
+// yozuvi qancha KATTA bo'lsa, bitta faylni qoplash uchun shuncha
+// KAM B2 so'rovi kerak. Eng katta ruxsat etilgan yozuv 512 MB, shu
+// sabab oyna 480 MB qilib olingan (32 MB zaxira bilan).
+//
+// Ya'ni: 166 MB'lik video uchun B2'ga ATIGI BITTA so'rov ketadi —
+// o'sha bitta so'rov butun faylni keshga ko'chiradi. Shundan keyin
+// bu videoni kim ko'rsa ham, kim yuklab olsa ham, B2'ga UMUMAN
+// chiqilmaydi: hammasi Cloudflare chekkasidan xizmat qilinadi.
+//
+// ── NEGA ALOHIDA SO'ROV KERAK (eng muhim nuqta) ────────────────
+//
+// Isitish ilgari worker ichida `waitUntil` (fon vazifasi) bilan
+// qilinardi va aynan shu uni buzardi: Cloudflare `waitUntil` uchun
+// javob yuborilgandan keyin ATIGI 30 SONIYA beradi. 480 MB'ni 30
+// soniyada ko'chirib bo'lmasdi — isitish o'rtada uzilar, keshga
+// hech narsa tushmasdi.
+//
+// Cloudflare'ning boshqa qoidasi esa: MIJOZ ULANIB TURGANDA
+// so'rovning davomiyligiga CHEGARA YO'Q. Shu sabab isitish endi
+// ALOHIDA, oddiy HTTP so'rovi sifatida bajariladi va ILOVA uni
+// tugaguncha ushlab turadi — worker o'sha davomida "uyg'oq"
+// qoladi. Aynan shuning uchun bu yerda alohida `warm_agent` bor:
+// uning o'qish chegarasi 15 soniya emas, 15 daqiqa.
+//
+// ── ILOVA KUTMAYDI ────────────────────────────────────────────
+//
+// Isitish FON ish oqimida ketadi. Video shu payt odatdagidek,
+// darhol ochiladi va birinchi soniyalar uchun kerakli 2-3 guruh
+// to'g'ridan-to'g'ri olinadi. Isitish tugashi bilan (odatda yarim
+// daqiqa ichida) qolgan hamma narsa keshdan keladi.
+//
+// Agar ilova yopilsa yoki tarmoq uzilsa — belgisi olib tashlanadi
+// va keyingi ochilishda qaytadan uriniladi.
+
+/// Kesh oynasi — worker'dagi `WARM_WINDOW` bilan AYNAN bir xil
+/// bo'lishi shart (ikkalasi bir xil oyna raqamini hisoblaydi).
+const WARM_WINDOW: u64 = 480 * 1024 * 1024;
+
+/// Bitta oyna uchun isitish holati.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WarmState {
+    /// Isitish ketyapti — yuklab olish shuni kutadi.
+    Running,
+    /// Oyna keshda — endi hamma narsa chekkadan keladi.
+    Done,
+    /// Isitib bo'lmadi (tarmoq uzildi va h.k.) — keyinroq qayta
+    /// uriniladi, yuklash esa odatdagidek davom etaveradi.
+    Failed,
+}
+
+/// Oyna holati: "kalit#wN" -> WarmState.
+static WARM_STATE: OnceLock<Mutex<HashMap<String, WarmState>>> = OnceLock::new();
+
+fn warm_state() -> &'static Mutex<HashMap<String, WarmState>> {
+    WARM_STATE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Video manzilidan isitish manzilini yasaydi:
+///   .../api/image/ep_1_2_720p.mp4  ->  .../api/warm/ep_1_2_720p.mp4?w=0
+/// Manzil kutilgan shaklda bo'lmasa `None` (isitish o'tkazib
+/// yuboriladi, qolgan hamma narsa avvalgidek ishlaydi).
+fn warm_url_for(url: &str, widx: u64) -> Option<String> {
+    const MARK: &str = "/api/image/";
+    let i = url.find(MARK)?;
+    let head = &url[..i];
+    let tail = &url[i + MARK.len()..];
+    let name = tail.split('?').next().unwrap_or(tail);
+    if name.is_empty() {
+        return None;
+    }
+    Some(format!("{head}/api/warm/{name}?w={widx}"))
+}
+
+/// Kerakli oynani keshga isitishni BIR MARTA boshlaydi. Darhol
+/// qaytadi — kutish fon ish oqimida.
+fn maybe_warm(url: &str, key: &str, byte_pos: u64) {
+    let widx = byte_pos / WARM_WINDOW;
+    let tag = format!("{key}#w{widx}");
+    {
+        let Ok(mut m) = warm_state().lock() else { return };
+        // Allaqachon ketyapti yoki tugagan bo'lsa — qaytarmaymiz.
+        if matches!(m.get(&tag), Some(WarmState::Running) | Some(WarmState::Done)) {
+            return;
+        }
+        m.insert(tag.clone(), WarmState::Running);
+    }
+    let Some(warm_url) = warm_url_for(url, widx) else {
+        return;
+    };
+    let tag_for_thread = tag.clone();
+    let spawned = thread::Builder::new()
+        .name("video-cache-warm".into())
+        .stack_size(256 * 1024)
+        .spawn(move || {
+            let tag = tag_for_thread;
+            let Some(shared) = SHARED.get() else { return };
+            log(format!("Oyna #{widx} keshga isitilmoqda: {warm_url}"));
+            match shared.warm_agent.get(&warm_url).call() {
+                Ok(resp) => {
+                    let status = resp.status();
+                    let body = resp.into_string().unwrap_or_default();
+                    let ok = body.contains("cached") || body.contains("warmed");
+                    log(format!("Isitish javobi ({status}): {body}"));
+                    if let Ok(mut m) = warm_state().lock() {
+                        m.insert(tag, if ok { WarmState::Done } else { WarmState::Failed });
+                    }
+                }
+                Err(e) => {
+                    log(format!("Isitish uzildi: {e}"));
+                    if let Ok(mut m) = warm_state().lock() {
+                        m.insert(tag, WarmState::Failed);
+                    }
+                }
+            }
+        });
+    if spawned.is_err() {
+        if let Ok(mut m) = warm_state().lock() {
+            m.insert(tag, WarmState::Failed);
+        }
+    }
+}
+
+/// ── YUKLAB OLISH ISITISHNI KUTADI ─────────────────────────────
+///
+/// Foydalanuvchi "yuklab olish"ni bosganda eng tejamkor va eng tez
+/// yo'l — avval oynaning keshga tushishini kutib, keyin HAMMASINI
+/// Cloudflare chekkasidan olish:
+///   * B2'ga bitta ham qo'shimcha so'rov ketmaydi (xarajat eng kam);
+///   * chekkadan olish B2'dan olishdan sezilarli tez.
+///
+/// Kutish CHEGARALANGAN: isitish `WARM_WAIT_MAX` ichida tugamasa,
+/// yuklash baribir davom etadi (ya'ni hech qachon "muzlab" qolmaydi).
+/// Foydalanuvchi pauza bossa ham kutish darhol uziladi.
+///
+/// Pleyer (ijro) HECH QACHON kutmaydi — video darhol ochilishi kerak.
+const WARM_WAIT_MAX: Duration = Duration::from_secs(90);
+
+fn wait_for_warm(key: &str, byte_pos: u64) {
+    let widx = byte_pos / WARM_WINDOW;
+    let tag = format!("{key}#w{widx}");
+    let deadline = Instant::now() + WARM_WAIT_MAX;
+    let mut logged = false;
+    loop {
+        let state = warm_state().lock().ok().and_then(|m| m.get(&tag).copied());
+        if state != Some(WarmState::Running) {
+            return;
+        }
+        if Instant::now() >= deadline {
+            log(format!(
+                "Isitish {}s ichida tugamadi — yuklash baribir davom etadi",
+                WARM_WAIT_MAX.as_secs()
+            ));
+            return;
+        }
+        if !download_active(key) {
+            return;
+        }
+        if !logged {
+            logged = true;
+            log(format!(
+                "Yuklab olish oynasi #{widx} keshga tushishini kutmoqda..."
+            ));
+        }
+        thread::sleep(Duration::from_millis(300));
+    }
+}
+
 /// Bo'lakni diskka YAKUNIY holda yozadi (shifrlab, atom ravishda).
 fn write_full_chunk(dir: &PathBuf, key: &str, index: u64, plain: &[u8]) -> bool {
     let on_disk: Vec<u8> = match crypto::derive_chunk_key_iv(key, index) {
@@ -2237,6 +2426,18 @@ fn fetch_and_store_chunk(
         if range_start > range_end {
             return read_cached_chunk(dir, key, index, expected_len)
                 .ok_or_else(|| format!("bo'lak #{index} topilmadi"));
+        }
+
+        // ── OYNANI ISITISHNI BOSHLAYMIZ ────────────────────────
+        // Aynan shu yerda: demak biz haqiqatan tarmoqqa chiqyapmiz.
+        // Diskda hamma narsa bor bo'lsa bu yergacha yetib kelinmaydi
+        // va worker bekorga bezovta qilinmaydi.
+        maybe_warm(url, key, range_start);
+        // Yuklab olish tugmasi bosilgan bo'lsa — isitish tugashini
+        // kutamiz va keyin hammasini keshdan olamiz (yuqoridagi
+        // `wait_for_warm` izohiga qarang). Pleyer kutmaydi.
+        if prio == FetchPrio::Download {
+            wait_for_warm(key, range_start);
         }
 
         log(format!(
@@ -4696,6 +4897,57 @@ mod tests {
         assert_eq!(&*again, &vec![0u32, 11_000, 12_000]);
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// ISITISH MANZILI: video manzilidan to'g'ri yasalishi.
+    #[test]
+    fn isitish_manzili_yasaladi() {
+        let base = "https://x.workers.dev/api/image/ep_1_2_720p_178.mp4";
+        assert_eq!(
+            warm_url_for(base, 0).unwrap(),
+            "https://x.workers.dev/api/warm/ep_1_2_720p_178.mp4?w=0"
+        );
+        assert_eq!(
+            warm_url_for(base, 3).unwrap(),
+            "https://x.workers.dev/api/warm/ep_1_2_720p_178.mp4?w=3"
+        );
+        // Query bo'lsa kesiladi.
+        assert_eq!(
+            warm_url_for(&format!("{base}?t=1"), 0).unwrap(),
+            "https://x.workers.dev/api/warm/ep_1_2_720p_178.mp4?w=0"
+        );
+        // Kutilmagan shakl — isitish o'tkazib yuboriladi.
+        assert!(warm_url_for("http://127.0.0.1:9/kino.mp4", 0).is_none());
+        assert!(warm_url_for("https://x.dev/api/image/", 0).is_none());
+    }
+
+    /// OYNA CHEGARASI HAR DOIM GURUH CHEGARASIGA TUSHADI.
+    ///
+    /// Fayl hajmi qanday bo'lishidan QAT'I NAZAR: oyna ham, guruh
+    /// ham fayl BOSHIDAN sanaladi, 480 MiB esa 4 MiB'ga karrali.
+    #[test]
+    fn oyna_chegarasi_guruhni_kesmaydi() {
+        let group_bytes = GROUP_CHUNKS * CHUNK_SIZE;
+        assert_eq!(WARM_WINDOW % group_bytes, 0, "oyna guruhga karrali emas");
+        // Bir necha xil hajmdagi fayllar uchun har bir guruh
+        // BUTUNLAY bitta oyna ichida yotishini tekshiramiz.
+        for total in [
+            50u64 * 1024 * 1024,
+            166 * 1024 * 1024 + 12345,
+            1000 * 1024 * 1024,
+            3 * 1024 * 1024 * 1024 + 7,
+        ] {
+            let groups = total.div_ceil(group_bytes);
+            for g in 0..groups {
+                let g_start = g * group_bytes;
+                let g_end = (g_start + group_bytes - 1).min(total - 1);
+                assert_eq!(
+                    g_start / WARM_WINDOW,
+                    g_end / WARM_WINDOW,
+                    "guruh {g} oyna chegarasini kesib o'tdi (hajm {total})"
+                );
+            }
+        }
     }
 
     /// MP4 `moov` -> `mvhd` dan davomiylik o'qilishi.
