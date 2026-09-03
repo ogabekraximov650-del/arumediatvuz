@@ -364,7 +364,10 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // boshlanadi. Yadro oynani eski videoning nuqtasidan hisoblab
     // qolmasligi uchun darhol xabar qilamiz.
     _lastPosReport = DateTime.now();
-    RustCore.instance.videoSetPosition(url, (resumeAt ?? Duration.zero).inMilliseconds);
+    // Davomiylik hali noma'lum (pleyer ochilmagan) — 0 yuboriladi,
+    // ya'ni bufer chegarasi hozircha qo'llanilmaydi.
+    RustCore.instance
+        .videoSetPosition(url, (resumeAt ?? Duration.zero).inMilliseconds, 0);
 
     final myToken = ++_playToken;
     setState(() {
@@ -743,13 +746,29 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       return;
     }
     _lastPosReport = now;
-    RustCore.instance.videoSetPosition(_currentUrl, pos.inMilliseconds);
+    RustCore.instance
+        .videoSetPosition(_currentUrl, pos.inMilliseconds, _durationMs);
   }
 
   void _reportPosition(Duration pos) {
     if (_currentUrl.isEmpty) return;
     _lastPosReport = DateTime.now();
-    RustCore.instance.videoSetPosition(_currentUrl, pos.inMilliseconds);
+    RustCore.instance
+        .videoSetPosition(_currentUrl, pos.inMilliseconds, _durationMs);
+  }
+
+  /// Joriy videoning to'liq davomiyligi (ms). Yadro "30 soniyalik
+  /// bufer" chegarasini shu son orqali baytga o'giradi:
+  ///
+  ///     bayt/soniya = fayl hajmi / davomiylik
+  ///
+  /// Pleyer hali ochilmagan bo'lsa 0 — u holda chegara umuman
+  /// qo'llanilmaydi va server avvalgidek to'liq tezlikda beradi.
+  int get _durationMs {
+    final c = _controller;
+    if (c == null || !c.value.isInitialized) return 0;
+    final d = c.value.duration;
+    return d > Duration.zero ? d.inMilliseconds : 0;
   }
 
   // ── SOG'LIQ KUZATUVCHISI (health watchdog) ────────────────────

@@ -437,6 +437,65 @@ async fn b2_fetch_range(env: &Env, file_name: &str, start: u64, end: u64) -> Res
     Ok((b2_resp, total))
 }
 
+/// ═══════════════════════════════════════════════════════════════
+///  FAYLNING HAQIQIY HAJMI — HECH QACHON TAXMIN QILINMAYDI
+/// ═══════════════════════════════════════════════════════════════
+///
+/// TUZATILGAN XATO (foydalanuvchi ko'rgan asosiy muammo):
+/// "pleyer buferni to'ldiradi va o'sha joydan video boshidan
+/// boshlanadi".
+///
+/// Sabab: hajm noma'lum bo'lganda worker uni SO'RALGAN ORALIQNING
+/// OXIRIDAN taxmin qilardi:
+///
+///     let total_str = if total > 0 { total } else { req_end + 1 };
+///
+/// Ya'ni mijoz 0-8 MiB so'rasa, javobda "fayl 8 MiB" deb yozilardi.
+/// Pleyer esa faylning haqiqiy hajmini MUSTAQIL bila olmaydi — u
+/// serverning `Content-Range` dagi oxirgi soniga ISHONADI. Natijada
+/// pleyer o'sha 8 MiB tugagach "fayl tugadi" deb videoni boshidan
+/// boshlardi.
+///
+/// Endi hajm faqat HAQIQIY manbadan olinadi: B2'ning o'z
+/// `Content-Range` javobidan. Natija keshda saqlanadi, shu sabab
+/// bu tekshiruv uchun B2'ga umuman qo'shimcha so'rov ketmaydi
+/// (birinchi martadan tashqari, u ham 1 baytlik).
+async fn file_total(env: &Env, file_name: &str) -> u64 {
+    let cache = Cache::default();
+    let size_url = cache_key_url(file_name, "size");
+    if let Ok(k) = Request::new(&size_url, Method::Get) {
+        if let Ok(Some(hit)) = cache.get(&k, false).await {
+            if let Ok(Some(v)) = hit.headers().get("X-Total-Size") {
+                if let Ok(n) = v.parse::<u64>() {
+                    if n > 0 {
+                        return n;
+                    }
+                }
+            }
+        }
+    }
+    // Keshda yo'q — B2'dan BITTA bayt so'rab, hajmni javobning
+    // `Content-Range` sarlavhasidan olamiz.
+    let Ok((_, total)) = b2_fetch_range(env, file_name, 0, 0).await else {
+        return 0;
+    };
+    if total == 0 {
+        return 0;
+    }
+    if let Ok(mut probe) = Response::ok("1") {
+        let h = probe.headers_mut();
+        let _ = h.set("X-Total-Size", &total.to_string());
+        let _ = h.set(
+            "Cache-Control",
+            &format!("public, max-age={CHUNK_CACHE_SECONDS}"),
+        );
+        if let Ok(k) = Request::new(&size_url, Method::Get) {
+            let _ = cache.put(&k, probe).await;
+        }
+    }
+    total
+}
+
 fn cache_key_url(file_name: &str, suffix: &str) -> String {
     format!("https://fulutter-chunk-cache.internal/{file_name}/{suffix}")
 }
@@ -546,7 +605,13 @@ async fn b2_warm(env: &Env, file_name: &str, widx: u64) -> Result<Response> {
 
     // 1) Allaqachon keshdami — ish tamom (hajmni keshdagi
     //    yozuvning o'zidan olamiz).
-    if let Some(total) = warm_window_total(file_name, widx).await {
+    if let Some(mut total) = warm_window_total(file_name, widx).await {
+        // Kesh yozuvida hajm ko'rsatilmagan bo'lsa uni HAQIQIY
+        // manbadan aniqlaymiz — 0 qaytarish ilovaga "hajm noma'lum"
+        // degani bo'lardi va u qo'shimcha so'rov yuborardi.
+        if total == 0 {
+            total = file_total(env, file_name).await;
+        }
         return reply("cached", total);
     }
 
@@ -599,6 +664,12 @@ async fn b2_warm(env: &Env, file_name: &str, widx: u64) -> Result<Response> {
         h.set("X-Window-Start", &win_start.to_string())?;
     }
     let key = Request::new(&warm_window_url(file_name, widx), Method::Get)?;
+    // B2 `Content-Range` bermagan bo'lsa hajm taxmin QILINMAYDI.
+    let total = if total > 0 {
+        total
+    } else {
+        file_total(env, file_name).await
+    };
     match cache.put(&key, to_cache).await {
         Ok(_) => reply("warmed", total),
         Err(_) => reply("error", total),
@@ -664,7 +735,16 @@ async fn b2_proxy_range(
     // Worker'ning 128 MB xotirasi bir nechta bir vaqtdagi so'rov
     // o'rtasida bo'linadi, shu sabab bu chegara ATAYLAB kichik:
     // 6 ta parallel so'rov ham eng ko'pi ~48 MB egallaydi.
-    const RANGE_MAX: u64 = 8 * 1024 * 1024;
+    /// 8 -> 4 MiB. SABAB (foydalanuvchi: "yuklab olish 30-40 foizda
+    /// to'xtab qoladi"): javob TANASI xotiraga yig'iladi, keshga
+    /// yozish uchun esa IKKINCHI nusxa olinadi — ya'ni bir so'rov
+    /// 2 x RANGE_MAX egallaydi. Worker'ning butun chegarasi 128 MB
+    /// va u BARCHA bir vaqtdagi so'rovlar o'rtasida bo'linadi:
+    /// 8 MiB da 6-7 parallel so'rov chegaradan oshib ketar,
+    /// worker o'lar va so'rovlar xatoga uchrardi — foiz esa
+    /// "to'xtab qolgandek" ko'rinardi. 4 MiB da 7 parallel so'rov
+    /// ham atigi ~56 MB.
+    const RANGE_MAX: u64 = 4 * 1024 * 1024;
 
     let req_end = req_end_opt
         .unwrap_or(req_start + RANGE_MAX - 1)
@@ -719,11 +799,20 @@ async fn b2_proxy_range(
                     Some((s, e, _)) => (win_start + s, win_start + e),
                     None => (req_start, req_end),
                 };
-                let total_str = if total > 0 {
-                    total.to_string()
+                // Hajm noma'lum bo'lsa TAXMIN QILINMAYDI (yuqoridagi
+                // `file_total` izohiga qarang) — haqiqiy hajm
+                // aniqlanadi, u ham bo'lmasa xato qaytariladi.
+                let real_total = if total > 0 {
+                    total
                 } else {
-                    (abs_e + 1).to_string()
+                    file_total(env, file_name).await
                 };
+                if real_total == 0 {
+                    return Err(Error::RustError(
+                        "fayl hajmini aniqlab bo'lmadi".into(),
+                    ));
+                }
+                let total_str = real_total.to_string();
                 let stream = hit.stream()?;
                 let mut resp = Response::from_stream(stream)?.with_status(206);
                 set_cors(&mut resp);
@@ -768,11 +857,15 @@ async fn b2_proxy_range(
         if let Some(l) = cl {
             h.set("Content-Length", &l)?;
         }
-        let total_str = if total > 0 {
-            total.to_string()
+        let real_total = if total > 0 {
+            total
         } else {
-            (req_end + 1).to_string()
+            file_total(env, file_name).await
         };
+        if real_total == 0 {
+            return Err(Error::RustError("fayl hajmini aniqlab bo'lmadi".into()));
+        }
+        let total_str = real_total.to_string();
         h.set("Content-Range", &format!("bytes {req_start}-{req_end}/{total_str}"))?;
         // Diagnostika: javob Cloudflare keshidan keldimi yoki B2'dan.
         h.set("X-Cache", "HIT-RANGE")?;
@@ -793,11 +886,15 @@ async fn b2_proxy_range(
         return Err(Error::RustError("B2 bo'sh javob qaytardi".into()));
     }
     let actual_end = req_start + got - 1;
-    let total_str = if total > 0 {
-        total.to_string()
+    let real_total = if total > 0 {
+        total
     } else {
-        (actual_end + 1).to_string()
+        file_total(env, file_name).await
     };
+    if real_total == 0 {
+        return Err(Error::RustError("fayl hajmini aniqlab bo'lmadi".into()));
+    }
+    let total_str = real_total.to_string();
 
     // Keshga yozish MIJOZNI KUTTIRMAYDI (wait_until).
     // MUHIM: Cache API 206 statusli javobni qabul qilmaydi, shu

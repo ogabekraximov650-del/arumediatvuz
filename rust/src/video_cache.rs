@@ -841,11 +841,22 @@ fn ensure_meta(shared: &Shared, dir: &PathBuf, url: &str) -> Result<CacheMeta, S
     let meta_path = dir.join("meta.json");
     if let Ok(raw) = fs::read_to_string(&meta_path) {
         if let Ok(meta) = serde_json::from_str::<CacheMeta>(&raw) {
-            if meta.total_size > 0 && meta.chunk_size == CHUNK_SIZE {
+            // Eski (buzuq) meta.json diskda qolib ketgan bo'lishi
+            // mumkin — masalan yuqoridagi tekshiruv qo'shilishidan
+            // oldingi versiyadan. Shubhali kichik hajmni saqlab
+            // qo'yish videoni "boshidan boshlanadigan" qilib
+            // qo'yardi, shu sabab bunday kesh TOZALANADI va hajm
+            // qaytadan aniqlanadi.
+            if meta.total_size > 0 && meta.total_size < 64 * 1024 {
+                log(format!(
+                    "meta.json dagi hajm ishonchsiz ({}) — kesh tozalanmoqda",
+                    meta.total_size
+                ));
+                invalidate_cache(dir);
+            } else if meta.total_size > 0 && meta.chunk_size == CHUNK_SIZE {
                 log(format!("meta.json diskdan o'qildi: hajm={}", meta.total_size));
                 return Ok(meta);
-            }
-            if meta.total_size > 0 {
+            } else if meta.total_size > 0 {
                 log(format!(
                     "Kesh eskirgan (bo'lak o'lchami {} != {CHUNK_SIZE}) — tozalanmoqda",
                     meta.chunk_size
@@ -889,10 +900,22 @@ fn ensure_meta(shared: &Shared, dir: &PathBuf, url: &str) -> Result<CacheMeta, S
                     if let Some(total_str) = cr.rsplit('/').next() {
                         size = total_str.parse().unwrap_or(0);
                     }
-                } else if let Some(len) =
-                    resp.header("Content-Length").and_then(|v| v.parse().ok())
-                {
-                    size = len;
+                } else if resp.status() == 200 {
+                    // ── MUHIM: `Content-Length` FAQAT 200 javobda
+                    // faylning to'liq hajmini bildiradi ──────────
+                    //
+                    // TUZATILGAN XATO: bu yerda status tekshirilmasdi.
+                    // Biz "bytes=0-0" so'ragan edik, ya'ni 206 javobda
+                    // `Content-Length: 1` bo'ladi — va fayl hajmi
+                    // 1 BAYT deb yozib qo'yilardi. Undan keyin
+                    // mahalliy server pleyerga "fayl 1 bayt" deb
+                    // aytar, pleyer esa buferni to'ldirgach "fayl
+                    // tugadi" deb videoni boshidan boshlardi.
+                    // Ya'ni faylning HAJMI noto'g'ri bo'lsa, pleyer
+                    // aybdor emas — u serverga ishonadi.
+                    if let Some(len) = resp.header("Content-Length").and_then(|v| v.parse().ok()) {
+                        size = len;
+                    }
                 }
                 if let Some(ct) = resp.header("Content-Type") {
                     content_type = ct.to_string();
@@ -911,6 +934,26 @@ fn ensure_meta(shared: &Shared, dir: &PathBuf, url: &str) -> Result<CacheMeta, S
     if size == 0 {
         log("XATO: video hajmini aniqlab bo'lmadi (HEAD ham, GET ham)".to_string());
         return Err("hajm aniqlanmadi".to_string());
+    }
+
+    // ── HAJMGA ISHONCH TEKSHIRUVI ──────────────────────────────
+    //
+    // Faylning hajmi butun tizimning ASOSI: mahalliy server aynan
+    // shu songa qarab pleyerga "fayl shuncha bayt" deb aytadi.
+    // Son NOTO'G'RI (kichik) bo'lsa, pleyer o'sha joyda "video
+    // tugadi" deb biladi va boshidan boshlaydi — foydalanuvchi
+    // ko'rgan xato aynan shunday ko'rinadi.
+    //
+    // Shu sabab shubhali kichik son QABUL QILINMAYDI: xato bilan
+    // to'xtash (ilova qayta urinib ko'radi) buzuq hajm bilan
+    // ishlashdan yaxshiroq. 64 KB — hech qanday video bundan
+    // kichik bo'lmaydi.
+    const MIN_PLAUSIBLE_SIZE: u64 = 64 * 1024;
+    if size < MIN_PLAUSIBLE_SIZE {
+        log(format!(
+            "XATO: server aytgan hajm ishonchsiz ({size} bayt) — meta saqlanmaydi"
+        ));
+        return Err(format!("hajm ishonchsiz ({size})"));
     }
 
     let meta = CacheMeta {
@@ -1271,8 +1314,14 @@ fn stat_reset(key: &str, keep_total: u64) {
 // ochilmaydi — faqat vazifaning holati o'zgaradi.
 
 /// Butun ilova bo'yicha bir vaqtda yuklanadigan videolar soni.
-/// Ijro (pleyer) har doim ustuvor bo'lishi uchun ataylab kichik.
-const DOWNLOAD_WORKERS: usize = 2;
+///
+/// 2 -> 1. SABAB (foydalanuvchi talabi: "yuklab olishda maksimal 5 ta
+/// parallel so'rov ishlasin, undan ko'p emas"): ikkita video baravar
+/// yuklansa, parallel so'rovlar soni 2 x DOWNLOAD_THREADS bo'lib
+/// ketardi. Bitta video to'liq tezlikda olinib, keyingisiga
+/// o'tilgani ham foydalanuvchi uchun yaxshiroq: birinchi qism
+/// ancha ertaroq tayyor bo'ladi.
+const DOWNLOAD_WORKERS: usize = 1;
 
 /// BITTA videoni yuklab olishda bir vaqtda ishlaydigan oqimlar soni.
 ///
@@ -1293,10 +1342,27 @@ const DOWNLOAD_WORKERS: usize = 2;
 ///   * NAVBATDA KUTMAYDI: `fetch_and_store_chunk` ga `no_queue = true`
 ///     bilan boradi, ya'ni MAX_NET_FETCHES ularni ushlab qolmaydi.
 ///
-/// Yagona chegara — oqimlar soni, va u xotira uchun kerak: bir vaqtda
-/// eng ko'pi 12 x 1 MiB bufer bo'ladi. Tezlikni esa endi faqat
-/// foydalanuvchining tarmog'i belgilaydi.
-const DOWNLOAD_THREADS: usize = 6;
+/// ── 6 -> 5 (foydalanuvchi talabi va o'lchangan sabab) ─────────
+///
+/// TUZATILGAN XATO: "yuklab olish 30-40 foizda to'xtab qoladi".
+///
+/// Har bir so'rov worker'ga (Cloudflare) boradi va u javobni
+/// XOTIRAGA yig'adi: bir so'rov uchun `RANGE_MAX` (8 MiB), ustiga
+/// keshga yozish uchun IKKINCHI nusxa — ya'ni ~16 MiB. Worker'ning
+/// butun xotira chegarasi esa 128 MB va u BARCHA bir vaqtdagi
+/// so'rovlar o'rtasida bo'linadi.
+///
+///   ilgari: 2 video x 6 oqim = 12 so'rov x 16 MiB ~ 190 MB  -> chegaradan
+///           OSHIB KETADI, worker o'ladi va so'rovlar xatoga uchraydi;
+///   endi:   1 video x 5 oqim =  5 so'rov x  8 MiB ~  40 MB  -> bemalol.
+///
+/// (worker tomonida ham tuzatildi: javob endi xotiraga yig'ilmasdan
+/// OQIM bilan o'tkaziladi.)
+///
+/// Ya'ni foizning "to'xtab qolishi" tarmoq sekinligi emas, o'zimiz
+/// keltirib chiqargan server xatosi edi: har bir bo'lak 3 marta
+/// urinib ham olinmas, vazifa esa kutishga ketardi.
+const DOWNLOAD_THREADS: usize = 5;
 
 /// ── BITTA USTKI SO'ROVDA NECHTA BO'LAK OLINADI ────────────────
 ///
@@ -1328,7 +1394,13 @@ const DOWNLOAD_THREADS: usize = 6;
 /// kattalashadi — shu sabab pauza endi oqimni O'RTASIDAN uzadi
 /// (pastdagi `'outer` sikliga qarang), ya'ni pauzadan keyin bitta
 /// ham ortiqcha bayt kelmaydi.
-const GROUP_CHUNKS: u64 = 8;
+/// 8 -> 4: worker'ning bir so'rovdagi chegarasi (`RANGE_MAX`) ham
+/// 4 MiB ga tushirildi (worker xotirasi uchun — u yerdagi izohga
+/// qarang). So'ralgan oraliq server chegarasidan KATTA bo'lsa,
+/// har bir guruhning oxirgi qismi hech qachon kelmasdi va foiz
+/// oxirida sudralib qolardi — shu sabab ikkalasi AYNAN bir xil
+/// bo'lishi shart.
+const GROUP_CHUNKS: u64 = 4;
 
 /// ── SERVERNING HAQIQIY ORALIQ CHEGARASI ────────────────────────
 ///
@@ -1595,7 +1667,14 @@ fn pool_worker() {
                 } else if let Some(st) = map.get_mut(&key) {
                     st.running = false;
                     st.failures = st.failures.saturating_add(1);
-                    let wait = 2u64.saturating_pow(st.failures.min(5)).min(60);
+                    // 60 -> 10 soniya. Uzun kutish foydalanuvchi
+                    // uchun "yuklab olish TO'XTAB QOLDI" bo'lib
+                    // ko'rinardi (aynan shikoyat qilingan holat),
+                    // holbuki vazifa navbatda turgan bo'lardi.
+                    // Mobil tarmoqdagi uzilish 10 soniyada tuzalmasa,
+                    // 60 soniyada ham tuzalmaydi — shu sabab uzun
+                    // kutishning foydasi yo'q.
+                    let wait = 2u64.saturating_pow(st.failures.min(4)).min(10);
                     st.next_try = Instant::now() + Duration::from_secs(wait);
                     log(format!(
                         "Yuklab olish uzildi ({key}): {e} — {wait}s dan keyin davom etadi"
@@ -1861,6 +1940,20 @@ fn run_download(key: &str, url: &str) -> Result<DlOutcome, String> {
     if done > 0 || failed == 0 {
         // Ilgarilash bor (yoki xato umuman bo'lmagan, faqat band
         // bo'laklar qolgan) — kutmasdan davom etamiz.
+        //
+        // DIAGNOSTIKA: "yuklab olish to'xtab qoldi" degan shikoyat
+        // kelganda eng kerakli ma'lumot aynan shu qator bo'ladi —
+        // qancha bo'lak olindi, qanchasi olinmadi va NEGA.
+        if failed > 0 {
+            let why = first_err
+                .lock()
+                .ok()
+                .and_then(|s| s.clone())
+                .unwrap_or_default();
+            log(format!(
+                "Bosqich yakuni ({key}): {done} olindi, {failed} olinmadi, {missing} qoldi — birinchi xato: {why}"
+            ));
+        }
         return Ok(DlOutcome::Partial(done));
     }
     Err(first_err
@@ -3100,6 +3193,110 @@ static PLAY_POS_KEY: AtomicU64 = AtomicU64::new(0);
 /// olinadi (u har doim haqiqiy).
 static PLAY_POS_AT_MS: AtomicU64 = AtomicU64::new(0);
 
+/// Videoning TO'LIQ davomiyligi (millisekund) — Dart tomoni xabar
+/// qiladi (`controller.value.duration`).
+///
+/// NEGA KERAK: "30 soniyalik bufer" qoidasi soniyani BAYTGA
+/// o'girishni talab qiladi. Buning uchun faylning o'rtacha bitreyti
+/// kerak:  bayt/soniya = to'liq_hajm / davomiylik. Davomiylikni
+/// faqat pleyer aniq biladi (MP4 sarlavhasini u o'qiydi), shu sabab
+/// u ijro nuqtasi bilan birga xabar qilinadi. 0 = noma'lum, bunday
+/// holatda cheklov UMUMAN qo'llanilmaydi (ya'ni eski, cheklovsiz
+/// xulq saqlanadi — hech qachon "muzlab qolish" bo'lmaydi).
+static PLAY_DUR_MS: AtomicU64 = AtomicU64::new(0);
+
+// ═══════════════════════════════════════════════════════════════
+//  "30 SONIYALIK BUFER" DARVOZASI
+// ═══════════════════════════════════════════════════════════════
+//
+// ── MUAMMO ────────────────────────────────────────────────────
+// ExoPlayer o'z buferini 50 soniyagacha to'ldiradi
+// (DefaultLoadControl.DEFAULT_MAX_BUFFER_MS = 50_000) va bu sonni
+// `video_player` paketi ochib bermaydi — ya'ni Dart tomonidan
+// o'zgartirib bo'lmaydi. Foydalanuvchi esa 30 soniyani so'radi
+// (trafik tejalishi uchun).
+//
+// ── YECHIM ────────────────────────────────────────────────────
+// Cheklov SERVER tomonida qilinadi: mahalliy server pleyerga ijro
+// nuqtasidan 30 soniyadan ortiq oldingi baytlarni BERMAYDI. Pleyer
+// esa faqat olgan narsasini buferlay oladi — demak uning buferi
+// ham 30 soniyada qoladi.
+//
+// ── NEGA BU ILGARI ISHLAMAGAN VA ENDI ISHLAYDI ────────────────
+// Ilgari (15 soniyalik qoida) server shunchaki JIM QOLARDI. Lekin
+// ExoPlayer'ning HTTP o'qish chegarasi 8 SONIYA: shu vaqt ichida
+// bitta ham bayt kelmasa, u ulanishni xato deb uzadi va video
+// to'xtaydi. O'lchov aynan shuni ko'rsatgan edi: 90 soniyada 16
+// marta 5-8 soniyalik jimlik.
+//
+// ENDI ulanish HECH QACHON jim qolmaydi: darvoza yopiq turganda ham
+// har `DRIP_INTERVAL` da kichkina (`DRIP_BYTES`) bo'lak yuboriladi.
+// Pleyer uchun oqim tirik, trafik esa amalda nolga teng
+// (4 KB / 4 s = 1 KB/s). Muhim tafsilot: bu kichik bo'lak QO'LDA
+// TURGAN (allaqachon olingan) bo'lakdan kesiladi — ya'ni u sabab
+// tarmoqqa YANGI so'rov ketmaydi.
+/// Pleyerga ijro nuqtasidan shuncha soniya OLDINGA ruxsat beriladi.
+const BUFFER_AHEAD_SECS: u64 = 30;
+
+/// Video ochilishi/sekdan keyin darhol beriladigan "startap" hajmi.
+/// Busiz pleyer birinchi kadrni ko'rsatish uchun kerakli sarlavhani
+/// (moov) ham ololmay qolishi mumkin edi.
+const START_BURST: u64 = 4 * CHUNK_SIZE;
+
+/// Darvoza yopiq turganda ulanish jim qolmasligi uchun shu oraliqda
+/// kichik bo'lak yuboriladi. 4 s — ExoPlayer'ning 8 soniyalik
+/// chegarasidan ikki barobar kichik (xavfsiz zaxira).
+const DRIP_INTERVAL: Duration = Duration::from_secs(4);
+
+/// Har bir "tomchi"da yuboriladigan bayt.
+const DRIP_BYTES: u64 = 4 * 1024;
+
+/// Ijro nuqtasi xabari shu muddatdan eski bo'lsa — unga ishonilmaydi
+/// va darvoza UMUMAN qo'llanilmaydi.
+const PLAY_POS_FRESH_MS: u64 = 20_000;
+
+/// Server ishga tushgandan beri o'tgan millisekund.
+fn now_ms() -> u64 {
+    SHARED
+        .get()
+        .map(|s| s.start.elapsed().as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Shu so'rov uchun HOZIR pleyerga berish mumkin bo'lgan OXIRGI bayt
+/// (inklyuziv). `u64::MAX` = cheklov yo'q.
+///
+/// Cheklov faqat quyidagilarning HAMMASI bajarilganda ishlaydi:
+///   * Dart tomoni shu video uchun ijro nuqtasini xabar qilgan;
+///   * xabar YANGI (`PLAY_POS_FRESH_MS` ichida);
+///   * davomiylik ma'lum (bayt <-> soniya o'girish uchun).
+/// Aks holda cheklov yo'q — server avvalgidek to'liq tezlikda beradi.
+fn gate_limit(key: &str, start: u64, total: u64) -> u64 {
+    let dur_ms = PLAY_DUR_MS.load(Ordering::Relaxed);
+    if dur_ms == 0 || total == 0 {
+        return u64::MAX;
+    }
+    if PLAY_POS_KEY.load(Ordering::Relaxed) != key_tag(key) {
+        return u64::MAX;
+    }
+    let at = PLAY_POS_AT_MS.load(Ordering::Relaxed);
+    if at == 0 {
+        return u64::MAX;
+    }
+    let age = now_ms().saturating_sub(at);
+    if age > PLAY_POS_FRESH_MS {
+        return u64::MAX;
+    }
+    // Xabar kelganidan beri ijro ham oldinga surildi — buni hisobga
+    // olamiz, aks holda darvoza har safar bir oz "orqada" qolardi.
+    let pos_ms = PLAY_POS_MS.load(Ordering::Relaxed).saturating_add(age);
+    let ahead_ms = pos_ms.saturating_add(BUFFER_AHEAD_SECS * 1000);
+    // bayt = (vaqt / davomiylik) * hajm — 128-bitda hisoblanadi
+    // (u64 ko'paytmasi toshib ketmasligi uchun).
+    let byte = ((ahead_ms as u128) * (total as u128) / (dur_ms as u128)) as u64;
+    byte.max(start.saturating_add(START_BURST)).min(total - 1)
+}
+
 /// Kalitni raqamga o'giradi (atomik solishtirish uchun).
 fn key_tag(key: &str) -> u64 {
     let mut h: u64 = 1469598103934665603;
@@ -3120,6 +3317,7 @@ fn key_tag(key: &str) -> u64 {
 pub extern "C" fn rust_video_cache_set_position(
     url_ptr: *const c_char,
     position_ms: u64,
+    duration_ms: u64,
 ) -> i32 {
     let Some(url) = (unsafe { cstr_to_str(url_ptr) }) else {
         return 0;
@@ -3127,17 +3325,42 @@ pub extern "C" fn rust_video_cache_set_position(
     if url.is_empty() {
         return 0;
     }
-    PLAY_POS_KEY.store(key_tag(&cache_key(url)), Ordering::Relaxed);
+    // Video ALMASHGAN bo'lsa eski davomiylikni tashlaymiz: aks holda
+    // yangi epizodning bufer chegarasi eskisining bitreyti bilan
+    // hisoblanib qolardi.
+    let tag = key_tag(&cache_key(url));
+    if PLAY_POS_KEY.swap(tag, Ordering::Relaxed) != tag {
+        PLAY_DUR_MS.store(0, Ordering::Relaxed);
+    }
     PLAY_POS_MS.store(position_ms, Ordering::Relaxed);
-    PLAY_POS_AT_MS.store(
-        SHARED
-            .get()
-            .map(|s| s.start.elapsed().as_millis() as u64)
-            .unwrap_or(0)
-            .max(1),
-        Ordering::Relaxed,
-    );
+    // Davomiylik faqat HAQIQIY qiymat kelganda yangilanadi: pleyer
+    // hali ochilmagan bo'lsa 0 keladi va uni saqlash darvozani
+    // o'chirib qo'yardi.
+    if duration_ms > 0 {
+        PLAY_DUR_MS.store(duration_ms, Ordering::Relaxed);
+    }
+    PLAY_POS_AT_MS.store(now_ms().max(1), Ordering::Relaxed);
     1
+}
+
+/// Soketga BLOKLANMASDAN yozadi va nechta bayt ketganini qaytaradi.
+///
+/// Soket `set_nonblocking(true)` rejimida bo'lishi SHART. Soket buferi
+/// to'lgan bo'lsa (pleyer o'qishni to'xtatgan) `WouldBlock` keladi —
+/// bu XATO EMAS, shunchaki "hozircha shuncha ketdi" degani. Haqiqiy
+/// xato (ulanish yopilgan) esa o'zi qaytariladi.
+fn write_without_blocking(stream: &mut TcpStream, data: &[u8]) -> std::io::Result<usize> {
+    let mut sent = 0usize;
+    while sent < data.len() {
+        match stream.write(&data[sent..]) {
+            Ok(0) => break,
+            Ok(n) => sent += n,
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(sent)
 }
 
 // ── Asosiy servis funksiyasi: Range'ni tahlil qilib, javobni yozadi ──
@@ -3271,6 +3494,9 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
     // shu sabab uni qayta-qayta diskdan o'qib, shifrini ochish
     // keraksiz — bir marta o'qib, shu yerda ushlab turiladi.
     let mut held: Option<(u64, Vec<u8>)> = None;
+    // Oxirgi marta pleyerga qachon bayt yozilgan — darvoza yopiq
+    // turganda ulanishni tirik saqlash uchun (`DRIP_INTERVAL`).
+    let mut last_write = Instant::now();
     while cursor <= end {
         let chunk_index = cursor / CHUNK_SIZE;
         let chunk_start = chunk_index * CHUNK_SIZE;
@@ -3278,9 +3504,39 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
         // Shu bo'lakda shu so'rov uchun kerak bo'lgan OXIRGI bayt.
         let stop = chunk_end.min(end);
 
-        // Bu bo'lakdan shu so'rov uchun kerak bo'lgan HAMMA bayt
-        // beriladi — hech narsa ushlab turilmaydi.
-        let write_to = stop + 1;
+        // ── 30 SONIYALIK BUFER DARVOZASI ───────────────────────
+        //
+        // Ijro nuqtasidan `BUFFER_AHEAD_SECS` dan uzoqdagi baytlar
+        // HOZIRCHA berilmaydi (va shu sabab tarmoqdan ham
+        // olinmaydi — trafik aynan shu yerda tejaladi).
+        //
+        // MUHIM: ulanish YOPILMAYDI va JIM ham qolmaydi. Darvoza
+        // yopiq turganda har `DRIP_INTERVAL` da `DRIP_BYTES`
+        // yuboriladi — ExoPlayer uchun oqim tirik, trafik esa
+        // amalda yo'q (4 KB / 4 s = 1 KB/s).
+        let mut allow_to = loop {
+            let limit = gate_limit(&key, start, total);
+            if cursor <= limit {
+                break limit;
+            }
+            if last_write.elapsed() >= DRIP_INTERVAL {
+                // Tomchi vaqti keldi. Kerakli bo'lak qo'lda bo'lsa
+                // (odatdagi holat) tarmoqqa umuman chiqilmaydi;
+                // bo'lak almashgan bo'lsa u BIR MARTA olinadi va
+                // keyingi ~250 ta tomchi o'shandan kesiladi (ya'ni
+                // 1 MiB taxminan 17 daqiqaga yetadi).
+                break cursor + DRIP_BYTES - 1;
+            }
+            thread::sleep(Duration::from_millis(200));
+        };
+        if allow_to < cursor {
+            allow_to = cursor;
+        }
+
+        // Shu aylanishda yoziladigan OXIRGI bayt (eksklyuziv).
+        // `saturating_add`: cheklov yo'q bo'lganda `allow_to`
+        // `u64::MAX` bo'ladi va oddiy qo'shish toshib ketardi.
+        let write_to = (stop + 1).min(allow_to.saturating_add(1));
 
         // ── BO'LAKNI OLAMIZ (kerak bo'lsa TARMOQDAN) ────────────
         // Bu chaqiruv aynan shu daqiqada bo'ladi: darvoza ochilgan,
@@ -3316,6 +3572,41 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
             // ettirmaymiz.
             let mut client_gone = false;
             let bytes = loop {
+                // ══════════════════════════════════════════════════
+                //  ENG MUHIM TUZATISH: TARMOQDAN O'QISH PLEYERGA
+                //  YOZISH BILAN BOG'LANIB QOLMASLIGI KERAK
+                // ══════════════════════════════════════════════════
+                //
+                // TUZATILGAN XATO (foydalanuvchi ko'rgan asosiy
+                // muammo): "pleyer buferni to'ldiradi, buffer
+                // to'lgach fayl boshqa yuklanmaydi va video
+                // boshidan boshlanadi".
+                //
+                // SABABI: quyidagi `sink` baytlarni tarmoqdan
+                // O'QILAYOTGAN PAYTDA pleyer soketiga yozardi va
+                // yozuv BLOKLANUVCHI edi. Pleyer buferi to'lgach
+                // (ExoPlayer 50 soniyada soketdan o'qishni
+                // to'xtatadi — bu normal) `write_all` kutib qolardi,
+                // ya'ni AYNI PAYTDA tepadagi (Cloudflare) javobdan
+                // ham o'qish to'xtardi. O'nlab soniya jim turgan
+                // ulanishni esa server tomoni uzib tashlaydi.
+                // Natijada:
+                //   * bo'lak yarim qolib, fayl "boshqa yuklanmasdi";
+                //   * qayta urinishlar ham (chegara tugagach)
+                //     tugab, ulanish YOPILARDI;
+                //   * ExoPlayer uchun ulanishning yopilishi =
+                //     "fayl tugadi" -> video boshidan boshlanardi.
+                //
+                // YECHIM: oqim paytidagi yozuv endi BLOKLANMAYDI
+                // (soket vaqtincha non-blocking rejimga o'tadi).
+                // Soket buferi to'lgan bo'lsa, oqim shu yerda
+                // to'xtaydi — LEKIN TARMOQDAN O'QISH DAVOM ETADI
+                // va bo'lak to'liq diskka tushadi. Qolgan baytlar
+                // keyingi aylanishda, ODATDAGI (bloklanuvchi)
+                // yozuv bilan, diskdan o'qib beriladi. O'shanda
+                // tarmoqdan hech narsa o'qilmayotgani uchun kutish
+                // butunlay zararsiz.
+                let _ = stream.set_nonblocking(true);
                 let res = {
                     // Baytlar tarmoqdan kelishi bilan darhol
                     // pleyerga uzatiladi (izohni `fetch_and_store_chunk`
@@ -3328,19 +3619,29 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
                             return true; // uzilish — oqim bilan bermaymiz
                         }
                         let s_from = streamed_to.max(abs);
-                        let s_to = (abs + data.len() as u64).min(stop + 1);
+                        let s_to = (abs + data.len() as u64).min(write_to);
                         if s_to <= s_from {
                             return true;
                         }
                         let off = (s_from - abs) as usize;
                         let len = (s_to - s_from) as usize;
-                        if let Err(e) = stream.write_all(&data[off..off + len]) {
-                            sink_err = Some(e);
-                            return false;
+                        match write_without_blocking(stream, &data[off..off + len]) {
+                            Ok(n) => {
+                                if n > 0 {
+                                    SERVED_BYTES.fetch_add(n as u64, Ordering::Relaxed);
+                                    streamed_to = s_from + n as u64;
+                                    last_write = Instant::now();
+                                }
+                                // n < len bo'lsa — soket buferi
+                                // to'lgan. Bu XATO EMAS: qolgani
+                                // keyinroq diskdan beriladi.
+                                true
+                            }
+                            Err(e) => {
+                                sink_err = Some(e);
+                                false
+                            }
                         }
-                        SERVED_BYTES.fetch_add(len as u64, Ordering::Relaxed);
-                        streamed_to = s_to;
-                        true
                     };
                     read_or_fetch_chunk(
                         shared,
@@ -3354,6 +3655,10 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
                         Some(&mut sink),
                     )
                 };
+                // Soket yana odatdagi (bloklanuvchi) rejimga
+                // qaytariladi — pastdagi yozuvlar shu rejimda
+                // bo'lishi kerak.
+                let _ = stream.set_nonblocking(false);
                 if let Some(e) = sink_err.take() {
                     // Pleyerga yozib bo'lmadi — u ulanishni yopgan
                     // (sek qildi, epizod almashdi yoki ilova yopildi).
@@ -3439,6 +3744,7 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
         }
         // Faqat HAQIQATAN uzatilgan baytlar hisoblanadi.
         SERVED_BYTES.fetch_add((slice_end_exclusive - slice_start) as u64, Ordering::Relaxed);
+        last_write = Instant::now();
         cursor = chunk_start + slice_end_exclusive as u64;
     }
     // MUHIM DIAGNOSTIKA: har bir so'rov oxirida ilova ishga tushgandan
@@ -3732,8 +4038,21 @@ mod tests {
         v
     }
 
+    /// ── IJRO NUQTASI GLOBALLARI: TESTLAR NAVBAT BILAN ─────────
+    ///
+    /// `PLAY_POS_KEY` / `PLAY_POS_MS` / `PLAY_DUR_MS` — butun jarayon
+    /// uchun BITTA. "30 soniyalik bufer" darvozasi aynan shularga
+    /// tayanadi, shu sabab ularga tegadigan testlar bir vaqtda
+    /// ishlasa bir-birining natijasini buzib qo'yardi. Shu qulf
+    /// ularni navbatga soladi.
+    fn pos_guard() -> std::sync::MutexGuard<'static, ()> {
+        static POS_LOCK: Mutex<()> = Mutex::new(());
+        POS_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn keshdan_bir_javobda_va_sek_bosimiga_bardosh() {
+        let _pos_guard = pos_guard();
         let (port, root) = ensure_server();
         fill_cache(&root, None);
 
@@ -4116,6 +4435,7 @@ mod tests {
     // qiladigan ish). Server javobni OXIRIGACHA yetkazishi SHART.
     #[test]
     fn ijro_surilganda_javob_oxirigacha_yetkaziladi() {
+        let _pos_guard = pos_guard();
         let (port, root) = ensure_server();
 
         const NAME: &str = "oqim.mp4";
@@ -4143,12 +4463,12 @@ mod tests {
         let s2 = Arc::clone(&stop);
         let u2 = url.clone();
         let c_url0 = std::ffi::CString::new(url.clone()).unwrap();
-        rust_video_cache_set_position(c_url0.as_ptr(), 0);
+        rust_video_cache_set_position(c_url0.as_ptr(), 0, 0);
         let pos_thread = thread::spawn(move || {
             let c = std::ffi::CString::new(u2).unwrap();
             let mut ms: u64 = 0;
             while !s2.load(Ordering::Relaxed) && ms <= DUR_S * 1000 {
-                rust_video_cache_set_position(c.as_ptr(), ms);
+                rust_video_cache_set_position(c.as_ptr(), ms, 0);
                 thread::sleep(Duration::from_millis(50));
                 ms += 500;
             }
@@ -4234,6 +4554,7 @@ mod tests {
     /// Endi bo'lak qayta so'raladi va javob OXIRIGACHA yetkaziladi.
     #[test]
     fn bir_martalik_tarmoq_xatosi_javobni_uzmaydi() {
+        let _pos_guard = pos_guard();
         let (port, root) = ensure_server();
 
         const NAME: &str = "uzilish.mp4";
@@ -4256,7 +4577,7 @@ mod tests {
         .unwrap();
 
         let c_url = std::ffi::CString::new(url.clone()).unwrap();
-        rust_video_cache_set_position(c_url.as_ptr(), 0);
+        rust_video_cache_set_position(c_url.as_ptr(), 0, 0);
 
         let (status, cr, len, body) = request_url(port, &url, Some("bytes=0-"), None);
         assert_eq!(status, 206);
@@ -4623,6 +4944,7 @@ mod tests {
     /// Endi baytlar kelishi bilan darhol uzatiladi.
     #[test]
     fn sekin_tarmoqda_oqim_jim_qolmaydi() {
+        let _pos_guard = pos_guard();
         let (port, root) = ensure_server();
 
         const NAME: &str = "sekin.mp4";
@@ -4643,7 +4965,7 @@ mod tests {
         .unwrap();
 
         let c_url = std::ffi::CString::new(url.clone()).unwrap();
-        rust_video_cache_set_position(c_url.as_ptr(), 0);
+        rust_video_cache_set_position(c_url.as_ptr(), 0, 0);
 
         let stop = Arc::new(AtomicBool::new(false));
         let s2 = Arc::clone(&stop);
@@ -4652,7 +4974,7 @@ mod tests {
             let c = std::ffi::CString::new(u2).unwrap();
             let mut ms: u64 = 0;
             while !s2.load(Ordering::Relaxed) {
-                rust_video_cache_set_position(c.as_ptr(), ms);
+                rust_video_cache_set_position(c.as_ptr(), ms, 0);
                 thread::sleep(Duration::from_millis(250));
                 ms += 250;
             }
@@ -4802,6 +5124,7 @@ mod tests {
     #[test]
     #[ignore]
     fn haqiqiy_pleyer_oqimi() {
+        let _pos_guard = pos_guard();
         let (port, _root) = ensure_server();
         let name = std::env::var("REAL_FILE")
             .unwrap_or_else(|_| "ep_1_2_720p_1788054615257.mp4".to_string());
@@ -4818,7 +5141,7 @@ mod tests {
         }
         dump_logs("tayyorlash");
 
-        rust_video_cache_set_position(c_url.as_ptr(), 0);
+        rust_video_cache_set_position(c_url.as_ptr(), 0, 0);
         let stop = Arc::new(AtomicBool::new(false));
         let s2 = Arc::clone(&stop);
         let u2 = url.clone();
@@ -4827,7 +5150,7 @@ mod tests {
             let c = std::ffi::CString::new(u2).unwrap();
             let mut ms: u64 = 0;
             while !s2.load(Ordering::Relaxed) {
-                rust_video_cache_set_position(c.as_ptr(), ms);
+                rust_video_cache_set_position(c.as_ptr(), ms, 0);
                 thread::sleep(Duration::from_millis(500));
                 ms += 500;
             }
@@ -4968,6 +5291,7 @@ mod tests {
     /// ishlaydi ("Videoni yuklab bo'lmadi").
     #[test]
     fn tozalangandan_keyin_qayta_yuklanadi() {
+        let _pos_guard = pos_guard();
         let (port, root) = ensure_server();
 
         const NAME: &str = "ep_9_9_720p_1700000000000.mp4";
@@ -5013,12 +5337,180 @@ mod tests {
         // ── 4) Tozalab, PLEYERNI ochish ham ishlashi kerak ──────
         assert_eq!(rust_video_cache_delete(c_url.as_ptr()), 1);
         thread::sleep(Duration::from_millis(300));
-        rust_video_cache_set_position(c_url.as_ptr(), 0);
+        rust_video_cache_set_position(c_url.as_ptr(), 0, 0);
         let (status, cr, len, _) =
             request_url(port, &url, Some("bytes=0-1048575"), None);
         assert_eq!(status, 206, "tozalashdan keyin pleyer javob olmadi");
         assert_eq!(cr, format!("bytes 0-1048575/{TOTAL}"), "hajm noto'g'ri aniqlandi");
         assert_eq!(len, CHUNK_SIZE as usize, "tozalashdan keyin video berilmadi");
+    }
+
+    /// ═══════════════════════════════════════════════════════════
+    ///  PLEYER O'QISHNI TO'XTATSA, YOZUV BLOKLANMASLIGI KERAK
+    /// ═══════════════════════════════════════════════════════════
+    ///
+    /// Bu — foydalanuvchi ko'rgan asosiy muammoning ILDIZI:
+    /// "buffer to'lgach fayl boshqa yuklanmayapti va video boshidan
+    /// boshlanadi".
+    ///
+    /// Server tarmoqdan kelgan baytlarni AYNI PAYTDA pleyerga
+    /// yozadi. Yozuv BLOKLANUVCHI bo'lsa (eski xulq), pleyer buferi
+    /// to'lgan zahoti tarmoqdan O'QISH ham to'xtardi — yuqoridagi
+    /// ulanish esa jim turgani uchun uzilib ketardi.
+    ///
+    /// Endi yozuv bloklanmaydi: soket to'lgan bo'lsa "shuncha ketdi"
+    /// deb qaytadi, bo'lak esa tarmoqdan to'liq olinib diskka
+    /// tushishda davom etadi.
+    #[test]
+    fn yozuv_soket_tolganda_bloklanmaydi() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // Qabul qiluvchi HECH NARSA O'QIMAYDI — pleyer buferi
+        // to'lgan holatning aynan o'zi.
+        let holder = thread::spawn(move || {
+            let (st, _) = listener.accept().unwrap();
+            thread::sleep(Duration::from_secs(3));
+            drop(st);
+        });
+
+        let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        client.set_nonblocking(true).unwrap();
+        let data = vec![7u8; 64 * 1024];
+        let started = Instant::now();
+        let mut sent = 0u64;
+        loop {
+            let n = write_without_blocking(&mut client, &data).expect("yozuv xato berdi");
+            sent += n as u64;
+            if n == 0 {
+                break; // soket to'ldi — kutmasdan qaytdi
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "yozuv BLOKLANDI — tarmoqdan o'qish ham to'xtab qolardi"
+            );
+        }
+        assert!(sent > 0, "bitta ham bayt yozilmadi");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "soket to'lganda yozuv kutib qoldi (bloklanuvchi rejim)"
+        );
+        let _ = holder.join();
+    }
+
+    /// ═══════════════════════════════════════════════════════════
+    ///  "30 SONIYALIK BUFER" DARVOZASI
+    /// ═══════════════════════════════════════════════════════════
+    ///
+    /// Foydalanuvchi talabi: bufer 50 soniyadan 30 soniyaga
+    /// tushirilsin. ExoPlayer'ning 50 soniyasini Dart tomonidan
+    /// o'zgartirib bo'lmaydi, shu sabab cheklov SERVERDA qilinadi:
+    /// ijro nuqtasidan 30 soniyadan uzoqdagi baytlar berilmaydi.
+    ///
+    /// Bu test butunlay keshdan ishlaydi (tarmoq yo'q): fayl
+    /// 30 MiB, davomiyligi 60 soniya, ya'ni 30 soniya = 15 MiB.
+    /// Cheklovsiz holda butun 30 MiB bir necha yuz millisekundda
+    /// yetkazilib bo'lardi.
+    #[test]
+    fn bufer_30_soniyadan_oshmaydi() {
+        let _pos_guard = pos_guard();
+        let (port, root) = ensure_server();
+
+        const NAME: &str = "darvoza.mp4";
+        const TOTAL: u64 = 30 * CHUNK_SIZE; // 30 MiB
+        const DUR_S: u64 = 60; // 60 s -> 512 KiB/s -> 30 s = 15 MiB
+        let dir = root.join("video_byte_cache").join(NAME);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("meta.json"),
+            format!(
+                "{{\"total_size\":{TOTAL},\"content_type\":\"video/mp4\",\
+                 \"chunk_size\":{CHUNK_SIZE},\"duration_secs\":{DUR_S}.0}}"
+            ),
+        )
+        .unwrap();
+        // Butun fayl keshda — tarmoqqa umuman chiqilmaydi.
+        for i in 0..(TOTAL / CHUNK_SIZE) {
+            let data: Vec<u8> = (0..CHUNK_SIZE as usize).map(|k| (k % 251) as u8).collect();
+            let (k, iv) = crypto::derive_chunk_key_iv(NAME, i).unwrap();
+            fs::write(dir.join(chunk_name(i)), crypto::encrypt_chunk(&data, &k, &iv)).unwrap();
+        }
+
+        // Ijro nuqtasi 0, davomiylik 60 s — darvoza SHU sonlarga
+        // qarab hisoblanadi.
+        let url = format!("http://127.0.0.1:9/{NAME}");
+        let c_url = std::ffi::CString::new(url).unwrap();
+        rust_video_cache_set_position(c_url.as_ptr(), 0, DUR_S * 1000);
+
+        let mut st = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        st.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+        st.write_all(
+            format!(
+                "GET /v?u=http%3A%2F%2F127.0.0.1%3A9%2F{NAME} HTTP/1.1\r\n\
+                 Host: x\r\nRange: bytes=0-\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        let mut br = BufReader::new(st);
+        let mut line = String::new();
+        br.read_line(&mut line).unwrap();
+        assert!(line.contains("206"), "javob 206 emas: {line}");
+        let mut cr = String::new();
+        loop {
+            let mut l = String::new();
+            if br.read_line(&mut l).unwrap_or(0) == 0 || l == "\r\n" {
+                break;
+            }
+            if let Some(v) = l.strip_prefix("Content-Range: ") {
+                cr = v.trim().to_string();
+            }
+        }
+        // ── ENG MUHIM TEKSHIRUV (5-maslahat) ─────────────────
+        // Cheklov bo'lsa ham `Content-Range` HAR DOIM faylning
+        // BUTUN hajmini aytishi shart. Aks holda pleyer "fayl
+        // shuncha ekan" deb o'ylab, buferi to'lgan joyda videoni
+        // tugatib qo'yadi.
+        assert_eq!(
+            cr,
+            format!("bytes 0-{}/{TOTAL}", TOTAL - 1),
+            "Content-Range butun fayl hajmini ko'rsatmadi"
+        );
+
+        // 3 soniya davomida iloji boricha ko'p o'qiymiz.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut got: u64 = 0;
+        let mut buf = vec![0u8; 256 * 1024];
+        while Instant::now() < deadline {
+            match br.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => got += n as u64,
+                Err(_) => continue, // o'qish muddati tugadi — darvoza yopiq
+            }
+        }
+
+        // Kutilgan: (30 + o'tgan_soniya) soniyalik hajm ~ 16.5 MiB.
+        // Cheklov ishlamasa butun 30 MiB kelardi.
+        assert!(
+            got < 24 * CHUNK_SIZE,
+            "darvoza ishlamadi: 3 soniyada {got} bayt berildi (30 MiB dan)"
+        );
+        assert!(
+            got > 8 * CHUNK_SIZE,
+            "darvoza haddan tashqari qattiq: atigi {got} bayt berildi"
+        );
+
+        // Ulanish TIRIK bo'lishi shart: darvoza yopiq turganda ham
+        // server "tomchi" yuborib turadi. Ulanish yopilsa ExoPlayer
+        // buni "fayl tugadi" deb tushunardi.
+        br.get_ref()
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut probe = [0u8; 32 * 1024];
+        let n = br.read(&mut probe).unwrap_or(0);
+        assert!(
+            n > 0,
+            "darvoza yopiq turganda server ulanishni jim qoldirdi/yopdi"
+        );
     }
 
     /// YARIM QOLGAN BO'LAK: olingan qism SAQLANADI, bo'lak to'liq

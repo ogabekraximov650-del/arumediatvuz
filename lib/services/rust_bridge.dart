@@ -61,8 +61,8 @@ typedef _VideoStatsDart = Pointer<Utf8> Function(Pointer<Utf8>);
 
 // Pleyer HOZIR qayerni ko'rsatayotgani (millisekundda). Rust yadrosi
 // oldindan yuklash oynasini aynan shu nuqtadan hisoblaydi.
-typedef _VideoSetPosC = Int32 Function(Pointer<Utf8>, Uint64);
-typedef _VideoSetPosDart = int Function(Pointer<Utf8>, int);
+typedef _VideoSetPosC = Int32 Function(Pointer<Utf8>, Uint64, Uint64);
+typedef _VideoSetPosDart = int Function(Pointer<Utf8>, int, int);
 
 typedef _VideoUrlActionC = Int32 Function(Pointer<Utf8>);
 typedef _VideoUrlActionDart = int Function(Pointer<Utf8>);
@@ -467,11 +467,19 @@ class RustCore {
   ///
   /// Juda arzon: Rust tomonida ikkita atomik yozuv, hech qanday
   /// qulf yoki disk yo'q.
-  void videoSetPosition(String url, int positionMs) {
+  /// [durationMs] — videoning TO'LIQ davomiyligi. Yadro "30 soniyalik
+  /// bufer" chegarasini aynan shu son bilan baytga o'giradi
+  /// (bayt/soniya = hajm / davomiylik). 0 yuborilsa chegara umuman
+  /// qo'llanilmaydi, ya'ni server avvalgidek to'liq tezlikda beradi.
+  void videoSetPosition(String url, int positionMs, int durationMs) {
     if (!_loaded || url.isEmpty) return;
     final ptr = url.toNativeUtf8();
     try {
-      _videoSetPos(ptr, positionMs < 0 ? 0 : positionMs);
+      _videoSetPos(
+        ptr,
+        positionMs < 0 ? 0 : positionMs,
+        durationMs < 0 ? 0 : durationMs,
+      );
     } catch (_) {
     } finally {
       malloc.free(ptr);
