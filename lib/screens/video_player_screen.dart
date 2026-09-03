@@ -470,12 +470,32 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       return;
     }
 
-    // Video tugaganda o'zi boshidan boshlanadi. Bu NATIVE (ExoPlayer)
-    // takrorlash — u fayl oxirini o'zi to'g'ri boshqaradi, bizning
-    // qo'lda "qayta ochish" mantig'imiz kerak emas.
+    // ═══════════════════════════════════════════════════════════
+    //  NATIVE TAKRORLASH (setLooping) ATAYLAB O'CHIRILGAN
+    // ═══════════════════════════════════════════════════════════
+    //
+    // TUZATILGAN XATO (foydalanuvchi ko'rgan asosiy muammo):
+    // "video 15 soniya ishlab, yana boshidan boshlanadi".
+    //
+    // SABABI: ExoPlayer uchun HTTP javobining erta tugashi (masalan
+    // bir lahzalik tarmoq uzilishi sabab mahalliy server ulanishni
+    // yopib qo'yishi) "FAYL TUGADI" degani. `setLooping(true)`
+    // yoqilganda esa u bu haqda BIZGA UMUMAN XABAR BERMAYDI —
+    // videoni jimgina BOSHIDAN qayta boshlaydi. Ya'ni oddiy tarmoq
+    // xatosi foydalanuvchiga "video 15 soniyadan keyin qayta
+    // boshlandi" bo'lib ko'rinardi.
+    //
+    // ENDI takrorlashni O'ZIMIZ boshqaramiz (`_onCompleted`):
+    //   * video HAQIQATAN oxiriga yetgan bo'lsa — boshidan
+    //     boshlanadi (foydalanuvchi uchun xulq o'zgarmadi);
+    //   * oxiriga yetmasdan "tugadi" degan xabar kelsa — bu erta
+    //     uzilish, ya'ni video AYNAN O'SHA nuqtadan qayta ochiladi.
     try {
-      await ctrl.setLooping(true);
+      await ctrl.setLooping(false);
     } catch (_) {}
+    _lastGoodPosition = resumeAt ?? Duration.zero;
+    _handlingCompleted = false;
+    _pendingEofAt = null;
 
     if (resumeAt != null && resumeAt > Duration.zero) {
       try {
@@ -591,12 +611,40 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   /// Ijro nuqtasi oxirgi marta qachon yadroga xabar qilingan.
   DateTime _lastPosReport = DateTime.fromMillisecondsSinceEpoch(0);
 
+  /// Video "tugadi" xabari kelishidan OLDINGI oxirgi haqiqiy ijro
+  /// nuqtasi.
+  ///
+  /// NEGA KERAK: `video_player` "tugadi" hodisasini olganda
+  /// pozitsiyani DARHOL `duration`ga qo'yadi (paketning o'z kodi:
+  /// `pause().then((_) => seekTo(value.duration))`). Shu sabab
+  /// hodisadan keyin "video haqiqatan oxirigacha ko'rildimi yoki
+  /// oqim erta uzildimi" degan savolga `value.position` javob bera
+  /// olmaydi — bizga hodisadan OLDINGI qiymat kerak.
+  Duration _lastGoodPosition = Duration.zero;
+  bool _handlingCompleted = false;
+
+  /// Oqim ERTA uzilgan bo'lsa — qayta ochish kerak bo'lgan nuqta.
+  /// `null` = kutayotgan hech narsa yo'q.
+  ///
+  /// Qayta ochish `_recoverPlayer` ichidagi 6 soniyalik tormoz
+  /// sabab darhol boshlanmasligi mumkin. Shunday bo'lsa video
+  /// oxirida qotib qolmasligi uchun sog'liq kuzatuvchisi (har
+  /// 800 ms) urinishni takrorlaydi.
+  Duration? _pendingEofAt;
+
   void _onControllerUpdate() {
     final c = _controller;
     if (c == null || !mounted) return;
     if (c.value.hasError && !_recovering) {
       VideoCacheServer.log('Pleyer xatosi: ${c.value.errorDescription}');
       _recoverPlayer(c.value.position);
+      return;
+    }
+    final v = c.value;
+    if (v.isCompleted) {
+      _onCompleted(c);
+    } else if (v.isInitialized) {
+      _lastGoodPosition = v.position;
     }
     // ── OLDINDAN YUKLASH OYNASI SHU NUQTADAN HISOBLANADI ───────
     // Yadro o'zi faqat BUFER UCHINI biladi (u uzatgan oxirgi
@@ -607,8 +655,73 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _reportPositionThrottled(c.value.position);
   }
 
-  /// Ijro nuqtasini yadroga xabar qiladi — soniyada bir martadan
-  /// ko'p emas.
+  // ═══════════════════════════════════════════════════════════════
+  //  "VIDEO TUGADI" — HAQIQIY OXIRMI YOKI ERTA UZILISHMI?
+  // ═══════════════════════════════════════════════════════════════
+  //
+  // ExoPlayer HTTP javobining tugashini "fayl tugadi" deb biladi.
+  // Ya'ni "tugadi" xabari ikki xil holatda keladi:
+  //
+  //   1) video HAQIQATAN oxirigacha ko'rildi;
+  //   2) mahalliy server ulanishni erta yopdi (masalan tarmoq bir
+  //      lahzaga uzilib, bo'lak olinmadi) — video esa hali
+  //      o'rtasida edi.
+  //
+  // Ilgari bu ikkalasi FARQLANMASDI: `setLooping(true)` yoqilgani
+  // uchun ExoPlayer ikkala holatda ham videoni jimgina BOSHIDAN
+  // boshlar edi. Foydalanuvchi ko'rgan "15 soniyadan keyin video
+  // qayta boshlanadi" xatosi aynan shu edi.
+  //
+  // Endi farq ANIQ: oxirgi haqiqiy ijro nuqtasi videoning
+  // oxiriga yaqinmi yoki yo'qmi.
+  static const Duration _endThreshold = Duration(seconds: 3);
+
+  void _onCompleted(VideoPlayerController c) {
+    if (_handlingCompleted || _recovering) return;
+    final v = c.value;
+    if (!v.isInitialized || v.duration <= Duration.zero) return;
+    _handlingCompleted = true;
+
+    final reached = _lastGoodPosition;
+    final remaining = v.duration - reached;
+
+    if (remaining <= _endThreshold) {
+      // ── HAQIQIY OXIR: takrorlaymiz (avvalgi xulq saqlanadi) ──
+      VideoCacheServer.log('Video oxiriga yetdi — boshidan boshlanmoqda');
+      _lastGoodPosition = Duration.zero;
+      _pendingEofAt = null;
+      _reportPosition(Duration.zero);
+      () async {
+        try {
+          // `video_player` "tugadi" hodisasida O'ZI ham
+          // `pause()` + `seekTo(duration)` qiladi (paket kodi).
+          // Bizning `seekTo(0)` undan OLDIN ketib qolmasligi uchun
+          // bir lahza kutamiz — aks holda pleyer darhol yana
+          // oxiriga sakrab ketardi.
+          await Future.delayed(const Duration(milliseconds: 250));
+          if (!mounted || _controller != c) return;
+          await c.seekTo(Duration.zero);
+          if (!mounted || _controller != c) return;
+          if (_intendedPlaying) await c.play();
+        } catch (_) {
+        } finally {
+          if (mounted) _handlingCompleted = false;
+        }
+      }();
+      return;
+    }
+
+    // ── ERTA UZILISH: video AYNAN SHU nuqtadan qayta ochiladi ──
+    // Boshidan boshlanmaydi — foydalanuvchi ko'rgan joyida qoladi.
+    VideoCacheServer.log(
+        'Oqim erta uzildi (${reached.inSeconds}s / ${v.duration.inSeconds}s) — '
+        'shu nuqtadan qayta ochilmoqda');
+    _pendingEofAt = reached;
+    _recoverPlayer(reached);
+  }
+
+  /// Ijro nuqtasini yadroga xabar qiladi — yarim soniyada bir
+  /// martadan ko'p emas.
   ///
   /// MUHIM: yadro bu xabarga QAT'IY tayanadi — javob oynasi
   /// ("oldinda nechta bo'lak yuklansin") aynan shu nuqtadan
@@ -621,7 +734,14 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   void _reportPositionThrottled(Duration pos) {
     if (_currentUrl.isEmpty) return;
     final now = DateTime.now();
-    if (now.difference(_lastPosReport) < const Duration(seconds: 1)) return;
+    // 1000 -> 500 ms: bufer darvozasi AYNAN shu songa qarab
+    // ochiladi, ya'ni xabar qanchalik tez-tez kelsa, baytlar
+    // shunchalik SILLIQ oqadi. Chaqiruvning o'zi juda arzon
+    // (yadroda ikkita atomik yozuv).
+    if (now.difference(_lastPosReport) <
+        const Duration(milliseconds: 500)) {
+      return;
+    }
     _lastPosReport = now;
     RustCore.instance.videoSetPosition(_currentUrl, pos.inMilliseconds);
   }
@@ -655,6 +775,16 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       // yangilanishlari siyraklashsa ham bu taymer uni yangilab
       // turadi.
       _reportPositionThrottled(v.position);
+
+      // ── ERTA UZILGAN OQIM: QAYTA OCHISHNI TAKRORLASH ─────────
+      // `_recoverPlayer` ichidagi 6 soniyalik tormoz sabab birinchi
+      // urinish o'tmagan bo'lishi mumkin. Video oxirida qotib
+      // qolmasligi uchun shu yerda takrorlanadi.
+      final eofAt = _pendingEofAt;
+      if (eofAt != null && v.isCompleted && !_recovering) {
+        _recoverPlayer(eofAt);
+        return;
+      }
 
       // Video oxiriga yaqin joyda takrorlash (loop) ishlaydi va
       // pozitsiya bir lahza "joyida turgandek" ko'rinishi mumkin —
@@ -2272,9 +2402,19 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // "Videoni yuklab bo'lmadi" chiqib qolardi. Shu sabab pleyer
     // AYNAN SHU joydan qaytadan ochiladi — video worker'dan
     // yangidan yuklana boshlaydi.
-    if (q.url == _currentUrl) {
+    final currentEp = _currentEp;
+    if (q.url == _currentUrl && currentEp != null) {
       final at = _controller?.value.position ?? Duration.zero;
-      _recoverPlayer(at);
+      // MUHIM: bu yerda `_recoverPlayer` ISHLATILMAYDI. U "xatodan
+      // tiklanish" uchun mo'ljallangan va o'zida 6 soniyalik tormoz
+      // hamda ketma-ket urinishlar chegarasi bor — foydalanuvchining
+      // ATAYLAB bosgan tugmasi esa har doim, darhol ishlashi kerak.
+      // Ilgari aynan shu tormoz sabab tozalashdan keyin video
+      // qayta ochilmay qolishi mumkin edi.
+      _recoveryStreakResetTimer?.cancel();
+      _recoveryStreak = 0;
+      _lastRecovery = DateTime.fromMillisecondsSinceEpoch(0);
+      _playEpisode(currentEp, resumeAt: at, resumePlaying: _intendedPlaying);
     }
   }
 
