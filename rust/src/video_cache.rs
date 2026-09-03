@@ -83,93 +83,10 @@ const MAX_CONNS: usize = 64;
 const MAX_NET_FETCHES: usize = 8;
 static NET_FETCHES: AtomicUsize = AtomicUsize::new(0);
 
-/// ── OLDINDAN YUKLASH OYNASI: HAR DOIM 10 MB TAYYOR ──────────────
-///
-/// Qoida oddiy: ijro nuqtasidan keyin HAMISHA 10 ta bo'lak (10 MB)
-/// keshda tayyor turadi, undan ortig'i EMAS.
-///
-///   * pleyer 1-bo'lakni ko'rsatayotgan bo'lsa — 11-bo'lakkacha
-///     yuklanadi;
-///   * pleyer 2-bo'lakka o'tsa — 12-bo'lak yuklanadi (oyna bir
-///     qadam suriladi);
-///   * foydalanuvchi 21-bo'lakka sek qilsa — oyna YANGI nuqtadan
-///     qayta hisoblanadi va 31-bo'lakkacha yuklanadi, eskisi
-///     (endi keraksiz) darhol to'xtatiladi.
-///
-/// NEGA AYNAN SHUNDAY: bu foydalanuvchi trafigini tejaydi. Video bir
-/// necha soniya ko'rilib tashlansa ham, faqat shu ~10 MB sarflanadi —
-/// butun fayl bekorga yuklab olinmaydi.
-/// ZAXIRA qiymat: davomiylik hali aniqlanmagan paytda ishlatiladi
-/// (masalan video endigina ochildi va 1-bo'lak hali keshda yo'q).
-/// Odatiy holatda oyna videoning BITREYTIDAN hisoblanadi —
-/// `prefetch_window_for` ga qarang.
-/// Davomiylik hali aniqlanmagan paytdagi ZAXIRA oyna.
-///
-/// 10 -> 4: video ENDIGINA ochilganda 1-bo'lak hali keshda
-/// bo'lmaydi, ya'ni davomiylik ham noma'lum va chegara aynan shu
-/// zaxira qiymatdan olinadi. 10 bo'lganda kichik fayl (masalan
-/// 1 daqiqalik 10 MB video) pleyer ishga tushmasidan BUTUNLAY
-/// yuklanib qolardi. 4 MiB esa faylning sarlavhasini o'qib ijroni
-/// boshlashga yetadi; shundan keyin davomiylik aniqlanadi va
-/// chegara haqiqiy "30 soniya" qoidasiga o'tadi.
-const PREFETCH_WINDOW: u64 = 4;
 
-/// ── ASOSIY QOIDA: PLEYER BUFERIDA 15 SONIYALIK VIDEO ───────────
-///
-/// Server pleyerga ijro nuqtasidan OLDINGA shu qadar video beradi —
-/// undan ortig'ini EMAS. Ya'ni:
-///
-///   * pleyer buferida 15 soniyadan KAM video qolsa — server
-///     navbatdagi bo'lakni beradi (kerak bo'lsa tarmoqdan oladi);
-///   * 15 soniyadan ORTIQ bo'lsa — server yangi bo'lak SO'RAMAYDI.
-///
-/// Aynan shu YouTube va boshqa striming ilovalaridagi xulq: video
-/// ochilganda faqat ijroga yetadigan qismi olinadi, qolgani esa
-/// KO'RILGAN SARI, kerak bo'lgandagina.
-///
-/// Bo'lakda necha soniya video borligi faylning O'Z jadvalidan aniq
-/// bilinadi (`CacheMeta::chunk_start_ms`) — shu sabab bu qoida
-/// bitreyt o'zgarib tursa ham to'g'ri ishlaydi: jim sahnada 2 ta
-/// bo'lak yetadi, jangovar sahnada 8 ta kerak bo'ladi.
-///
-/// 30 -> 15 (foydalanuvchi talabi): ko'rsatilayotgan vaqtdan
-/// tashqari 15 soniyalik video tayyor turadi, undan ortig'i uchun
-/// tarmoqqa chiqilmaydi.
-const BUFFER_SECONDS: u64 = 15;
 
-/// ── DARVOZA YOPIQ BO'LGANDA: ULANISHNI TIRIK USHLASH ───────────
-///
-/// MUHIM (eski xatoning ildizi): javobni bufer chegarasida KESIB
-/// qo'yish MUMKIN EMAS. ExoPlayer javob oxirini "fayl tugadi" deb
-/// tushunadi va videoni SHU YERDA yakunlaydi (setLooping tufayli
-/// video boshidan qayta boshlanadi). Foydalanuvchi ko'rgan xato
-/// aynan shu edi: sek qilinmasa video ~30 soniyalik buferga yetib
-/// borib qaytadan boshlanardi.
-///
-/// Endi javob HECH QACHON kesilmaydi — u faqat SEKINLASHTIRILADI:
-/// baytlar ijro nuqtasidan `BUFFER_SECONDS` oldindagi chegaragacha
-/// beriladi, undan narisi esa ijro siljigan sari asta-sekin
-/// ochiladi. Ulanish ochiq qolgani uchun pleyer o'zi yangi so'rov
-/// ochishi ham, "fayl tugadi" deb o'ylashi ham shart emas.
-///
-/// Video PAUZA qilinganda ijro nuqtasi siljimaydi va darvoza
-/// yopiq turadi. ExoPlayer esa o'z buferini to'ldirish uchun
-/// o'qishda davom etadi va 8 soniya ichida bayt kelmasa ulanishni
-/// XATO deb uzadi. Shu sabab darvoza yopiq bo'lsa ham har
-/// `KEEPALIVE_MS` da juda kichik (`KEEPALIVE_BYTES`) bo'lak
-/// beriladi: bu ulanishni tirik ushlaydi, lekin trafik jihatdan
-/// deyarli sezilmaydi (~1 KB/s).
-const KEEPALIVE_MS: u64 = 4000;
-const KEEPALIVE_BYTES: u64 = 4 * 1024;
 
-/// Darvoza ochilganda bir marta yoziladigan ENG KICHIK bo'lak.
-/// Undan kam ruxsat berilgan bo'lsa, server 200 ms kutib qayta
-/// tekshiradi — shu bilan minglab mayda `write` chaqiruvining
-/// oldi olinadi.
-const MIN_SLICE: u64 = 32 * 1024;
 
-/// Darvoza yopiq bo'lganda qayta tekshirish oralig'i.
-const GATE_TICK_MS: u64 = 200;
 
 /// ── BO'LAK OLINMASA: QAYTA URINISH ────────────────────────────
 ///
@@ -186,45 +103,8 @@ const GATE_TICK_MS: u64 = 200;
 const CHUNK_RETRY_MAX: Duration = Duration::from_secs(20);
 const CHUNK_RETRY_WAIT: Duration = Duration::from_millis(600);
 
-/// ── OXIRGI XAVFSIZLIK CHIZIG'I ─────────────────────────────────
-///
-/// Bufer qoidasi Dart tomoni xabar qiladigan IJRO NUQTASIGA
-/// tayanadi. Kutilmagan holatda (masalan pleyer holati buzilib,
-/// xabar umuman kelmay qolsa) zaxira oyna ham tugab, video
-/// to'xtab qolishi mumkin edi.
-///
-/// Shu sabab: ijro nuqtasi shu muddat davomida umuman kelmasa,
-/// zaxira oyna BIR POG'ONA (30 soniyalik video) kengaytiriladi va
-/// shu takrorlanaveradi. Video hech qachon to'xtab qolmaydi, lekin
-/// cheklov ham butunlay yo'qolmaydi — ya'ni bitta nosozlik sabab
-/// butun fayl bekorga yuklanib ketmaydi.
-const STALE_GIVEUP_MS: u64 = 20_000;
 
-/// Oynaning eng katta ruxsat etilgan kengligi (bo'lak = MiB).
-///
-/// QOIDA O'ZGARMAYDI: oyna HAR DOIM "hajm ÷ davomiylik", ya'ni bir
-/// daqiqalik video necha MiB bo'lsa shuncha bo'lak. Bu chegara esa
-/// FAQAT buzuq metadata uchun (masalan davomiyligi 1 soniya deb
-/// yozilgan 1 GB'lik fayl) — u holda oyna 1000+ bo'lakka chiqib,
-/// butun faylni bir zumda tortib olardi.
-///
-/// 64 -> 128: 64 chegarasi ~9 Mbit/s dan yuqori bitreytli (masalan
-/// yuqori sifatli 4K) fayllarda haqiqiy qoidani buzardi — ularda
-/// bir daqiqalik video 64 MiB'dan katta bo'ladi. 128 bilan chegara
-/// ~18 Mbit/s gacha ko'tarildi, ya'ni amaliy fayllarda u umuman
-/// ishga tushmaydi va oyna har doim aynan "hajm ÷ davomiylik"
-/// bo'lib qoladi.
-const MAX_PREFETCH_WINDOW: u64 = 128;
 
-/// Oldindan yuklash bir safarda ENG KO'PI shuncha bo'lak oladi.
-///
-/// Foydalanuvchi talabi: "faqatgina yuklab olingan bo'laklar 15
-/// soniya bufferlashga yetmasagina mahalliy server BITTA bo'lak
-/// yuklab olishi kerak". Ya'ni oldindan yuklash endi bir vaqtda
-/// bittadan ortiq bo'lak olmaydi: 15 soniyalik oynadagi ENG
-/// BIRINCHI yetishmayotgan bo'lak olinadi va ish oqimi tugaydi.
-/// Pleyer navbatdagi bo'lakka o'tganda eshik yana ochiladi.
-const PREFETCH_CHUNKS: u64 = 1;
 
 /// O'chirilayotgan papkalar shu prefiks bilan nomlanadi. Ular
 /// "video" emas — kesh skanerlash ularni e'tiborsiz qoldiradi, ilova
@@ -246,14 +126,6 @@ struct Shared {
     // to'ldiruvchi ish oqimi bo'ladi va u shu yerdagi vazifani bajaradi;
     // boshqa video ochilsa, vazifa almashadi va eski video uchun
     // yuklash DARHOL to'xtaydi.
-    // Hozir ochilgan video kaliti. Boshqa video ochilsa, eski video
-    // uchun ishlayotgan oldindan-yuklash DARHOL to'xtaydi.
-    active_key: Mutex<String>,
-    // "ESHIK": bir vaqtda faqat BITTA oldindan-yuklash ish oqimi
-    // bo'lishini ta'minlaydi. Ish tugashi bilan eshik yopiladi va
-    // server yana hech narsa so'ray olmaydi — toki pleyer navbatdagi
-    // bo'lakka o'tib, eshikni qayta ochmaguncha.
-    prefetch_active: AtomicBool,
     // Isitish so'rovlari uchun ALOHIDA agent: bu so'rov worker
     // 480 MB'ni B2'dan keshga ko'chirib bo'lguncha javob bermaydi,
     // ya'ni bir necha daqiqa davom etishi mumkin. Oddiy agentning
@@ -289,10 +161,6 @@ static NET_BYTES: AtomicU64 = AtomicU64::new(0);
 /// Agar INTERNET o'zgarmay, MAHALLIY o'sib borsa — telefon
 /// ko'rsatayotgan trafik AYNAN shu mahalliy uzatma, internet emas.
 static SERVED_BYTES: AtomicU64 = AtomicU64::new(0);
-/// Pleyer HOZIR o'qiyotgan bo'lak indeksi. Oldindan yuklash ish oqimi
-/// har bir bo'lakdan oldin shuni tekshiradi: pleyer sek qilib boshqa
-/// joyga o'tgan bo'lsa, eski (endi keraksiz) oyna DARHOL tashlanadi.
-static CURRENT_CHUNK: AtomicU64 = AtomicU64::new(0);
 
 
 /// Diagnostika jurnali — FAQAT XOTIRADA, cheklangan (300 qator).
@@ -371,8 +239,6 @@ pub extern "C" fn rust_video_cache_start(cache_dir_ptr: *const c_char) -> i32 {
         logs: Mutex::new(Vec::new()),
         agent,
         warm_agent,
-        active_key: Mutex::new(String::new()),
-        prefetch_active: AtomicBool::new(false),
         net_by_file: Mutex::new(HashMap::new()),
     };
     let _ = SHARED.set(shared);
@@ -2321,13 +2187,9 @@ fn read_or_fetch_chunk(
 /// bo'lak-vaqt jadvali) tashlaydi. Kesh tozalanganda yoki manbadagi
 /// fayl o'zgarganda chaqiriladi — aks holda eski jadval yangi
 /// faylga qo'llanib qolardi.
-fn forget_derived(key: &str) {
-    if let Ok(mut m) = durations().lock() {
-        m.remove(key);
-    }
-    if let Ok(mut m) = time_indexes().lock() {
-        m.remove(key);
-    }
+fn forget_derived(_key: &str) {
+    // Hosila ma'lumotlar (davomiylik jadvali) endi umuman
+    // hisoblanmaydi — tozalanadigan narsa qolmadi.
 }
 
 /// Keshni butunlay tozalaydi (meta.json + barcha bo'lak fayllari).
@@ -2408,13 +2270,6 @@ const BUSY_ERR: &str = "__band__";
 /// bo'lishi shart (ikkalasi bir xil oyna raqamini hisoblaydi).
 const WARM_WINDOW: u64 = 480 * 1024 * 1024;
 
-/// Keyingi oyna shu masofa qolganda isitila boshlaydi.
-///
-/// Katta faylda (bir necha oyna) ijro chegaraga yetganda isitishni
-/// endi boshlash kech bo'lardi — pleyer kutib qolardi. 48 MiB
-/// bu ilovadagi videolar uchun bir necha daqiqalik tasvir, ya'ni
-/// isitish bemalol ulguradi.
-const WARM_LOOKAHEAD: u64 = 48 * 1024 * 1024;
 
 /// Bitta oyna uchun isitish holati.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -3238,8 +3093,6 @@ static PLAY_POS_KEY: AtomicU64 = AtomicU64::new(0);
 /// ISHLATILMAYDI — o'rniga so'rovning O'ZIDAGI boshlanish nuqtasi
 /// olinadi (u har doim haqiqiy).
 static PLAY_POS_AT_MS: AtomicU64 = AtomicU64::new(0);
-/// Ijro nuqtasi shu muddatdan eski bo'lsa — ishonilmaydi.
-const PLAY_POS_FRESH_MS: u64 = 30_000;
 
 /// Kalitni raqamga o'giradi (atomik solishtirish uchun).
 fn key_tag(key: &str) -> u64 {
@@ -3254,154 +3107,6 @@ fn key_tag(key: &str) -> u64 {
     } else {
         h
     }
-}
-
-/// Pleyer hozir ko'rsatayotgan BO'LAK indeksi (aniq bo'lsa).
-///
-/// Vaqtdan baytga o'tish videoning o'rtacha bitreyti bo'yicha
-/// hisoblanadi: bu H.265 uchun yetarli aniq va hech qanday
-/// qo'shimcha metadata talab qilmaydi.
-/// Dart tomoni xabar qilgan ijro nuqtasi (ms) — faqat SHU video
-/// uchun va faqat xabar YANGI bo'lsa.
-fn reported_pos_ms(key: &str) -> Option<u64> {
-    if PLAY_POS_KEY.load(Ordering::Relaxed) != key_tag(key) {
-        return None;
-    }
-    // Xabar eskirgan bo'lsa (pleyer yopilgan, ilova fonda va h.k.)
-    // unga ishonmaymiz.
-    let now_ms = SHARED
-        .get()
-        .map(|s| s.start.elapsed().as_millis() as u64)
-        .unwrap_or(0);
-    let at = PLAY_POS_AT_MS.load(Ordering::Relaxed);
-    if at == 0 || now_ms.saturating_sub(at) > PLAY_POS_FRESH_MS {
-        return None;
-    }
-    Some(PLAY_POS_MS.load(Ordering::Relaxed))
-}
-
-/// ── BUFER CHEGARASI: ijro nuqtasidan 15 soniyalik video ────────
-///
-/// Qaytaradi: bufer qoidasi bo'yicha OXIRGI ruxsat etilgan bo'lak
-/// indeksi. Undan naridagi bo'lak uchun worker'ga umuman
-/// chiqilmaydi.
-///
-/// Ikki yo'l:
-///   * faylning ANIQ jadvali bor bo'lsa — "ijro vaqti + 15 s" dan
-///     oldin boshlanadigan oxirgi bo'lak (bitreyt qanday
-///     o'zgarishidan qat'i nazar to'g'ri);
-///   * jadval hali qurilmagan bo'lsa — o'rtacha bitreyt bo'yicha
-///     15 soniyalik hajm.
-///
-/// MUHIM: bu yerda "keshda bor bo'laklar bepul" degan kengaytma
-/// YO'Q. U ilgari javobni kesish uchun kerak edi; endi chegara
-/// faqat OLDINDAN YUKLASH qarorida ishlatiladi, ya'ni savol aniq:
-/// "15 soniyalik oynada yetishmayotgan bo'lak bormi?". Keshdagi
-/// bo'laklar ustidan chegarani cho'zish bu savolga noto'g'ri javob
-/// berardi (oynadan tashqaridagi bo'lak yuklab olinardi).
-fn buffer_limit(
-    key: &str,
-    dir: &PathBuf,
-    total: u64,
-    secs: f64,
-    origin: u64,
-    chunk_count: u64,
-) -> u64 {
-    if chunk_count == 0 {
-        return 0;
-    }
-    let mut limit = match (time_index(key, dir, total), reported_pos_ms(key)) {
-        (Some(idx), Some(pos_ms)) => {
-            let deadline = pos_ms.saturating_add(BUFFER_SECONDS * 1000);
-            let mut l = origin;
-            while l + 1 < chunk_count {
-                match idx.get((l + 1) as usize) {
-                    Some(t) if (*t as u64) < deadline => l += 1,
-                    _ => break,
-                }
-            }
-            l
-        }
-        _ => origin.saturating_add(window_for_seconds(total, secs, BUFFER_SECONDS)),
-    };
-    if limit >= chunk_count {
-        limit = chunk_count - 1;
-    }
-    limit
-}
-
-/// ── BUFER CHEGARASI, BAYT ANIQLIGIDA ───────────────────────────
-///
-/// Javob oqimi aynan shu chegara bilan boshqariladi. Bo'lak
-/// (1 MiB) aniqligi bu yerda YETARLI EMAS: bir bo'lakda 8-10
-/// soniyalik video bo'lishi mumkin, ya'ni chegara bo'lakdan
-/// bo'lakka sakrasa, server bir necha soniya UMUMAN bayt bermay
-/// turardi va ExoPlayer ulanishni "javob bermadi" deb uzardi
-/// (o'qish timeout'i 8 soniya).
-///
-/// Bayt aniqligida esa chegara ijro bilan birga UZLUKSIZ suriladi:
-/// server har doim ozgina bayt berib turadi, pleyerning buferi
-/// esa aynan 15 soniya atrofida qoladi.
-///
-/// `None` = ijro nuqtasi noma'lum (yoki eskirgan) — chaqiruvchi
-/// zaxira chegarani ishlatadi.
-fn buffer_limit_byte(key: &str, dir: &PathBuf, total: u64, secs: f64) -> Option<u64> {
-    if total == 0 {
-        return None;
-    }
-    let pos_ms = reported_pos_ms(key)?;
-    let deadline = pos_ms.saturating_add(BUFFER_SECONDS * 1000);
-
-    // ── 1) ANIQ YO'L: faylning o'z "bo'lak -> soniya" jadvali ──
-    if let Some(idx) = time_index(key, dir, total) {
-        let c = block_for_ms(&idx, deadline);
-        let t0 = idx.get(c as usize).copied().unwrap_or(0) as u64;
-        let byte = match idx.get((c + 1) as usize) {
-            // Bo'lak ICHIDA chiziqli taqsimlash — chegara sakramaydi.
-            Some(t1) if (*t1 as u64) > t0 && deadline > t0 => {
-                let span = (*t1 as u64) - t0;
-                let into = ((deadline - t0).min(span) as f64 / span as f64) * CHUNK_SIZE as f64;
-                c.saturating_mul(CHUNK_SIZE).saturating_add(into as u64)
-            }
-            Some(_) => c.saturating_mul(CHUNK_SIZE),
-            // Oxirgi bo'lak — cheklov qolmaydi.
-            None => total,
-        };
-        return Some(byte.min(total));
-    }
-
-    // ── 2) ZAXIRA: o'rtacha bitreyt ────────────────────────────
-    if secs <= 0.0 {
-        return None;
-    }
-    let b = (total as f64 * ((deadline as f64 / 1000.0) / secs)).clamp(0.0, total as f64);
-    Some(b as u64)
-}
-
-fn playing_chunk(key: &str, dir: &PathBuf, total: u64, secs: f64) -> Option<u64> {
-    if total == 0 {
-        return None;
-    }
-    let pos_ms = reported_pos_ms(key)?;
-
-    // ── 1) ANIQ YO'L: faylning o'z jadvalidan ──────────────────
-    // Har bir bo'lakda qaysi soniyadan boshlanishi ANIQ yozilgan
-    // (`CacheMeta::chunk_start_ms`). Bu yerda hech qanday taxmin
-    // yo'q — bitreyt o'zgarib tursa ham javob to'g'ri bo'ladi.
-    if let Some(idx) = time_index(key, dir, total) {
-        return Some(block_for_ms(&idx, pos_ms));
-    }
-
-    // ── 2) ZAXIRA: o'rtacha bitreyt ────────────────────────────
-    // Jadval hali qurilmagan (1-bo'lak keshda yo'q yoki fayl
-    // g'ayrioddiy tuzilgan) — taxminiy hisob. Jadval tayyor
-    // bo'lishi bilan bu yo'ldan umuman foydalanilmaydi.
-    if secs <= 0.0 {
-        return None;
-    }
-    let pos_s = pos_ms as f64 / 1000.0;
-    let byte = (total as f64 * (pos_s / secs)).clamp(0.0, (total - 1) as f64);
-    Some(byte as u64 / CHUNK_SIZE)
 }
 
 /// Dart tomoni ijro nuqtasini shu yerda xabar qiladi.
@@ -3427,925 +3132,6 @@ pub extern "C" fn rust_video_cache_set_position(
         Ordering::Relaxed,
     );
     1
-}
-
-/// Xotiradagi hisob: kalit -> (davomiylik soniya, oxirgi urinish).
-/// Davomiylik 0.0 = hali aniqlanmadi.
-static DURATIONS: OnceLock<Mutex<HashMap<String, (f64, Instant)>>> = OnceLock::new();
-
-fn durations() -> &'static Mutex<HashMap<String, (f64, Instant)>> {
-    DURATIONS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn be_u32(b: &[u8]) -> u32 {
-    u32::from_be_bytes([b[0], b[1], b[2], b[3]])
-}
-
-fn be_u64(b: &[u8]) -> u64 {
-    u64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
-}
-
-/// `moov` atomining ichidan `mvhd` ni topib, davomiylikni qaytaradi.
-fn mvhd_duration_secs(moov: &[u8]) -> Option<f64> {
-    let mut pos = 0usize;
-    while pos + 8 <= moov.len() {
-        let size = be_u32(&moov[pos..pos + 4]) as usize;
-        let typ = &moov[pos + 4..pos + 8];
-        if typ == b"mvhd" {
-            let b = &moov[pos + 8..];
-            if b.is_empty() {
-                return None;
-            }
-            // mvhd tuzilishi (ISO/IEC 14496-12):
-            //   v0: version(1) flags(3) created(4) modified(4)
-            //       timescale(4) duration(4)
-            //   v1: version(1) flags(3) created(8) modified(8)
-            //       timescale(4) duration(8)
-            let (timescale, duration) = if b[0] == 0 {
-                if b.len() < 20 {
-                    return None;
-                }
-                (be_u32(&b[12..16]) as u64, be_u32(&b[16..20]) as u64)
-            } else {
-                if b.len() < 32 {
-                    return None;
-                }
-                (be_u32(&b[20..24]) as u64, be_u64(&b[24..32]))
-            };
-            if timescale == 0 || duration == 0 {
-                return None;
-            }
-            return Some(duration as f64 / timescale as f64);
-        }
-        // Hajm 0 yoki juda kichik bo'lsa — buzuq, to'xtaymiz.
-        if size < 8 {
-            return None;
-        }
-        pos = pos.saturating_add(size);
-    }
-    None
-}
-
-/// MP4 faylining boshidan davomiylikni (soniya) o'qiydi.
-/// Faqat yuqori darajadagi atomlar bo'ylab yuriladi.
-fn mp4_duration_secs(data: &[u8]) -> Option<f64> {
-    let mut pos = 0usize;
-    while pos + 8 <= data.len() {
-        let raw = be_u32(&data[pos..pos + 4]) as u64;
-        let typ = [
-            data[pos + 4],
-            data[pos + 5],
-            data[pos + 6],
-            data[pos + 7],
-        ];
-        // Hajm 1 bo'lsa — haqiqiy hajm keyingi 8 baytda (64-bit).
-        // Hajm 0 bo'lsa — atom fayl oxirigacha davom etadi.
-        let (header, size) = if raw == 1 {
-            if pos + 16 > data.len() {
-                return None;
-            }
-            (16usize, be_u64(&data[pos + 8..pos + 16]))
-        } else if raw == 0 {
-            (8usize, (data.len() - pos) as u64)
-        } else {
-            (8usize, raw)
-        };
-        if size < header as u64 {
-            return None;
-        }
-        if &typ == b"moov" {
-            // Bizda bor bo'lgan qismgacha qisamiz: moov to'liq
-            // yuklanmagan bo'lsa ham `mvhd` odatda uning ENG BOSHIDA
-            // turadi, ya'ni baribir topiladi.
-            let from = pos + header;
-            let to = ((pos as u64 + size) as usize).min(data.len());
-            if from >= to {
-                return None;
-            }
-            return mvhd_duration_secs(&data[from..to]);
-        }
-        pos = pos.saturating_add(size as usize);
-    }
-    None
-}
-
-// ═══════════════════════════════════════════════════════════════════
-//  ANIQ "BO'LAK <-> VAQT" JADVALI (MP4 namuna jadvallaridan)
-// ═══════════════════════════════════════════════════════════════════
-//
-// ── NEGA O'RTACHA BITREYT YETARLI EMAS ──────────────────────────
-//
-// Har bir bo'lak 1 MiB, LEKIN har bir bo'lakdagi VIDEO uzunligi
-// har xil: jim, qimirlamaydigan sahna 1 MiB'ga 20 soniya sig'adi,
-// jangovar sahna esa atigi 3 soniya. Shu sabab
-//
-//     bo'lak = (soniya / davomiylik) * hajm / 1 MiB
-//
-// formulasi faqat O'RTACHA to'g'ri bo'ladi — ayrim joylarda esa
-// bir necha bo'lakka adashadi. Adashish ikki tomonlama zarar:
-//   * oldinga adashsa — cheklov ishlamay, keragidan ko'p yuklanadi;
-//   * orqaga adashsa — pleyerga har safar bitta bo'lak berilib,
-//     keraksiz qayta ulanishlar ko'payadi.
-//
-// ── ANIQ JADVAL QAYERDAN OLINADI ────────────────────────────────
-//
-// MP4 faylining o'zida har bir kadr QAYSI BAYTDA va QAYSI VAQTDA
-// ekani ANIQ yozilgan — `moov` -> `trak` -> `mdia` -> `minf` ->
-// `stbl` ichidagi to'rtta jadvalda:
-//
-//   stts — har bir kadr necha "tik" davom etadi (vaqt);
-//   stsz — har bir kadrning bayt hajmi;
-//   stsc — bitta mp4-"chunk"ida nechta kadr borligi;
-//   stco/co64 — har bir mp4-"chunk"ning fayldagi bayt o'rni.
-//
-// Shu to'rttasidan har bir kadrning (bayt o'rni, vaqti) juftligi
-// aniq hisoblanadi. Undan esa bizga kerak bo'lgan yagona narsa
-// chiqadi:
-//
-//   chunk_start_ms[i] = i-bo'lakda BOSHLANADIGAN birinchi kadrning
-//                       vaqti (millisekund)
-//
-// Ya'ni aynan foydalanuvchi so'ragan jadval:
-//   bo'lak 1 -> 00:00 dan, bo'lak 2 -> 00:11 dan, bo'lak 3 -> 00:14 dan ...
-//
-// U bir marta hisoblanib meta.json'ga yoziladi (166 ta son ~1 KB).
-// Fayl bo'yicha hech qanday taxmin qilinmaydi.
-//
-// MUHIM (xavfsizlik): Cargo.toml'da `panic = "abort"` — ya'ni
-// tahlilchidagi HAR QANDAY chegaradan chiqish BUTUN ILOVANI
-// yiqitadi. Shu sabab bu yerdagi barcha o'qishlar `get()` orqali,
-// bitta ham to'g'ridan-to'g'ri indekslash yoki `unwrap` YO'Q.
-
-/// Namuna jadvallarini o'qishda bir jarayonda ko'rib chiqiladigan
-/// eng ko'p kadr soni — buzuq metadata cheksiz tsiklga olib
-/// kelmasligi uchun.
-const MAX_SAMPLES: u64 = 20_000_000;
-
-fn rd_u32(d: &[u8], at: usize) -> Option<u32> {
-    let s = d.get(at..at + 4)?;
-    Some(u32::from_be_bytes([s[0], s[1], s[2], s[3]]))
-}
-
-fn rd_u64(d: &[u8], at: usize) -> Option<u64> {
-    let s = d.get(at..at + 8)?;
-    Some(u64::from_be_bytes([
-        s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7],
-    ]))
-}
-
-/// Berilgan ma'lumot ichidagi YUQORI DARAJALI qutilar ro'yxati:
-/// (tur, tana). Buzuq joyda shunchaki to'xtaydi.
-fn mp4_boxes(data: &[u8]) -> Vec<([u8; 4], &[u8])> {
-    let mut out = Vec::new();
-    let mut pos = 0usize;
-    while pos + 8 <= data.len() {
-        let Some(raw) = rd_u32(data, pos) else { break };
-        let Some(t) = data.get(pos + 4..pos + 8) else { break };
-        let typ = [t[0], t[1], t[2], t[3]];
-        let (header, size) = if raw == 1 {
-            match rd_u64(data, pos + 8) {
-                Some(v) => (16usize, v),
-                None => break,
-            }
-        } else if raw == 0 {
-            (8usize, (data.len() - pos) as u64)
-        } else {
-            (8usize, raw as u64)
-        };
-        if size < header as u64 {
-            break;
-        }
-        let body_start = pos + header;
-        let body_end = ((pos as u64).saturating_add(size)).min(data.len() as u64) as usize;
-        if body_start > body_end {
-            break;
-        }
-        if let Some(b) = data.get(body_start..body_end) {
-            out.push((typ, b));
-        }
-        let next = (pos as u64).saturating_add(size);
-        if next <= pos as u64 || next > usize::MAX as u64 {
-            break;
-        }
-        pos = next as usize;
-        if out.len() > 4096 {
-            break;
-        }
-    }
-    out
-}
-
-fn find_box<'a>(data: &'a [u8], typ: &[u8; 4]) -> Option<&'a [u8]> {
-    mp4_boxes(data)
-        .into_iter()
-        .find(|(t, _)| t == typ)
-        .map(|(_, b)| b)
-}
-
-/// Bitta trekning namuna jadvallari.
-struct SampleTables {
-    /// Trek vaqt birligi (bir soniyadagi "tik" soni).
-    timescale: u32,
-    /// (kadrlar soni, har birining davomiyligi) juftliklari.
-    stts: Vec<(u32, u32)>,
-    /// Barcha kadr bir xil hajmda bo'lsa — o'sha hajm; 0 bo'lsa
-    /// `sizes` ishlatiladi.
-    uniform_size: u32,
-    sizes: Vec<u32>,
-    /// (birinchi mp4-chunk (1 dan), undagi kadrlar soni).
-    stsc: Vec<(u32, u32)>,
-    /// Har bir mp4-chunkning fayldagi bayt o'rni.
-    chunk_offsets: Vec<u64>,
-}
-
-fn parse_stts(b: &[u8]) -> Option<Vec<(u32, u32)>> {
-    let n = rd_u32(b, 4)? as usize;
-    if n > 4_000_000 {
-        return None;
-    }
-    let mut out = Vec::with_capacity(n.min(65536));
-    for i in 0..n {
-        let at = 8 + i * 8;
-        out.push((rd_u32(b, at)?, rd_u32(b, at + 4)?));
-    }
-    Some(out)
-}
-
-fn parse_stsz(b: &[u8]) -> Option<(u32, Vec<u32>)> {
-    let uniform = rd_u32(b, 4)?;
-    let n = rd_u32(b, 8)? as usize;
-    if uniform != 0 {
-        return Some((uniform, Vec::new()));
-    }
-    if n as u64 > MAX_SAMPLES {
-        return None;
-    }
-    let mut out = Vec::with_capacity(n.min(1 << 20));
-    for i in 0..n {
-        out.push(rd_u32(b, 12 + i * 4)?);
-    }
-    Some((0, out))
-}
-
-fn parse_stsc(b: &[u8]) -> Option<Vec<(u32, u32)>> {
-    let n = rd_u32(b, 4)? as usize;
-    if n > 4_000_000 {
-        return None;
-    }
-    let mut out = Vec::with_capacity(n.min(65536));
-    for i in 0..n {
-        let at = 8 + i * 12;
-        out.push((rd_u32(b, at)?, rd_u32(b, at + 4)?));
-    }
-    Some(out)
-}
-
-fn parse_chunk_offsets(stbl: &[u8]) -> Option<Vec<u64>> {
-    if let Some(b) = find_box(stbl, b"stco") {
-        let n = rd_u32(b, 4)? as usize;
-        if n as u64 > MAX_SAMPLES {
-            return None;
-        }
-        let mut out = Vec::with_capacity(n.min(1 << 20));
-        for i in 0..n {
-            out.push(rd_u32(b, 8 + i * 4)? as u64);
-        }
-        return Some(out);
-    }
-    let b = find_box(stbl, b"co64")?;
-    let n = rd_u32(b, 4)? as usize;
-    if n as u64 > MAX_SAMPLES {
-        return None;
-    }
-    let mut out = Vec::with_capacity(n.min(1 << 20));
-    for i in 0..n {
-        out.push(rd_u64(b, 8 + i * 8)?);
-    }
-    Some(out)
-}
-
-fn mdhd_timescale(mdia: &[u8]) -> Option<u32> {
-    let b = find_box(mdia, b"mdhd")?;
-    let version = *b.first()?;
-    if version == 0 {
-        rd_u32(b, 12)
-    } else {
-        rd_u32(b, 20)
-    }
-}
-
-fn is_video_track(mdia: &[u8]) -> bool {
-    match find_box(mdia, b"hdlr") {
-        Some(b) => b.get(8..12).map(|h| h == b"vide").unwrap_or(false),
-        None => false,
-    }
-}
-
-/// `moov` ichidan VIDEO trekning jadvallarini yig'adi.
-fn video_tables(moov: &[u8]) -> Option<SampleTables> {
-    for (typ, trak) in mp4_boxes(moov) {
-        if &typ != b"trak" {
-            continue;
-        }
-        let Some(mdia) = find_box(trak, b"mdia") else {
-            continue;
-        };
-        if !is_video_track(mdia) {
-            continue;
-        }
-        let Some(timescale) = mdhd_timescale(mdia) else {
-            continue;
-        };
-        if timescale == 0 {
-            continue;
-        }
-        let Some(minf) = find_box(mdia, b"minf") else {
-            continue;
-        };
-        let Some(stbl) = find_box(minf, b"stbl") else {
-            continue;
-        };
-        let stts = find_box(stbl, b"stts").and_then(parse_stts)?;
-        let (uniform_size, sizes) = find_box(stbl, b"stsz").and_then(parse_stsz)?;
-        let stsc = find_box(stbl, b"stsc").and_then(parse_stsc)?;
-        let chunk_offsets = parse_chunk_offsets(stbl)?;
-        if stts.is_empty() || stsc.is_empty() || chunk_offsets.is_empty() {
-            return None;
-        }
-        return Some(SampleTables {
-            timescale,
-            stts,
-            uniform_size,
-            sizes,
-            stsc,
-            chunk_offsets,
-        });
-    }
-    None
-}
-
-/// Jadvallardan "bo'lak -> boshlanish vaqti (ms)" ro'yxatini quradi.
-///
-/// Natija HAR DOIM o'smaydigan (non-decreasing) bo'ladi va uzunligi
-/// aynan bo'laklar soniga teng.
-fn build_block_index(t: &SampleTables, total: u64) -> Option<Vec<u32>> {
-    let n_blocks = total.div_ceil(CHUNK_SIZE) as usize;
-    if n_blocks == 0 {
-        return None;
-    }
-    // u32::MAX = "bu bo'lakda hali kadr uchramadi".
-    let mut block_ms = vec![u32::MAX; n_blocks];
-
-    // stts bo'ylab yuruvchi kursor: (qaysi qator, o'sha qatorda
-    // nechta kadr qoldi).
-    let mut run = 0usize;
-    let mut left_in_run = t.stts.first().map(|(c, _)| *c).unwrap_or(0) as u64;
-    let mut ticks: u64 = 0;
-
-    // stsc bo'ylab yuruvchi kursor.
-    let mut sc = 0usize;
-    let mut sample_idx: u64 = 0;
-    let mut filled = 0usize;
-
-    for (ci, off) in t.chunk_offsets.iter().enumerate() {
-        // Shu mp4-chunkda nechta kadr bor.
-        while sc + 1 < t.stsc.len() {
-            let next_first = t.stsc.get(sc + 1).map(|(f, _)| *f).unwrap_or(u32::MAX);
-            if (ci as u64 + 1) >= next_first as u64 {
-                sc += 1;
-            } else {
-                break;
-            }
-        }
-        let per_chunk = t.stsc.get(sc).map(|(_, s)| *s).unwrap_or(0) as u64;
-        let mut cur_off = *off;
-        for _ in 0..per_chunk {
-            if sample_idx >= MAX_SAMPLES {
-                return None;
-            }
-            // Kadr hajmi.
-            let size = if t.uniform_size != 0 {
-                t.uniform_size as u64
-            } else {
-                match t.sizes.get(sample_idx as usize) {
-                    Some(s) => *s as u64,
-                    None => break,
-                }
-            };
-            // Kadr vaqti.
-            let delta = t.stts.get(run).map(|(_, d)| *d).unwrap_or(0) as u64;
-            // Kadr qaysi bo'lakda BOSHLANADI.
-            let block = (cur_off / CHUNK_SIZE) as usize;
-            if let Some(slot) = block_ms.get_mut(block) {
-                if *slot == u32::MAX {
-                    let ms = ticks.saturating_mul(1000) / t.timescale as u64;
-                    *slot = ms.min(u32::MAX as u64 - 1) as u32;
-                    filled += 1;
-                }
-            }
-            cur_off = cur_off.saturating_add(size);
-            ticks = ticks.saturating_add(delta);
-            sample_idx += 1;
-            // stts kursorini surish.
-            if left_in_run > 0 {
-                left_in_run -= 1;
-            }
-            while left_in_run == 0 && run + 1 < t.stts.len() {
-                run += 1;
-                left_in_run = t.stts.get(run).map(|(c, _)| *c).unwrap_or(0) as u64;
-            }
-        }
-    }
-
-    if filled == 0 {
-        return None;
-    }
-
-    // Bo'sh qolgan bo'laklar (masalan faqat audio yotgan joylar)
-    // oldingi qiymat bilan to'ldiriladi; boshidagilar 0 bilan.
-    let mut last = 0u32;
-    for v in block_ms.iter_mut() {
-        if *v == u32::MAX {
-            *v = last;
-        } else {
-            if *v < last {
-                *v = last; // o'smaydigan bo'lib qolishi kafolatlanadi
-            }
-            last = *v;
-        }
-    }
-    Some(block_ms)
-}
-
-/// Berilgan vaqt (ms) QAYSI bo'lakda ekanini jadvaldan topadi.
-///
-/// Bir xil qiymatli ketma-ketlik uchrasa (kadr yotmagan bo'laklar)
-/// ENG BIRINCHISI olinadi — ya'ni ijro nuqtasi hech qachon
-/// oshirib yuborilmaydi (cheklov mo'ljaldan kengaymaydi).
-fn block_for_ms(index: &[u32], pos_ms: u64) -> u64 {
-    if index.is_empty() {
-        return 0;
-    }
-    let t = pos_ms.min(u32::MAX as u64) as u32;
-    let mut lo = 0usize;
-    let mut hi = index.len();
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        match index.get(mid) {
-            Some(v) if *v <= t => lo = mid + 1,
-            _ => hi = mid,
-        }
-    }
-    let mut i = lo.saturating_sub(1);
-    while i > 0 && index.get(i - 1) == index.get(i) {
-        i -= 1;
-    }
-    i as u64
-}
-
-/// Faylning boshidan keshda UZLUKSIZ mavjud bo'lgan baytlarni
-/// birlashtiradi (eng ko'pi `max_bytes`). TARMOQQA CHIQMAYDI.
-fn read_head_bytes(dir: &PathBuf, key: &str, total: u64, max_bytes: u64) -> Vec<u8> {
-    let mut out: Vec<u8> = Vec::new();
-    let mut i = 0u64;
-    while (out.len() as u64) < max_bytes {
-        let len = chunk_plain_len(i, total) as usize;
-        if len == 0 {
-            break;
-        }
-        match read_cached_chunk(dir, key, i, len) {
-            Some(b) => out.extend_from_slice(&b),
-            None => break,
-        }
-        i += 1;
-    }
-    out
-}
-
-/// Faylning boshidan `moov` qutisining TANASINI (to'liq holda)
-/// qaytaradi. Keshda yetarli bayt bo'lmasa — `None`.
-fn moov_bytes(dir: &PathBuf, key: &str, total: u64) -> Option<Vec<u8>> {
-    let head = read_head_bytes(dir, key, total, CHUNK_SIZE);
-    if head.is_empty() {
-        return None;
-    }
-    // Yuqori darajali qutilar bo'ylab yurib `moov`ning fayldagi
-    // ABSOLYUT o'rni va hajmini topamiz.
-    let mut pos = 0u64;
-    let mut found: Option<(u64, u64)> = None; // (tana boshi, tana uzunligi)
-    while (pos as usize) + 8 <= head.len() {
-        let Some(raw) = rd_u32(&head, pos as usize) else {
-            break;
-        };
-        let Some(t) = head.get(pos as usize + 4..pos as usize + 8) else {
-            break;
-        };
-        let is_moov = t == b"moov";
-        let (header, size) = if raw == 1 {
-            match rd_u64(&head, pos as usize + 8) {
-                Some(v) => (16u64, v),
-                None => break,
-            }
-        } else if raw == 0 {
-            (8u64, total.saturating_sub(pos))
-        } else {
-            (8u64, raw as u64)
-        };
-        if size < header {
-            break;
-        }
-        if is_moov {
-            found = Some((pos + header, size - header));
-            break;
-        }
-        let next = pos.saturating_add(size);
-        if next <= pos {
-            break;
-        }
-        pos = next;
-    }
-    let (start, len) = found?;
-    let need = start.saturating_add(len);
-    // `moov` haddan tashqari katta bo'lsa (buzuq metadata) —
-    // umuman tegmaymiz.
-    if len == 0 || need > 32 * 1024 * 1024 {
-        return None;
-    }
-    if need <= head.len() as u64 {
-        return head.get(start as usize..need as usize).map(|s| s.to_vec());
-    }
-    // `moov` birinchi bo'lakka sig'magan — kerakli bo'laklar
-    // keshda bo'lsa o'qib olamiz (baribir tarmoqqa chiqilmaydi).
-    let more = read_head_bytes(dir, key, total, need);
-    if (more.len() as u64) < need {
-        return None;
-    }
-    more.get(start as usize..need as usize).map(|s| s.to_vec())
-}
-
-/// Xotiradagi jadvallar: kalit -> (jadval, oxirgi urinish vaqti).
-/// Bo'sh jadval = "hali qurilmadi" (3 soniyada bir marta qayta
-/// uriniladi).
-static TIME_INDEX: OnceLock<Mutex<HashMap<String, (Arc<Vec<u32>>, Instant)>>> = OnceLock::new();
-
-fn time_indexes() -> &'static Mutex<HashMap<String, (Arc<Vec<u32>>, Instant)>> {
-    TIME_INDEX.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// "Bo'lak -> boshlanish vaqti" jadvalini beradi.
-/// Uch bosqichli: xotira -> meta.json -> MP4 jadvallaridan qurish.
-/// TARMOQQA UMUMAN CHIQMAYDI.
-fn time_index(key: &str, dir: &PathBuf, total: u64) -> Option<Arc<Vec<u32>>> {
-    let expected = total.div_ceil(CHUNK_SIZE) as usize;
-    if expected == 0 {
-        return None;
-    }
-    if let Ok(m) = time_indexes().lock() {
-        if let Some((v, at)) = m.get(key) {
-            if v.len() == expected {
-                return Some(Arc::clone(v));
-            }
-            if at.elapsed() < Duration::from_secs(3) {
-                return None;
-            }
-        }
-    }
-    // meta.json'da saqlangan bo'lishi mumkin (oldingi sessiyadan).
-    let stored = meta_index_from_disk(dir);
-    if stored.len() == expected {
-        let arc = Arc::new(stored);
-        if let Ok(mut m) = time_indexes().lock() {
-            m.insert(key.to_string(), (Arc::clone(&arc), Instant::now()));
-        }
-        return Some(arc);
-    }
-    // Qurish: `moov` + namuna jadvallari.
-    let built = moov_bytes(dir, key, total)
-        .and_then(|moov| video_tables(&moov))
-        .and_then(|t| build_block_index(&t, total));
-    match built {
-        Some(idx) if idx.len() == expected => {
-            log(format!(
-                "Bo'lak-vaqt jadvali qurildi: {key} — {} ta bo'lak (oxirgisi {} s)",
-                idx.len(),
-                idx.last().copied().unwrap_or(0) / 1000
-            ));
-            store_meta_index(dir, &idx);
-            let arc = Arc::new(idx);
-            if let Ok(mut m) = time_indexes().lock() {
-                m.insert(key.to_string(), (Arc::clone(&arc), Instant::now()));
-            }
-            Some(arc)
-        }
-        _ => {
-            if let Ok(mut m) = time_indexes().lock() {
-                m.insert(key.to_string(), (Arc::new(Vec::new()), Instant::now()));
-            }
-            None
-        }
-    }
-}
-
-/// meta.json'dagi davomiylikni o'qiydi (0.0 = yozilmagan).
-fn meta_duration_from_disk(dir: &PathBuf) -> f64 {
-    let Ok(raw) = fs::read_to_string(dir.join("meta.json")) else {
-        return 0.0;
-    };
-    match serde_json::from_str::<CacheMeta>(&raw) {
-        Ok(m) if m.chunk_size == CHUNK_SIZE && m.duration_secs > 0.0 => m.duration_secs,
-        _ => 0.0,
-    }
-}
-
-/// meta.json'dagi "bo'lak -> soniya" jadvalini o'qiydi.
-fn meta_index_from_disk(dir: &PathBuf) -> Vec<u32> {
-    let Ok(raw) = fs::read_to_string(dir.join("meta.json")) else {
-        return Vec::new();
-    };
-    match serde_json::from_str::<CacheMeta>(&raw) {
-        Ok(m) if m.chunk_size == CHUNK_SIZE => m.chunk_start_ms,
-        _ => Vec::new(),
-    }
-}
-
-/// meta.json'ni ATOM ravishda yangilaydi (tmp -> rename): boshqa
-/// oqim aynan shu paytda uni o'qiyotgan bo'lsa, yarim yozilgan
-/// faylni ko'rib qolmasin.
-fn update_meta(dir: &PathBuf, change: impl FnOnce(&mut CacheMeta) -> bool) {
-    let path = dir.join("meta.json");
-    let Ok(raw) = fs::read_to_string(&path) else {
-        return;
-    };
-    let Ok(mut meta) = serde_json::from_str::<CacheMeta>(&raw) else {
-        return;
-    };
-    if !change(&mut meta) {
-        return;
-    }
-    let Ok(json) = serde_json::to_string(&meta) else {
-        return;
-    };
-    let tmp = dir.join(format!("meta.{}.tmp", micros_now()));
-    if fs::write(&tmp, json).is_ok() {
-        if fs::rename(&tmp, &path).is_err() {
-            let _ = fs::remove_file(&tmp);
-        }
-    } else {
-        let _ = fs::remove_file(&tmp);
-    }
-}
-
-/// Aniqlangan davomiylikni meta.json'ga QO'SHIB yozadi (qolgan
-/// maydonlar o'zgarmaydi). Bir marta bajariladi.
-fn store_meta_duration(dir: &PathBuf, secs: f64) {
-    if secs <= 0.0 {
-        return;
-    }
-    update_meta(dir, |m| {
-        if m.duration_secs > 0.0 {
-            return false;
-        }
-        m.duration_secs = secs;
-        true
-    });
-}
-
-/// "Bo'lak -> soniya" jadvalini meta.json'ga yozadi.
-fn store_meta_index(dir: &PathBuf, index: &[u32]) {
-    if index.is_empty() {
-        return;
-    }
-    update_meta(dir, |m| {
-        if m.chunk_start_ms.len() == index.len() {
-            return false;
-        }
-        m.chunk_start_ms = index.to_vec();
-        true
-    });
-}
-
-/// Videoning davomiyligi (soniya).
-///
-/// Uch bosqichli: xotira -> meta.json -> MP4 `mvhd` (1-bo'lakdan).
-/// TARMOQQA UMUMAN CHIQMAYDI. Bir marta aniqlangach meta.json'ga
-/// yoziladi, ya'ni ilova qayta ochilganda qaytadan hisoblash
-/// (va 1-bo'lakni o'qish) shart bo'lmaydi.
-///
-/// Shu son bilan "qaysi bo'lak qaysi soniyalarga to'g'ri keladi"
-/// jadvali to'liq aniqlanadi (CacheMeta::duration_secs izohiga
-/// qarang) — pleyerdagi ijro nuqtasi aynan shu orqali bo'lak
-/// indeksiga o'giriladi.
-fn duration_secs(key: &str, dir: &PathBuf, total: u64) -> f64 {
-    if let Ok(m) = durations().lock() {
-        if let Some((d, at)) = m.get(key) {
-            // Muvaffaqiyatli aniqlangan qiymat — abadiy.
-            if *d > 0.0 {
-                return *d;
-            }
-            // ANIQLANMAGANI esa VAQTINCHA eslab qolinadi. Ilgari u
-            // ham abadiy saqlanardi: birinchi urinish 1-bo'lak hali
-            // diskka tushmasdan oldin bo'lsa, oyna butun sessiya
-            // davomida zaxira qiymatda (10) qolib ketardi.
-            if at.elapsed() < Duration::from_secs(3) {
-                return 0.0;
-            }
-        }
-    }
-    // 2-bosqich: meta.json (oldingi sessiyada aniqlangan bo'lishi
-    // mumkin — 1-bo'lak keshdan o'chirilgan bo'lsa ham qoladi).
-    let stored = meta_duration_from_disk(dir);
-    if stored > 0.0 {
-        if let Ok(mut m) = durations().lock() {
-            m.insert(key.to_string(), (stored, Instant::now()));
-        }
-        return stored;
-    }
-    let first_len = chunk_plain_len(0, total) as usize;
-    let Some(head) = read_cached_chunk(dir, key, 0, first_len) else {
-        if let Ok(mut m) = durations().lock() {
-            m.insert(key.to_string(), (0.0, Instant::now()));
-        }
-        return 0.0;
-    };
-    let secs = mp4_duration_secs(&head).unwrap_or(0.0);
-    if let Ok(mut m) = durations().lock() {
-        m.insert(key.to_string(), (secs, Instant::now()));
-    }
-    if secs > 0.0 {
-        store_meta_duration(dir, secs);
-        log(format!(
-            "Davomiylik aniqlandi: {key} = {:.0} soniya ({:.1} daqiqa), meta.json'ga yozildi",
-            secs,
-            secs / 60.0
-        ));
-    }
-    secs
-}
-
-/// `want` soniyalik video O'RTACHA necha bo'lakka to'g'ri keladi.
-///
-/// Bu ZAXIRA hisob: faylning aniq jadvali (`chunk_start_ms`) hali
-/// qurilmagan paytda ishlatiladi. Jadval tayyor bo'lgach chegara
-/// undan ANIQ olinadi va bu yerga umuman kelinmaydi.
-fn window_for_seconds(total: u64, secs: f64, want: u64) -> u64 {
-    if secs <= 0.0 || total == 0 || want == 0 {
-        return PREFETCH_WINDOW;
-    }
-    let bytes = total as f64 * (want as f64 / secs);
-    let w = (bytes / CHUNK_SIZE as f64).floor() as u64;
-    w.clamp(1, MAX_PREFETCH_WINDOW)
-}
-
-/// Oldindan yuklash OYNASINI hisoblaydi: pleyer HOZIR o'qiyotgan
-/// bo'lakdan keyin ENG KO'PI `PREFETCH_WINDOW` ta bo'lak olinadi.
-/// Qaytaradi: `[from, until)` — ya'ni `until` OYNAGA KIRMAYDI.
-///
-/// Foydalanuvchi tilida (bo'laklar 1 dan sanalganda):
-///   * pleyer 1-bo'lakni ko'rsatyapti -> 11-bo'lakkacha yuklanadi;
-///   * pleyer 2-bo'lakka o'tdi        -> 12-bo'lakkacha;
-///   * 21-bo'lakka sek qilindi        -> 31-bo'lakkacha.
-/// Kodda indeks 0 dan boshlanadi, shu sabab "1-bo'lak" = indeks 0.
-///
-/// Oyna HAR DOIM pleyer bilan birga suriladi va HECH QACHON undan
-/// kengroq bo'lmaydi — ya'ni worker'dan oldindan 10 MB dan ortiq
-/// olinmaydi.
-#[cfg_attr(not(test), allow(dead_code))]
-fn prefetch_range(current_chunk: u64, chunk_count: u64, window: u64) -> (u64, u64) {
-    let from = current_chunk + 1;
-    let until = from.saturating_add(window).min(chunk_count);
-    (from, until)
-}
-
-fn maybe_prefetch(
-    shared: &'static Shared,
-    key: &str,
-    dir: &PathBuf,
-    url: &str,
-    total: u64,
-    current_chunk: u64,
-) {
-    // ── FOYDALANUVCHI YUKLAB OLISHNI BOSHLAGAN BO'LSA ──────────
-    // Bu videoni allaqachon 12 ta oqim cheklovsiz yuklab olyapti —
-    // oldindan yuklashning ustiga qo'shilishi shunchaki bir xil
-    // tarmoq uchun raqobat bo'lardi (va bir xil bo'laklarni
-    // ikkilantirardi). Shu sabab bu yerda hech narsa qilinmaydi.
-    if download_active(key) {
-        return;
-    }
-
-    // Joriy videoni belgilab qo'yamiz — boshqa video ochilsa, bu yerda
-    // ishlayotgan yuklash o'zini to'xtatadi.
-    {
-        let mut ak = shared.active_key.lock().unwrap();
-        if *ak != key {
-            *ak = key.to_string();
-        }
-    }
-
-    // ESHIK: allaqachon ochiq (ish ketyapti) bo'lsa, ikkinchisini
-    // ochmaymiz. Shu bilan bir vaqtda faqat BITTA yuklash bo'ladi.
-    if shared.prefetch_active.swap(true, Ordering::SeqCst) {
-        return;
-    }
-
-    let (key2, dir2, url2) = (key.to_string(), dir.clone(), url.to_string());
-    let spawned = thread::Builder::new()
-        .name("video-cache-prefetch".into())
-        .spawn(move || {
-            let chunk_count = total.div_ceil(CHUNK_SIZE);
-            let secs = duration_secs(&key2, &dir2, total);
-            // ── OYNANING BOSHLANISH NUQTASI ───────────────────────
-            // Oyna IJRO nuqtasidan hisoblanadi, bufer uchidan EMAS.
-            // Pleyer o'zi ijro nuqtasidan bir necha bo'lak oldinga
-            // o'qib qo'yadi; agar biz oynani o'sha buferning UCHIDAN
-            // boshlasak, ikkalasi qo'shilib ketadi va oyna ikki
-            // barobar kengayadi (PLAY_POS_MS izohiga qarang).
-            let origin = playing_chunk(&key2, &dir2, total, secs).unwrap_or(current_chunk);
-            // ── PLEYER BILAN BIR XIL BO'LAKNI TALASHMAYMIZ ────────
-            //
-            // TUZATILGAN XATO: pleyerga xizmat qilayotgan oqim
-            // navbatdagi bo'lakni AYNI PAYTDA olayotgan bo'lardi.
-            // Oldindan yuklash ham aynan o'shani so'rar, ikkinchisi
-            // esa birinchisini 6 SONIYAGACHA kutib turardi —
-            // shu davomida pleyerga bitta ham bayt bormasdi. Sekin
-            // tarmoqda bu ExoPlayer'ning 8 soniyalik chegarasiga
-            // yetib borardi.
-            //
-            // Endi oldindan yuklash pleyer O'QIYOTGAN va KEYINGI
-            // bo'lakdan KEYIN boshlanadi. Natijada ikkalasi bir
-            // vaqtda, BOSHQA-BOSHQA bo'laklarni oladi — ya'ni
-            // Telegram'dagi kabi haqiqiy parallel yuklash bo'ladi.
-            let live_now = CURRENT_CHUNK.load(Ordering::Relaxed);
-            // Oldindan yuklash ham AYNAN SHU chegara bilan ishlaydi:
-            // ijro nuqtasidan 30 soniyalik video, undan ortig'i emas.
-            // Ikkalasi bir xil chegarani ishlatgani uchun "bufer +
-            // oyna" qo'shilib ketishi mumkin emas.
-            // Oldindan yuklash ham AYNAN SHU chegara bilan ishlaydi:
-            // ijro nuqtasidan 15 soniyalik video, undan ortig'i emas.
-            // Ikkalasi bir xil chegarani ishlatgani uchun "bufer +
-            // oyna" qo'shilib ketishi mumkin emas.
-            let limit = buffer_limit(&key2, &dir2, total, secs, origin, chunk_count);
-            let from = origin.max(live_now).saturating_add(2);
-            let until = limit.saturating_add(1).min(chunk_count);
-
-            // ── BIR SAFARDA FAQAT BITTA BO'LAK ────────────────────
-            //
-            // Foydalanuvchi qoidasi: "yuklab olingan bo'laklar 15
-            // soniyalik buferga yetmasagina BITTA bo'lak olinsin".
-            // Shu sabab oynadagi bo'laklar boshidan ketma-ket
-            // tekshiriladi va ENG BIRINCHI yetishmayotgani olinadi.
-            // Oynadagi hamma narsa keshda bo'lsa — birorta ham so'rov
-            // ketmaydi.
-            let mut taken = 0u64;
-            let mut i = from;
-            while i < until && taken < PREFETCH_CHUNKS {
-                // Boshqa video ochilgan bo'lsa — darhol to'xtaymiz.
-                if *shared.active_key.lock().unwrap() != key2 {
-                    break;
-                }
-                // ESKIRGAN OYNANI TASHLASH: foydalanuvchi sek qilib
-                // butunlay boshqa joyga o'tgan bo'lishi mumkin —
-                // bunday holda bu oyna endi keraksiz va uni davom
-                // ettirish pleyer HOZIR so'rayotgan bo'lak bilan
-                // tarmoq uchun raqobatlashadi.
-                let live = CURRENT_CHUNK.load(Ordering::Relaxed);
-                if live < origin || live > limit {
-                    break;
-                }
-                let chunk_start = i * CHUNK_SIZE;
-                let chunk_end = (chunk_start + CHUNK_SIZE - 1).min(total - 1);
-                let expected_len = (chunk_end - chunk_start + 1) as usize;
-
-                // Diskda bor bo'lsa — TARMOQQA UMUMAN CHIQILMAYDI.
-                if chunk_cached(&dir2, i, total) {
-                    i += 1;
-                    continue;
-                }
-                let _ = fetch_and_store_chunk(
-                    shared,
-                    &key2,
-                    &dir2,
-                    &url2,
-                    i,
-                    chunk_start,
-                    chunk_end,
-                    expected_len,
-                    total,
-                    FetchPrio::Prefetch,
-                    None,
-                );
-                taken += 1;
-                i += 1;
-            }
-
-            // ESHIK YOPILDI — pleyer navbatdagi bo'lakka o'tmaguncha
-            // server endi hech narsa so'ramaydi.
-            shared.prefetch_active.store(false, Ordering::SeqCst);
-        });
-
-    if spawned.is_err() {
-        shared.prefetch_active.store(false, Ordering::SeqCst);
-    }
 }
 
 // ── Asosiy servis funksiyasi: Range'ni tahlil qilib, javobni yozadi ──
@@ -4401,58 +3187,43 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
     }
 
     // ═══════════════════════════════════════════════════════════
-    //  JAVOB OQIMI: KESILMAYDI, FAQAT SEKINLASHTIRILADI
+    //  ODDIY HTTP SERVER: HECH NARSA USHLAB TURILMAYDI
     // ═══════════════════════════════════════════════════════════
     //
-    // ── ESKI XATO (foydalanuvchi ko'rgan muammo) ───────────────
-    // Avval javobning oxiri bufer chegarasiga qarab KESILARDI va
-    // `Content-Length` aynan shu qisqa uzunlikka qo'yilardi. HTTP
-    // jihatidan bu to'g'ri 206 javob, LEKIN ExoPlayer (Media3)
-    // uchun bu "manba tugadi" degani: `ProgressiveMediaPeriod`
-    // yuklash muvaffaqiyatli tugagach `loadingFinished = true`
-    // qo'yadi va videoni SHU YERDA yakunlaydi. `setLooping(true)`
-    // yoqilgani uchun video darhol BOSHIDAN qayta boshlanardi.
+    // ── NEGA "SEKINLASHTIRISH" BUTUNLAY OLIB TASHLANDI ─────────
     //
-    // Aynan foydalanuvchi aytgan xulq: "sek qilmasa pleyer 30
-    // soniyalik buferga borib, u yog'iga o'ta olmay qayta
-    // boshlanadi — mahalliy serverdan faylni so'ramaydi".
+    // Avval bu server pleyerga baytlarni ATAYLAB sekin berardi:
+    // "ijro nuqtasidan 15 soniya oldinga" degan chegara bor edi.
+    // Maqsad — foydalanuvchi trafigini tejash — to'g'ri edi, lekin
+    // YECHIM NOTO'G'RI edi.
     //
-    // ── ENDI QANDAY ────────────────────────────────────────────
-    // Javob TO'LIQ uzunlikda e'lon qilinadi (`Content-Length` =
-    // haqiqiy qolgan hajm) va ULANISH OCHIQ qoladi. Cheklov esa
-    // baytlarni BERISH TEZLIGIGA qo'yiladi:
+    // O'LCHOV (sekin mobil tarmoqda, 125 KB/s):
+    //   * oqim 90 soniyada 16 marta 5-8 SONIYAGA jim qolardi;
+    //   * ExoPlayer'ning HTTP o'qish chegarasi esa 8 SONIYA.
+    // Ya'ni pleyer ulanishni xato deb uzardi, video to'xtardi yoki
+    // boshidan boshlanardi. Tez internetda muammo ko'rinmasdi.
     //
-    //     ruxsat etilgan oxirgi bayt = ijro nuqtasi + 15 soniya
+    // ── CHEKLOV ALLAQACHON PLEYER TOMONIDA BOR (media3 manbasi) ─
     //
-    // Ijro oldinga siljigan sari bu chegara ham uzluksiz suriladi,
-    // ya'ni server pleyerga har doim aynan 15 soniyalik zaxira
-    // berib turadi. Tarmoqqa esa faqat SHU chegaraga yetgan
-    // paytda, bittadan 1 MiB bo'lak uchun chiqiladi.
+    //   DefaultLoadControl.DEFAULT_MAX_BUFFER_MS = 50_000
+    //   shouldContinueLoading(): bufer >= maxBufferUs -> false
+    //   ProgressiveMediaPeriod.ExtractingLoadable.load():
+    //       loadCondition.block();   // bufer to'lsa SHU YERDA TO'XTAYDI
     //
-    // Chegara BAYT aniqligida hisoblanadi (`buffer_limit_byte`):
-    // bo'lak aniqligi yetarli emas edi — bir bo'lakda 8-10
-    // soniyalik video bo'lishi mumkin va chegara sakraganda server
-    // bir necha soniya umuman bayt bermay turardi (ExoPlayer'ning
-    // o'qish timeout'i 8 soniya).
+    // Ya'ni pleyer buferida 50 soniyalik video yig'ilishi bilan u
+    // soketdan O'QISHNI TO'XTATADI. Biz yozayotgan bo'lsak, TCP
+    // o'zi bizni ushlab qoladi (`write_all` bloklanadi) — demak
+    // tarmoqdan ham hech narsa olinmaydi.
     //
-    // ── ISTISNOLAR ─────────────────────────────────────────────
-    // 1) So'rovning BIRINCHI bo'lagi har doim darhol beriladi —
-    //    aks holda pleyer ochilishda yoki sekdan keyin bo'sh javob
-    //    olib qotib qolardi.
-    // 2) Foydalanuvchi YUKLAB OLISH tugmasini bosgan bo'lsa
-    //    (`download_active`), bu videoda hech qanday cheklov
-    //    qolmaydi. Pauza bosilsa cheklov o'z-o'zidan qaytadi.
-    // 3) Ijro nuqtasi noma'lum yoki eskirgan bo'lsa — zaxira
-    //    chegara ishlatiladi: so'rovning O'Z boshlanish nuqtasidan
-    //    15 soniyalik hajm.
-    let secs = duration_secs(&key, &dir, total);
-    let start_chunk = start / CHUNK_SIZE;
-    let unlimited = download_active(&key);
-
-    // Ijro nuqtasi noma'lum bo'lgan paytdagi ZAXIRA chegara.
-    let fallback_limit = ((start_chunk + window_for_seconds(total, secs, BUFFER_SECONDS) + 1)
-        * CHUNK_SIZE)
-        .min(total);
+    // XULOSA: 24 daqiqalik 166 MB'lik videoda 50 soniya ~6-12 MB
+    // degani — butun fayl EMAS. Serverning yana o'zidan cheklashi
+    // hech narsa qo'shmaydi, faqat yuqoridagi nosozlikni keltirib
+    // chiqaradi.
+    //
+    // Shu sabab endi server ODDIY, TO'G'RI HTTP fayl serveri:
+    // so'ralgan baytni imkon qadar TEZ beradi, keshda bo'lmasa
+    // tarmoqdan olib, kelishi bilan DARHOL uzatadi va bir vaqtda
+    // diskka yozadi.
 
     let content_length = end - start + 1;
 
@@ -4494,26 +3265,6 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
     // shu sabab uni qayta-qayta diskdan o'qib, shifrini ochish
     // keraksiz — bir marta o'qib, shu yerda ushlab turiladi.
     let mut held: Option<(u64, Vec<u8>)> = None;
-    // Darvoza yopiq turgan vaqt (ms). `KEEPALIVE_MS` ga yetganda
-    // ulanish uzilib qolmasligi uchun juda kichik bo'lak beriladi.
-    let mut gate_wait_ms: u64 = 0;
-    // Ijro nuqtasi kelmay turgan vaqt (ms) — `STALE_GIVEUP_MS` ga
-    // yetganda zaxira oyna bir pog'ona kengaytiriladi.
-    let mut stale_ms: u64 = 0;
-    // Ijro nuqtasi umuman kelmayotganda zaxira oynaga qo'shiladigan
-    // qo'shimcha (bayt).
-    //
-    // TUZATISH: ilgari bu holatda cheklov BUTUNLAY olib tashlanardi
-    // (limit = butun fayl). Ya'ni bitta nosozlik butun videoni —
-    // masalan 166 MB'ni — bir zumda yuklab olishga olib kelishi
-    // mumkin edi, garchi foydalanuvchi uni ko'rmasa ham. Endi oyna
-    // har `STALE_GIVEUP_MS` da BIR POG'ONA (30 soniyalik video)
-    // kengayadi: video hech qachon to'xtab qolmaydi, trafik esa
-    // baribir chegaralangan bo'lib qoladi.
-    let stale_step = window_for_seconds(total, secs, BUFFER_SECONDS * 2)
-        .max(1)
-        .saturating_mul(CHUNK_SIZE);
-    let mut stale_bonus: u64 = 0;
     while cursor <= end {
         let chunk_index = cursor / CHUNK_SIZE;
         let chunk_start = chunk_index * CHUNK_SIZE;
@@ -4521,61 +3272,9 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
         // Shu bo'lakda shu so'rov uchun kerak bo'lgan OXIRGI bayt.
         let stop = chunk_end.min(end);
 
-        // ── DARVOZA: shu daqiqada nechta bayt berish mumkin ─────
-        let write_to = if unlimited || cursor == start {
-            // Cheklovsiz rejim yoki so'rovning birinchi bo'lagi.
-            stop + 1
-        } else {
-            // Ijro nuqtasi bor bo'lsa — aniq chegara; bo'lmasa
-            // zaxira oyna, u ham uzoq davom etsa — cheklovsiz.
-            let (limit, pos_known) = match buffer_limit_byte(&key, &dir, total, secs) {
-                Some(b) => (b, true),
-                None => (
-                    fallback_limit.saturating_add(stale_bonus).min(total),
-                    false,
-                ),
-            };
-            if pos_known {
-                stale_ms = 0;
-                stale_bonus = 0;
-            }
-            let avail = if limit > cursor {
-                limit.min(stop + 1) - cursor
-            } else {
-                0
-            };
-            // Chegaraga yetdik: kichik bo'laklar bilan tinimsiz
-            // yozmaslik uchun kamida MIN_SLICE kutamiz — ammo
-            // so'rovning oxiriga yetgan bo'lsak, bori beriladi.
-            if avail >= MIN_SLICE || (avail > 0 && cursor + avail > stop) {
-                gate_wait_ms = 0;
-                cursor + avail
-            } else if gate_wait_ms >= KEEPALIVE_MS {
-                // ── ULANISHNI TIRIK USHLASH ─────────────────────
-                // Video pauzada bo'lsa ijro nuqtasi siljimaydi va
-                // darvoza yopiq turadi, ExoPlayer esa o'qishda
-                // davom etadi. 8 soniya bayt kelmasa u ulanishni
-                // xato deb uzadi — shu sabab juda kichik bo'lak
-                // beriladi (~1 KB/s, trafik jihatdan sezilmaydi).
-                gate_wait_ms = 0;
-                (cursor + KEEPALIVE_BYTES).min(stop + 1)
-            } else {
-                thread::sleep(Duration::from_millis(GATE_TICK_MS));
-                gate_wait_ms += GATE_TICK_MS;
-                if !pos_known {
-                    stale_ms += GATE_TICK_MS;
-                    if stale_ms >= STALE_GIVEUP_MS {
-                        stale_ms = 0;
-                        stale_bonus = stale_bonus.saturating_add(stale_step);
-                        log(format!(
-                            "Ijro nuqtasi kelmayapti — zaxira oyna kengaytirildi (+{} MiB)",
-                            stale_step / (1024 * 1024)
-                        ));
-                    }
-                }
-                continue;
-            }
-        };
+        // Bu bo'lakdan shu so'rov uchun kerak bo'lgan HAMMA bayt
+        // beriladi — hech narsa ushlab turilmaydi.
+        let write_to = stop + 1;
 
         // ── BO'LAKNI OLAMIZ (kerak bo'lsa TARMOQDAN) ────────────
         // Bu chaqiruv aynan shu daqiqada bo'ladi: darvoza ochilgan,
@@ -4678,10 +3377,7 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
             // Baytlar oqim orqali ketgan bo'lsa — ularni QAYTA
             // yozmaymiz: kursorni surib, keyingi aylanishga o'tamiz.
             if streamed_to > cursor {
-                CURRENT_CHUNK.store(chunk_index, Ordering::Relaxed);
-                maybe_prefetch(shared, &key, &dir, url, total, chunk_index);
                 cursor = streamed_to;
-                gate_wait_ms = 0;
                 held = None;
                 // Oqim yarmida uzilgan bo'lsa ham ULANISH YOPILMAYDI:
                 // qolgan baytlar keyingi aylanishda qayta so'raladi.
@@ -4695,36 +3391,6 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
             ));
             held = Some((chunk_index, bytes));
 
-            // Pleyerning HAQIQIY joyi — oldindan yuklash ish oqimi
-            // shuni kuzatib turadi va foydalanuvchi sek qilganda
-            // eskirgan oynani darhol tashlaydi.
-            CURRENT_CHUNK.store(chunk_index, Ordering::Relaxed);
-
-            // ── KEYINGI OYNANI OLDINDAN ISITISH ────────────────
-            //
-            // Katta fayl (masalan 1 GB) bir necha 480 MB'lik oynadan
-            // iborat. Keyingi oyna FAQAT unga yetib borilganda kerak —
-            // shu sabab u oldindan olinmaydi. Lekin aynan chegaraga
-            // kelganda isitishni boshlash kech bo'lardi: pleyer
-            // kutishga majbur bo'lardi.
-            //
-            // Shu sabab chegaraga WARM_LOOKAHEAD (48 MiB, ya'ni bir
-            // necha daqiqalik tasvir) qolganda isitish fon'da
-            // boshlanadi. Ijro chegaradan o'tganda oyna allaqachon
-            // keshda bo'ladi va B2'ga o'sha yagona so'rovdan boshqa
-            // hech narsa ketmaydi.
-            let win_end = (chunk_start / WARM_WINDOW + 1) * WARM_WINDOW;
-            if win_end < total && win_end.saturating_sub(chunk_start) <= WARM_LOOKAHEAD {
-                maybe_warm(url, &key, win_end);
-            }
-
-            // ── ESHIK SHU YERDA, FAQAT SHU YERDA OCHILADI ──────
-            // Pleyer #chunk_index bo'lagini oldi — demak u oldinga
-            // siljidi. Shu daqiqada (va faqat shu daqiqada) oynada
-            // yetishmayotgan BITTA bo'lakni olishga ruxsat beriladi.
-            // Ish tugashi bilan eshik yopiladi: hech qanday taymer,
-            // hech qanday fon tsikli yo'q.
-            maybe_prefetch(shared, &key, &dir, url, total, chunk_index);
         }
 
         let chunk_bytes = match held.as_ref() {
@@ -5231,7 +3897,7 @@ mod tests {
         // qiladi va baytlarni asta-sekin beradi (izohni `serve`
         // ichidan qarang). Shu sabab test oynaga to'g'ri keladigan
         // qismini o'qib, ulanishni tashlab ketadi.
-        let read_len = ((PREFETCH_WINDOW + 1) * CHUNK_SIZE) as usize;
+        let read_len = (5 * CHUNK_SIZE) as usize;
         let (status, gcr, glen, gbody) =
             request_url(port, &g_url, Some("bytes=0-"), Some(read_len));
         assert_eq!(status, 206);
@@ -5491,44 +4157,6 @@ mod tests {
         }
     }
 
-    /// Javobni oqim to'xtaguncha o'qiydi: `idle` davomida bitta ham
-    /// bayt kelmasa, o'qish tugatiladi. Shu bilan "server ijro
-    /// nuqtasidan qancha oldinga bergani" o'lchanadi.
-    fn read_until_idle(port: u16, origin_url: &str, range: &str, idle: Duration) -> usize {
-        let encoded: String = origin_url
-            .chars()
-            .map(|c| match c {
-                ':' => "%3A".to_string(),
-                '/' => "%2F".to_string(),
-                c => c.to_string(),
-            })
-            .collect();
-        let mut st = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        st.set_read_timeout(Some(idle)).unwrap();
-        st.write_all(
-            format!("GET /v?u={encoded} HTTP/1.1\r\nHost: x\r\nRange: {range}\r\n\r\n").as_bytes(),
-        )
-        .unwrap();
-        let mut br = BufReader::new(st);
-        let mut line = String::new();
-        br.read_line(&mut line).unwrap();
-        loop {
-            let mut l = String::new();
-            if br.read_line(&mut l).unwrap_or(0) == 0 || l == "\r\n" {
-                break;
-            }
-        }
-        let mut total = 0usize;
-        let mut buf = [0u8; 64 * 1024];
-        loop {
-            match br.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => total += n,
-                Err(_) => break, // idle timeout — oqim to'xtadi
-            }
-        }
-        total
-    }
 
     /// Manba: berilgan bo'lak uchun dastlabki `fail_times` so'rovni
     /// ATAYLAB yiqitadi (ulanishni javobsiz uzadi), keyin odatdagidek
@@ -5627,65 +4255,6 @@ mod tests {
         }
     }
 
-    /// ═══════════════════════════════════════════════════════════
-    ///  BUFER QOIDASI: IJRO NUQTASIDAN 15 SONIYA, UNDAN ORTIQ EMAS
-    /// ═══════════════════════════════════════════════════════════
-    ///
-    /// Foydalanuvchi talabi: "1-soniya ko'rsatilayotgan bo'lsa
-    /// oldinda 16-soniyagacha video tayyor tursin va SHUNGA
-    /// yetadigan bo'lak yuklab olinsin, undan ko'p emas".
-    #[test]
-    fn bufer_ijro_nuqtasidan_15_soniya() {
-        let (port, root) = ensure_server();
-
-        const NAME: &str = "bufer.mp4";
-        const TOTAL: u64 = 30 * CHUNK_SIZE; // 30 MiB
-        const DUR_S: u64 = 60; // 0.5 MiB/s -> 15 s = 7.5 MiB
-        let (o_port, _log) = start_origin(TOTAL);
-        let url = format!("http://127.0.0.1:{o_port}/{NAME}");
-
-        let dir = root.join("video_byte_cache").join(NAME);
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(
-            dir.join("meta.json"),
-            format!(
-                "{{\"total_size\":{TOTAL},\"content_type\":\"video/mp4\",\
-                 \"chunk_size\":{CHUNK_SIZE},\"duration_secs\":{DUR_S}.0}}"
-            ),
-        )
-        .unwrap();
-
-        // Ijro nuqtasi 0 da turibdi (video endigina ochildi va hali
-        // birinchi soniyani ko'rsatyapti).
-        let c_url = std::ffi::CString::new(url.clone()).unwrap();
-        rust_video_cache_set_position(c_url.as_ptr(), 0);
-
-        let got = read_until_idle(port, &url, "bytes=0-", Duration::from_secs(3));
-
-        // Kutilgan: 15 soniyalik video = 7.5 MiB. Chegara BAYT
-        // aniqligida, ustiga ulanishni tirik ushlash uchun juda
-        // kichik (KEEPALIVE_BYTES) qo'shimchalar bo'lishi mumkin.
-        let want = TOTAL * 15 / DUR_S; // 7.5 MiB
-        assert!(
-            got as u64 >= want.saturating_sub(CHUNK_SIZE),
-            "15 soniyalik bufer to'lmadi: {got} bayt (kutilgan ~{want})"
-        );
-        assert!(
-            (got as u64) < want + CHUNK_SIZE,
-            "bufer qoidasi buzildi — 15 soniyadan KO'P berildi: {got} bayt \
-             (kutilgan ~{want})"
-        );
-
-        // Diskdagi bo'laklar ham 15 soniyalik oynadan oshmasligi
-        // kerak: keyingi bo'laklar ijro oldinga surilgandagina
-        // olinadi.
-        thread::sleep(Duration::from_millis(500));
-        let cached = (0..30).filter(|i| chunk_cached(&dir, *i, TOTAL)).count() as u64;
-        assert!(
-            cached <= (want / CHUNK_SIZE) + 2,
-            "keragidan ko'p bo'lak yuklab olindi: {cached} ta"
-        );
-    }
 
     /// Worker'ning HAQIQIY xulqini takrorlaydigan manba:
     ///   * bir so'rovda eng ko'pi `cap` bayt qaytaradi (Cloudflare
@@ -5862,6 +4431,87 @@ mod tests {
             }
         });
         port
+    }
+
+    /// ═══════════════════════════════════════════════════════════
+    ///  PLEYER O'QISHNI TO'XTATSA — TRAFIK HAM TO'XTAYDI
+    /// ═══════════════════════════════════════════════════════════
+    ///
+    /// Server endi hech narsani ushlab turmaydi. Savol: unda butun
+    /// fayl yuklanib ketmaydimi?
+    ///
+    /// YO'Q. ExoPlayer buferi to'lgach (DefaultLoadControl,
+    /// DEFAULT_MAX_BUFFER_MS = 50_000) `loadCondition.block()` da
+    /// to'xtaydi va soketdan O'QISHNI to'xtatadi. Shunda TCP
+    /// bizning `write_all`imizni bloklaydi — ya'ni tarmoqdan ham
+    /// hech narsa olinmaydi.
+    ///
+    /// Bu test aynan shuni tekshiradi: mijoz bir oz o'qib, keyin
+    /// o'qishni TO'XTATADI (lekin ulanishni yopmaydi). Manbadan
+    /// olingan hajm kichik bo'lib qolishi SHART.
+    #[test]
+    fn pleyer_toxtasa_trafik_ham_toxtaydi() {
+        let (port, _root) = ensure_server();
+
+        const NAME: &str = "toxtash.mp4";
+        const TOTAL: u64 = 40 * CHUNK_SIZE;
+        let (o_port, o_log) = start_origin(TOTAL);
+        let url = format!("http://127.0.0.1:{o_port}/{NAME}");
+
+        let encoded: String = url
+            .chars()
+            .map(|c| match c {
+                ':' => "%3A".to_string(),
+                '/' => "%2F".to_string(),
+                c => c.to_string(),
+            })
+            .collect();
+        let mut st = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        st.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+        st.write_all(
+            format!("GET /v?u={encoded} HTTP/1.1\r\nHost: x\r\nRange: bytes=0-\r\n\r\n").as_bytes(),
+        )
+        .unwrap();
+        let mut br = BufReader::new(st);
+        let mut line = String::new();
+        br.read_line(&mut line).unwrap();
+        loop {
+            let mut l = String::new();
+            if br.read_line(&mut l).unwrap_or(0) == 0 || l == "\r\n" {
+                break;
+            }
+        }
+        // 2 MiB o'qiymiz, keyin O'QISHNI TO'XTATAMIZ (ulanish ochiq).
+        let mut buf = vec![0u8; 2 * CHUNK_SIZE as usize];
+        let mut got = 0usize;
+        while got < buf.len() {
+            match br.read(&mut buf[got..]) {
+                Ok(0) => break,
+                Ok(n) => got += n,
+                Err(_) => break,
+            }
+        }
+        assert_eq!(got, buf.len(), "birinchi 2 MiB berilmadi");
+
+        // Pleyer buferi to'lgan holat: 5 soniya umuman o'qimaymiz.
+        thread::sleep(Duration::from_secs(5));
+
+        let asked: u64 = o_log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| *r != "bytes=0-0")
+            .map(|r| {
+                let (s, e) = parse_test_range(r, TOTAL);
+                e - s + 1
+            })
+            .sum();
+        drop(br);
+        assert!(
+            asked < 12 * CHUNK_SIZE,
+            "pleyer o'qimay turganda ham {:.1} MiB yuklandi — TCP tormozi ishlamadi",
+            asked as f64 / 1048576.0
+        );
     }
 
     /// ═══════════════════════════════════════════════════════════
@@ -6357,158 +5007,8 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
-    /// OLDINDAN YUKLASH OYNASI: oyna kengligi berilganda u aynan
-    /// shuncha bo'lakni qamraydi va fayl chegarasidan chiqmaydi.
-    /// Bo'laklar kodda 0 dan sanaladi, ya'ni "1-bo'lak" = indeks 0.
-    #[test]
-    fn oldindan_yuklash_oynasi() {
-        // Butun fayl juda uzun (1000 bo'lak) — chegara faqat oyna.
-        let n = 1000;
-        let w = 10;
 
-        // 1-bo'lak ko'rsatilyapti (indeks 0) -> 2..11-bo'laklar
-        // (indeks 1..=10) olinadi, ya'ni 11-bo'lakkacha.
-        assert_eq!(prefetch_range(0, n, w), (1, 11));
-        // 2-bo'lakka o'tdi -> 12-bo'lakkacha (indeks 11).
-        assert_eq!(prefetch_range(1, n, w), (2, 12));
-        // 21-bo'lakka sek qilindi (indeks 20) -> 31-bo'lakkacha.
-        assert_eq!(prefetch_range(20, n, w), (21, 31));
 
-        for cur in 0..50u64 {
-            let (from, until) = prefetch_range(cur, n, w);
-            assert_eq!(until - from, w, "oyna kengligi noto'g'ri");
-        }
-
-        // Fayl oxirida oyna qisqaradi va HECH QACHON fayldan
-        // chiqib ketmaydi.
-        assert_eq!(prefetch_range(995, 1000, w), (996, 1000));
-        assert_eq!(prefetch_range(999, 1000, w), (1000, 1000));
-
-        // Oyna 6 bo'lsa: 11-bo'lak (indeks 10) ko'rsatilayotganda
-        // 17-bo'lakkacha (indeks 16) olinadi — undan ortiq EMAS.
-        assert_eq!(prefetch_range(10, n, 6), (11, 17));
-    }
-
-    /// OYNA VIDEONING BITREYTIDAN HISOBLANADI.
-    /// Foydalanuvchi bergan misol: 166.54 MiB / 24:05 -> 6 bo'lak.
-    #[test]
-    fn oyna_bitreytdan_hisoblanadi() {
-        let total = (166.54 * 1024.0 * 1024.0) as u64; // 166.54 MiB
-        let secs = 24.0 * 60.0 + 5.0; // 24:05 = 1445 soniya
-        // 166.54 / 24.0833 = 6.91... -> 6 (7 ga YETMAGANI uchun)
-        assert_eq!(window_for_seconds(total, secs, 60), 6);
-
-        // ASOSIY QOIDA — 15 soniyalik bufer: shuning to'rtdan biri
-        // (166.54 / 24.0833 = 6.91 -> 15 s uchun 1.72 -> 1).
-        assert_eq!(window_for_seconds(total, secs, BUFFER_SECONDS), 1);
-
-        // Davomiylik hali noma'lum — zaxira qiymat.
-        assert_eq!(window_for_seconds(total, 0.0, 60), PREFETCH_WINDOW);
-        assert_eq!(window_for_seconds(0, secs, 60), PREFETCH_WINDOW);
-
-        // Foydalanuvchining ikkinchi misoli: 1000 MiB / 25 daqiqa
-        // -> bir daqiqalik video 40 bo'lak, 15 soniyalik — 10.
-        assert_eq!(window_for_seconds(1000 * 1024 * 1024, 25.0 * 60.0, 60), 40);
-        assert_eq!(
-            window_for_seconds(1000 * 1024 * 1024, 25.0 * 60.0, BUFFER_SECONDS),
-            10
-        );
-
-        // Yuqori bitreytli fayl ham qoidaga bo'ysunadi (chegara
-        // endi 128, shu sabab 100 kesilmaydi).
-        assert_eq!(window_for_seconds(2500 * 1024 * 1024, 25.0 * 60.0, 60), 100);
-
-        // Juda past bitreyt ham kamida 1 bo'lak beradi.
-        assert_eq!(window_for_seconds(1024 * 1024, 3600.0, 60), 1);
-
-        // Buzuq metadata (1 soniyalik "1 GB" video) chegaralanadi.
-        assert_eq!(
-            window_for_seconds(1024 * 1024 * 1024, 1.0, 60),
-            MAX_PREFETCH_WINDOW
-        );
-    }
-
-    /// IJRO NUQTASI: oyna bufer uchidan emas, PLEYER KO'RSATAYOTGAN
-    /// joydan hisoblanishi kerak.
-    #[test]
-    fn ijro_nuqtasi_bolakka_ogiriladi() {
-        let total = 166 * 1024 * 1024; // ~166 MiB
-        let secs = 24.0 * 60.0 + 5.0; // 24:05
-
-        // Jadval qurib bo'lmaydigan (bo'sh) papka — ya'ni bu test
-        // ZAXIRA (o'rtacha bitreyt) yo'lini tekshiradi.
-        let nodir = std::env::temp_dir().join(format!("yoq_{}", micros_now()));
-
-        // Hali hech narsa xabar qilinmagan — nuqta noma'lum.
-        PLAY_POS_KEY.store(0, Ordering::Relaxed);
-        assert!(playing_chunk("kino", &nodir, total, secs).is_none());
-
-        // Dart tomoni ijro nuqtasini xabar qildi.
-        let url = "http://127.0.0.1:9/kino";
-        let key = cache_key(url);
-        let c_url = std::ffi::CString::new(url).unwrap();
-
-        // Boshida (0 ms) -> 0-bo'lak.
-        assert_eq!(rust_video_cache_set_position(c_url.as_ptr(), 0), 1);
-        assert_eq!(playing_chunk(&key, &nodir, total, secs), Some(0));
-
-        // Yarmida -> taxminan yarim bo'lak.
-        let half_ms = (secs * 1000.0 / 2.0) as u64;
-        rust_video_cache_set_position(c_url.as_ptr(), half_ms);
-        let mid = playing_chunk(&key, &nodir, total, secs).unwrap();
-        let kutilgan = (total / 2) / CHUNK_SIZE;
-        assert!(
-            (mid as i64 - kutilgan as i64).abs() <= 1,
-            "o'rtadagi bo'lak: {mid}, kutilgan ~{kutilgan}"
-        );
-
-        // BOSHQA videoning nuqtasi bu videoga TAALLUQLI EMAS.
-        assert!(playing_chunk("boshqa_kino", &nodir, total, secs).is_none());
-
-        // Oyna aynan shu nuqtadan boshlanadi: 10-bo'lakda turgan
-        // pleyer uchun 6 lik oyna 11..17 ni qamraydi (16-bo'lak
-        // KIRADI, 17-si yo'q).
-        let n = total.div_ceil(CHUNK_SIZE);
-        assert_eq!(prefetch_range(10, n, 6), (11, 17));
-
-        // ── BAYT ANIQLIGIDAGI CHEGARA (javob oqimi shunga tayanadi) ──
-        //
-        // Chegara ijro nuqtasidan `BUFFER_SECONDS` oldinda turadi va
-        // ijro bilan BIRGA, uzluksiz suriladi — bo'lakdan bo'lakka
-        // sakramaydi. Aynan shu tufayli server pleyerga har doim
-        // ozgina bayt berib turadi va ulanish uzilmaydi.
-        rust_video_cache_set_position(c_url.as_ptr(), 0);
-        let b0 = buffer_limit_byte(&key, &nodir, total, secs).unwrap();
-        // 166 MiB / 1445 s -> 15 soniya ~ 1.72 MiB.
-        let kutilgan0 = (total as f64 * (BUFFER_SECONDS as f64 / secs)) as u64;
-        assert!(
-            (b0 as i64 - kutilgan0 as i64).abs() <= CHUNK_SIZE as i64 / 64,
-            "0 soniyadagi chegara: {b0}, kutilgan ~{kutilgan0}"
-        );
-
-        // 60 soniyada chegara AYNAN 60 soniyaga surilgan bo'ladi.
-        rust_video_cache_set_position(c_url.as_ptr(), 60_000);
-        let b60 = buffer_limit_byte(&key, &nodir, total, secs).unwrap();
-        let siljish = (total as f64 * (60.0 / secs)) as u64;
-        assert!(
-            (b60 as i64 - (b0 + siljish) as i64).abs() <= CHUNK_SIZE as i64 / 64,
-            "60 soniyadagi chegara: {b60}, kutilgan ~{}",
-            b0 + siljish
-        );
-
-        // Chegara hech qachon fayl oxiridan chiqmaydi.
-        rust_video_cache_set_position(c_url.as_ptr(), (secs * 1000.0) as u64);
-        assert!(buffer_limit_byte(&key, &nodir, total, secs).unwrap() <= total);
-
-        // Nuqta xabar qilinmagan bo'lsa — chegara YO'Q (zaxira
-        // qoida ishlaydi, `serve` ichiga qarang).
-        PLAY_POS_KEY.store(0, Ordering::Relaxed);
-        assert!(buffer_limit_byte(&key, &nodir, total, secs).is_none());
-
-        // Test global holatni o'zgartirdi — tozalab qo'yamiz.
-        PLAY_POS_KEY.store(0, Ordering::Relaxed);
-        PLAY_POS_MS.store(0, Ordering::Relaxed);
-    }
 
 
     // ═══════════════════════════════════════════════════════════
@@ -6523,190 +5023,11 @@ mod tests {
     // chiqadi va javob NOTO'G'RI bo'ladi. Aniq jadval esa faylning
     // o'z namuna jadvallaridan hisoblanadi.
 
-    /// MP4 qutisini yasaydi: [hajm(4)][tur(4)][tana].
-    fn bx(typ: &[u8; 4], body: &[u8]) -> Vec<u8> {
-        let mut v = Vec::with_capacity(8 + body.len());
-        v.extend_from_slice(&((8 + body.len()) as u32).to_be_bytes());
-        v.extend_from_slice(typ);
-        v.extend_from_slice(body);
-        v
-    }
 
-    fn u32b(v: u32) -> [u8; 4] {
-        v.to_be_bytes()
-    }
 
-    /// Test uchun bitta video trekli `moov` TANASINI yasaydi.
-    fn test_moov_body(offsets: &[u32], sizes: &[u32], timescale: u32, delta: u32) -> Vec<u8> {
-        // hdlr: vf(4) + pre_defined(4) + 'vide' + reserved(12) + nom(1)
-        let mut hdlr = Vec::new();
-        hdlr.extend_from_slice(&[0; 8]);
-        hdlr.extend_from_slice(b"vide");
-        hdlr.extend_from_slice(&[0; 13]);
 
-        // mdhd (v0): vf(4) + created(4) + modified(4) + timescale(4)
-        //            + duration(4) + til(2) + pre(2)
-        let mut mdhd = Vec::new();
-        mdhd.extend_from_slice(&[0; 12]);
-        mdhd.extend_from_slice(&u32b(timescale));
-        mdhd.extend_from_slice(&u32b(delta * sizes.len() as u32));
-        mdhd.extend_from_slice(&[0; 4]);
 
-        // stts: vf(4) + qatorlar soni(4) + (kadrlar soni, davomiylik)
-        let mut stts = Vec::new();
-        stts.extend_from_slice(&[0; 4]);
-        stts.extend_from_slice(&u32b(1));
-        stts.extend_from_slice(&u32b(sizes.len() as u32));
-        stts.extend_from_slice(&u32b(delta));
 
-        // stsz: vf(4) + bir xil hajm(4)=0 + soni(4) + hajmlar
-        let mut stsz = Vec::new();
-        stsz.extend_from_slice(&[0; 4]);
-        stsz.extend_from_slice(&u32b(0));
-        stsz.extend_from_slice(&u32b(sizes.len() as u32));
-        for s in sizes {
-            stsz.extend_from_slice(&u32b(*s));
-        }
-
-        // stsc: vf(4) + soni(4) + (birinchi chunk=1, har chunkda 1 kadr, sdi=1)
-        let mut stsc = Vec::new();
-        stsc.extend_from_slice(&[0; 4]);
-        stsc.extend_from_slice(&u32b(1));
-        stsc.extend_from_slice(&u32b(1));
-        stsc.extend_from_slice(&u32b(1));
-        stsc.extend_from_slice(&u32b(1));
-
-        // stco: vf(4) + soni(4) + o'rinlar
-        let mut stco = Vec::new();
-        stco.extend_from_slice(&[0; 4]);
-        stco.extend_from_slice(&u32b(offsets.len() as u32));
-        for o in offsets {
-            stco.extend_from_slice(&u32b(*o));
-        }
-
-        let mut stbl = Vec::new();
-        stbl.extend_from_slice(&bx(b"stts", &stts));
-        stbl.extend_from_slice(&bx(b"stsz", &stsz));
-        stbl.extend_from_slice(&bx(b"stsc", &stsc));
-        stbl.extend_from_slice(&bx(b"stco", &stco));
-
-        let minf = bx(b"stbl", &stbl);
-        let mut mdia = Vec::new();
-        mdia.extend_from_slice(&bx(b"hdlr", &hdlr));
-        mdia.extend_from_slice(&bx(b"mdhd", &mdhd));
-        mdia.extend_from_slice(&bx(b"minf", &minf));
-
-        let trak = bx(b"mdia", &mdia);
-        bx(b"trak", &trak)
-    }
-
-    /// 14 ta kadr: dastlabki 11 tasi kichik (jim sahna), keyingilari
-    /// katta. Har biri 1 soniya.
-    fn test_layout() -> (Vec<u32>, Vec<u32>, u64) {
-        let mut offsets = Vec::new();
-        let mut sizes = Vec::new();
-        let mut off = 0u32;
-        for _ in 0..10 {
-            offsets.push(off);
-            sizes.push(100_000);
-            off += 100_000;
-        }
-        // 10-kadr: 1_000_000 (hali 0-bo'lakda), hajmi katta
-        offsets.push(off);
-        sizes.push(600_000);
-        off += 600_000; // 1_600_000 -> 1-bo'lak
-        offsets.push(off);
-        sizes.push(600_000);
-        off += 600_000; // 2_200_000 -> 2-bo'lak
-        offsets.push(off);
-        sizes.push(600_000);
-        off += 600_000; // 2_800_000 -> 2-bo'lak
-        offsets.push(off);
-        sizes.push(300_000);
-        off += 300_000; // 3_100_000 = jami hajm
-        (offsets, sizes, off as u64)
-    }
-
-    #[test]
-    fn bolak_vaqt_jadvali_aniq_hisoblanadi() {
-        let (offsets, sizes, total) = test_layout();
-        let moov = test_moov_body(&offsets, &sizes, 1000, 1000);
-        let tables = video_tables(&moov).expect("video trek jadvallari o'qilmadi");
-        assert_eq!(tables.timescale, 1000);
-        assert_eq!(tables.chunk_offsets.len(), offsets.len());
-
-        let index = build_block_index(&tables, total).expect("jadval qurilmadi");
-        // 3_100_000 bayt -> 3 ta bo'lak.
-        assert_eq!(index.len(), 3);
-        assert_eq!(
-            index,
-            vec![0, 11_000, 12_000],
-            "bo'lak boshlanish vaqtlari noto'g'ri"
-        );
-
-        // ── ENG MUHIMI: soniya -> bo'lak ────────────────────────
-        // 5-soniya HALI 0-bo'lakda (o'rtacha bitreyt bilan
-        // hisoblansa 1-bo'lak chiqardi — aynan shu XATO edi).
-        assert_eq!(block_for_ms(&index, 0), 0);
-        assert_eq!(block_for_ms(&index, 5_000), 0);
-        assert_eq!(block_for_ms(&index, 10_999), 0);
-        assert_eq!(block_for_ms(&index, 11_000), 1);
-        assert_eq!(block_for_ms(&index, 11_500), 1);
-        assert_eq!(block_for_ms(&index, 12_000), 2);
-        assert_eq!(block_for_ms(&index, 999_999), 2);
-
-        // Taqqoslash uchun: o'rtacha bitreyt 5-soniyani 1-bo'lakka
-        // yuborardi (14 soniya / 3 bo'lak ≈ 4.7 s).
-        let secs = 14.0;
-        let taxminiy = ((total as f64 * (5.0 / secs)) as u64) / CHUNK_SIZE;
-        assert_eq!(taxminiy, 1, "taxminiy hisob namunasi kutilganidek emas");
-    }
-
-    /// TO'LIQ YO'L: kesh papkasidagi haqiqiy bo'lakdan jadval
-    /// qurilib, meta.json'ga yozilishi.
-    #[test]
-    fn jadval_keshdan_qurilib_metaga_yoziladi() {
-        enable_crypto();
-        let (offsets, sizes, total) = test_layout();
-        let moov_body = test_moov_body(&offsets, &sizes, 1000, 1000);
-
-        // Fayl boshi: ftyp + moov (faststart).
-        let mut head = Vec::new();
-        head.extend_from_slice(&bx(b"ftyp", &[0u8; 16]));
-        head.extend_from_slice(&bx(b"moov", &moov_body));
-        // 0-bo'lak aynan 1 MiB bo'lishi kerak.
-        head.resize(CHUNK_SIZE as usize, 0);
-
-        const NAME: &str = "vbr.mp4";
-        let root = std::env::temp_dir().join(format!("idx_test_{}", micros_now()));
-        let dir = root.join(NAME);
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(
-            dir.join("meta.json"),
-            format!(
-                "{{\"total_size\":{total},\"content_type\":\"video/mp4\",\"chunk_size\":{CHUNK_SIZE}}}"
-            ),
-        )
-        .unwrap();
-        let (k, iv) = crypto::derive_chunk_key_iv(NAME, 0).unwrap();
-        fs::write(dir.join(chunk_name(0)), crypto::encrypt_chunk(&head, &k, &iv)).unwrap();
-
-        let idx = time_index(NAME, &dir, total).expect("jadval qurilmadi");
-        assert_eq!(&*idx, &vec![0u32, 11_000, 12_000]);
-
-        // meta.json'ga yozilganini tekshiramiz — ilova qayta
-        // ochilganda qaytadan hisoblash shart bo'lmasligi kerak.
-        let raw = fs::read_to_string(dir.join("meta.json")).unwrap();
-        let meta: CacheMeta = serde_json::from_str(&raw).unwrap();
-        assert_eq!(meta.chunk_start_ms, vec![0u32, 11_000, 12_000]);
-
-        // Xotira tozalangan holatda ham meta.json'dan o'qiladi.
-        time_indexes().lock().unwrap().remove(NAME);
-        let again = time_index(NAME, &dir, total).expect("meta.json'dan o'qilmadi");
-        assert_eq!(&*again, &vec![0u32, 11_000, 12_000]);
-
-        let _ = fs::remove_dir_all(&root);
-    }
 
     /// ISITISH MANZILI: video manzilidan to'g'ri yasalishi.
     #[test]
@@ -6730,99 +5051,7 @@ mod tests {
         assert!(warm_url_for("https://x.dev/api/image/", 0).is_none());
     }
 
-    /// OYNA CHEGARASI HAR DOIM GURUH CHEGARASIGA TUSHADI.
-    ///
-    /// Fayl hajmi qanday bo'lishidan QAT'I NAZAR: oyna ham, guruh
-    /// ham fayl BOSHIDAN sanaladi, 480 MiB esa 10 MiB'ga karrali.
-    #[test]
-    fn oyna_chegarasi_guruhni_kesmaydi() {
-        let group_bytes = GROUP_CHUNKS * CHUNK_SIZE;
-        assert_eq!(WARM_WINDOW % group_bytes, 0, "oyna guruhga karrali emas");
-        // Bir necha xil hajmdagi fayllar uchun har bir guruh
-        // BUTUNLAY bitta oyna ichida yotishini tekshiramiz.
-        for total in [
-            50u64 * 1024 * 1024,
-            166 * 1024 * 1024 + 12345,
-            1000 * 1024 * 1024,
-            3 * 1024 * 1024 * 1024 + 7,
-        ] {
-            let groups = total.div_ceil(group_bytes);
-            for g in 0..groups {
-                let g_start = g * group_bytes;
-                let g_end = (g_start + group_bytes - 1).min(total - 1);
-                assert_eq!(
-                    g_start / WARM_WINDOW,
-                    g_end / WARM_WINDOW,
-                    "guruh {g} oyna chegarasini kesib o'tdi (hajm {total})"
-                );
-            }
-        }
-    }
 
-    /// MP4 `moov` -> `mvhd` dan davomiylik o'qilishi.
-    #[test]
-    fn mp4_davomiyligi_oqiladi() {
-        /// mvhd (v0) qutisini yasaydi: 8 bayt sarlavha + 100 bayt tana.
-        fn mvhd_v0(timescale: u32, duration: u32) -> Vec<u8> {
-            let mut body = vec![0u8; 100];
-            body[0] = 0; // version
-            body[12..16].copy_from_slice(&timescale.to_be_bytes());
-            body[16..20].copy_from_slice(&duration.to_be_bytes());
-            let mut out = ((8 + body.len()) as u32).to_be_bytes().to_vec();
-            out.extend_from_slice(b"mvhd");
-            out.extend_from_slice(&body);
-            out
-        }
-
-        fn mvhd_v1(timescale: u32, duration: u64) -> Vec<u8> {
-            let mut body = vec![0u8; 112];
-            body[0] = 1; // version
-            body[20..24].copy_from_slice(&timescale.to_be_bytes());
-            body[24..32].copy_from_slice(&duration.to_be_bytes());
-            let mut out = ((8 + body.len()) as u32).to_be_bytes().to_vec();
-            out.extend_from_slice(b"mvhd");
-            out.extend_from_slice(&body);
-            out
-        }
-
-        /// ftyp + moov(mvhd) — "faststart" bilan tayyorlangan fayl
-        /// aynan shunday boshlanadi.
-        fn faststart(mvhd: Vec<u8>) -> Vec<u8> {
-            let mut out: Vec<u8> = Vec::new();
-            out.extend_from_slice(&16u32.to_be_bytes());
-            out.extend_from_slice(b"ftypisom");
-            out.extend_from_slice(&[0, 0, 2, 0]);
-            out.extend_from_slice(&((8 + mvhd.len()) as u32).to_be_bytes());
-            out.extend_from_slice(b"moov");
-            out.extend_from_slice(&mvhd);
-            out
-        }
-
-        // 24:05 = 1445 soniya (timescale 1000).
-        let d = mp4_duration_secs(&faststart(mvhd_v0(1000, 1_445_000))).unwrap();
-        assert!((d - 1445.0).abs() < 0.001, "v0 davomiylik: {d}");
-
-        // 64-bitli (version 1) variant ham o'qilishi kerak.
-        let d = mp4_duration_secs(&faststart(mvhd_v1(90_000, 130_050_000))).unwrap();
-        assert!((d - 1445.0).abs() < 0.001, "v1 davomiylik: {d}");
-
-        // moov TO'LIQ yuklanmagan bo'lsa ham, mvhd uning boshida
-        // bo'lgani uchun baribir o'qiladi (moov hajmi katta deb
-        // ko'rsatilgan, lekin baytlar yetishmaydi).
-        let mut kesik = faststart(mvhd_v0(1000, 1_445_000));
-        let moov_at = 16;
-        kesik[moov_at..moov_at + 4].copy_from_slice(&50_000u32.to_be_bytes());
-        let d = mp4_duration_secs(&kesik).unwrap();
-        assert!((d - 1445.0).abs() < 0.001, "kesik moov: {d}");
-
-        // Aniqlab bo'lmaydigan ma'lumot — panic emas, `None`.
-        assert!(mp4_duration_secs(&[]).is_none());
-        assert!(mp4_duration_secs(&[0u8; 7]).is_none());
-        assert!(mp4_duration_secs(&[0u8; 64]).is_none());
-        assert!(mp4_duration_secs(b"bu umuman mp4 emas, shunchaki matn").is_none());
-        // timescale 0 — bo'lishga urinilmaydi.
-        assert!(mp4_duration_secs(&faststart(mvhd_v0(0, 1000))).is_none());
-    }
 
     /// FFI orqali holatni so'rab, JSON'ga o'giradi va Rust qaytargan
     /// satrni bo'shatadi.
