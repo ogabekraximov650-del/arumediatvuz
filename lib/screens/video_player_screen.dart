@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
@@ -423,6 +424,13 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // chiqilmaydi.
     await _prepareSource(url, myToken);
     if (!mounted || myToken != _playToken) return;
+
+    // Tayyorlash uzoq (bir necha daqiqagacha) davom etgan bo'lishi
+    // mumkin, yadrodagi ijro nuqtasi esa 30 soniyada eskiradi
+    // (video_cache.rs -> PLAY_POS_FRESH_MS). Pleyer ochilishi bilan
+    // birinchi so'rovni yuboradi — o'sha so'rov 15 soniyalik bufer
+    // qoidasi bilan ishlashi uchun nuqtani SHU YERDA yangilaymiz.
+    _reportPosition(resumeAt ?? Duration.zero);
 
     // ── Video manzili: HAMISHA mahalliy kesh-server orqali ────
     Uri source;
@@ -1554,6 +1562,26 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
               ),
             ),
 
+          // ── KUTISH HALQASI: KONTROLLARDAN MUSTAQIL ────────────
+          //
+          // TALAB: "play/pause atrofida aylanadigan progress chizig'i
+          // KUTISH VAQTIDA HAR DOIM ko'rinishi kerak — qolgan pleyer
+          // tugmalari esa chiqmasin".
+          //
+          // Muammo shunda ediki, halqa `_buildControls` ichida
+          // joylashgan va butun kontrollar paneli bilan birga
+          // yashirinardi: 3 soniyadan keyin kontrollar ketishi bilan
+          // buferlash/sek aylanasi ham ko'rinmay qolardi va ekran
+          // "qotib qolgandek" tuyulardi.
+          //
+          // Endi kutish holati uchun ALOHIDA qatlam bor: u faqat
+          // HALQANI chizadi (ikonkasiz, tugmalarsiz) va faqat
+          // kontrollar yashiringan paytda ishlaydi — kontrollar
+          // ko'ringanda halqani `_centerButton` o'zi chizadi, ya'ni
+          // ikkitasi hech qachon ustma-ust tushmaydi.
+          if (_currentEp != null && _playerError == null)
+            IgnorePointer(child: Center(child: _busyRingOverlay(isFullscreen))),
+
           // ── FAQAT BITTA AYLANMA CHIZIQ ────────────────────────
           //
           // Kutish holatining HAMMASI (video ochilishi, keshga
@@ -1768,6 +1796,45 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   // `isPlaying` false bo'lib qoladi; agar ikonka shunga qarab
   // chizilsa, har bir sekda tugma "play" ga sakrab, ko'zni
   // qamashtirardi. Endi u foydalanuvchining NIYATINI ko'rsatadi.
+  /// Kontrollar YASHIRINGAN paytdagi kutish halqasi.
+  ///
+  /// Kutish deb hisoblanadigan holatlar (foydalanuvchi uchun bularning
+  /// hammasi bir xil: "video hozir tayyorlanmoqda"):
+  ///   * video endi ochilmoqda (`_playerLoading`, `_preparing`);
+  ///   * pleyer buferlamoqda (`isBuffering`);
+  ///   * sek kutilmoqda yoki bajarilmoqda;
+  ///   * progress chizig'i barmoq bilan surilmoqda.
+  Widget _busyRingOverlay(bool isFullscreen) {
+    // Kontrollar ko'rinib turibdi — halqani `_centerButton` chizadi.
+    if (_showControls || _playerLoading) return const SizedBox.shrink();
+
+    final ctrl = _controller;
+    if (ctrl == null) return _spinnerOnly(isFullscreen);
+
+    return ValueListenableBuilder<VideoPlayerValue>(
+      valueListenable: ctrl,
+      builder: (_, value, __) {
+        final busy = !value.isInitialized ||
+            value.isBuffering ||
+            _isScrubbing ||
+            _seekBusy ||
+            _pendingTarget != null;
+        if (!busy) return const SizedBox.shrink();
+        return _spinnerOnly(isFullscreen);
+      },
+    );
+  }
+
+  /// Faqat aylanma halqa — markazdagi tugma o'lchamida, ikonkasiz.
+  Widget _spinnerOnly(bool isFullscreen) => _PlayerRing(
+        size: _playPauseDiameter(isFullscreen),
+        strokeWidth: 2.6,
+        color: AppColors.accent,
+        trackColor: Colors.transparent,
+        busy: true,
+        progress: 0,
+      );
+
   Widget _playPauseReactive({required double size}) {
     final ctrl = _controller;
     if (ctrl == null) {
@@ -1814,17 +1881,14 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       child: Stack(
         alignment: Alignment.center,
         children: [
-          SizedBox(
-            width: ringSize,
-            height: ringSize,
-            child: CircularProgressIndicator(
-              // `value: null` — aylanuvchi (aniqlanmagan) rejim.
-              value: busy ? null : progress,
-              strokeWidth: 2.6,
-              color: AppColors.accent,
-              backgroundColor:
-                  busy ? Colors.transparent : Colors.white.withOpacity(0.22),
-            ),
+          _PlayerRing(
+            size: ringSize,
+            strokeWidth: 2.6,
+            color: AppColors.accent,
+            trackColor:
+                busy ? Colors.transparent : Colors.white.withOpacity(0.22),
+            busy: busy,
+            progress: progress,
           ),
           _playPauseIcon(playing: playing, size: iconSize),
         ],
@@ -2718,6 +2782,189 @@ class _MiniIconButton extends StatelessWidget {
       ),
     );
   }
+}
+
+// ══════════════════════════════════════════════════════════════
+//  AYLANMA HALQA (play/pause tugmasi atrofidagi chiziq)
+// ══════════════════════════════════════════════════════════════
+//
+// Ikki vazifasi bor:
+//   * `busy == false` — ijro qay darajada o'tganini ko'rsatadi
+//     (to'liq aylana = video oxiri);
+//   * `busy == true`  — GOOGLE USLUBIDA aylanadi: yoy avval
+//     uzayadi va boshi tez yuguradi, keyin qisqaradi va sekinlashadi.
+//
+// NEGA O'Z VIDJETIMIZ (Flutter'ning `CircularProgressIndicator`
+// o'rniga): standart vidjetdagi aylanish juda tekis va sust
+// ko'rinardi. Bu yerdagi mantiq Material'ning asl g'oyasini
+// takrorlaydi, lekin qarama-qarshiligi kuchaytirilgan:
+//
+//   * yoyning BOSHI davrning birinchi yarmida tez harakatlanadi
+//     (yoy uzayadi);
+//   * DUMI ikkinchi yarmida uni quvib yetadi (yoy qisqaradi va
+//     harakat sekinlashadi);
+//   * bir davrda ikkalasi birgalikda ANIQ BITTA to'liq aylana
+//     bosib o'tadi — shu sabab davrlar orasida sakrash bo'lmaydi.
+class _PlayerRing extends StatefulWidget {
+  final double size;
+  final double strokeWidth;
+  final Color color;
+  final Color trackColor;
+  final bool busy;
+  final double progress;
+
+  const _PlayerRing({
+    required this.size,
+    required this.strokeWidth,
+    required this.color,
+    required this.trackColor,
+    required this.busy,
+    required this.progress,
+  });
+
+  @override
+  State<_PlayerRing> createState() => _PlayerRingState();
+}
+
+class _PlayerRingState extends State<_PlayerRing>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _spin;
+
+  @override
+  void initState() {
+    super.initState();
+    _spin = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1400),
+    );
+    if (widget.busy) _spin.repeat();
+  }
+
+  @override
+  void didUpdateWidget(covariant _PlayerRing oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Kutish tugagach animatsiya to'xtaydi — bekorga kadr
+    // chizilmaydi (batareya tejaladi).
+    if (widget.busy && !_spin.isAnimating) {
+      _spin.repeat();
+    } else if (!widget.busy && _spin.isAnimating) {
+      _spin.stop();
+    }
+  }
+
+  @override
+  void dispose() {
+    _spin.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return RepaintBoundary(
+      child: SizedBox(
+        width: widget.size,
+        height: widget.size,
+        child: AnimatedBuilder(
+          animation: _spin,
+          builder: (_, __) => CustomPaint(
+            painter: _PlayerRingPainter(
+              t: _spin.value,
+              busy: widget.busy,
+              progress: widget.progress,
+              color: widget.color,
+              trackColor: widget.trackColor,
+              strokeWidth: widget.strokeWidth,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _PlayerRingPainter extends CustomPainter {
+  final double t;
+  final bool busy;
+  final double progress;
+  final Color color;
+  final Color trackColor;
+  final double strokeWidth;
+
+  const _PlayerRingPainter({
+    required this.t,
+    required this.busy,
+    required this.progress,
+    required this.color,
+    required this.trackColor,
+    required this.strokeWidth,
+  });
+
+  // Yoyning eng qisqa uzunligi (aylana ulushi) — u hech qachon
+  // butunlay yo'qolib ketmasligi kerak.
+  static const double _minArc = 0.06;
+
+  // Yoyning o'sish zaxirasi. `_minArc + _maxArc` = eng uzun yoy
+  // (0.78 aylana ~ 280°). Qolgan `1 - _maxArc` esa har bir davrda
+  // qo'shiladigan doimiy burilish — shu sabab bir davrda yoy ANIQ
+  // bitta to'liq aylana bosadi va davrlar uzluksiz ulanadi.
+  static const double _maxArc = 0.72;
+
+  /// `t` ning [begin, end] oralig'idagi yumshatilgan (0..1) qiymati.
+  static double _seg(double t, double begin, double end) {
+    final v = ((t - begin) / (end - begin)).clamp(0.0, 1.0);
+    return Curves.easeInOutCubic.transform(v);
+  }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final r = (math.min(size.width, size.height) - strokeWidth) / 2;
+    if (r <= 0) return;
+    final center = Offset(size.width / 2, size.height / 2);
+    final rect = Rect.fromCircle(center: center, radius: r);
+
+    final arc = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = strokeWidth
+      ..strokeCap = StrokeCap.round
+      ..color = color;
+
+    if (!busy) {
+      if (trackColor.alpha != 0) {
+        canvas.drawCircle(
+          center,
+          r,
+          Paint()
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = strokeWidth
+            ..color = trackColor,
+        );
+      }
+      final p = progress.clamp(0.0, 1.0);
+      if (p > 0) {
+        canvas.drawArc(rect, -math.pi / 2, 2 * math.pi * p, false, arc);
+      }
+      return;
+    }
+
+    // Boshi — davrning birinchi yarmida yuguradi (yoy uzayadi).
+    final head = _seg(t, 0.0, 0.55);
+    // Dumi — ikkinchi yarmida quvib yetadi (yoy qisqaradi).
+    final tail = _seg(t, 0.45, 1.0);
+
+    final sweep = (_minArc + (head - tail).clamp(0.0, 1.0) * _maxArc) * 2 * math.pi;
+    final start =
+        (tail * _maxArc + t * (1 - _maxArc)) * 2 * math.pi - math.pi / 2;
+    canvas.drawArc(rect, start, sweep, false, arc);
+  }
+
+  @override
+  bool shouldRepaint(_PlayerRingPainter old) =>
+      old.t != t ||
+      old.busy != busy ||
+      old.progress != progress ||
+      old.color != color ||
+      old.trackColor != trackColor ||
+      old.strokeWidth != strokeWidth;
 }
 
 class _SeekBadge extends StatefulWidget {
