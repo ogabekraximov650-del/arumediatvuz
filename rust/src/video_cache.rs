@@ -410,29 +410,35 @@ struct ParsedRequest {
 
 fn read_request_line_and_headers(stream: &mut TcpStream) -> std::io::Result<ParsedRequest> {
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-    // MUHIM (crash sababi): agar klient (mdk-sdk) sek qilib javobni
-    // o'qishni to'xtatsa, TCP oqimi to'lib, write_all() ABADIY bloklanib
-    // qolardi — ish oqimi hech qachon tugamay, o'zining 1 MiB buferi
-    // bilan xotirada qolib ketardi. Tez-tez sek qilinganda bunday
-    // "o'lik" ish oqimlari to'planib, ilova o'chib qolardi. Yozish
-    // timeout'i bunday oqimni majburan xatoga uchratib, tozalanishini
-    // kafolatlaydi.
-    // YOZISH TIMEOUT'I: 60s.
+    // ── YOZISH CHEGARASI (write timeout) BUTUNLAY OLIB TASHLANDI ──
     //
-    // Muhim tushuncha: pleyer sek qilib ulanishni tashlab ketganda u
-    // soketni YOPADI — bunda `write_all` timeout'ni KUTMASDAN, darhol
-    // xato qaytaradi (ECONNRESET/EPIPE) va ish oqimi shu zahoti
-    // tugaydi. Ya'ni "o'lik" ulanishlarni tozalash uchun qisqa timeout
-    // KERAK EMAS.
+    // TUZATILGAN XATO — foydalanuvchi ko'rgan muammoning ILDIZI:
+    // "videoni pauza qildim, 31 MB yuklandi va video o'sha joydan
+    // qayta boshlandi".
     //
-    // Timeout faqat bitta holatda ishlaydi: pleyer soketni ochiq
-    // qoldirib, ma'lumot o'qishni to'xtatganda — ya'ni foydalanuvchi
-    // videoni PAUZA qilganda. 2 soniya bunga juda kam edi: 2 soniyadan
-    // uzoq pauza qilinsa, biz oqimni uzib qo'yardik va davom
-    // ettirilganda video buzilardi. Endi javoblar UZLUKSIZ (bo'shliqda
-    // qisqartirilmaydi), ya'ni pleyer buferi to'lganda o'qishni bir
-    // muddat to'xtatib turishi butunlay normal — shu sabab 60 soniya.
-    stream.set_write_timeout(Some(Duration::from_secs(60)))?;
+    // Nima bo'lardi:
+    //   1. Foydalanuvchi pauza qiladi;
+    //   2. ExoPlayer buferi to'ladi (50 soniya) va u soketdan
+    //      O'QISHNI TO'XTATADI — bu MUTLAQO NORMAL xulq;
+    //   3. Bizning `write_all` shu sabab kutib qoladi — bu ham
+    //      normal: aynan shu TCP tormozi ortiqcha yuklanishning
+    //      oldini oladi;
+    //   4. LEKIN 60 soniyadan keyin yozish CHEGARASI ishlab, xato
+    //      qaytarardi va biz ulanishni yopardik;
+    //   5. ExoPlayer uchun ulanishning yopilishi = "FAYL TUGADI";
+    //   6. ilova buni sezib videoni o'sha nuqtadan QAYTA ochardi va
+    //      pleyer yana 50 soniyalik buferni to'ldirardi — har
+    //      safar yangi trafik.
+    //
+    // Ya'ni pauza qancha uzoq bo'lsa, shuncha ko'p qayta ochish va
+    // shuncha ko'p behuda trafik. Aynan foydalanuvchi o'lchagan
+    // holat.
+    //
+    // ENDI chegara YO'Q: pleyer o'qishni to'xtatsa, biz shunchaki
+    // kutamiz (protsessor ham, trafik ham sarflanmaydi). Pleyer
+    // yopilsa yoki ilova o'chsa, soket yopiladi va `write_all`
+    // HAQIQIY xato qaytaradi — ish oqimi o'shanda tugaydi. Ya'ni
+    // "o'lik ulanish"ni aniqlash uchun chegara kerak emas.
     // Nagle algoritmini o'chirish: sarlavha va kichik bo'laklar
     // kechiktirilmasdan darhol yuboriladi (mahalliy ulanishda bu
     // javob tezligini sezilarli oshiradi).
@@ -3306,6 +3312,9 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
             // Oqim orqali pleyerga ALLAQACHON uzatilgan bayt chegarasi.
             let mut streamed_to = cursor;
             let mut sink_err: Option<std::io::Error> = None;
+            // Pleyer ulanishni yopgan bo'lsa — hech narsani davom
+            // ettirmaymiz.
+            let mut client_gone = false;
             let bytes = loop {
                 let res = {
                     // Baytlar tarmoqdan kelishi bilan darhol
@@ -3346,7 +3355,12 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
                     )
                 };
                 if let Some(e) = sink_err.take() {
-                    log(format!("So'rov uzildi/xato ({start}-{end}): {e}"));
+                    // Pleyerga yozib bo'lmadi — u ulanishni yopgan
+                    // (sek qildi, epizod almashdi yoki ilova yopildi).
+                    // Bunday holatda QAYTA URINISH ma'nosiz: shu
+                    // yerda ish tugaydi.
+                    log(format!("Pleyer ulanishni yopdi ({start}-{end}): {e}"));
+                    client_gone = true;
                     break None;
                 }
                 match res {
@@ -3376,6 +3390,9 @@ fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::
 
             // Baytlar oqim orqali ketgan bo'lsa — ularni QAYTA
             // yozmaymiz: kursorni surib, keyingi aylanishga o'tamiz.
+            if client_gone {
+                break;
+            }
             if streamed_to > cursor {
                 cursor = streamed_to;
                 held = None;
@@ -4431,6 +4448,82 @@ mod tests {
             }
         });
         port
+    }
+
+    /// ═══════════════════════════════════════════════════════════
+    ///  UZOQ PAUZADA SERVER ULANISHNI YOPMASLIGI KERAK
+    /// ═══════════════════════════════════════════════════════════
+    ///
+    /// Foydalanuvchi o'lchagan xato: "videoni pauza qildim, 31 MB
+    /// yuklandi va video o'sha joydan qayta boshlandi".
+    ///
+    /// Sabab: soketda 60 soniyalik YOZISH CHEGARASI bor edi. Pleyer
+    /// pauzada o'qishni to'xtatgach (normal xulq) server 60 soniya
+    /// kutar, keyin xato olib ulanishni YOPARDI. ExoPlayer uchun
+    /// bu "fayl tugadi" degani — ilova videoni qayta ochar, pleyer
+    /// yana 50 soniyalik buferni to'ldirar, trafik esa har safar
+    /// qaytadan sarflanardi.
+    ///
+    /// Bu test 75 soniya (eski chegaradan uzoq) UMUMAN o'qimaydi va
+    /// shundan keyin ham ulanish TIRIK ekanini tekshiradi.
+    #[test]
+    fn uzoq_pauzada_ulanish_yopilmaydi() {
+        let (port, _root) = ensure_server();
+
+        const NAME: &str = "pauza.mp4";
+        const TOTAL: u64 = 40 * CHUNK_SIZE;
+        let (o_port, _log) = start_origin(TOTAL);
+        let url = format!("http://127.0.0.1:{o_port}/{NAME}");
+        let encoded: String = url
+            .chars()
+            .map(|c| match c {
+                ':' => "%3A".to_string(),
+                '/' => "%2F".to_string(),
+                c => c.to_string(),
+            })
+            .collect();
+
+        let mut st = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        st.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+        st.write_all(
+            format!("GET /v?u={encoded} HTTP/1.1\r\nHost: x\r\nRange: bytes=0-\r\n\r\n").as_bytes(),
+        )
+        .unwrap();
+        let mut br = BufReader::new(st);
+        let mut line = String::new();
+        br.read_line(&mut line).unwrap();
+        loop {
+            let mut l = String::new();
+            if br.read_line(&mut l).unwrap_or(0) == 0 || l == "\r\n" {
+                break;
+            }
+        }
+        // Bir oz o'qiymiz (pleyer ochilgan holat).
+        let mut buf = vec![0u8; 256 * 1024];
+        let mut got = 0usize;
+        while got < buf.len() {
+            match br.read(&mut buf[got..]) {
+                Ok(0) => break,
+                Ok(n) => got += n,
+                Err(_) => break,
+            }
+        }
+        assert!(got > 0, "birinchi baytlar kelmadi");
+
+        // ── PAUZA: 75 soniya UMUMAN o'qimaymiz ────────────────
+        thread::sleep(Duration::from_secs(75));
+
+        // Ulanish TIRIK bo'lishi kerak: yana o'qiy olamiz.
+        br.get_ref()
+            .set_read_timeout(Some(Duration::from_secs(20)))
+            .unwrap();
+        let mut probe = [0u8; 64 * 1024];
+        let n = br.read(&mut probe).unwrap_or(0);
+        assert!(
+            n > 0,
+            "SERVER PAUZADAN KEYIN ULANISHNI YOPDI — ExoPlayer buni \
+             'fayl tugadi' deb tushunadi va video qayta ochiladi"
+        );
     }
 
     /// ═══════════════════════════════════════════════════════════
