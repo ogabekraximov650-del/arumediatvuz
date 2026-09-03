@@ -485,19 +485,25 @@ fn warm_window_url(file_name: &str, widx: u64) -> String {
     cache_key_url(file_name, &format!("w{widx}"))
 }
 
-/// Oyna keshda BORMI (bitta bayt so'rab tekshiriladi — arzon).
-async fn warm_window_cached(file_name: &str, widx: u64) -> bool {
+/// Oyna keshda bo'lsa — faylning umumiy hajmini qaytaradi.
+/// Bitta bayt so'raladi, ya'ni tekshiruv juda arzon.
+async fn warm_window_total(file_name: &str, widx: u64) -> Option<u64> {
     let mut h = Headers::new();
-    if h.set("Range", "bytes=0-0").is_err() {
-        return false;
-    }
-    let Ok(probe) = Request::new_with_init(
+    h.set("Range", "bytes=0-0").ok()?;
+    let probe = Request::new_with_init(
         &warm_window_url(file_name, widx),
         RequestInit::new().with_method(Method::Get).with_headers(h),
-    ) else {
-        return false;
-    };
-    matches!(Cache::default().get(&probe, false).await, Ok(Some(_)))
+    )
+    .ok()?;
+    let hit = Cache::default().get(&probe, false).await.ok()??;
+    let total = hit
+        .headers()
+        .get("X-Total-Size")
+        .ok()
+        .flatten()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    Some(total)
 }
 
 /// ═══════════════════════════════════════════════════════════════
@@ -525,24 +531,30 @@ async fn warm_window_cached(file_name: &str, widx: u64) -> bool {
 ///
 /// Javob: {"status":"cached"|"warming"|"warmed"|"error"}
 async fn b2_warm(env: &Env, file_name: &str, widx: u64) -> Result<Response> {
-    let reply = |status: &str| -> Result<Response> {
-        let mut r = Response::ok(format!("{{\"status\":\"{status}\"}}"))?;
+    // Javobda faylning UMUMIY hajmi ham qaytariladi — shu bilan
+    // ilova hajmni bilish uchun ALOHIDA so'rov yubormaydi, ya'ni
+    // B2'ga bitta ham ortiqcha murojaat bo'lmaydi.
+    let reply = |status: &str, total: u64| -> Result<Response> {
+        let mut r = Response::ok(format!(
+            "{{\"status\":\"{status}\",\"total\":{total}}}"
+        ))?;
         set_cors(&mut r);
         r.headers_mut().set("Content-Type", "application/json")?;
         r.headers_mut().set("Cache-Control", "no-store")?;
         Ok(r)
     };
 
-    // 1) Allaqachon keshdami — ish tamom.
-    if warm_window_cached(file_name, widx).await {
-        return reply("cached");
+    // 1) Allaqachon keshdami — ish tamom (hajmni keshdagi
+    //    yozuvning o'zidan olamiz).
+    if let Some(total) = warm_window_total(file_name, widx).await {
+        return reply("cached", total);
     }
 
     // 2) Boshqa birov aynan hozir isitayaptimi.
     let cache = Cache::default();
     let marker_key = Request::new(&warm_marker_url(file_name, widx), Method::Get)?;
     if cache.get(&marker_key, false).await?.is_some() {
-        return reply("warming");
+        return reply("warming", 0);
     }
     let mut marker = Response::ok("1")?;
     marker
@@ -559,7 +571,7 @@ async fn b2_warm(env: &Env, file_name: &str, widx: u64) -> Result<Response> {
     let mut resp = Fetch::Request(req).send().await?;
     let status = resp.status_code();
     if status != 200 && status != 206 {
-        return reply("error");
+        return reply("error", 0);
     }
     let ct = resp
         .headers()
@@ -588,8 +600,8 @@ async fn b2_warm(env: &Env, file_name: &str, widx: u64) -> Result<Response> {
     }
     let key = Request::new(&warm_window_url(file_name, widx), Method::Get)?;
     match cache.put(&key, to_cache).await {
-        Ok(_) => reply("warmed"),
-        Err(_) => reply("error"),
+        Ok(_) => reply("warmed", total),
+        Err(_) => reply("error", total),
     }
 }
 

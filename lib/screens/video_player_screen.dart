@@ -100,6 +100,11 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   StreamSubscription<List<ConnectivityResult>>? _connSub;
   String? _selectedQuality;
   bool _playerLoading = false;
+
+  // Worker videoni Cloudflare keshiga ko'chirayotgan payt `true`.
+  // Shu paytda ekranda aylanma chiziq va "Video tayyorlanyabdi..."
+  // yozuvi turadi — foydalanuvchi nima kutayotganini bilsin.
+  bool _preparing = false;
   int _playToken = 0;
   String? _playerError;
 
@@ -366,6 +371,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       _currentUrl = url;
       _showControls = true;
       _playerLoading = true;
+      _preparing = false;
       _playerError = null;
       _intendedPlaying = resumePlaying;
     });
@@ -396,6 +402,26 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
         await old.dispose();
       } catch (_) {}
     }
+    if (!mounted || myToken != _playToken) return;
+
+    // ═══════════════════════════════════════════════════════════
+    //  TAYYORLASH: B2'ga ATIGI BITTA so'rov
+    // ═══════════════════════════════════════════════════════════
+    //
+    // Pleyerni ochishdan OLDIN yadro worker'ga "oynani keshga
+    // ko'chir" degan bitta so'rov yuboradi va tugashini kutamiz.
+    // Shundan keyin videoning har bir bo'lagi Cloudflare
+    // chekkasidan keladi va B2'ga umuman chiqilmaydi.
+    //
+    // NEGA KUTISH SHU YERDA: kutishni mahalliy serverning HTTP
+    // javobi ichida qilib bo'lmaydi — ExoPlayer javob sarlavhasini
+    // 8 soniyadan ortiq kutmaydi va ulanishni uzib xatoga chiqadi.
+    // Bu yerda esa ekranda oddiy "yuklanmoqda" belgisi turadi.
+    //
+    // Fayl allaqachon to'liq telefonda bo'lsa (yuklab olingan yoki
+    // ko'rilgan) — bu bosqich bir zumda o'tadi va tarmoqqa umuman
+    // chiqilmaydi.
+    await _prepareSource(url, myToken);
     if (!mounted || myToken != _playToken) return;
 
     // ── Video manzili: HAMISHA mahalliy kesh-server orqali ────
@@ -470,6 +496,39 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _syncWatchedUrls();
     _startHealthWatchdog();
     _scheduleHide();
+  }
+
+  /// Worker'ga isitish so'rovini yuboradi va tugashini kutadi.
+  ///
+  /// Kutish CHEGARALANGAN (`_prepareMax`): shu vaqt ichida
+  /// tugamasa, video baribir ochiladi va bo'laklar odatdagidek
+  /// olinadi — ya'ni ilova hech qachon "muzlab" qolmaydi.
+  static const Duration _prepareMax = Duration(minutes: 3);
+
+  Future<void> _prepareSource(String url, int myToken) async {
+    RustCore.instance.videoPrepare(url);
+    // Darhol tayyor bo'lsa (fayl telefonda bor yoki oyna allaqachon
+    // keshda) — hech qanday yozuv ko'rsatmaymiz.
+    if (RustCore.instance.videoPrepareReady(url)) return;
+
+    if (mounted && myToken == _playToken) {
+      setState(() => _preparing = true);
+    }
+    final started = DateTime.now();
+    try {
+      while (mounted && myToken == _playToken) {
+        if (RustCore.instance.videoPrepareReady(url)) return;
+        if (DateTime.now().difference(started) > _prepareMax) {
+          VideoCacheServer.log(
+              'Tayyorlash ${_prepareMax.inMinutes} daqiqada tugamadi — '
+              'video baribir ochilmoqda');
+          return;
+        }
+        await Future.delayed(const Duration(milliseconds: 300));
+      }
+    } finally {
+      if (mounted) setState(() => _preparing = false);
+    }
   }
 
   // Bitta manzildan controller ochishga urinadi. Muvaffaqiyatsiz
@@ -1426,8 +1485,32 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
             ),
 
           if (_currentEp != null && _playerLoading)
-            const Center(
-                child: CircularProgressIndicator(color: Colors.white54)),
+            Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const SizedBox(
+                    width: 42,
+                    height: 42,
+                    child: CircularProgressIndicator(
+                        color: Colors.white54, strokeWidth: 3),
+                  ),
+                  // Worker videoni keshga ko'chirayotgan payt —
+                  // foydalanuvchi nima kutayotganini bilsin.
+                  if (_preparing) ...[
+                    const SizedBox(height: 14),
+                    const Text(
+                      'Video tayyorlanyabdi...',
+                      style: TextStyle(
+                        color: Colors.white70,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
 
           // ── Runtime buferlash indikatori: controller allaqachon
           // initialize bo'lgan va ijro boshlangan, lekin tarmoq
