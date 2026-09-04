@@ -412,27 +412,6 @@ async fn b2_access(env: &Env) -> Result<B2Access> {
     })
 }
 
-/// B2'dan faylni BUTUNLIGICHA (Range'siz) so'rash.
-///
-/// NEGA KERAK: B2 Range'li so'rovga 206 bilan javob beradi,
-/// Cloudflare Cache API esa 206 javobni SAQLAMAYDI. Uni saqlash
-/// uchun javobni qayta o'rash kerak bo'ladi, qayta o'ralgan oqimdan
-/// esa `Content-Length` YO'QOLADI — natijada keshdagi yozuvdan
-/// keyinchalik ORALIQ kesib bo'lmaydi (Cloudflare 206 emas, butun
-/// javobni qaytaradi) va har bir so'rov B2'ga tushib ketaveradi.
-///
-/// Range'siz so'rovga B2 200 + `Content-Length` qaytaradi — bunday
-/// javobni keshga O'ZGARTIRMASDAN qo'yish mumkin va uzunlik
-/// saqlanib qoladi.
-fn b2_plain_request(acc: &B2Access, file_name: &str) -> Result<Request> {
-    let h = Headers::new();
-    h.set("Authorization", &acc.token)?;
-    Request::new_with_init(
-        &format!("{}/file/aniraxuz/{file_name}", acc.dl_url),
-        RequestInit::new().with_method(Method::Get).with_headers(h),
-    )
-}
-
 fn b2_range_request(acc: &B2Access, file_name: &str, start: u64, end: u64) -> Result<Request> {
     let mut h = Headers::new();
     h.set("Authorization", &acc.token)?;
@@ -593,48 +572,6 @@ async fn cache_range_test() -> Result<Response> {
     Ok(r)
 }
 
-/// Butun faylni B2'dan RANGE'SIZ olib, javobni O'ZGARTIRMASDAN
-/// keshga qo'yadi.
-///
-/// Shu yo'lning yagona maqsadi — keshdagi yozuvda `Content-Length`
-/// saqlanib qolishi. Faqat shunda Cloudflare keyinchalik o'sha
-/// yozuvdan ORALIQ kesib, 206 bilan qaytara oladi (pleyer aynan
-/// shuni so'raydi).
-///
-/// Har bir qadam xatosi MATN bilan qaytadi — kutilmagan holatda
-/// worker 500 bermasdan, aniq sababni aytadi.
-async fn warm_whole_file(
-    acc: &B2Access,
-    cache: &Cache,
-    key: &Request,
-    file_name: &str,
-    total: u64,
-) -> std::result::Result<(), String> {
-    let req = b2_plain_request(acc, file_name).map_err(|e| format!("req {e}"))?;
-    let mut resp = Fetch::Request(req)
-        .send()
-        .await
-        .map_err(|e| format!("fetch {e}"))?;
-    let st = resp.status_code();
-    if st != 200 {
-        return Err(format!("status {st}"));
-    }
-    {
-        let h = resp.headers_mut();
-        h.set("Accept-Ranges", "bytes")
-            .map_err(|e| format!("hdr-ar {e}"))?;
-        h.set(
-            "Cache-Control",
-            &format!("public, max-age={CHUNK_CACHE_SECONDS}"),
-        )
-        .map_err(|e| format!("hdr-cc {e}"))?;
-        h.set("X-Total-Size", &total.to_string())
-            .map_err(|e| format!("hdr-ts {e}"))?;
-    }
-    cache.put(key, resp).await.map_err(|e| format!("put {e}"))?;
-    Ok(())
-}
-
 async fn b2_warm(env: &Env, file_name: &str, widx: u64, force: bool) -> Result<Response> {
     // Javobda faylning UMUMIY hajmi ham qaytariladi — shu bilan
     // ilova hajmni bilish uchun ALOHIDA so'rov yubormaydi, ya'ni
@@ -702,18 +639,8 @@ async fn b2_warm(env: &Env, file_name: &str, widx: u64, force: bool) -> Result<R
         let _ = probe.bytes().await;
     }
 
-    if widx == 0 && known_total > 0 && known_total <= WARM_WINDOW {
-        match warm_whole_file(&acc, &cache, &key, file_name, known_total).await {
-            Ok(()) => return reply("warmed", known_total),
-            // Qaysi qadamda uzilgani javobda ko'rinadi — kutilmagan
-            // holatda 500 o'rniga aniq sabab qaytadi.
-            Err(e) => return reply(&format!("error {e}"), known_total),
-        }
-    }
-
-    // 3) Katta fayl: oynani ORALIQ bilan olamiz (eski yo'l).
-    //    Bunday yozuvdan oraliq kesib bo'lmaydi, lekin `/api/image/`
-    //    uchun u baribir foydali.
+    // 3) Oynani B2'dan ORALIQ bilan olamiz va OQIM bilan keshga
+    //    yozamiz (xotiraga yig'ilmaydi).
     let win_start = widx * WARM_WINDOW;
     let win_end = win_start + WARM_WINDOW - 1;
     let req = b2_range_request(&acc, file_name, win_start, win_end)?;
@@ -726,21 +653,39 @@ async fn b2_warm(env: &Env, file_name: &str, widx: u64, force: bool) -> Result<R
         .headers()
         .get("Content-Type")?
         .unwrap_or_else(|| "application/octet-stream".to_string());
-    let cl = resp.headers().get("Content-Length")?;
     let total = resp
         .headers()
         .get("Content-Range")?
         .and_then(|c| parse_content_range(&c))
         .map(|(_, _, t)| t)
-        .unwrap_or(0);
+        .filter(|t| *t > 0)
+        .unwrap_or(known_total);
+
+    // ── ENG MUHIM SARLAVHA: `Content-Length` ─────────────────
+    //
+    // Tekshirib ko'rildi: Cloudflare keshi yozuvdan ORALIQ kesib,
+    // 206 bilan qaytara OLADI — lekin faqat yozuvning uzunligi
+    // ma'lum bo'lsa. Aks holda u butun javobni 200 bilan beradi va
+    // "isitilgan oyna" keshi amalda ishlamaydi (har bir so'rov
+    // B2'ga tushadi).
+    //
+    // B2'ning javobidagi `Content-Length` bu yergacha yetib
+    // kelmasligi mumkin (oqim sifatida uzatilganda yo'qoladi), shu
+    // sabab uzunlikni O'ZIMIZ hisoblaymiz: oynaning haqiqiy
+    // uzunligi = min(oyna oxiri, fayl hajmi) - oyna boshi.
+    let win_len = if total > 0 {
+        total.min(win_start + WARM_WINDOW).saturating_sub(win_start)
+    } else {
+        0
+    };
 
     let stream = resp.stream()?;
     let mut to_cache = Response::from_stream(stream)?;
     {
         let h = to_cache.headers_mut();
         h.set("Content-Type", &ct)?;
-        if let Some(l) = cl {
-            h.set("Content-Length", &l)?;
+        if win_len > 0 {
+            h.set("Content-Length", &win_len.to_string())?;
         }
         h.set("Accept-Ranges", "bytes")?;
         h.set("Cache-Control", &format!("public, max-age={CHUNK_CACHE_SECONDS}"))?;
