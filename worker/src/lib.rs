@@ -530,6 +530,58 @@ async fn warm_window_total(file_name: &str, widx: u64) -> Option<u64> {
 /// shu sabab worker'ning 128 MB chegarasi muammo bo'lmaydi.
 ///
 /// Javob: {"status":"cached"|"warming"|"warmed"|"error"}
+/// ── UZUNLIGI MA'LUM OQIM (FixedLengthStream) ────────────────────
+///
+/// MUAMMO: Cloudflare keshidagi yozuvdan ORALIQ kesib olish (206)
+/// faqat yozuvning UZUNLIGI ma'lum bo'lsagina ishlaydi. Oqim bilan
+/// uzatilayotgan javobga esa `Content-Length` sarlavhasini qo'lda
+/// yozib bo'lmaydi — runtime uni tashlab yuboradi (o'lchab
+/// tekshirildi: yozib ko'rildi, kesh baribir 200 qaytardi).
+///
+/// YECHIM: Cloudflare aynan shu holat uchun `FixedLengthStream`
+/// beradi — bu uzunligi OLDINDAN e'lon qilingan quvur. Undan
+/// o'tgan javobga runtime `Content-Length`ni O'ZI qo'yadi va
+/// xotiraga hech narsa yig'ilmaydi.
+///
+/// Baytlar quvurdan fon'da oqadi (`pipeTo` kutilmaydi) — biz esa
+/// o'qish tomonini (readable) javob tanasi sifatida beramiz.
+fn fixed_length_stream(
+    src: &web_sys::ReadableStream,
+    len: u64,
+) -> Result<web_sys::ReadableStream> {
+    use worker::wasm_bindgen::{JsCast, JsValue};
+
+    let global = js_sys::global();
+    let ctor = js_sys::Reflect::get(&global, &JsValue::from_str("FixedLengthStream"))
+        .map_err(|_| Error::RustError("FixedLengthStream topilmadi".into()))?;
+    let ctor: js_sys::Function = ctor
+        .dyn_into()
+        .map_err(|_| Error::RustError("FixedLengthStream funksiya emas".into()))?;
+    let args = js_sys::Array::new();
+    args.push(&JsValue::from_f64(len as f64));
+    let obj = js_sys::Reflect::construct(&ctor, &args)
+        .map_err(|_| Error::RustError("FixedLengthStream yaratilmadi".into()))?;
+    let readable = js_sys::Reflect::get(&obj, &JsValue::from_str("readable"))
+        .map_err(|_| Error::RustError("readable yo'q".into()))?;
+    let writable = js_sys::Reflect::get(&obj, &JsValue::from_str("writable"))
+        .map_err(|_| Error::RustError("writable yo'q".into()))?;
+
+    // `pipeTo` dinamik chaqiriladi (WritableStream turi web-sys'da
+    // yoqilmagan bo'lishi mumkin). Qaytgan Promise KUTILMAYDI.
+    let pipe_to = js_sys::Reflect::get(src, &JsValue::from_str("pipeTo"))
+        .map_err(|_| Error::RustError("pipeTo yo'q".into()))?;
+    let pipe_to: js_sys::Function = pipe_to
+        .dyn_into()
+        .map_err(|_| Error::RustError("pipeTo funksiya emas".into()))?;
+    pipe_to
+        .call1(src, &writable)
+        .map_err(|_| Error::RustError("pipeTo ishlamadi".into()))?;
+
+    readable
+        .dyn_into::<web_sys::ReadableStream>()
+        .map_err(|_| Error::RustError("readable ReadableStream emas".into()))
+}
+
 /// ── VAQTINCHA TEKSHIRUV ─────────────────────────────────────────
 /// Cloudflare Cache API keshdagi yozuvdan ORALIQ kesib, 206 bilan
 /// qaytara oladimi? Butun tizim shu savolga bog'liq.
@@ -679,19 +731,28 @@ async fn b2_warm(env: &Env, file_name: &str, widx: u64, force: bool) -> Result<R
         0
     };
 
-    let stream = resp.stream()?;
-    let mut to_cache = Response::from_stream(stream)?;
-    {
-        let h = to_cache.headers_mut();
-        h.set("Content-Type", &ct)?;
-        if win_len > 0 {
-            h.set("Content-Length", &win_len.to_string())?;
-        }
-        h.set("Accept-Ranges", "bytes")?;
-        h.set("Cache-Control", &format!("public, max-age={CHUNK_CACHE_SECONDS}"))?;
-        h.set("X-Total-Size", &total.to_string())?;
-        h.set("X-Window-Start", &win_start.to_string())?;
+    if win_len == 0 {
+        return reply("error hajm noma'lum", total);
     }
+    let src = match resp.body() {
+        ResponseBody::Stream(rs) => rs.clone(),
+        _ => return reply("error oqim yo'q", total),
+    };
+    // Uzunligi e'lon qilingan quvur — keshdagi yozuvda
+    // `Content-Length` shu tufayli paydo bo'ladi.
+    let readable = match fixed_length_stream(&src, win_len) {
+        Ok(r) => r,
+        Err(e) => return reply(&format!("error {e}"), total),
+    };
+    let headers = Headers::new();
+    headers.set("Content-Type", &ct)?;
+    headers.set("Accept-Ranges", "bytes")?;
+    headers.set("Cache-Control", &format!("public, max-age={CHUNK_CACHE_SECONDS}"))?;
+    headers.set("X-Total-Size", &total.to_string())?;
+    headers.set("X-Window-Start", &win_start.to_string())?;
+    let to_cache = Response::from_body(ResponseBody::Stream(readable))?
+        .with_headers(headers)
+        .with_status(200);
     match cache.put(&key, to_cache).await {
         Ok(_) => reply("warmed", total),
         Err(_) => reply("error", total),
