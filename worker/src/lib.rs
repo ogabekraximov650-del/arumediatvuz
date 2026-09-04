@@ -506,30 +506,6 @@ async fn warm_window_total(file_name: &str, widx: u64) -> Option<u64> {
     Some(total)
 }
 
-/// ═══════════════════════════════════════════════════════════════
-///  GET /api/warm/:filename[?w=N]  — OYNANI KESHGA ISITISH
-/// ═══════════════════════════════════════════════════════════════
-///
-/// ── NEGA ALOHIDA SO'ROV ─────────────────────────────────────────
-///
-/// Isitish ilgari `wait_until` (fon vazifasi) bilan qilinardi va
-/// AYNAN SHU uni buzardi: Cloudflare `waitUntil` uchun javob
-/// yuborilgandan keyin ATIGI 30 SONIYA beradi. 450 MB'ni 30
-/// soniyada ko'chirib bo'lmasdi — isitish o'rtada uzilar, keshga
-/// hech narsa tushmas, "isitish belgisi" esa qayta urinishni
-/// bloklab turardi. Natijada kesh HECH QACHON to'lmasdi va har bir
-/// so'rov B2'ga borardi.
-///
-/// Cloudflare qoidasi esa boshqacha: MIJOZ ULANIB TURGANDA
-/// so'rovning davomiyligiga CHEGARA YO'Q. Shu sabab isitish endi
-/// ALOHIDA, ODDIY so'rov sifatida bajariladi — ilova uni ochadi va
-/// tugaguncha ulanib turadi. Worker esa o'sha davomida "uyg'oq"
-/// qoladi va 448 MB'ni bemalol ko'chiradi.
-///
-/// Tana OQIM (quvur) orqali o'tadi — xotiraga umuman yig'ilmaydi,
-/// shu sabab worker'ning 128 MB chegarasi muammo bo'lmaydi.
-///
-/// Javob: {"status":"cached"|"warming"|"warmed"|"error"}
 /// ── UZUNLIGI MA'LUM OQIM (FixedLengthStream) ────────────────────
 ///
 /// MUAMMO: Cloudflare keshidagi yozuvdan ORALIQ kesib olish (206)
@@ -582,48 +558,30 @@ fn fixed_length_stream(
         .map_err(|_| Error::RustError("readable ReadableStream emas".into()))
 }
 
-/// ── VAQTINCHA TEKSHIRUV ─────────────────────────────────────────
-/// Cloudflare Cache API keshdagi yozuvdan ORALIQ kesib, 206 bilan
-/// qaytara oladimi? Butun tizim shu savolga bog'liq.
-async fn cache_range_test() -> Result<Response> {
-    let cache = Cache::default();
-    let url = "https://fulutter-chunk-cache.internal/__rangetest__/v3";
-    let data = vec![7u8; 1024 * 1024];
-    let mut to_cache = Response::from_bytes(data)?;
-    {
-        let h = to_cache.headers_mut();
-        h.set("Content-Type", "application/octet-stream")?;
-        h.set("Accept-Ranges", "bytes")?;
-        h.set("Cache-Control", "public, max-age=600")?;
-        h.set("X-Total-Size", "1048576")?;
-    }
-    let key = Request::new(url, Method::Get)?;
-    let put = cache.put(&key, to_cache).await.is_ok();
-
-    let lh = Headers::new();
-    lh.set("Range", "bytes=10-19")?;
-    let lookup = Request::new_with_init(
-        url,
-        RequestInit::new().with_method(Method::Get).with_headers(lh),
-    )?;
-    let hit = cache.get(&lookup, false).await?;
-    let (status, cr, cl) = match hit {
-        Some(h) => (
-            h.status_code(),
-            h.headers().get("Content-Range")?.unwrap_or_else(|| "-".into()),
-            h.headers().get("Content-Length")?.unwrap_or_else(|| "-".into()),
-        ),
-        None => (0, "-".to_string(), "-".to_string()),
-    };
-    let mut r = Response::ok(format!(
-        "{{\"put\":{put},\"status\":{status},\"content_range\":\"{cr}\",\"content_length\":\"{cl}\"}}"
-    ))?;
-    set_cors(&mut r);
-    r.headers_mut().set("Content-Type", "application/json")?;
-    r.headers_mut().set("Cache-Control", "no-store")?;
-    Ok(r)
-}
-
+/// ═══════════════════════════════════════════════════════════════
+///  GET /api/warm/:filename[?w=N]  — OYNANI KESHGA ISITISH
+/// ═══════════════════════════════════════════════════════════════
+///
+/// ── NEGA ALOHIDA SO'ROV ─────────────────────────────────────────
+///
+/// Isitish ilgari `wait_until` (fon vazifasi) bilan qilinardi va
+/// AYNAN SHU uni buzardi: Cloudflare `waitUntil` uchun javob
+/// yuborilgandan keyin ATIGI 30 SONIYA beradi. 450 MB'ni 30
+/// soniyada ko'chirib bo'lmasdi — isitish o'rtada uzilar, keshga
+/// hech narsa tushmas, "isitish belgisi" esa qayta urinishni
+/// bloklab turardi. Natijada kesh HECH QACHON to'lmasdi va har bir
+/// so'rov B2'ga borardi.
+///
+/// Cloudflare qoidasi esa boshqacha: MIJOZ ULANIB TURGANDA
+/// so'rovning davomiyligiga CHEGARA YO'Q. Shu sabab isitish endi
+/// ALOHIDA, ODDIY so'rov sifatida bajariladi — ilova uni ochadi va
+/// tugaguncha ulanib turadi. Worker esa o'sha davomida "uyg'oq"
+/// qoladi va 448 MB'ni bemalol ko'chiradi.
+///
+/// Tana OQIM (quvur) orqali o'tadi — xotiraga umuman yig'ilmaydi,
+/// shu sabab worker'ning 128 MB chegarasi muammo bo'lmaydi.
+///
+/// Javob: {"status":"cached"|"warming"|"warmed"|"error"}
 async fn b2_warm(env: &Env, file_name: &str, widx: u64, force: bool) -> Result<Response> {
     // Javobda faylning UMUMIY hajmi ham qaytariladi — shu bilan
     // ilova hajmni bilish uchun ALOHIDA so'rov yubormaydi, ya'ni
@@ -796,7 +754,7 @@ async fn b2_warm(env: &Env, file_name: &str, widx: u64, force: bool) -> Result<R
 /// holda 503. `/api/image/...` (bo'laklab keshlaydigan yo'l)
 /// o'zgarishsiz qoladi — undan endi FAQAT "yuklab olish" tugmasi
 /// foydalanadi.
-async fn b2_play(file_name: &str, range: Option<String>) -> Result<Response> {
+async fn b2_play(env: &Env, file_name: &str, range: Option<String>) -> Result<Response> {
     // Nima uchun keshdan berib bo'lmaganini aytadi (diagnostika —
     // `X-Warm-Reason` sarlavhasida ko'rinadi).
     let mut reason = String::new();
@@ -805,6 +763,23 @@ async fn b2_play(file_name: &str, range: Option<String>) -> Result<Response> {
     {
         return Ok(resp);
     }
+
+    // ── YAGONA ISTISNO: FAYL BITTA OYNAGA SIG'MAYDI ──────────
+    //
+    // Kesh yozuvi bor, lekin so'ralgan oraliq oyna chegarasidan
+    // chiqib ketyapti — bu FAQAT fayl 480 MiB'dan katta bo'lganda
+    // yuz beradi (Cloudflare kesh yozuvining chegarasi 512 MB).
+    // Bunday faylni keshdan BUTUNLAY berib bo'lmaydi, javobni
+    // kesish esa mumkin emas (pleyer uni "fayl tugadi" deb
+    // tushunadi). Shu sabab bu holatda — va FAQAT bu holatda —
+    // baytlar B2'dan oqim bilan beriladi.
+    //
+    // Kesh shunchaki hali TAYYOR EMAS bo'lsa (reason = no-window),
+    // bu yerga tushilmaydi: 503 qaytadi va ilova avval isitadi.
+    if reason == "outside-window" {
+        return b2_stream(env, file_name, range).await;
+    }
+
     // ── KESH TAYYOR EMAS ─────────────────────────────────────
     // B2'ga CHIQILMAYDI. Ilova isitishni (`/api/warm/...`)
     // chaqirib, keyin qaytadan uriniladi.
@@ -815,6 +790,48 @@ async fn b2_play(file_name: &str, range: Option<String>) -> Result<Response> {
         h.set("Cache-Control", "no-store")?;
         h.set("X-Cache", "NOT-WARMED")?;
         h.set("X-Warm-Reason", &reason)?;
+    }
+    Ok(resp)
+}
+
+/// B2'dan to'g'ridan-to'g'ri oqim (faqat 480 MiB'dan katta fayllar
+/// uchun — `b2_play` izohiga qarang).
+///
+/// `Range` B2'ga O'ZGARISHSIZ uzatiladi, ya'ni javob hech qachon
+/// sun'iy kesilmaydi.
+async fn b2_stream(env: &Env, file_name: &str, range: Option<String>) -> Result<Response> {
+    let acc = b2_access(env).await?;
+    let h = Headers::new();
+    h.set("Authorization", &acc.token)?;
+    if let Some(r) = range.as_deref() {
+        h.set("Range", r)?;
+    }
+    let req = Request::new_with_init(
+        &format!("{}/file/aniraxuz/{file_name}", acc.dl_url),
+        RequestInit::new().with_method(Method::Get).with_headers(h),
+    )?;
+    let mut b2 = Fetch::Request(req).send().await?;
+    let status = b2.status_code();
+    if status != 200 && status != 206 {
+        return Err(Error::RustError(format!("B2 oqim xatosi: {status}")));
+    }
+    let ct = b2
+        .headers()
+        .get("Content-Type")?
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    let cr = b2.headers().get("Content-Range")?;
+    let stream = b2.stream()?;
+    let mut resp = Response::from_stream(stream)?.with_status(status);
+    set_cors(&mut resp);
+    {
+        let h = resp.headers_mut();
+        h.set("Content-Type", &ct)?;
+        h.set("Accept-Ranges", "bytes")?;
+        h.set("Cache-Control", "no-store")?;
+        if let Some(c) = cr {
+            h.set("Content-Range", &c)?;
+        }
+        h.set("X-Cache", "B2-STREAM")?;
     }
     Ok(resp)
 }
@@ -1329,17 +1346,12 @@ async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
         if let Some(fname) = path.strip_prefix("/api/image/") {
             return b2_proxy(&env, &ctx, fname, range_header).await;
         }
-        // ── VAQTINCHA: KESH ORALIQNI KESIB BERA OLADIMI? ─────
-        // Bu tekshiruv tugagach OLIB TASHLANADI.
-        if path == "/api/cachetest" {
-            return cache_range_test().await;
-        }
         // Pleyer SHU manzildan oqim oladi (b2_play izohiga qarang).
         // Farqi: javob hech qachon sun'iy kesilmaydi va bo'laklab
         // keshlash mantiqi umuman ishlatilmaydi — ya'ni pleyer
         // faqat o'zi so'ragan baytni oladi.
         if let Some(fname) = path.strip_prefix("/api/play/") {
-            return b2_play(fname, range_header).await;
+            return b2_play(&env, fname, range_header).await;
         }
         // Oynani keshga isitish — ilova video ochilganda BIR MARTA
         // chaqiradi va so'rov tugaguncha ulanib turadi (b2_warm
