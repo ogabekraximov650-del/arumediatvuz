@@ -2107,6 +2107,48 @@ pub extern "C" fn rust_video_cache_stats(urls_json_ptr: *const c_char) -> *mut c
     string_to_cptr(serde_json::Value::Object(out).to_string())
 }
 
+/// ── SHU VIDEO TELEFONDA TO'LIQ BORMI ────────────────────────────
+///
+/// Pleyer AYNAN SHU javobga qarab manba tanlaydi:
+///   * `1` — fayl to'liq diskda: pleyer MAHALLIY server orqali
+///     ko'rsatadi va internetga umuman chiqmaydi (internet bo'lsa
+///     ham, bo'lmasa ham);
+///   * `0` — fayl to'liq emas: pleyer to'g'ridan-to'g'ri worker'ga
+///     ulanadi (internet kerak).
+///
+/// NEGA BU CHAQIRUV `rust_video_cache_stats` DAN FARQ QILADI:
+/// `stats` UI oqimida soniyada bir necha marta chaqilgani uchun
+/// diskka UMUMAN chiqmaydi — javob hali skanerlanmagan videoda
+/// "0 bayt" bo'lib chiqadi. Bu yerda esa javob ANIQ bo'lishi shart
+/// (aks holda to'liq yuklangan video baribir internetdan
+/// ko'rsatilib, foydalanuvchining trafigi bekorga sarflanardi).
+/// Shu sabab bu funksiya diskni SINXRON skanerlaydi — lekin u
+/// faqat video OCHILGANDA bir marta chaqiriladi, ya'ni ro'yxatni
+/// surishga hech qanday ta'siri yo'q.
+#[no_mangle]
+pub extern "C" fn rust_video_cache_complete(url_ptr: *const c_char) -> i32 {
+    let Some(shared) = SHARED.get() else {
+        return 0;
+    };
+    let Some(url) = (unsafe { cstr_to_str(url_ptr) }) else {
+        return 0;
+    };
+    if url.is_empty() {
+        return 0;
+    }
+    let key = cache_key(url);
+    let dir = shared.cache_root.join(&key);
+    if !dir.is_dir() {
+        return 0;
+    }
+    let (total, downloaded) = stat_snapshot(&key, &dir);
+    if total > 0 && downloaded >= total {
+        1
+    } else {
+        0
+    }
+}
+
 /// Videoni to'liq yuklab olishni boshlaydi (yetishmayotgan bo'laklarni).
 /// Darhol qaytadi.
 #[no_mangle]

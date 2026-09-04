@@ -39,8 +39,47 @@ import 'package:http/http.dart' as http;
 // Google'ning Android uchun rasmiy tavsiyasi va Flutter
 // teksturasidagi (SurfaceTexture/Impeller) muammolardan xoli yo'l.
 //
-// Mahalliy Rust kesh-serveri (127.0.0.1) O'ZGARISHSIZ qoladi:
-// ExoPlayer oddiy HTTP Range so'rovlari bilan ishlaydi.
+// ═══════════════════════════════════════════════════════════════════
+//  VIDEO QAYERDAN KELADI: IKKI YO'L, IKKITASI HAM ANIQ
+// ═══════════════════════════════════════════════════════════════════
+//
+// ── ILGARI QANDAY EDI VA NEGA MUAMMO BO'LGAN ──────────────────────
+//
+// Pleyer HAR DOIM telefondagi mahalliy (127.0.0.1) Rust kesh-serveri
+// orqali ishlardi. Undan ikkita muammo kelib chiqardi:
+//
+//   1) ORTIQCHA (VA ERTA) YUKLASH. Mahalliy server pleyer so'ramagan
+//      baytlarni ham oldindan tortib olardi: bo'laklar 8 MiB'lik
+//      guruhlar bilan olinar, ustiga worker'da "oyna isitish" ham
+//      ishga tushardi. Foydalanuvchi videoning bir necha daqiqasini
+//      ko'rsa ham, trafik ancha ko'p sarflanardi.
+//
+//   2) "VIDEO TUGADI" DEB BOSHIDAN BOSHLANISH. Mahalliy server biror
+//      bo'lakni ololmasa, javobni yarmida to'xtatib ulanishni
+//      yopardi. ExoPlayer uchun esa javobning erta tugashi "FAYL
+//      TUGADI" degani: u videoni tugagan deb bilib, yig'ilgan
+//      buferni boshidan qayta ko'rsatardi — video esa hali
+//      o'rtasida edi.
+//
+// ── ENDI QANDAY ───────────────────────────────────────────────────
+//
+//   * Fayl telefonda TO'LIQ bor  ->  MAHALLIY server (127.0.0.1).
+//     Internet bor-yo'qligidan qat'i nazar: bitta ham tarmoq
+//     so'rovi yuborilmaydi.
+//
+//   * Fayl to'liq emas + internet bor  ->  TO'G'RIDAN-TO'G'RI
+//     worker (`/api/play/...`). Bu oddiy, to'g'ri HTTP video
+//     manbasi: `Range` so'rovi o'zgarishsiz bajariladi va javob
+//     hech qachon sun'iy kesilmaydi. Qancha bayt olishni endi
+//     PLEYERNING O'ZI hal qiladi (buferi to'lishi bilan soketdan
+//     o'qishni to'xtatadi) — ortiqcha bayt olinmaydi.
+//
+//   * Fayl to'liq emas + internet yo'q  ->  ijro etib bo'lmaydi,
+//     foydalanuvchiga aniq xabar ko'rsatiladi.
+//
+// Ya'ni mahalliy kesh-server O'CHIRILMADI, uning VAZIFASI aniqlashdi:
+// u endi YUKLAB OLISH tugmasiga xizmat qiladi (va yuklab olingan
+// videoni oflayn ko'rsatadi), ijro oqimiga aralashmaydi.
 import 'package:video_player/video_player.dart';
 
 import '../services/download_manager.dart';
@@ -85,9 +124,11 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   bool _isScrubbing = false;
 
   Map<String, dynamic>? _currentEp;
-  // Hozir ijro etilayotgan videoning ASL (worker'dagi) manzili —
-  // pleyer progress chizig'idagi "yuklab olingan" oq qism shu manzil
-  // bo'yicha real vaqtda hisoblanadi.
+  // Hozir ijro etilayotgan videoning ASL (`/api/image/...`) manzili.
+  // Kesh, yuklab olish hisobi va o'chirish AYNAN shu manzil bo'yicha
+  // ishlaydi. Pleyerga beriladigan manzil esa boshqacha bo'lishi
+  // mumkin (mahalliy proksi yoki `/api/play/...`) — `_playEpisode`ga
+  // qarang.
   String _currentUrl = '';
   // Ro'yxatda YOYILGAN (sifatlari ko'rsatilgan) qismlar kalitlari.
   final Set<String> _expandedEps = {};
@@ -102,10 +143,10 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   String? _selectedQuality;
   bool _playerLoading = false;
 
-  // Worker videoni Cloudflare keshiga ko'chirayotgan payt `true`.
-  // Shu paytda ekranda aylanma chiziq va "Video tayyorlanyabdi..."
-  // yozuvi turadi — foydalanuvchi nima kutayotganini bilsin.
-  bool _preparing = false;
+  // Hozirgi video QAYERDAN kelayapti:
+  //   true  — telefondagi mahalliy server (fayl to'liq yuklangan);
+  //   false — to'g'ridan-to'g'ri worker (internet orqali).
+  bool _playViaLocal = false;
   int _playToken = 0;
   String? _playerError;
 
@@ -360,19 +401,12 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // tegmaydi (aynan shu tekshiruvsiz eski ochilish yangisining
     // controllerini o'chirib yuborib, "epizod almashtirganda ekran
     // qora bo'lib qoldi" holatini keltirib chiqarardi).
-    // Yangi qism — ijro nuqtasi noldan (yoki `resumeAt` dan)
-    // boshlanadi. Yadro oynani eski videoning nuqtasidan hisoblab
-    // qolmasligi uchun darhol xabar qilamiz.
-    _lastPosReport = DateTime.now();
-    RustCore.instance.videoSetPosition(url, (resumeAt ?? Duration.zero).inMilliseconds);
-
     final myToken = ++_playToken;
     setState(() {
       _currentEp = ep;
       _currentUrl = url;
       _showControls = true;
       _playerLoading = true;
-      _preparing = false;
       _playerError = null;
       _intendedPlaying = resumePlaying;
     });
@@ -406,51 +440,56 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     if (!mounted || myToken != _playToken) return;
 
     // ═══════════════════════════════════════════════════════════
-    //  TAYYORLASH: B2'ga ATIGI BITTA so'rov
+    //  MANBA TANLASH: WORKER'MI YOKI MAHALLIY SERVERMI
     // ═══════════════════════════════════════════════════════════
     //
-    // Pleyerni ochishdan OLDIN yadro worker'ga "oynani keshga
-    // ko'chir" degan bitta so'rov yuboradi va tugashini kutamiz.
-    // Shundan keyin videoning har bir bo'lagi Cloudflare
-    // chekkasidan keladi va B2'ga umuman chiqilmaydi.
+    // Qoida sodda va qat'iy (ekran boshidagi izohga qarang):
     //
-    // NEGA KUTISH SHU YERDA: kutishni mahalliy serverning HTTP
-    // javobi ichida qilib bo'lmaydi — ExoPlayer javob sarlavhasini
-    // 8 soniyadan ortiq kutmaydi va ulanishni uzib xatoga chiqadi.
-    // Bu yerda esa ekranda oddiy "yuklanmoqda" belgisi turadi.
-    //
-    // Fayl allaqachon to'liq telefonda bo'lsa (yuklab olingan yoki
-    // ko'rilgan) — bu bosqich bir zumda o'tadi va tarmoqqa umuman
-    // chiqilmaydi.
-    await _prepareSource(url, myToken);
-    if (!mounted || myToken != _playToken) return;
-
-    // Tayyorlash uzoq (bir necha daqiqagacha) davom etgan bo'lishi
-    // mumkin, yadrodagi ijro nuqtasi esa 30 soniyada eskiradi
-    // (video_cache.rs -> PLAY_POS_FRESH_MS). Pleyer ochilishi bilan
-    // birinchi so'rovni yuboradi — o'sha so'rov 15 soniyalik bufer
-    // qoidasi bilan ishlashi uchun nuqtani SHU YERDA yangilaymiz.
-    _reportPosition(resumeAt ?? Duration.zero);
-
-    // ── Video manzili: HAMISHA mahalliy kesh-server orqali ────
-    Uri source;
-    bool viaProxy = true;
-    try {
-      source = await VideoCacheServer.instance.proxyUri(url);
-    } catch (e) {
-      VideoCacheServer.log('proxyUri xato berdi, asl URL ishlatiladi: $e');
-      source = Uri.parse(url);
-      viaProxy = false;
+    //   * fayl TELEFONDA TO'LIQ bor -> MAHALLIY server. Internet
+    //     bor-yo'qligi ahamiyatsiz: bitta ham tarmoq so'rovi
+    //     yuborilmaydi.
+    //   * fayl to'liq emas + internet bor -> to'g'ridan-to'g'ri
+    //     WORKER (/api/play/...).
+    //   * fayl to'liq emas + internet yo'q -> ijro etib bo'lmaydi.
+    final complete = _isFullyDownloaded(url);
+    Uri? source;
+    if (complete) {
+      try {
+        source = await VideoCacheServer.instance.proxyUri(url);
+        _playViaLocal = true;
+      } catch (e) {
+        // Mahalliy server javob bermadi — quyida worker'ga
+        // o'tamiz (internet bo'lsa).
+        VideoCacheServer.log('Mahalliy server javob bermadi: $e');
+      }
     }
     if (!mounted || myToken != _playToken) return;
 
+    if (source == null) {
+      if (_offline) {
+        setState(() {
+          _playerLoading = false;
+          _playerError = complete
+              ? 'Videoni ochib bo\'lmadi'
+              : 'Bu qism to\'liq yuklab olinmagan — internetga ulaning';
+        });
+        return;
+      }
+      source = Uri.parse(_workerPlayUrl(url));
+      _playViaLocal = false;
+    }
+    VideoCacheServer.log(_playViaLocal
+        ? 'Manba: MAHALLIY server (fayl to\'liq yuklangan)'
+        : 'Manba: WORKER (to\'g\'ridan-to\'g\'ri oqim)');
+
     var ctrl = await _openController(source, myToken);
-    // Mahalliy proksi ishlamasa — kesh bo'lmasa ham video ochilishi
-    // uchun asl URL bilan qayta urinamiz.
-    if (ctrl == null && viaProxy) {
+    // Mahalliy server kutilmaganda ishlamay qolsa — internet bo'lsa
+    // worker orqali qayta urinamiz (video baribir ochilsin).
+    if (ctrl == null && _playViaLocal && !_offline) {
       if (!mounted || myToken != _playToken) return;
-      VideoCacheServer.log('Zaxira: asl URL bilan qayta urinilyapti...');
-      ctrl = await _openController(Uri.parse(url), myToken);
+      VideoCacheServer.log('Zaxira: worker orqali qayta urinilyapti...');
+      _playViaLocal = false;
+      ctrl = await _openController(Uri.parse(_workerPlayUrl(url)), myToken);
     }
 
     if (!mounted || myToken != _playToken) {
@@ -526,37 +565,36 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _scheduleHide();
   }
 
-  /// Worker'ga isitish so'rovini yuboradi va tugashini kutadi.
+  /// ── FAYL TELEFONDA TO'LIQ BORMI ─────────────────────────────
   ///
-  /// Kutish CHEGARALANGAN (`_prepareMax`): shu vaqt ichida
-  /// tugamasa, video baribir ochiladi va bo'laklar odatdagidek
-  /// olinadi — ya'ni ilova hech qachon "muzlab" qolmaydi.
-  static const Duration _prepareMax = Duration(minutes: 3);
+  /// Pleyer manbani AYNAN shu javobga qarab tanlaydi.
+  ///
+  /// Ekrandagi hisob (`DownloadManager`) UI oqimini bloklamaslik
+  /// uchun diskka chiqmaydi — shu sabab video endigina ochilganda u
+  /// hali "0 bayt" deb turishi mumkin. Shu bois bu yerda Rust
+  /// yadrosidan ANIQ javob so'raladi: u diskni bir marta
+  /// skanerlaydi. Chaqiruv faqat video ochilganda bo'lgani uchun
+  /// ro'yxatni surishga hech qanday ta'siri yo'q.
+  bool _isFullyDownloaded(String url) {
+    if (url.isEmpty) return false;
+    if (DownloadManager.instance.statOf(url).complete) return true;
+    return RustCore.instance.videoIsComplete(url);
+  }
 
-  Future<void> _prepareSource(String url, int myToken) async {
-    RustCore.instance.videoPrepare(url);
-    // Darhol tayyor bo'lsa (fayl telefonda bor yoki oyna allaqachon
-    // keshda) — hech qanday yozuv ko'rsatmaymiz.
-    if (RustCore.instance.videoPrepareReady(url)) return;
-
-    if (mounted && myToken == _playToken) {
-      setState(() => _preparing = true);
-    }
-    final started = DateTime.now();
-    try {
-      while (mounted && myToken == _playToken) {
-        if (RustCore.instance.videoPrepareReady(url)) return;
-        if (DateTime.now().difference(started) > _prepareMax) {
-          VideoCacheServer.log(
-              'Tayyorlash ${_prepareMax.inMinutes} daqiqada tugamadi — '
-              'video baribir ochilmoqda');
-          return;
-        }
-        await Future.delayed(const Duration(milliseconds: 300));
-      }
-    } finally {
-      if (mounted) setState(() => _preparing = false);
-    }
+  /// Worker'dagi TO'G'RIDAN-TO'G'RI ijro manzili.
+  ///
+  /// Bazadagi manzil `/api/image/<fayl>` ko'rinishida saqlanadi —
+  /// bu bo'laklab keshlaydigan, YUKLAB OLISH uchun mo'ljallangan
+  /// yo'l. Pleyer uchun esa `/api/play/<fayl>` ishlatiladi: u
+  /// javobni hech qachon kesmaydi (`Range` B2'ga o'zgarishsiz
+  /// uzatiladi) va tanani oqim bilan beradi. Aynan shu farq
+  /// "video tugadi deb boshidan boshlanishi" muammosini yo'q
+  /// qiladi.
+  static String _workerPlayUrl(String url) {
+    const mark = '/api/image/';
+    final i = url.indexOf(mark);
+    if (i < 0) return url;
+    return '${url.substring(0, i)}/api/play/${url.substring(i + mark.length)}';
   }
 
   // Bitta manzildan controller ochishga urinadi. Muvaffaqiyatsiz
@@ -608,9 +646,6 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   // Controllerdan kelgan har bir yangilanish. Bu yerda faqat
   // XATO holatini kuzatamiz — qolgan yangilanishlarni UI o'zi
   // (ValueListenableBuilder orqali) oladi.
-  /// Ijro nuqtasi oxirgi marta qachon yadroga xabar qilingan.
-  DateTime _lastPosReport = DateTime.fromMillisecondsSinceEpoch(0);
-
   /// Video "tugadi" xabari kelishidan OLDINGI oxirgi haqiqiy ijro
   /// nuqtasi.
   ///
@@ -646,13 +681,6 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     } else if (v.isInitialized) {
       _lastGoodPosition = v.position;
     }
-    // ── OLDINDAN YUKLASH OYNASI SHU NUQTADAN HISOBLANADI ───────
-    // Yadro o'zi faqat BUFER UCHINI biladi (u uzatgan oxirgi
-    // bo'lak), ijro nuqtasi esa undan bir necha bo'lak orqada.
-    // Oynani bufer uchidan hisoblash uni ikki barobar kengaytirib
-    // yuborardi — shu sabab haqiqiy nuqtani o'zimiz aytamiz.
-    // Soniyada bir marta yetarli (chaqiruv juda arzon).
-    _reportPositionThrottled(c.value.position);
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -690,7 +718,6 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       VideoCacheServer.log('Video oxiriga yetdi — boshidan boshlanmoqda');
       _lastGoodPosition = Duration.zero;
       _pendingEofAt = null;
-      _reportPosition(Duration.zero);
       () async {
         try {
           // `video_player` "tugadi" hodisasida O'ZI ham
@@ -720,37 +747,18 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _recoverPlayer(reached);
   }
 
-  /// Ijro nuqtasini yadroga xabar qiladi — yarim soniyada bir
-  /// martadan ko'p emas.
-  ///
-  /// MUHIM: yadro bu xabarga QAT'IY tayanadi — javob oynasi
-  /// ("oldinda nechta bo'lak yuklansin") aynan shu nuqtadan
-  /// hisoblanadi. Xabar 30 soniyadan ortiq yangilanmasa, yadro uni
-  /// eskirgan deb hisoblab so'rovning o'z boshlanish nuqtasiga
-  /// qaytadi (video_cache.rs -> PLAY_POS_FRESH_MS). Shu sabab u
-  /// ikki joydan yuboriladi: controller yangilanishlaridan va
-  /// sog'liq kuzatuvchisi taymeridan — biri jim qolsa ikkinchisi
-  /// ishlaydi.
-  void _reportPositionThrottled(Duration pos) {
-    if (_currentUrl.isEmpty) return;
-    final now = DateTime.now();
-    // 1000 -> 500 ms: bufer darvozasi AYNAN shu songa qarab
-    // ochiladi, ya'ni xabar qanchalik tez-tez kelsa, baytlar
-    // shunchalik SILLIQ oqadi. Chaqiruvning o'zi juda arzon
-    // (yadroda ikkita atomik yozuv).
-    if (now.difference(_lastPosReport) <
-        const Duration(milliseconds: 500)) {
-      return;
-    }
-    _lastPosReport = now;
-    RustCore.instance.videoSetPosition(_currentUrl, pos.inMilliseconds);
-  }
-
-  void _reportPosition(Duration pos) {
-    if (_currentUrl.isEmpty) return;
-    _lastPosReport = DateTime.now();
-    RustCore.instance.videoSetPosition(_currentUrl, pos.inMilliseconds);
-  }
+  // ── IJRO NUQTASINI YADROGA XABAR QILISH — OLIB TASHLANDI ─────
+  //
+  // Ilgari pleyer har yarim soniyada Rust yadrosiga "hozir shu
+  // joydaman" deb xabar berardi: yadro javob oynasini ("oldinda
+  // nechta bo'lak yuklansin") aynan shu nuqtadan hisoblardi.
+  //
+  // Endi bu xabar KERAK EMAS:
+  //   * worker'dan ijro etilganda yadro umuman ishtirok etmaydi —
+  //     baytlarni pleyerning o'zi so'raydi;
+  //   * mahalliy serverdan ijro etilganda esa fayl ALLAQACHON
+  //     to'liq diskda bo'ladi, ya'ni "oldinda nimani yuklash
+  //     kerak" degan savolning o'zi yo'q.
 
   // ── SOG'LIQ KUZATUVCHISI (health watchdog) ────────────────────
   //
@@ -770,11 +778,6 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       if (c == null) return;
       final VideoPlayerValue v = c.value;
       if (!v.isInitialized || v.duration <= Duration.zero) return;
-
-      // Ijro nuqtasi — yadrodagi javob oynasi uchun. Controller
-      // yangilanishlari siyraklashsa ham bu taymer uni yangilab
-      // turadi.
-      _reportPositionThrottled(v.position);
 
       // ── ERTA UZILGAN OQIM: QAYTA OCHISHNI TAKRORLASH ─────────
       // `_recoverPlayer` ichidagi 6 soniyalik tormoz sabab birinchi
@@ -1076,13 +1079,6 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       if (mounted) setState(() => _pendingTarget = null);
       return;
     }
-    // ── SEKDAN OLDIN xabar qilamiz ────────────────────────────
-    // ExoPlayer sek buyrug'ini olishi bilan YANGI bayt oralig'ini
-    // so'raydi. Agar yadro hali eski nuqtani bilsa, javob oynasi
-    // eski joyda hisoblanib, yangi joyga atigi bitta bo'lak
-    // berilardi (ya'ni sekdan keyin video sekin ochilardi). Shu
-    // sabab nuqta sek BOSHLANISHIDAN oldin ham yuboriladi.
-    _reportPosition(target);
     await _runSeek(c, target);
     if (!mounted || _controller != c) return;
 
@@ -1096,10 +1092,6 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // uni tegmasdan qoldiramiz — o'zining 1 soniyalik taymeri bilan
     // bajariladi.
     if (_pendingTarget != target) return;
-
-    // Sekdan keyin yana bir bor — endi sek HAQIQATAN o'sha nuqtada
-    // tugagani aniq.
-    _reportPosition(target);
 
     setState(() => _pendingTarget = null);
     if (_resumeAfterSeek) {
@@ -1714,34 +1706,16 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
 
           // ── FAQAT BITTA AYLANMA CHIZIQ ────────────────────────
           //
-          // Kutish holatining HAMMASI (video ochilishi, keshga
-          // saqlanishi, sek, progress chizig'ini surish, qayta
-          // buferlash) markazdagi play/pause tugmasini o'rab turgan
-          // BITTA halqa orqali ko'rsatiladi — `_centerButton`
-          // ichidagi aylanma `CircularProgressIndicator`.
+          // Kutish holatining HAMMASI (video ochilishi, sek,
+          // progress chizig'ini surish, qayta buferlash) markazdagi
+          // play/pause tugmasini o'rab turgan BITTA halqa orqali
+          // ko'rsatiladi — `_centerButton` ichidagi aylanma
+          // `CircularProgressIndicator`.
           //
-          // Ilgari bu yerda yana ikkita alohida aylana bor edi
-          // (ochilish spinneri va buferlash spinneri) — ular
-          // markazdagi halqa bilan bir vaqtda aylanib, ekranni
-          // chalkashtirardi. Ikkalasi ham OLIB TASHLANDI.
-          //
-          // Bu yerda faqat YOZUV qoladi va u aynan halqaning
-          // TAGIDA turadi (halqa diametri 76, ya'ni 60 px pastga
-          // surish uni halqa ostiga tushiradi).
-          if (_currentEp != null && _preparing)
-            Center(
-              child: Transform.translate(
-                offset: const Offset(0, 60),
-                child: const Text(
-                  'Video tayyorlanyabdi...',
-                  style: TextStyle(
-                    color: Colors.white70,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-            ),
+          // "Video tayyorlanyabdi..." yozuvi OLIB TASHLANDI: u
+          // worker'ning keshini oldindan isitishni kutish uchun
+          // kerak edi. Endi pleyer hech narsa kutmaydi — birinchi
+          // baytdan boshlab ijro qiladi.
 
 
           // ── Sek ko'rsatkichlari — asosiy kontrollardan mustaqil,
@@ -1930,7 +1904,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   ///
   /// Kutish deb hisoblanadigan holatlar (foydalanuvchi uchun bularning
   /// hammasi bir xil: "video hozir tayyorlanmoqda"):
-  ///   * video endi ochilmoqda (`_playerLoading`, `_preparing`);
+  ///   * video endi ochilmoqda (`_playerLoading`);
   ///   * pleyer buferlamoqda (`isBuffering`);
   ///   * sek kutilmoqda yoki bajarilmoqda;
   ///   * progress chizig'i barmoq bilan surilmoqda.
@@ -2047,11 +2021,32 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     );
   }
 
+  /// Progress chizig'idagi OQ chiziq — "qayergacha tayyor".
+  ///
+  ///   * mahalliy serverdan ijro etilyaptimi — diskdagi ulush
+  ///     (bunday holatda fayl to'liq, ya'ni 100%);
+  ///   * worker'dan ijro etilyaptimi — pleyerning O'Z buferi.
+  ///     Diskda hech narsa saqlanmagani uchun DownloadManager'ning
+  ///     hisobi bu yerda 0 bo'lardi va chiziq bo'sh ko'rinardi.
+  double _readyRatio(VideoPlayerValue? value) {
+    if (_playViaLocal) {
+      return DownloadManager.instance.statOf(_currentUrl).ratio;
+    }
+    if (value == null) return 0;
+    final dur = value.duration;
+    if (dur <= Duration.zero) return 0;
+    var end = Duration.zero;
+    for (final r in value.buffered) {
+      if (r.end > end) end = r.end;
+    }
+    return (end.inMilliseconds / dur.inMilliseconds).clamp(0.0, 1.0);
+  }
+
   // Faqat slayder/vaqtni eng tor ko'lamda yangilaydi.
   Widget _bottomBarReactive({required bool isFullscreen}) {
     final ctrl = _controller;
-    // Progress chizig'idagi OQ (yuklab olingan) qism uchun: joriy video
-    // qancha yuklanganini DownloadManager real vaqtda beradi.
+    // Progress chizig'idagi OQ (tayyor) qism uchun: mahalliy
+    // ijroda DownloadManager hisobi kerak bo'ladi.
     Widget bar(VideoPlayerValue? value) => AnimatedBuilder(
           animation: DownloadManager.instance,
           builder: (context, _) => _bottomBar(value, isFullscreen),
@@ -2070,8 +2065,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
           // darhol ko'radi.
           position: _pendingTarget ?? value?.position ?? Duration.zero,
           duration: value?.duration ?? Duration.zero,
-          downloadedRatio:
-              DownloadManager.instance.statOf(_currentUrl).ratio,
+          downloadedRatio: _readyRatio(value),
           fmt: _fmt,
           onSeek: (d) {
             // MUHIM: progress chizig'idan kelgan sek ham DEBOUNCE

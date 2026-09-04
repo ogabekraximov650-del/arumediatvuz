@@ -96,6 +96,7 @@ class RustCore {
   late final _VideoUrlActionDart _videoDelete;
   late final _VideoUrlActionDart _videoPrepare;
   late final _VideoUrlActionDart _videoPrepareStatus;
+  late final _VideoUrlActionDart _videoComplete;
   late final _CryptoGenKeyDart _cryptoGenKey;
   late final _CryptoSetKeyDart _cryptoSetKey;
 
@@ -152,6 +153,8 @@ class RustCore {
         'rust_video_cache_delete');
     _videoPrepare = _lib.lookupFunction<_VideoUrlActionC, _VideoUrlActionDart>(
         'rust_video_cache_prepare');
+    _videoComplete = _lib.lookupFunction<_VideoUrlActionC, _VideoUrlActionDart>(
+        'rust_video_cache_complete');
     _videoPrepareStatus =
         _lib.lookupFunction<_VideoUrlActionC, _VideoUrlActionDart>(
             'rust_video_cache_prepare_status');
@@ -457,6 +460,14 @@ class RustCore {
     }
   }
 
+  /// ── ESKIRGAN: HOZIR HECH KIM CHAQIRMAYDI ──────────────────
+  ///
+  /// Pleyer endi mahalliy serverga "hozir shu joydaman" deb xabar
+  /// bermaydi: worker'dan ijro etilganda yadro umuman ishtirok
+  /// etmaydi, mahalliy ijroda esa fayl allaqachon to'liq diskda
+  /// bo'ladi. Chaqiruv Rust tomonida ham hech qayerda o'qilmaydi —
+  /// mos keluvchanlik uchun saqlanyapti.
+  ///
   /// Pleyer HOZIR qayerni ko'rsatayotganini Rust yadrosiga bildiradi.
   ///
   /// Oldindan yuklash oynasi aynan shu nuqtadan hisoblanadi. Ilgari
@@ -488,7 +499,12 @@ class RustCore {
   /// Shu sifatdagi videoning keshini butunlay o'chiradi.
   void videoDelete(String url) => _videoUrlAction(_videoDelete, url);
 
-  /// ── VIDEONI IJROGA TAYYORLASH ───────────────────────────────
+  /// ── VIDEONI IJROGA TAYYORLASH (ESKIRGAN) ────────────────────
+  ///
+  /// Pleyer endi bu isitishni KUTMAYDI — u worker'dan
+  /// to'g'ridan-to'g'ri oqim oladi. Yuklab olish yo'li esa isitishni
+  /// Rust yadrosining o'zi ichida (`maybe_warm`) boshqaradi. Metod
+  /// mos keluvchanlik uchun saqlanyapti.
   ///
   /// Worker'ga "oynani keshga ko'chir" degan BITTA so'rov yuboradi
   /// va DARHOL qaytadi (ish fon oqimida ketadi). Shu isitish
@@ -498,6 +514,29 @@ class RustCore {
   /// Fayl allaqachon to'liq telefonda bo'lsa — hech narsa
   /// qilinmaydi va holat darhol "tayyor" bo'ladi.
   void videoPrepare(String url) => _videoUrlAction(_videoPrepare, url);
+
+  /// ── SHU VIDEO TELEFONDA TO'LIQ BORMI ────────────────────────
+  ///
+  /// Pleyer manba tanlashda AYNAN shu javobga tayanadi:
+  ///   * `true`  — fayl to'liq diskda: video MAHALLIY server orqali
+  ///     ko'rsatiladi, internetga umuman chiqilmaydi;
+  ///   * `false` — fayl to'liq emas: video to'g'ridan-to'g'ri
+  ///     worker'dan oqim bilan ko'rsatiladi (internet kerak).
+  ///
+  /// MUHIM: bu chaqiruv `videoStats` dan farqli o'laroq DISKKA
+  /// chiqadi (bir marta skanerlaydi), shu sabab u FAQAT video
+  /// ochilayotganda chaqiriladi — ro'yxat chizilayotganda emas.
+  bool videoIsComplete(String url) {
+    if (!_loaded || url.isEmpty) return false;
+    final ptr = url.toNativeUtf8();
+    try {
+      return _videoComplete(ptr) == 1;
+    } catch (_) {
+      return false;
+    } finally {
+      malloc.free(ptr);
+    }
+  }
 
   /// Tayyorlash tugadimi. `true` — pleyerni ochish mumkin.
   bool videoPrepareReady(String url) {

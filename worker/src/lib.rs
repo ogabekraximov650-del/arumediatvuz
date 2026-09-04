@@ -605,6 +605,187 @@ async fn b2_warm(env: &Env, file_name: &str, widx: u64) -> Result<Response> {
     }
 }
 
+/// ═══════════════════════════════════════════════════════════════
+///  GET /api/play/:filename  — PLEYER SHU YERDAN OQIM OLADI
+/// ═══════════════════════════════════════════════════════════════
+///
+/// ── NEGA ALOHIDA MANZIL KERAK BO'LDI ────────────────────────────
+///
+/// Ilgari pleyer videoni TELEFONDAGI mahalliy (127.0.0.1) kesh
+/// serveri orqali ko'rsatardi. U ikkita muammo tug'dirardi:
+///
+///   1) ORTIQCHA YUKLASH — mahalliy server pleyer so'ramagan
+///      baytlarni ham oldindan (8 MiB'lik guruhlar bilan) tortib
+///      olardi. Foydalanuvchi videoning 2 daqiqasini ko'rsa ham,
+///      trafik ancha ko'p sarflanardi.
+///
+///   2) "VIDEO TUGADI" DEB QAYTA BOSHLANISH — mahalliy server
+///      bo'lakni ololmasa javobni yarmida to'xtatib, ulanishni
+///      yopardi. ExoPlayer uchun javobning erta tugashi "FAYL
+///      TUGADI" degani: u videoni tugagan deb bilib, yig'ilgan
+///      buferni boshidan qayta ko'rsatardi.
+///
+/// ── YECHIM ──────────────────────────────────────────────────────
+///
+/// Endi pleyer to'g'ridan-to'g'ri SHU manzilga ulanadi va bu yerda
+/// javob HECH QACHON sun'iy ravishda kesilmaydi:
+///   * `Range` sarlavhasi B2'ga o'zgarishsiz uzatiladi;
+///   * javob tanasi OQIM (quvur) bilan o'tadi — worker xotirasiga
+///     yig'ilmaydi, ya'ni fayl hajmi qanchalik katta bo'lishidan
+///     qat'i nazar xavfsiz;
+///   * `Content-Length` / `Content-Range` B2 aytgan HAQIQIY
+///     qiymatlar bo'ladi.
+///
+/// Ya'ni bu oddiy, to'g'ri HTTP video manbasi. Qancha bayt olish
+/// kerakligini endi PLEYERNING O'ZI hal qiladi (ExoPlayer buferi
+/// to'lishi bilan soketdan o'qishni to'xtatadi, TCP esa bizni
+/// ushlab qoladi) — ortiqcha bayt umuman olinmaydi.
+///
+/// `/api/image/...` (bo'laklab keshlaydigan yo'l) O'ZGARISHSIZ
+/// qoladi: undan endi FAQAT "yuklab olish" tugmasi foydalanadi.
+async fn b2_play(env: &Env, file_name: &str, range: Option<String>) -> Result<Response> {
+    // Isitilgan oyna keshida bormi — bo'lsa B2'ga umuman
+    // chiqilmaydi (yuklab olingan/isitilgan videolar shu yo'ldan
+    // Cloudflare chekkasidan keladi).
+    if let Some(resp) = play_from_warm_cache(file_name, range.as_deref()).await? {
+        return Ok(resp);
+    }
+
+    let acc = b2_access(env).await?;
+    let h = Headers::new();
+    h.set("Authorization", &acc.token)?;
+    // MUHIM: oraliq O'ZGARTIRILMASDAN uzatiladi. Pleyer "bytes=N-"
+    // (oxirigacha) deb so'raganda B2 ham faylning OXIRIGACHA beradi
+    // — javob yarmida kesilmaydi, demak "video tugadi" xatosi ham
+    // bo'lmaydi.
+    if let Some(r) = range.as_deref() {
+        h.set("Range", r)?;
+    }
+    let req = Request::new_with_init(
+        &format!("{}/file/aniraxuz/{file_name}", acc.dl_url),
+        RequestInit::new().with_method(Method::Get).with_headers(h),
+    )?;
+    let mut b2 = Fetch::Request(req).send().await?;
+    let status = b2.status_code();
+    if status != 200 && status != 206 {
+        return Err(Error::RustError(format!("B2 oqim xatosi: {status}")));
+    }
+    let ct = b2
+        .headers()
+        .get("Content-Type")?
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    let cl = b2.headers().get("Content-Length")?;
+    let cr = b2.headers().get("Content-Range")?;
+
+    let stream = b2.stream()?;
+    let mut resp = Response::from_stream(stream)?.with_status(status);
+    set_cors(&mut resp);
+    {
+        let h = resp.headers_mut();
+        h.set("Content-Type", &ct)?;
+        h.set("Accept-Ranges", "bytes")?;
+        // Oraliq javoblar oraliq keshlarda saqlanmasin — pleyer
+        // har safar aniq so'ragan baytini olishi kerak.
+        h.set("Cache-Control", "no-store")?;
+        if let Some(l) = cl {
+            h.set("Content-Length", &l)?;
+        }
+        if let Some(c) = cr {
+            h.set("Content-Range", &c)?;
+        }
+        h.set("X-Cache", "STREAM")?;
+    }
+    Ok(resp)
+}
+
+/// Isitilgan oyna keshi so'ralgan oraliqni TO'LIQ qoplasa — javobni
+/// o'sha yerdan (Cloudflare chekkasidan) beradi.
+///
+/// "To'liq qoplash" shart: kesh AYNAN so'ralgan boshlanish va
+/// tugash nuqtasini qaytarishi kerak. Aks holda javob qisqa
+/// bo'lib qolardi — ExoPlayer esa buni "fayl tugadi" deb tushunadi.
+/// Shu sabab shubha bo'lsa `None` qaytariladi va baytlar B2'dan
+/// oqim bilan olinadi.
+async fn play_from_warm_cache(
+    file_name: &str,
+    range: Option<&str>,
+) -> Result<Option<Response>> {
+    let (req_start, req_end_opt) = match range {
+        Some(r) => match parse_range(r) {
+            Some(v) => v,
+            // "bytes=-N" kabi shakllarni bu yerda ishlamaymiz —
+            // ularni B2 o'zi to'g'ri bajaradi.
+            None => return Ok(None),
+        },
+        None => (0, None),
+    };
+
+    let widx = req_start / WARM_WINDOW;
+    let win_start = widx * WARM_WINDOW;
+    let total = match warm_window_total(file_name, widx).await {
+        Some(t) if t > 0 => t,
+        _ => return Ok(None),
+    };
+    if req_start >= total {
+        return Ok(None);
+    }
+    let req_end = req_end_opt.unwrap_or(total - 1).min(total - 1);
+    // So'ralgan oraliq oyna chegarasidan chiqib ketsa — keshdan
+    // to'liq berib bo'lmaydi.
+    if req_end < req_start || req_end >= win_start + WARM_WINDOW {
+        return Ok(None);
+    }
+
+    let rel_start = req_start - win_start;
+    let rel_end = req_end - win_start;
+    let lookup_h = Headers::new();
+    lookup_h.set("Range", &format!("bytes={rel_start}-{rel_end}"))?;
+    let lookup = Request::new_with_init(
+        &warm_window_url(file_name, widx),
+        RequestInit::new().with_method(Method::Get).with_headers(lookup_h),
+    )?;
+    let Some(mut hit) = Cache::default().get(&lookup, false).await? else {
+        return Ok(None);
+    };
+    if hit.status_code() != 206 {
+        return Ok(None);
+    }
+    // Kesh AYNAN so'ralgan oraliqni berdimi?
+    let Some((c_start, c_end, _)) = hit
+        .headers()
+        .get("Content-Range")?
+        .and_then(|c| parse_content_range(&c))
+    else {
+        return Ok(None);
+    };
+    if c_start != rel_start || c_end != rel_end {
+        return Ok(None);
+    }
+
+    let ct = hit
+        .headers()
+        .get("Content-Type")?
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    let len = req_end - req_start + 1;
+    let is_range = range.is_some();
+    let stream = hit.stream()?;
+    let mut resp =
+        Response::from_stream(stream)?.with_status(if is_range { 206 } else { 200 });
+    set_cors(&mut resp);
+    {
+        let h = resp.headers_mut();
+        h.set("Content-Type", &ct)?;
+        h.set("Accept-Ranges", "bytes")?;
+        h.set("Cache-Control", "no-store")?;
+        h.set("Content-Length", &len.to_string())?;
+        if is_range {
+            h.set("Content-Range", &format!("bytes {req_start}-{req_end}/{total}"))?;
+        }
+        h.set("X-Cache", "HIT-WINDOW")?;
+    }
+    Ok(Some(resp))
+}
+
 /// ── RANGE BILAN (video) ──────────────────────────────────────
 ///
 /// ═════════════════════════════════════════════════════════════
@@ -1010,6 +1191,13 @@ async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
     if method == Method::Get {
         if let Some(fname) = path.strip_prefix("/api/image/") {
             return b2_proxy(&env, &ctx, fname, range_header).await;
+        }
+        // Pleyer SHU manzildan oqim oladi (b2_play izohiga qarang).
+        // Farqi: javob hech qachon sun'iy kesilmaydi va bo'laklab
+        // keshlash mantiqi umuman ishlatilmaydi — ya'ni pleyer
+        // faqat o'zi so'ragan baytni oladi.
+        if let Some(fname) = path.strip_prefix("/api/play/") {
+            return b2_play(&env, fname, range_header).await;
         }
         // Oynani keshga isitish — ilova video ochilganda BIR MARTA
         // chaqiradi va so'rov tugaguncha ulanib turadi (b2_warm
