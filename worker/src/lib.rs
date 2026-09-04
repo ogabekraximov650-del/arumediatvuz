@@ -551,6 +551,48 @@ async fn warm_window_total(file_name: &str, widx: u64) -> Option<u64> {
 /// shu sabab worker'ning 128 MB chegarasi muammo bo'lmaydi.
 ///
 /// Javob: {"status":"cached"|"warming"|"warmed"|"error"}
+/// ── VAQTINCHA TEKSHIRUV ─────────────────────────────────────────
+/// Cloudflare Cache API keshdagi yozuvdan ORALIQ kesib, 206 bilan
+/// qaytara oladimi? Butun tizim shu savolga bog'liq.
+async fn cache_range_test() -> Result<Response> {
+    let cache = Cache::default();
+    let url = "https://fulutter-chunk-cache.internal/__rangetest__/v3";
+    let data = vec![7u8; 1024 * 1024];
+    let mut to_cache = Response::from_bytes(data)?;
+    {
+        let h = to_cache.headers_mut();
+        h.set("Content-Type", "application/octet-stream")?;
+        h.set("Accept-Ranges", "bytes")?;
+        h.set("Cache-Control", "public, max-age=600")?;
+        h.set("X-Total-Size", "1048576")?;
+    }
+    let key = Request::new(url, Method::Get)?;
+    let put = cache.put(&key, to_cache).await.is_ok();
+
+    let lh = Headers::new();
+    lh.set("Range", "bytes=10-19")?;
+    let lookup = Request::new_with_init(
+        url,
+        RequestInit::new().with_method(Method::Get).with_headers(lh),
+    )?;
+    let hit = cache.get(&lookup, false).await?;
+    let (status, cr, cl) = match hit {
+        Some(h) => (
+            h.status_code(),
+            h.headers().get("Content-Range")?.unwrap_or_else(|| "-".into()),
+            h.headers().get("Content-Length")?.unwrap_or_else(|| "-".into()),
+        ),
+        None => (0, "-".to_string(), "-".to_string()),
+    };
+    let mut r = Response::ok(format!(
+        "{{\"put\":{put},\"status\":{status},\"content_range\":\"{cr}\",\"content_length\":\"{cl}\"}}"
+    ))?;
+    set_cors(&mut r);
+    r.headers_mut().set("Content-Type", "application/json")?;
+    r.headers_mut().set("Cache-Control", "no-store")?;
+    Ok(r)
+}
+
 /// Butun faylni B2'dan RANGE'SIZ olib, javobni O'ZGARTIRMASDAN
 /// keshga qo'yadi.
 ///
@@ -1280,6 +1322,11 @@ async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
     if method == Method::Get {
         if let Some(fname) = path.strip_prefix("/api/image/") {
             return b2_proxy(&env, &ctx, fname, range_header).await;
+        }
+        // ── VAQTINCHA: KESH ORALIQNI KESIB BERA OLADIMI? ─────
+        // Bu tekshiruv tugagach OLIB TASHLANADI.
+        if path == "/api/cachetest" {
+            return cache_range_test().await;
         }
         // Pleyer SHU manzildan oqim oladi (b2_play izohiga qarang).
         // Farqi: javob hech qachon sun'iy kesilmaydi va bo'laklab
