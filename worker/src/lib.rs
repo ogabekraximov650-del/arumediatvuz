@@ -630,25 +630,6 @@ async fn b2_warm(env: &Env, file_name: &str, widx: u64, force: bool) -> Result<R
 
     // ── FAYL BITTA OYNAGA SIG'ADIMI ──────────────────────────
     //
-    // Avval hajmni bilib olamiz (1 baytlik so'rov — eng arzon B2
-    // tranzaksiyasi). Fayl 480 MiB'dan kichik bo'lsa (bizdagi
-    // qismlarning HAMMASI shunday), uni B2'dan RANGE'SIZ olamiz va
-    // javobni keshga O'ZGARTIRMASDAN qo'yamiz.
-    //
-    // NEGA SHUNDAY QILINYAPTI (topilgan xato): Range'li javob 206
-    // bo'ladi, Cache API esa 206 ni saqlamaydi. Uni saqlash uchun
-    // javob qayta o'ralardi va o'shanda `Content-Length` yo'qolardi.
-    // Content-Length'siz yozuvdan Cloudflare ORALIQ kesib bera
-    // olmaydi — u butun javobni 200 bilan qaytaradi, kod esa faqat
-    // 206 ni qabul qiladi. Natijada "isitilgan oyna" keshi AMALDA
-    // HECH QACHON ishlamas va har bir so'rov B2'ga borardi.
-    let mut size_probe = b2_fetch_range(env, file_name, 0, 0).await.ok();
-    let known_total = size_probe.as_ref().map(|(_, t)| *t).unwrap_or(0);
-    if let Some((probe, _)) = size_probe.as_mut() {
-        // Javob tanasi (1 bayt) o'qib yuboriladi.
-        let _ = probe.bytes().await;
-    }
-
     // 3) Oynani B2'dan ORALIQ bilan olamiz va OQIM bilan keshga
     //    yozamiz (xotiraga yig'ilmaydi).
     let win_start = widx * WARM_WINDOW;
@@ -669,7 +650,7 @@ async fn b2_warm(env: &Env, file_name: &str, widx: u64, force: bool) -> Result<R
         .and_then(|c| parse_content_range(&c))
         .map(|(_, _, t)| t)
         .filter(|t| *t > 0)
-        .unwrap_or(known_total);
+        .unwrap_or(0);
 
     // ── ENG MUHIM SARLAVHA: `Content-Length` ─────────────────
     //
@@ -895,24 +876,44 @@ async fn play_from_warm_cache(
         *reason = "slice-miss".into();
         return Ok(None);
     };
-    if hit.status_code() != 206 {
-        // Kesh oraliqni kesib bermadi (yozuvda `Content-Length`
-        // yo'q bo'lsa shunday bo'ladi) — butun javobni yuborib
-        // bo'lmaydi, aks holda pleyer noto'g'ri baytlarni oladi.
-        *reason = format!("slice-status-{}", hit.status_code());
-        return Ok(None);
-    }
-    // Kesh AYNAN so'ralgan oraliqni berdimi?
-    let Some((c_start, c_end, _)) = hit
-        .headers()
-        .get("Content-Range")?
-        .and_then(|c| parse_content_range(&c))
-    else {
-        *reason = "slice-no-range".into();
-        return Ok(None);
-    };
-    if c_start != rel_start || c_end != rel_end {
-        *reason = format!("slice-mismatch-{c_start}-{c_end}");
+    let st = hit.status_code();
+    let want_len = rel_end - rel_start + 1;
+    if st == 200 {
+        // ── BUTUN YOZUV SO'RALGANDA KESH 200 QAYTARADI ───────
+        //
+        // Bu HTTP bo'yicha to'g'ri: so'ralgan oraliq yozuvning
+        // o'zi bilan bir xil bo'lsa, server 206 o'rniga 200
+        // berishi mumkin. Pleyer videoni ochganda AYNAN shunday
+        // so'raydi ("bytes=0-"), shu sabab bu holat oddiy.
+        //
+        // Lekin uni faqat javob HAQIQATAN so'ralgan baytlar
+        // bo'lgandagina qabul qilamiz: boshlanish nuqtasi 0 va
+        // uzunlik so'ralganiga teng. Aks holda pleyer noto'g'ri
+        // joydan baytlarni olib qolardi.
+        let obj_len = hit
+            .headers()
+            .get("Content-Length")?
+            .and_then(|v| v.parse::<u64>().ok());
+        if rel_start != 0 || obj_len != Some(want_len) {
+            *reason = format!("full-body-{}-vs-{want_len}", obj_len.unwrap_or(0));
+            return Ok(None);
+        }
+    } else if st == 206 {
+        // Kesh AYNAN so'ralgan oraliqni berdimi?
+        let Some((c_start, c_end, _)) = hit
+            .headers()
+            .get("Content-Range")?
+            .and_then(|c| parse_content_range(&c))
+        else {
+            *reason = "slice-no-range".into();
+            return Ok(None);
+        };
+        if c_start != rel_start || c_end != rel_end {
+            *reason = format!("slice-mismatch-{c_start}-{c_end}");
+            return Ok(None);
+        }
+    } else {
+        *reason = format!("slice-status-{st}");
         return Ok(None);
     }
 
