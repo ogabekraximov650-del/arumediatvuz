@@ -551,11 +551,58 @@ async fn warm_window_total(file_name: &str, widx: u64) -> Option<u64> {
 /// shu sabab worker'ning 128 MB chegarasi muammo bo'lmaydi.
 ///
 /// Javob: {"status":"cached"|"warming"|"warmed"|"error"}
+/// Butun faylni B2'dan RANGE'SIZ olib, javobni O'ZGARTIRMASDAN
+/// keshga qo'yadi.
+///
+/// Shu yo'lning yagona maqsadi — keshdagi yozuvda `Content-Length`
+/// saqlanib qolishi. Faqat shunda Cloudflare keyinchalik o'sha
+/// yozuvdan ORALIQ kesib, 206 bilan qaytara oladi (pleyer aynan
+/// shuni so'raydi).
+///
+/// Har bir qadam xatosi MATN bilan qaytadi — kutilmagan holatda
+/// worker 500 bermasdan, aniq sababni aytadi.
+async fn warm_whole_file(
+    acc: &B2Access,
+    cache: &Cache,
+    key: &Request,
+    file_name: &str,
+    total: u64,
+) -> std::result::Result<(), String> {
+    let req = b2_plain_request(acc, file_name).map_err(|e| format!("req {e}"))?;
+    let mut resp = Fetch::Request(req)
+        .send()
+        .await
+        .map_err(|e| format!("fetch {e}"))?;
+    let st = resp.status_code();
+    if st != 200 {
+        return Err(format!("status {st}"));
+    }
+    {
+        let h = resp.headers_mut();
+        h.set("Accept-Ranges", "bytes")
+            .map_err(|e| format!("hdr-ar {e}"))?;
+        h.set(
+            "Cache-Control",
+            &format!("public, max-age={CHUNK_CACHE_SECONDS}"),
+        )
+        .map_err(|e| format!("hdr-cc {e}"))?;
+        h.set("X-Total-Size", &total.to_string())
+            .map_err(|e| format!("hdr-ts {e}"))?;
+    }
+    cache.put(key, resp).await.map_err(|e| format!("put {e}"))?;
+    Ok(())
+}
+
 async fn b2_warm(env: &Env, file_name: &str, widx: u64, force: bool) -> Result<Response> {
     // Javobda faylning UMUMIY hajmi ham qaytariladi — shu bilan
     // ilova hajmni bilish uchun ALOHIDA so'rov yubormaydi, ya'ni
     // B2'ga bitta ham ortiqcha murojaat bo'lmaydi.
     let reply = |status: &str, total: u64| -> Result<Response> {
+        // Diagnostika matni JSON'ni buzmasin.
+        let status: String = status
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || " :-_.,()".contains(*c))
+            .collect();
         let mut r = Response::ok(format!(
             "{{\"status\":\"{status}\",\"total\":{total}}}"
         ))?;
@@ -614,23 +661,11 @@ async fn b2_warm(env: &Env, file_name: &str, widx: u64, force: bool) -> Result<R
     }
 
     if widx == 0 && known_total > 0 && known_total <= WARM_WINDOW {
-        let req = b2_plain_request(&acc, file_name)?;
-        let mut resp = Fetch::Request(req).send().await?;
-        if resp.status_code() == 200 {
-            {
-                let h = resp.headers_mut();
-                h.set("Accept-Ranges", "bytes")?;
-                h.set(
-                    "Cache-Control",
-                    &format!("public, max-age={CHUNK_CACHE_SECONDS}"),
-                )?;
-                h.set("X-Total-Size", &known_total.to_string())?;
-                h.set("X-Window-Start", "0")?;
-            }
-            return match cache.put(&key, resp).await {
-                Ok(_) => reply("warmed", known_total),
-                Err(_) => reply("error", known_total),
-            };
+        match warm_whole_file(&acc, &cache, &key, file_name, known_total).await {
+            Ok(()) => return reply("warmed", known_total),
+            // Qaysi qadamda uzilgani javobda ko'rinadi — kutilmagan
+            // holatda 500 o'rniga aniq sabab qaytadi.
+            Err(e) => return reply(&format!("error {e}"), known_total),
         }
     }
 
