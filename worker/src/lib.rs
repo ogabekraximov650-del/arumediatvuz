@@ -412,6 +412,27 @@ async fn b2_access(env: &Env) -> Result<B2Access> {
     })
 }
 
+/// B2'dan faylni BUTUNLIGICHA (Range'siz) so'rash.
+///
+/// NEGA KERAK: B2 Range'li so'rovga 206 bilan javob beradi,
+/// Cloudflare Cache API esa 206 javobni SAQLAMAYDI. Uni saqlash
+/// uchun javobni qayta o'rash kerak bo'ladi, qayta o'ralgan oqimdan
+/// esa `Content-Length` YO'QOLADI — natijada keshdagi yozuvdan
+/// keyinchalik ORALIQ kesib bo'lmaydi (Cloudflare 206 emas, butun
+/// javobni qaytaradi) va har bir so'rov B2'ga tushib ketaveradi.
+///
+/// Range'siz so'rovga B2 200 + `Content-Length` qaytaradi — bunday
+/// javobni keshga O'ZGARTIRMASDAN qo'yish mumkin va uzunlik
+/// saqlanib qoladi.
+fn b2_plain_request(acc: &B2Access, file_name: &str) -> Result<Request> {
+    let h = Headers::new();
+    h.set("Authorization", &acc.token)?;
+    Request::new_with_init(
+        &format!("{}/file/aniraxuz/{file_name}", acc.dl_url),
+        RequestInit::new().with_method(Method::Get).with_headers(h),
+    )
+}
+
 fn b2_range_request(acc: &B2Access, file_name: &str, start: u64, end: u64) -> Result<Request> {
     let mut h = Headers::new();
     h.set("Authorization", &acc.token)?;
@@ -530,7 +551,7 @@ async fn warm_window_total(file_name: &str, widx: u64) -> Option<u64> {
 /// shu sabab worker'ning 128 MB chegarasi muammo bo'lmaydi.
 ///
 /// Javob: {"status":"cached"|"warming"|"warmed"|"error"}
-async fn b2_warm(env: &Env, file_name: &str, widx: u64) -> Result<Response> {
+async fn b2_warm(env: &Env, file_name: &str, widx: u64, force: bool) -> Result<Response> {
     // Javobda faylning UMUMIY hajmi ham qaytariladi — shu bilan
     // ilova hajmni bilish uchun ALOHIDA so'rov yubormaydi, ya'ni
     // B2'ga bitta ham ortiqcha murojaat bo'lmaydi.
@@ -546,14 +567,20 @@ async fn b2_warm(env: &Env, file_name: &str, widx: u64) -> Result<Response> {
 
     // 1) Allaqachon keshdami — ish tamom (hajmni keshdagi
     //    yozuvning o'zidan olamiz).
-    if let Some(total) = warm_window_total(file_name, widx).await {
-        return reply("cached", total);
+    //
+    // `force=1` bo'lsa bu tekshiruvlar o'tkazib yuboriladi: keshdagi
+    // yozuv eskirgan yoki noto'g'ri shaklda bo'lsa, uni QAYTADAN
+    // yozish uchun kerak.
+    if !force {
+        if let Some(total) = warm_window_total(file_name, widx).await {
+            return reply("cached", total);
+        }
     }
 
     // 2) Boshqa birov aynan hozir isitayaptimi.
     let cache = Cache::default();
     let marker_key = Request::new(&warm_marker_url(file_name, widx), Method::Get)?;
-    if cache.get(&marker_key, false).await?.is_some() {
+    if !force && cache.get(&marker_key, false).await?.is_some() {
         return reply("warming", 0);
     }
     let mut marker = Response::ok("1")?;
@@ -562,11 +589,56 @@ async fn b2_warm(env: &Env, file_name: &str, widx: u64) -> Result<Response> {
         .set("Cache-Control", &format!("public, max-age={WARM_MARKER_SECONDS}"))?;
     let _ = cache.put(&marker_key, marker).await;
 
-    // 3) B2 -> kesh, OQIM bilan. Mijoz ulanib turgani uchun vaqt
-    //    chegarasi yo'q.
+    let key = Request::new(&warm_window_url(file_name, widx), Method::Get)?;
+    let acc = b2_access(env).await?;
+
+    // ── FAYL BITTA OYNAGA SIG'ADIMI ──────────────────────────
+    //
+    // Avval hajmni bilib olamiz (1 baytlik so'rov — eng arzon B2
+    // tranzaksiyasi). Fayl 480 MiB'dan kichik bo'lsa (bizdagi
+    // qismlarning HAMMASI shunday), uni B2'dan RANGE'SIZ olamiz va
+    // javobni keshga O'ZGARTIRMASDAN qo'yamiz.
+    //
+    // NEGA SHUNDAY QILINYAPTI (topilgan xato): Range'li javob 206
+    // bo'ladi, Cache API esa 206 ni saqlamaydi. Uni saqlash uchun
+    // javob qayta o'ralardi va o'shanda `Content-Length` yo'qolardi.
+    // Content-Length'siz yozuvdan Cloudflare ORALIQ kesib bera
+    // olmaydi — u butun javobni 200 bilan qaytaradi, kod esa faqat
+    // 206 ni qabul qiladi. Natijada "isitilgan oyna" keshi AMALDA
+    // HECH QACHON ishlamas va har bir so'rov B2'ga borardi.
+    let mut size_probe = b2_fetch_range(env, file_name, 0, 0).await.ok();
+    let known_total = size_probe.as_ref().map(|(_, t)| *t).unwrap_or(0);
+    if let Some((probe, _)) = size_probe.as_mut() {
+        // Javob tanasi (1 bayt) o'qib yuboriladi.
+        let _ = probe.bytes().await;
+    }
+
+    if widx == 0 && known_total > 0 && known_total <= WARM_WINDOW {
+        let req = b2_plain_request(&acc, file_name)?;
+        let mut resp = Fetch::Request(req).send().await?;
+        if resp.status_code() == 200 {
+            {
+                let h = resp.headers_mut();
+                h.set("Accept-Ranges", "bytes")?;
+                h.set(
+                    "Cache-Control",
+                    &format!("public, max-age={CHUNK_CACHE_SECONDS}"),
+                )?;
+                h.set("X-Total-Size", &known_total.to_string())?;
+                h.set("X-Window-Start", "0")?;
+            }
+            return match cache.put(&key, resp).await {
+                Ok(_) => reply("warmed", known_total),
+                Err(_) => reply("error", known_total),
+            };
+        }
+    }
+
+    // 3) Katta fayl: oynani ORALIQ bilan olamiz (eski yo'l).
+    //    Bunday yozuvdan oraliq kesib bo'lmaydi, lekin `/api/image/`
+    //    uchun u baribir foydali.
     let win_start = widx * WARM_WINDOW;
     let win_end = win_start + WARM_WINDOW - 1;
-    let acc = b2_access(env).await?;
     let req = b2_range_request(&acc, file_name, win_start, win_end)?;
     let mut resp = Fetch::Request(req).send().await?;
     let status = resp.status_code();
@@ -598,7 +670,6 @@ async fn b2_warm(env: &Env, file_name: &str, widx: u64) -> Result<Response> {
         h.set("X-Total-Size", &total.to_string())?;
         h.set("X-Window-Start", &win_start.to_string())?;
     }
-    let key = Request::new(&warm_window_url(file_name, widx), Method::Get)?;
     match cache.put(&key, to_cache).await {
         Ok(_) => reply("warmed", total),
         Err(_) => reply("error", total),
@@ -643,7 +714,12 @@ async fn b2_warm(env: &Env, file_name: &str, widx: u64) -> Result<Response> {
 /// o'zgarishsiz qoladi — undan endi FAQAT "yuklab olish" tugmasi
 /// foydalanadi.
 async fn b2_play(file_name: &str, range: Option<String>) -> Result<Response> {
-    if let Some(resp) = play_from_warm_cache(file_name, range.as_deref()).await? {
+    // Nima uchun keshdan berib bo'lmaganini aytadi (diagnostika —
+    // `X-Warm-Reason` sarlavhasida ko'rinadi).
+    let mut reason = String::new();
+    if let Some(resp) =
+        play_from_warm_cache(file_name, range.as_deref(), &mut reason).await?
+    {
         return Ok(resp);
     }
     // ── KESH TAYYOR EMAS ─────────────────────────────────────
@@ -655,6 +731,7 @@ async fn b2_play(file_name: &str, range: Option<String>) -> Result<Response> {
         let h = resp.headers_mut();
         h.set("Cache-Control", "no-store")?;
         h.set("X-Cache", "NOT-WARMED")?;
+        h.set("X-Warm-Reason", &reason)?;
     }
     Ok(resp)
 }
@@ -670,13 +747,17 @@ async fn b2_play(file_name: &str, range: Option<String>) -> Result<Response> {
 async fn play_from_warm_cache(
     file_name: &str,
     range: Option<&str>,
+    reason: &mut String,
 ) -> Result<Option<Response>> {
     let (req_start, req_end_opt) = match range {
         Some(r) => match parse_range(r) {
             Some(v) => v,
             // "bytes=-N" (oxiridan N bayt) — pleyer bunday
             // so'ramaydi, shu sabab bu yerda ishlamaymiz.
-            None => return Ok(None),
+            None => {
+                *reason = "bad-range".into();
+                return Ok(None);
+            }
         },
         None => (0, None),
     };
@@ -685,15 +766,20 @@ async fn play_from_warm_cache(
     let win_start = widx * WARM_WINDOW;
     let total = match warm_window_total(file_name, widx).await {
         Some(t) if t > 0 => t,
-        _ => return Ok(None),
+        _ => {
+            *reason = "no-window".into();
+            return Ok(None);
+        }
     };
     if req_start >= total {
+        *reason = "start-past-end".into();
         return Ok(None);
     }
     let req_end = req_end_opt.unwrap_or(total - 1).min(total - 1);
     // So'ralgan oraliq oyna chegarasidan chiqib ketsa — keshdan
     // to'liq berib bo'lmaydi.
     if req_end < req_start || req_end >= win_start + WARM_WINDOW {
+        *reason = "outside-window".into();
         return Ok(None);
     }
 
@@ -706,9 +792,14 @@ async fn play_from_warm_cache(
         RequestInit::new().with_method(Method::Get).with_headers(lookup_h),
     )?;
     let Some(mut hit) = Cache::default().get(&lookup, false).await? else {
+        *reason = "slice-miss".into();
         return Ok(None);
     };
     if hit.status_code() != 206 {
+        // Kesh oraliqni kesib bermadi (yozuvda `Content-Length`
+        // yo'q bo'lsa shunday bo'ladi) — butun javobni yuborib
+        // bo'lmaydi, aks holda pleyer noto'g'ri baytlarni oladi.
+        *reason = format!("slice-status-{}", hit.status_code());
         return Ok(None);
     }
     // Kesh AYNAN so'ralgan oraliqni berdimi?
@@ -717,9 +808,11 @@ async fn play_from_warm_cache(
         .get("Content-Range")?
         .and_then(|c| parse_content_range(&c))
     else {
+        *reason = "slice-no-range".into();
         return Ok(None);
     };
     if c_start != rel_start || c_end != rel_end {
+        *reason = format!("slice-mismatch-{c_start}-{c_end}");
         return Ok(None);
     }
 
@@ -1169,7 +1262,10 @@ async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
                 .find(|(k, _)| k == "w")
                 .and_then(|(_, v)| v.parse::<u64>().ok())
                 .unwrap_or(0);
-            return b2_warm(&env, fname, widx).await;
+            let force = url
+                .query_pairs()
+                .any(|(k, v)| k == "force" && (v == "1" || v == "true"));
+            return b2_warm(&env, fname, widx, force).await;
         }
     }
 
