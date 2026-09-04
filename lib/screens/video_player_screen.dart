@@ -74,6 +74,14 @@ import 'package:http/http.dart' as http;
 //     PLEYERNING O'ZI hal qiladi (buferi to'lishi bilan soketdan
 //     o'qishni to'xtatadi) — ortiqcha bayt olinmaydi.
 //
+//     MUHIM: `/api/play/...` FAQAT Cloudflare keshidan xizmat
+//     qiladi. B2'ga murojaat butun tizimda ATIGI BITTA joyda
+//     bo'ladi — isitish so'rovi 480 MiB'lik oynani keshga
+//     ko'chirganda. Shu sabab pleyer ochilishidan oldin ilova
+//     o'sha isitishni chaqirib, tugashini kutadi ("Video
+//     tayyorlanyabdi..."). Kesh tayyor bo'lmasa worker 503
+//     qaytaradi va B2'ga chiqmaydi.
+//
 //   * Fayl to'liq emas + internet yo'q  ->  ijro etib bo'lmaydi,
 //     foydalanuvchiga aniq xabar ko'rsatiladi.
 //
@@ -147,6 +155,12 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   //   true  — telefondagi mahalliy server (fayl to'liq yuklangan);
   //   false — to'g'ridan-to'g'ri worker (internet orqali).
   bool _playViaLocal = false;
+
+  // Worker 480 MiB'lik oynani B2'dan Cloudflare keshiga
+  // ko'chirayotgan payt `true`. Shu paytda ekranda aylanma halqa va
+  // "Video tayyorlanyabdi..." yozuvi turadi — foydalanuvchi nima
+  // kutayotganini bilsin.
+  bool _preparing = false;
   int _playToken = 0;
   String? _playerError;
 
@@ -407,6 +421,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       _currentUrl = url;
       _showControls = true;
       _playerLoading = true;
+      _preparing = false;
       _playerError = null;
       _intendedPlaying = resumePlaying;
     });
@@ -480,16 +495,53 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     }
     VideoCacheServer.log(_playViaLocal
         ? 'Manba: MAHALLIY server (fayl to\'liq yuklangan)'
-        : 'Manba: WORKER (to\'g\'ridan-to\'g\'ri oqim)');
+        : 'Manba: WORKER (Cloudflare keshidan oqim)');
+
+    // ── WORKER'DAN IJRO: AVVAL OYNA KESHGA TAYYOR BO'LSIN ─────
+    //
+    // `/api/play/...` faqat Cloudflare keshidan xizmat qiladi va
+    // B2'ga UMUMAN chiqmaydi. B2'ga murojaat butun tizimda atigi
+    // bitta joyda bo'ladi — isitish so'rovi 480 MiB'lik oynani
+    // keshga ko'chirganda. Shu sabab pleyerni ochishdan oldin
+    // aynan o'sha isitishni chaqiramiz va tugashini kutamiz.
+    //
+    // Fayl allaqachon to'liq telefonda bo'lsa bu bosqich umuman
+    // bo'lmaydi (yuqoridagi mahalliy yo'l).
+    if (!_playViaLocal) {
+      await _prepareSource(url, myToken);
+      if (!mounted || myToken != _playToken) return;
+    }
 
     var ctrl = await _openController(source, myToken);
+
     // Mahalliy server kutilmaganda ishlamay qolsa — internet bo'lsa
     // worker orqali qayta urinamiz (video baribir ochilsin).
     if (ctrl == null && _playViaLocal && !_offline) {
       if (!mounted || myToken != _playToken) return;
       VideoCacheServer.log('Zaxira: worker orqali qayta urinilyapti...');
       _playViaLocal = false;
-      ctrl = await _openController(Uri.parse(_workerPlayUrl(url)), myToken);
+      source = Uri.parse(_workerPlayUrl(url));
+      await _prepareSource(url, myToken);
+      if (!mounted || myToken != _playToken) return;
+      ctrl = await _openController(source, myToken);
+    }
+
+    // ── KESH OYNASI ESKIRGAN BO'LISHI MUMKIN ─────────────────
+    //
+    // `/api/play/...` faqat Cloudflare keshidan xizmat qiladi.
+    // Cloudflare esa katta yozuvlarni (480 MiB'lik oyna) xotira
+    // siqilganda o'chirib yuborishi mumkin — o'shanda u 503
+    // qaytaradi va video ochilmaydi. Bu holatda isitish belgisini
+    // tozalab, oynani QAYTADAN isitamiz va bir marta qayta
+    // urinamiz. (B2'ga murojaat baribir faqat shu isitishda
+    // bo'ladi — qoida buzilmaydi.)
+    if (ctrl == null && !_playViaLocal && !_offline) {
+      if (!mounted || myToken != _playToken) return;
+      VideoCacheServer.log('Kesh oynasi topilmadi — qaytadan isitilmoqda...');
+      RustCore.instance.videoPrepareReset(url);
+      await _prepareSource(url, myToken);
+      if (!mounted || myToken != _playToken) return;
+      ctrl = await _openController(source, myToken);
     }
 
     if (!mounted || myToken != _playToken) {
@@ -579,6 +631,49 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     if (url.isEmpty) return false;
     if (DownloadManager.instance.statOf(url).complete) return true;
     return RustCore.instance.videoIsComplete(url);
+  }
+
+  /// ── OYNANI KESHGA ISITISHNI KUTISH ──────────────────────────
+  ///
+  /// Worker'ga "480 MiB'lik oynani B2'dan Cloudflare keshiga
+  /// ko'chir" degan BITTA so'rov yuboriladi va tugashi kutiladi.
+  /// Shundan keyin videoning har bir bayti chekkadagi keshdan
+  /// keladi — B2'ga boshqa umuman chiqilmaydi.
+  ///
+  /// NEGA KUTISH AYNAN SHU YERDA: kutishni pleyerning HTTP javobi
+  /// ichida qilib bo'lmaydi — ExoPlayer javob sarlavhasini 8
+  /// soniyadan ortiq kutmaydi va ulanishni uzib xatoga chiqadi. Bu
+  /// yerda esa ekranda oddiy "tayyorlanmoqda" belgisi turadi.
+  ///
+  /// Kutish CHEGARALANGAN (`_prepareMax`): shu vaqt ichida
+  /// tugamasa, video baribir ochiladi — ya'ni ilova hech qachon
+  /// "muzlab" qolmaydi.
+  static const Duration _prepareMax = Duration(minutes: 3);
+
+  Future<void> _prepareSource(String url, int myToken) async {
+    RustCore.instance.videoPrepare(url);
+    // Darhol tayyor bo'lsa (oyna allaqachon keshda) — hech qanday
+    // yozuv ko'rsatmaymiz.
+    if (RustCore.instance.videoPrepareReady(url)) return;
+
+    if (mounted && myToken == _playToken) {
+      setState(() => _preparing = true);
+    }
+    final started = DateTime.now();
+    try {
+      while (mounted && myToken == _playToken) {
+        if (RustCore.instance.videoPrepareReady(url)) return;
+        if (DateTime.now().difference(started) > _prepareMax) {
+          VideoCacheServer.log(
+              'Tayyorlash ${_prepareMax.inMinutes} daqiqada tugamadi — '
+              'video baribir ochilmoqda');
+          return;
+        }
+        await Future.delayed(const Duration(milliseconds: 300));
+      }
+    } finally {
+      if (mounted) setState(() => _preparing = false);
+    }
   }
 
   /// Worker'dagi TO'G'RIDAN-TO'G'RI ijro manzili.
@@ -1712,10 +1807,23 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
           // ko'rsatiladi — `_centerButton` ichidagi aylanma
           // `CircularProgressIndicator`.
           //
-          // "Video tayyorlanyabdi..." yozuvi OLIB TASHLANDI: u
-          // worker'ning keshini oldindan isitishni kutish uchun
-          // kerak edi. Endi pleyer hech narsa kutmaydi — birinchi
-          // baytdan boshlab ijro qiladi.
+          // Bu yerda faqat YOZUV qoladi va u aynan halqaning
+          // TAGIDA turadi (halqa diametri 76, ya'ni 60 px pastga
+          // surish uni halqa ostiga tushiradi).
+          if (_currentEp != null && _preparing)
+            Center(
+              child: Transform.translate(
+                offset: const Offset(0, 60),
+                child: const Text(
+                  'Video tayyorlanyabdi...',
+                  style: TextStyle(
+                    color: Colors.white70,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ),
 
 
           // ── Sek ko'rsatkichlari — asosiy kontrollardan mustaqil,
@@ -1904,7 +2012,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   ///
   /// Kutish deb hisoblanadigan holatlar (foydalanuvchi uchun bularning
   /// hammasi bir xil: "video hozir tayyorlanmoqda"):
-  ///   * video endi ochilmoqda (`_playerLoading`);
+  ///   * video endi ochilmoqda (`_playerLoading`, `_preparing`);
   ///   * pleyer buferlamoqda (`isBuffering`);
   ///   * sek kutilmoqda yoki bajarilmoqda;
   ///   * progress chizig'i barmoq bilan surilmoqda.

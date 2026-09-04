@@ -609,6 +609,18 @@ async fn b2_warm(env: &Env, file_name: &str, widx: u64) -> Result<Response> {
 ///  GET /api/play/:filename  — PLEYER SHU YERDAN OQIM OLADI
 /// ═══════════════════════════════════════════════════════════════
 ///
+/// ── QAT'IY QOIDA: BU YERDAN B2'GA CHIQILMAYDI ───────────────────
+///
+/// Javob FAQAT Cloudflare keshidagi "isitilgan oyna"dan beriladi.
+/// B2'ga murojaat butun tizimda ATIGI BITTA joyda bo'ladi —
+/// `/api/warm/...` oynani (480 MiB) keshga ko'chirayotganda.
+/// Ilova pleyerni ochishdan oldin aynan o'sha isitishni chaqiradi
+/// va tugashini kutadi.
+///
+/// Kesh hali tayyor bo'lmasa bu yerda 503 qaytadi (B2'ga
+/// chiqilmaydi) — ilova buni xato deb bilib, isitishni qaytadan
+/// chaqiradi va keyin ijroni davom ettiradi.
+///
 /// ── NEGA ALOHIDA MANZIL KERAK BO'LDI ────────────────────────────
 ///
 /// Ilgari pleyer videoni TELEFONDAGI mahalliy (127.0.0.1) kesh
@@ -625,75 +637,24 @@ async fn b2_warm(env: &Env, file_name: &str, widx: u64) -> Result<Response> {
 ///      TUGADI" degani: u videoni tugagan deb bilib, yig'ilgan
 ///      buferni boshidan qayta ko'rsatardi.
 ///
-/// ── YECHIM ──────────────────────────────────────────────────────
-///
-/// Endi pleyer to'g'ridan-to'g'ri SHU manzilga ulanadi va bu yerda
-/// javob HECH QACHON sun'iy ravishda kesilmaydi:
-///   * `Range` sarlavhasi B2'ga o'zgarishsiz uzatiladi;
-///   * javob tanasi OQIM (quvur) bilan o'tadi — worker xotirasiga
-///     yig'ilmaydi, ya'ni fayl hajmi qanchalik katta bo'lishidan
-///     qat'i nazar xavfsiz;
-///   * `Content-Length` / `Content-Range` B2 aytgan HAQIQIY
-///     qiymatlar bo'ladi.
-///
-/// Ya'ni bu oddiy, to'g'ri HTTP video manbasi. Qancha bayt olish
-/// kerakligini endi PLEYERNING O'ZI hal qiladi (ExoPlayer buferi
-/// to'lishi bilan soketdan o'qishni to'xtatadi, TCP esa bizni
-/// ushlab qoladi) — ortiqcha bayt umuman olinmaydi.
-///
-/// `/api/image/...` (bo'laklab keshlaydigan yo'l) O'ZGARISHSIZ
-/// qoladi: undan endi FAQAT "yuklab olish" tugmasi foydalanadi.
-async fn b2_play(env: &Env, file_name: &str, range: Option<String>) -> Result<Response> {
-    // Isitilgan oyna keshida bormi — bo'lsa B2'ga umuman
-    // chiqilmaydi (yuklab olingan/isitilgan videolar shu yo'ldan
-    // Cloudflare chekkasidan keladi).
+/// Shu sabab bu yerda javob HECH QACHON sun'iy ravishda kesilmaydi:
+/// so'ralgan oraliq keshdan TO'LIQ berilsagina javob qaytadi, aks
+/// holda 503. `/api/image/...` (bo'laklab keshlaydigan yo'l)
+/// o'zgarishsiz qoladi — undan endi FAQAT "yuklab olish" tugmasi
+/// foydalanadi.
+async fn b2_play(file_name: &str, range: Option<String>) -> Result<Response> {
     if let Some(resp) = play_from_warm_cache(file_name, range.as_deref()).await? {
         return Ok(resp);
     }
-
-    let acc = b2_access(env).await?;
-    let h = Headers::new();
-    h.set("Authorization", &acc.token)?;
-    // MUHIM: oraliq O'ZGARTIRILMASDAN uzatiladi. Pleyer "bytes=N-"
-    // (oxirigacha) deb so'raganda B2 ham faylning OXIRIGACHA beradi
-    // — javob yarmida kesilmaydi, demak "video tugadi" xatosi ham
-    // bo'lmaydi.
-    if let Some(r) = range.as_deref() {
-        h.set("Range", r)?;
-    }
-    let req = Request::new_with_init(
-        &format!("{}/file/aniraxuz/{file_name}", acc.dl_url),
-        RequestInit::new().with_method(Method::Get).with_headers(h),
-    )?;
-    let mut b2 = Fetch::Request(req).send().await?;
-    let status = b2.status_code();
-    if status != 200 && status != 206 {
-        return Err(Error::RustError(format!("B2 oqim xatosi: {status}")));
-    }
-    let ct = b2
-        .headers()
-        .get("Content-Type")?
-        .unwrap_or_else(|| "application/octet-stream".to_string());
-    let cl = b2.headers().get("Content-Length")?;
-    let cr = b2.headers().get("Content-Range")?;
-
-    let stream = b2.stream()?;
-    let mut resp = Response::from_stream(stream)?.with_status(status);
+    // ── KESH TAYYOR EMAS ─────────────────────────────────────
+    // B2'ga CHIQILMAYDI. Ilova isitishni (`/api/warm/...`)
+    // chaqirib, keyin qaytadan uriniladi.
+    let mut resp = Response::error("Oyna hali keshga isitilmagan", 503)?;
     set_cors(&mut resp);
     {
         let h = resp.headers_mut();
-        h.set("Content-Type", &ct)?;
-        h.set("Accept-Ranges", "bytes")?;
-        // Oraliq javoblar oraliq keshlarda saqlanmasin — pleyer
-        // har safar aniq so'ragan baytini olishi kerak.
         h.set("Cache-Control", "no-store")?;
-        if let Some(l) = cl {
-            h.set("Content-Length", &l)?;
-        }
-        if let Some(c) = cr {
-            h.set("Content-Range", &c)?;
-        }
-        h.set("X-Cache", "STREAM")?;
+        h.set("X-Cache", "NOT-WARMED")?;
     }
     Ok(resp)
 }
@@ -713,8 +674,8 @@ async fn play_from_warm_cache(
     let (req_start, req_end_opt) = match range {
         Some(r) => match parse_range(r) {
             Some(v) => v,
-            // "bytes=-N" kabi shakllarni bu yerda ishlamaymiz —
-            // ularni B2 o'zi to'g'ri bajaradi.
+            // "bytes=-N" (oxiridan N bayt) — pleyer bunday
+            // so'ramaydi, shu sabab bu yerda ishlamaymiz.
             None => return Ok(None),
         },
         None => (0, None),
@@ -1197,7 +1158,7 @@ async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
         // keshlash mantiqi umuman ishlatilmaydi — ya'ni pleyer
         // faqat o'zi so'ragan baytni oladi.
         if let Some(fname) = path.strip_prefix("/api/play/") {
-            return b2_play(&env, fname, range_header).await;
+            return b2_play(fname, range_header).await;
         }
         // Oynani keshga isitish — ilova video ochilganda BIR MARTA
         // chaqiradi va so'rov tugaguncha ulanib turadi (b2_warm

@@ -2602,6 +2602,35 @@ fn prepare_ready(key: &str) -> bool {
         .unwrap_or(true)
 }
 
+/// ── ISITISHNI BOSHIDAN QAYTA BOSHLASH ───────────────────────────
+///
+/// Cloudflare keshi katta yozuvlarni (480 MiB'lik oyna) xotira
+/// siqilganda o'chirib yuborishi mumkin. Bunday holatda
+/// `/api/play/...` 503 qaytaradi va video ochilmaydi.
+///
+/// Ilova buni sezganda shu funksiyani chaqiradi: isitish "tayyor"
+/// belgisi va oyna holati tozalanadi, ya'ni keyingi
+/// `rust_video_cache_prepare` oynani HAQIQATDAN qayta isitadi.
+#[no_mangle]
+pub extern "C" fn rust_video_cache_prepare_reset(url_ptr: *const c_char) -> i32 {
+    let Some(url) = (unsafe { cstr_to_str(url_ptr) }) else {
+        return 0;
+    };
+    if url.is_empty() {
+        return 0;
+    }
+    let key = cache_key(url);
+    if let Ok(mut m) = prepares().lock() {
+        m.remove(&key);
+    }
+    let prefix = format!("{key}#w");
+    if let Ok(mut m) = warm_state().lock() {
+        m.retain(|k, _| !k.starts_with(&prefix));
+    }
+    log(format!("Tayyorlash holati tozalandi — qayta isitiladi: {key}"));
+    1
+}
+
 /// Tayyorlash holati: 1 = tayyor, 0 = hali ketyapti/boshlanmagan.
 #[no_mangle]
 pub extern "C" fn rust_video_cache_prepare_status(url_ptr: *const c_char) -> i32 {

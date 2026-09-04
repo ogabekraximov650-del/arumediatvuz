@@ -97,6 +97,7 @@ class RustCore {
   late final _VideoUrlActionDart _videoPrepare;
   late final _VideoUrlActionDart _videoPrepareStatus;
   late final _VideoUrlActionDart _videoComplete;
+  late final _VideoUrlActionDart _videoPrepareReset;
   late final _CryptoGenKeyDart _cryptoGenKey;
   late final _CryptoSetKeyDart _cryptoSetKey;
 
@@ -158,6 +159,9 @@ class RustCore {
     _videoPrepareStatus =
         _lib.lookupFunction<_VideoUrlActionC, _VideoUrlActionDart>(
             'rust_video_cache_prepare_status');
+    _videoPrepareReset =
+        _lib.lookupFunction<_VideoUrlActionC, _VideoUrlActionDart>(
+            'rust_video_cache_prepare_reset');
     _cryptoGenKey = _lib.lookupFunction<_CryptoGenKeyC, _CryptoGenKeyDart>(
         'rust_crypto_generate_key');
     _cryptoSetKey = _lib.lookupFunction<_CryptoSetKeyC, _CryptoSetKeyDart>(
@@ -499,12 +503,7 @@ class RustCore {
   /// Shu sifatdagi videoning keshini butunlay o'chiradi.
   void videoDelete(String url) => _videoUrlAction(_videoDelete, url);
 
-  /// ── VIDEONI IJROGA TAYYORLASH (ESKIRGAN) ────────────────────
-  ///
-  /// Pleyer endi bu isitishni KUTMAYDI — u worker'dan
-  /// to'g'ridan-to'g'ri oqim oladi. Yuklab olish yo'li esa isitishni
-  /// Rust yadrosining o'zi ichida (`maybe_warm`) boshqaradi. Metod
-  /// mos keluvchanlik uchun saqlanyapti.
+  /// ── VIDEONI IJROGA TAYYORLASH ───────────────────────────────
   ///
   /// Worker'ga "oynani keshga ko'chir" degan BITTA so'rov yuboradi
   /// va DARHOL qaytadi (ish fon oqimida ketadi). Shu isitish
@@ -550,6 +549,15 @@ class RustCore {
       malloc.free(ptr);
     }
   }
+
+  /// ── ISITISHNI BOSHIDAN QAYTA BOSHLASH ───────────────────────
+  ///
+  /// Cloudflare keshi katta yozuvlarni (480 MiB'lik oyna) xotira
+  /// siqilganda o'chirib yuborishi mumkin — o'shanda `/api/play/...`
+  /// 503 qaytaradi va video ochilmaydi. Shu chaqiruvdan keyin
+  /// keyingi `videoPrepare` oynani HAQIQATDAN qayta isitadi.
+  void videoPrepareReset(String url) =>
+      _videoUrlAction(_videoPrepareReset, url);
 
   void _videoUrlAction(_VideoUrlActionDart fn, String url) {
     if (!_loaded || url.isEmpty) return;
