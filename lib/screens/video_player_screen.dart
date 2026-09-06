@@ -1514,14 +1514,20 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   // MUHIM: shu 500 ms ichida pleyerga (demak worker'ga ham) BITTA
   // ham so'rov yuborilmaydi — video pauzada, `seekTo` esa faqat
   // tinchlik davri tugagach, AYNAN BIR MARTA yuboriladi.
-  // 500 -> 200 ms (foydalanuvchi: "sek sekin ishlaydi").
+  // 500 -> 320 ms (foydalanuvchi: "sek sekin ishlaydi").
   //
   // Bu tanaffusning YAGONA vazifasi — ketma-ket bosilgan taplarni
-  // (+5, +10, +15...) BITTA sek qilib yig'ish. Taplar orasidagi
-  // masofa odatda 200-400 ms, ya'ni 200 ms ularni yig'ib olishga
-  // yetadi; bitta marta bosilganda esa video deyarli DARHOL
-  // (yarim soniyaga emas, beshdan bir soniyaga) sakraydi.
-  static const Duration _seekIdle = Duration(milliseconds: 200);
+  // (+5, +10, +15...) BITTA sek qilib yig'ish.
+  //
+  // NEGA AYNAN 320 ms: ketma-ket tap deb hisoblanadigan oraliq —
+  // 300 ms (`_handleVideoTap`). Tanaffus undan KICHIK bo'lsa, sek
+  // ikki tap ORASIDA yuborilib ketardi: jamlash buzilib, ikkinchi
+  // tap eskirgan pozitsiyadan hisoblanardi (ya'ni "+10" o'rniga
+  // ikkita alohida "+5" bo'lardi va ekrandagi son bilan haqiqiy
+  // sakrash mos kelmasdi). 320 ms — 300 dan bir oz katta, ya'ni
+  // jamlash har doim to'g'ri ishlaydi, lekin kutish avvalgidan
+  // ancha qisqa.
+  static const Duration _seekIdle = Duration(milliseconds: 320);
 
   // ── Ichki holat ──────────────────────────────────────────────
   // Bir vaqtda faqat BITTA `seekTo` uchib turadi; undan keyingilari
