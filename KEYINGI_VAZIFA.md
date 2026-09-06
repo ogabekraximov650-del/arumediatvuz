@@ -1,112 +1,134 @@
-# Vazifa: video pleyerni fvp'ning past-darajali (mdk.dart) API'siga o'tkazish
+# Loyihaning hozirgi holati va keyingi ish uchun eslatmalar
+
+> Bu fayl **hozirgi** arxitekturani tasvirlaydi. Avvalgi versiyasi
+> allaqachon bekor qilingan rejani (`fvp`/`mdk` past-darajali API'siga
+> o'tish) tasvirlar edi — u yo'ldan **voz kechilgan**, pleyer rasmiy
+> `video_player` (Android'da ExoPlayer/Media3) ustida ishlaydi.
 
 ## Repo va muhit
 
-- Repo: `ogabekraximov650-del/fulutter` (Flutter anime-striming ilovasi + Rust yadrosi + Cloudflare Worker/B2 backend)
-- Ishchi branch: `claude/player-bugs-fix-yitavh` — bu branch `main`ga allaqachon merge qilingan (oxirgi commit: `552df1d`). SHU BRANCH'DAN davom et yoki undan yangi branch och: `claude/mdk-native-player`.
-- **MUHIM: yangi ishni ALOHIDA branchda qil, `main`ga to'g'ridan-to'g'ri push qilma.** Faqat ishlaganini tasdiqlagandan keyin (foydalanuvchi tasdiqlaydi) mergelanadi.
-- Build: GitHub Actions (`.github/workflows/build-flutter-apk.yml`) push qilinganda AVTOMATIK ishga tushadi. **HECH QACHON qo'lda workflow_dispatch trigger qilma** — push qilib, keyin natijani kuzat.
-- Commit qilishdan oldin har doim: `rm -rf rust/target rust/Cargo.lock` (bular .gitignore'da bor, lekin ehtiyot chorasi sifatida).
-- Foydalanuvchi bilan **faqat o'zbek tilida** gaplash.
-- Foydalanuvchi juda tajribali emas — texnik tushunchalarni oddiy, aniq tilda tushuntir. Taxmin qilma, kodni o'qib tasdiqla.
+- Repo: `ogabekraximov650-del/fulutter` — Flutter ilova + Rust yadrosi
+  (`rust/`) + Cloudflare Worker (`worker/`) + B2 (fayl ombori) +
+  Turso (baza).
+- Foydalanuvchi bilan **faqat o'zbek tilida** gaplashing; texnik
+  tushunchalarni oddiy tilda tushuntiring, taxmin qilmang — kodni
+  o'qib tasdiqlang.
+- Ishni **alohida branch**da qiling, `main`ga to'g'ridan-to'g'ri push
+  qilmang.
+- APK build: `.github/workflows/build-flutter-apk.yml` — `main` va
+  `claude/**` branchlariga push qilinganda **avtomatik** ishga tushadi.
+  Qo'lda `workflow_dispatch` qilmang.
+- Worker deploy: `.github/workflows/deploy-worker.yml` — **faqat
+  `main`ga** `worker/**` o'zgarishi push qilinganda. Ya'ni feature
+  branchdagi worker o'zgarishlari **deploy bo'lmaydi**.
+- Commit qilishdan oldin: `rm -rf rust/target rust/Cargo.lock
+  worker/target worker/Cargo.lock`.
 
-## Nima uchun bu vazifa kerak (asl kontekst)
-
-Video pleyerda oylab davom etgan muammo bor edi: **foydalanuvchi progress chizig'ini surganda yoki tez-tez sek (forward/backward) qilganda ilova qotib qolardi / crash bo'lardi.**
-
-Ko'plab urinishlar qilindi (HTTP javoblarni cheklash, mahalliy diskka keshlash, bufer sozlamalarini o'zgartirish, "sog'liq kuzatuvchisi" taymer bilan qayta ochish, va h.k.) — ular muammoni yumshatishga yordam berdi, lekin **asl sababni yo'q qila olmadi**.
-
-**Asl sabab manba kodidan tasdiqlangan:** `fvp` paketi (`^0.38.1`) `video_player` paketi (`^2.9.2`) uchun "shim" (moslashtiruvchi) bo'lib ishlaydi. Uning muammosi:
-
-```dart
-// fvp/lib/src/video_player_mdk.dart
-Future<void> seekTo(int playerId, Duration position) async {
-  return _seekToWithFlags(playerId, position, mdk.SeekFlag(_seekFlags));
-}
-Future<void> _seekToWithFlags(...) async {
-  final player = _players[playerId];
-  ...
-  player.seek(position: position.inMilliseconds, flags: flags);  // ← AWAIT QILINMAYDI!
-}
-```
-
-`player.seek()` (bu `fvp/lib/src/player.dart`dagi mdk-sdk'ning Player klassi) **haqiqiy** `Future<int>` qaytaradi — bu Future native (C++ mdk-sdk) javob bergandagina hal bo'ladi (`Completer<int> _seeked` orqali, `NativeApi.postCObject` bilan). LEKIN `_seekToWithFlags` bu Future'ni **hech qachon await qilmaydi** — "fire-and-forget" tarzda chaqirib, darhol qaytadi.
-
-Buning ustiga, rasmiy `video_player` paketining o'zi (`package:video_player/video_player.dart`):
-```dart
-Future<void> seekTo(Duration position) async {
-  ...
-  await _videoPlayerPlatform.seekTo(_playerId, position);  // yuqoridagi sabab bilan DEYARLI DARHOL qaytadi
-  _updatePosition(position);  // ← pozitsiyani NATIVE JAVOBNI KUTMASDAN, OPTIMISTIK o'rnatadi!
-}
-```
-
-**Xulosa:** `await controller.seekTo(target)` chaqiruvi HAQIQIY sek tugashini bildirmaydi — faqat "buyruq yuborildi"ni bildiradi. `controller.value.position` ham sekdan keyin darhol "maqsadga yetdi" deb ko'rsatadi, garchi native tomonda sek hali tugamagan yoki hatto qotib qolgan bo'lsa ham. **Shu sabab Dart tomonida "sek tugadimi, qotib qoldimi" degan savolga standart `video_player` API orqali ISHONCHLI javob berib bo'lmaydi.**
-
-## Yechim: `package:fvp/mdk.dart` — past-darajali API
-
-`fvp` paketi ikkita ochiq API beradi:
+## Tekshiruv (har bir o'zgarishdan keyin)
 
 ```
-package:fvp/fvp.dart   → video_player uchun "shim" (HOZIR ISHLATILAYOTGAN, muammoli qatlam)
-package:fvp/mdk.dart   → mdk-sdk'ning TO'G'RIDAN-TO'G'RI, past-darajali API'si (export 'src/player.dart', 'src/global.dart', 'src/media_info.dart')
+flutter analyze          # 0 muammo bo'lishi kerak
+cd rust && cargo test --lib     # 15/15 o'tishi kerak
+cd worker && cargo check --target wasm32-unknown-unknown
 ```
 
-`mdk.dart`dagi `Player` klassi (`fvp/lib/src/player.dart`, paket manba kodi `~/.pub-cache/hosted/pub.dev/fvp-0.38.1/lib/src/player.dart` da, yoki loyihada `flutter pub get` dan keyin paydo bo'ladi) quyidagilarni beradi — BULARNI O'QIB TASDIQLA, men faqat topganlarimni yozayapman:
+## Videoni ko'rsatish: uch yo'l
 
-- `Future<int> prepare({...})` — video ochish
-- `set media(String value)` — manba URL/yo'lini o'rnatish
-- `Future<int> seek({required int position, SeekFlag flags})` — **HAQIQIY** Future, native javob bergandagina hal bo'ladi
-- `int get position` — to'g'ridan-to'g'ri native'dan o'qiladi (`_player.ref.position`), OPTIMISTIK EMAS
-- `set state(PlaybackState value)` / `PlaybackState get state`
-- `MediaStatus get mediaStatus`
-- `onMediaStatus` — real native hodisalar oqimi (buffering/buffered/loaded holatlari)
-- `onEvent` — boshqa native hodisalar
-- `Future<int> updateTexture({...})` — `textureId` (`ValueNotifier<int?>`) ni yangilaydi, Flutter'ning `Texture` vidjeti orqali ko'rsatiladi
-- `bool waitFor(PlaybackState state, {int timeout = -1})`
-- `List<DurationRange> bufferedTimeRanges()`
-- `setBufferRange(min, max, drop)`
-- `dispose()`
+1. **Fayl telefonda TO'LIQ bor** → mahalliy Rust kesh-serveri
+   (`127.0.0.1`, `rust/src/video_cache.rs`). Tarmoqqa umuman
+   chiqilmaydi.
+2. **Fayl to'liq emas + internet bor** → to'g'ridan-to'g'ri worker:
+   `/api/play/<fayl>`. Bu yo'l **faqat Cloudflare keshidan** xizmat
+   qiladi va **B2'ga hech qachon chiqmaydi**.
+3. **Fayl to'liq emas + internet yo'q** → ijro etib bo'lmaydi, aniq
+   xabar ko'rsatiladi.
 
-Bu qatlamda pozitsiya va holat **haqiqiy native signal**lardan keladi — Dart tomonida taxmin qilish yo'q. Shuning uchun sek/surish paytidagi qotib qolishni **ishonchli aniqlash va oldini olish** mumkin bo'ladi.
+## TANBAL (LAZY) OYNA KESHLASH — eng muhim qoida
 
-## Nimani saqlab qolish SHART
+Fayl **480 MiB**lik "oynalarga" bo'linadi (`WARM_WINDOW`; Rust va
+worker'da **aynan bir xil** bo'lishi shart). Oynalar **ketma-ket
+emas, faqat kerak bo'lganda** keshlanadi:
 
-`lib/screens/video_player_screen.dart` (hozir ~1800+ qator) da quyidagi funksionallik bor va **hammasi saqlanishi kerak**, faqat pastki pleyer boshqaruv qatlami almashadi:
+| Qachon | Nima bo'ladi |
+|---|---|
+| Video ochilganda | Faqat **#0** oyna keshlanadi. Foydalanuvchi shuni kutadi. |
+| Ijro oyna chegarasiga 64 MiB qolganda | Keyingi oyna **fon'da** keshlanadi (kutish sezilmaydi). |
+| Hali keshlanmagan joyga sek qilinganda | Avval o'sha oyna keshlanadi, **keyin** sek bajariladi. |
+| Foydalanuvchi oxiriga bormasa | Oxirgi oyna B2'dan **hech qachon** o'qilmaydi. |
 
-1. **Mahalliy kesh-server orqali ijro** — `VideoCacheServer.instance.proxyUri(url)` `http://127.0.0.1:PORT/v?u=<encoded>` qaytaradi. Bu Rust yadrosidagi mahalliy HTTP proksi (`rust/src/video_cache.rs`) — video baytlarini diskka 1 MiB bo'laklarga bo'lib keshlaydi, yetishmayotganini worker'dan yuklaydi, to'liq yig'ilgan faylni (`full.enc`) shifrlangan holda saqlaydi va so'rov kelganda shifrni o'zi ochib beradi. **Bu qatlamga UMUMAN TEGMA** — u sinovdan o'tgan (8 ta Rust testi bor, `cargo test --lib`).
-   - Yangi Player'ga video manzili sifatida shu proksi URL beriladi: `player.media = proxied.toString();`
-2. **Epizod/mavsum ro'yxati** — offline kesh bilan (`RustCore.instance.getCachedList/saveListCache`), bunga tegilmaydi.
-3. **Sek gestlar**: ekranning chap/o'ng yarmiga ikki marta bosib ±5s sek, o'rtada play/pause tugmasi atrofida "o'lik zona".
-4. **Progress chizig'i (Slider)**: sudrab surganda faqat vizual holat yangilanadi, qo'l qo'yib yuborilganda (`onChangeEnd`) bitta sek yuboriladi.
-5. **Play/pause, fullscreen, sifat (HQ) tanlash tugmalari.**
-6. **Video tugagach avtomatik boshidan boshlash** (loop).
-7. **Bufer sozlamalari**: hozir `main.dart`dagi `_playerOpts` Map orqali (`buffer.range`, `demux.buffer.ranges`, `avformat.probesize`, `avformat.analyzeduration`) — bularni yangi `Player`ga qanday uzatish kerakligini `player.dart`dan top (ehtimol `setProperty(key, value)` metodi bor, tasdiqla).
-8. **"Foydalanuvchi nima qilsa ham, qancha tez sek qilsa ham — crash bo'lmasin"** — bu ENG MUHIM talab. Yangi arxitekturada bu ancha oson bajariladi, chunki `seek()` Future'i endi HAQIQIY, shu sabab sek navbati (queue) mantiqi ancha soddalashadi va ishonchli bo'ladi.
+**B2'ga so'rov faqat isitish (`/api/warm`) paytida, oynasiga bir
+marta ketadi.** Boshqa hech qaysi yo'l B2'ga chiqmaydi. Yangi kod
+yozganda bu qoidani buzmang.
 
-## Nimani olib tashlash mumkin (eski "aylanma yo'llar")
+Tegishli FFI (`rust/src/video_cache.rs` → `lib/services/rust_bridge.dart`):
 
-Hozirgi `_runSeek`, `_settleAfterSeek`, `_startHealthWatchdog` (umumiy "qotish" qismi), `_recoverPlayer` kabi funksiyalar — bularning barchasi standart `video_player` API'sining ishonchsizligini "aylanib o'tish" uchun yozilgan murakkab ish-atrofi (workaround) kodlari edi. Yangi arxitekturada `seek()`ning HAQIQIY Future'i va `position`/`state`/`onMediaStatus`ning HAQIQIY signal berishi tufayli bu workaround'larning katta qismi **keraksiz bo'lib qoladi yoki ancha soddalashadi**. Buni kodni o'qib, mantiqan qayta loyihalashtirib qil — eskisini sinab ko'rmasdan olib tashlama, avval yangi Player API bilan qanday ishlashini tushunib ol.
+- `rust_video_cache_prepare` / `_prepare_status` — #0 oynani tayyorlash;
+- `rust_video_cache_warm_window(url, widx)` — oynani fon'da keshlash;
+- `rust_video_cache_window_status(url, widx)` — 0 ketyapti / 1 tayyor /
+  2 yiqildi / 3 boshlanmagan;
+- `rust_video_cache_total(url)`, `rust_video_cache_window_size()` —
+  ilova oyna chegarasini shular bilan hisoblaydi.
 
-## Texnik eslatmalar
+Test: `cargo test --lib tanbal` →
+`tanbal_keshlash_faqat_kerakli_oynani_oladi`.
 
-- `panic = "abort"` Rust `Cargo.toml`da o'rnatilgan — bu vazifaga bevosita aloqasi yo'q, lekin eslab qo'y: Rust tomonida panic bo'lsa butun ilova process'i o'ladi (shu sabab Rust kodi juda ehtiyotkorlik bilan yozilgan, tegma).
-- `pubspec.yaml`da: `video_player: ^2.9.2`, `fvp: ^0.38.1`, `flutter_secure_storage: ^9.2.4` bor.
-- CI workflow endi **bitta APK** yasaydi (split-per-abi emas), `x86_64` chiqarib tashlangan, mdk-sdk GitHub Actions keshiga saqlanadi (SourceForge'dan qayta-qayta yuklamaslik uchun — bu avval build'ni bir necha marta yiqitgan edi).
-- Flutter SDK va Dart SDK lokal muhitda `/tmp/claude-0/.../scratchpad/flutter` da bor edi (agar shu konteynerda davom etilsa) — `flutter analyze` va `cargo test`/`cargo build` bilan HAR BIR o'zgarishdan keyin tekshirib borish kerak, push qilishdan oldin.
-- Rust papkasiga tegilmasa ham, `cargo test --lib` ni bir marta ishga tushirib, hech narsa buzilmaganini tasdiqlash foydali (8/8 test o'tishi kerak).
+## NEGA BUFER TOZALANMASLIGI MUHIM
 
-## Ish tartibi (tavsiya)
+`/api/play` keshda yo'q joy so'ralganda **503** qaytaradi. ExoPlayer
+uchun bu **qaytarib bo'lmaydigan** xato: pleyerni butunlay qaytadan
+ochishga to'g'ri keladi va **yig'ilgan butun bufer yo'qoladi**
+(foydalanuvchi buni "sek qilsam video qaytadan sekin ochiladi" deb
+ko'radi).
 
-1. `lib/screens/video_player_screen.dart`, `lib/main.dart`, `lib/services/video_cache_server.dart`, `lib/services/rust_bridge.dart` fayllarini to'liq o'qib chiq.
-2. `fvp/lib/src/player.dart` va `fvp/mdk.dart` manba kodini to'liq o'qib, aniq API'ni tasdiqla (yuqoridagi ro'yxat mening taxminim, sen tekshirasan).
-3. Yangi branch och (`claude/mdk-native-player` yoki shunga o'xshash).
-4. Pleyer boshqaruv qatlamini `Player` (mdk.dart) + `Texture` vidjeti asosida qayta yoz. UI/gestlar/progress-slider/kesh-server chaqiruvlari o'zgarishsiz qoladi — faqat ularning ORQASIDAGI controller almashadi.
-5. `flutter analyze` xatosiz bo'lishi kerak.
-6. Push qil, CI build natijasini kuzat (avtomatik ishga tushadi).
-7. Foydalanuvchiga APK'ni qurilmada sinab ko'rishni so'ra — ayniqsa: tez-tez sek qilish, progress chizig'ini bir necha marta ketma-ket surish, video tugagach qayta boshlanishi.
-8. Faqat foydalanuvchi tasdiqlagandan keyin `main`ga merge taklif qil — o'zing hal qilma.
+Shu sabab `lib/screens/video_player_screen.dart` da:
 
-## Muvaffaqiyat mezoni
+- ilova pleyerdan **oldinda yuradi** (`_startWindowPrefetch`,
+  `_ensureWindowFor`) — 503 umuman yuz bermaydi;
+- qotish belgisida avval **yengil turtki** (`_nudgePlayer`:
+  `seekTo` + `play`) sinaladi — bufer saqlanadi;
+- pleyerni qaytadan ochish (`_recoverPlayer`) — **oxirgi chora**, va
+  undan oldin `_handleFatalError` kerakli oynani keshga oldiradi.
 
-Foydalanuvchi progress chizig'ini xohlagancha tez-tez sursin, video ichida istalgan joyga sek qilsin — ilova HECH QACHON qotib qolmasligi yoki crash bo'lmasligi kerak. Bu asosiy, hal qiluvchi talab.
+Yangi "tuzatish" qo'shayotganda pleyerni qaytadan ochish yo'lini
+kengaytirmang — avval oldini olishga harakat qiling.
+
+## 480 MiB'dan katta fayllar
+
+`worker/src/lib.rs` → `stitched_response`: javob bir nechta oynadan
+**oqim bilan** ulanadi (uzunlik oldindan to'g'ri e'lon qilinadi).
+Busiz ExoPlayer javobning tugashini "fayl tugadi" deb tushunadi va
+video 480 MiB'da to'xtab qolardi. Keyingi oyna hali keshda bo'lmasa
+javob **kutadi** (B2'ga chiqmaydi).
+
+## Yuklab olish
+
+- Navbat diskda saqlanadi (`download_queue.json`) — ilova o'ldirilsa
+  ham yuklash o'zi davom etadi;
+- internet qaytganda kutish darhol bekor qilinadi
+  (`DownloadManager._resumeActive`);
+- bo'laklar 1 MiB, so'rovlar 8 MiB'lik guruh bilan (`GROUP_CHUNKS`),
+  worker chegarasi bilan aynan mos (`RANGE_MAX`);
+- server chegarasi (`SERVER_SPAN_MAX`) 5 daqiqada unutiladi — bitta
+  noxush javob ilovani abadiy sekinlashtirmaydi.
+
+## Miqyos (yuz minglab foydalanuvchi)
+
+- `ensure_db` — jadval yaratish buyruqlari izolyat umrida **bir
+  marta** (avval har bir so'rovda 10 ta DDL Turso'ga ketardi);
+- ro'yxat so'rovlari (`/api/anime`, `/api/seasons/...`,
+  `/api/epizods/...`) chekkada **30 soniya** keshlanadi, yozishdan
+  keyin darhol tozalanadi (`purge_list_cache`).
+
+**Hali hal qilinmagan:** Cloudflare keshi har bir data-markazda
+alohida. Ya'ni bitta epizodni ko'p mamlakatdan ko'rishsa, oyna har
+bir data-markaz uchun B2'dan alohida o'qiladi. Buni butunlay yo'q
+qilish uchun Cache Reserve yoki R2 kerak bo'ladi — bu arxitektura
+o'zgarishi, foydalanuvchi bilan kelishilmagan.
+
+## Tegilmaydigan joylar
+
+- `rust/src/video_cache.rs` ning bo'lak-keshlash va shifrlash qismi
+  (sinovdan o'tgan, 15 ta test);
+- `rust/Cargo.toml` dagi `panic = "abort"` — Rust tomonida panic
+  bo'lsa butun ilova o'ladi, shu sabab Rust kodi juda ehtiyotkorlik
+  bilan yozilgan.
