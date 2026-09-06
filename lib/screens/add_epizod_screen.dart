@@ -38,8 +38,6 @@ class _QualityState {
     required this.label,
     required this.urlKey,
     required this.sizeKey,
-    this.url,
-    this.size,
   });
 
   bool get hasFile => url != null && url!.isNotEmpty;
@@ -223,13 +221,13 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
             style: const TextStyle(color: Colors.white)),
         content: Text(
           'Fayl B2dan ham, bazadan ham o\'chiriladi. Davom etasizmi?',
-          style: TextStyle(color: Colors.white.withOpacity(0.7)),
+          style: TextStyle(color: Colors.white.withValues(alpha: 0.7)),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
             child: Text('Yo\'q',
-                style: TextStyle(color: Colors.white.withOpacity(0.5))),
+                style: TextStyle(color: Colors.white.withValues(alpha: 0.5))),
           ),
           FilledButton(
             onPressed: () => Navigator.pop(ctx, true),
@@ -240,6 +238,9 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
       ),
     );
     if (confirm != true) return;
+    // Tasdiqlash oynasi yopilgunicha ekran ham yopilgan bo'lishi
+    // mumkin.
+    if (!mounted) return;
 
     final ep = widget.initialEpizod;
     if (ep == null) {
@@ -388,10 +389,10 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
                         Container(
                           padding: const EdgeInsets.all(12),
                           decoration: BoxDecoration(
-                            color: Colors.red.withOpacity(0.2),
+                            color: Colors.red.withValues(alpha: 0.2),
                             borderRadius: BorderRadius.circular(12),
                             border:
-                                Border.all(color: Colors.red.withOpacity(0.5)),
+                                Border.all(color: Colors.red.withValues(alpha: 0.5)),
                           ),
                           child: Text(_errorMsg!,
                               style: const TextStyle(
@@ -435,7 +436,7 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
                                     : () => Navigator.of(context).pop(),
                                 style: FilledButton.styleFrom(
                                   backgroundColor:
-                                      Colors.white.withOpacity(0.1),
+                                      Colors.white.withValues(alpha: 0.1),
                                   foregroundColor: Colors.white,
                                 ),
                                 child: const Text('Bekor qilish'),
@@ -491,7 +492,7 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
         style: const TextStyle(color: Colors.white),
         decoration: InputDecoration(
           hintText: label,
-          hintStyle: TextStyle(color: Colors.white.withOpacity(0.4)),
+          hintStyle: TextStyle(color: Colors.white.withValues(alpha: 0.4)),
           prefixIcon: Icon(icon, color: Colors.white54),
           border: InputBorder.none,
         ),
@@ -537,7 +538,7 @@ class _QualityCard extends StatelessWidget {
               borderRadius: BorderRadius.circular(6),
               child: LinearProgressIndicator(
                 value: q.progress,
-                backgroundColor: Colors.white.withOpacity(0.1),
+                backgroundColor: Colors.white.withValues(alpha: 0.1),
                 valueColor: AlwaysStoppedAnimation(AppColors.accent),
                 minHeight: 6,
               ),
@@ -546,7 +547,7 @@ class _QualityCard extends StatelessWidget {
             Text(
               progressText,
               style:
-                  TextStyle(fontSize: 12, color: Colors.white.withOpacity(0.7)),
+                  TextStyle(fontSize: 12, color: Colors.white.withValues(alpha: 0.7)),
             ),
           ] else if (q.hasFile) ...[
             // ── Yuklangan ──
@@ -559,7 +560,7 @@ class _QualityCard extends StatelessWidget {
                   child: Text(
                     q.size ?? '',
                     style: TextStyle(
-                        fontSize: 13, color: Colors.white.withOpacity(0.8)),
+                        fontSize: 13, color: Colors.white.withValues(alpha: 0.8)),
                   ),
                 ),
                 GlassTappable(

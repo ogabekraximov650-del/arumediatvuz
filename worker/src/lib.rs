@@ -171,6 +171,40 @@ async fn turso_batch(env: &Env, stmts: &[(&str, Vec<TursoArg>)]) -> Result<()> {
     Ok(())
 }
 
+/// Jadvallar SHU IZOLYATDA allaqachon tekshirilganmi.
+///
+/// ═══════════════════════════════════════════════════════════════
+///  MIQYOS UCHUN ENG MUHIM TUZATISH
+/// ═══════════════════════════════════════════════════════════════
+///
+/// TOPILGAN XATO: `init_db` HAR BIR API so'rovida chaqirilardi va
+/// har safar 10 ta DDL buyrug'ini (CREATE TABLE / CREATE INDEX /
+/// ALTER TABLE) Turso'ga yuborardi. Ya'ni foydalanuvchi ilovani
+/// ochib ro'yxatni ko'rgani uchun ham bazaga 10 ta ortiqcha
+/// so'rov ketardi.
+///
+/// 1000 foydalanuvchida bu sezilmaydi. 100 ming (yoki 1 million)
+/// foydalanuvchida esa bu Turso'ni butunlay to'xtatib qo'yadi:
+/// har bir oddiy ro'yxat so'rovi 11 ta baza so'roviga aylanadi va
+/// javob vaqti bir necha soniyagacha cho'ziladi.
+///
+/// YECHIM: jadvallar bir marta yaratilsa yetarli. Cloudflare bitta
+/// "izolyat"ni minglab so'rov uchun qayta ishlatadi, shu sabab bu
+/// bayroq amalda DDL so'rovlarini MINGLAB BAROBAR kamaytiradi
+/// (yangi izolyat ko'tarilganda atigi bir marta ishlaydi).
+static DB_READY: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Jadvallar borligiga BIR MARTA ishonch hosil qiladi.
+async fn ensure_db(env: &Env) {
+    use core::sync::atomic::Ordering;
+    if DB_READY.load(Ordering::Relaxed) {
+        return;
+    }
+    init_db(env).await;
+    DB_READY.store(true, Ordering::Relaxed);
+}
+
 async fn init_db(env: &Env) {
     let _ = turso_batch(env, &[
         ("CREATE TABLE IF NOT EXISTS anime_db (
@@ -540,6 +574,38 @@ async fn warm_window_total(file_name: &str, widx: u64) -> Option<u64> {
 ///
 /// Baytlar quvurdan fon'da oqadi (`pipeTo` kutilmaydi) — biz esa
 /// o'qish tomonini (readable) javob tanasi sifatida beramiz.
+/// `FixedLengthStream` obyektini yaratadi va (readable, writable)
+/// juftligini qaytaradi.
+///
+/// `fixed_length_stream` bundan faqat `readable` tomonini oladi;
+/// bir nechta manbani KETMA-KET bitta javobga ulash uchun esa
+/// `writable` ham kerak bo'ladi (`stitched_window_stream`ga qarang).
+fn fixed_length_pipe(
+    len: u64,
+) -> Result<(web_sys::ReadableStream, web_sys::WritableStream)> {
+    use worker::wasm_bindgen::{JsCast, JsValue};
+
+    let global = js_sys::global();
+    let ctor = js_sys::Reflect::get(&global, &JsValue::from_str("FixedLengthStream"))
+        .map_err(|_| Error::RustError("FixedLengthStream topilmadi".into()))?;
+    let ctor: js_sys::Function = ctor
+        .dyn_into()
+        .map_err(|_| Error::RustError("FixedLengthStream funksiya emas".into()))?;
+    let args = js_sys::Array::new();
+    args.push(&JsValue::from_f64(len as f64));
+    let obj = js_sys::Reflect::construct(&ctor, &args)
+        .map_err(|_| Error::RustError("FixedLengthStream yaratilmadi".into()))?;
+    let readable = js_sys::Reflect::get(&obj, &JsValue::from_str("readable"))
+        .map_err(|_| Error::RustError("readable yo'q".into()))?
+        .dyn_into::<web_sys::ReadableStream>()
+        .map_err(|_| Error::RustError("readable noto'g'ri turda".into()))?;
+    let writable = js_sys::Reflect::get(&obj, &JsValue::from_str("writable"))
+        .map_err(|_| Error::RustError("writable yo'q".into()))?
+        .dyn_into::<web_sys::WritableStream>()
+        .map_err(|_| Error::RustError("writable noto'g'ri turda".into()))?;
+    Ok((readable, writable))
+}
+
 fn fixed_length_stream(
     src: &web_sys::ReadableStream,
     len: u64,
@@ -861,12 +927,17 @@ async fn b2_warm(env: &Env, file_name: &str, widx: u64, force: bool) -> Result<R
 /// holda 503. `/api/image/...` (bo'laklab keshlaydigan yo'l)
 /// o'zgarishsiz qoladi — undan endi FAQAT "yuklab olish" tugmasi
 /// foydalanadi.
-async fn b2_play(_env: &Env, file_name: &str, range: Option<String>) -> Result<Response> {
+async fn b2_play(
+    _env: &Env,
+    ctx: &Context,
+    file_name: &str,
+    range: Option<String>,
+) -> Result<Response> {
     // Nima uchun keshdan berib bo'lmaganini aytadi (diagnostika —
     // `X-Warm-Reason` sarlavhasida ko'rinadi).
     let mut reason = String::new();
     if let Some(resp) =
-        play_from_warm_cache(file_name, range.as_deref(), &mut reason).await?
+        play_from_warm_cache(ctx, file_name, range.as_deref(), &mut reason).await?
     {
         return Ok(resp);
     }
@@ -895,8 +966,139 @@ async fn b2_play(_env: &Env, file_name: &str, range: Option<String>) -> Result<R
         h.set("X-Cache", "NOT-WARMED")?;
         h.set("X-Warm-Reason", &reason)?;
         h.set("X-Warm-Window", &widx.to_string())?;
+        // Ilova AYNAN shu oynani keshga oladi va qayta uriniladi.
+        // `Retry-After` bo'lmasa ba'zi mijozlar darhol, to'xtovsiz
+        // qayta so'rab, bekorga yuk yaratardi.
+        h.set("Retry-After", "1")?;
     }
     Ok(resp)
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  BIR NECHA OYNANI BITTA JAVOBGA ULASH ("stitching")
+// ═══════════════════════════════════════════════════════════════
+//
+// ── MUAMMO ───────────────────────────────────────────────────
+//
+// Kesh yozuvi eng ko'pi 480 MiB (Cloudflare chegarasi ~512 MB).
+// Ya'ni 1.5 GB'lik fayl 4 ta "oyna"ga bo'linadi.
+//
+// ExoPlayer esa videoni ochganda `Range: bytes=0-` deb so'raydi va
+// javobda E'LON QILINGAN uzunlikni FAYLNING QOLGAN QISMI deb
+// biladi. Agar biz atigi bitta oynani (480 MiB) berib, javobni
+// shu yerda tugatsak — pleyer buni "FAYL TUGADI" deb tushunadi va
+// video 480 MiB'da to'xtab qoladi.
+//
+// Ilgari bu holat umuman ishlamasdi: `play_from_warm_cache`
+// so'ralgan oraliq oynadan chiqib ketsa "outside-window" deb
+// javob bermasdi va pleyer 503 olardi. Ya'ni 480 MiB'dan KATTA
+// videolar UMUMAN OCHILMASDI.
+//
+// ── YECHIM ───────────────────────────────────────────────────
+//
+// Javob tanasi bir nechta oynadan KETMA-KET yig'iladi va
+// uzunligi oldindan (to'g'ri qiymat bilan) e'lon qilinadi.
+// Baytlar oqim bilan o'tadi — worker xotirasiga hech narsa
+// yig'ilmaydi.
+//
+// MUHIM: bu yerda B2'ga BITTA HAM so'rov ketmaydi. Keyingi oyna
+// hali keshda bo'lmasa, u KUTILADI (ilova o'sha paytda uni
+// keshga oldirayotgan bo'ladi) — foydalanuvchi uchun bu oddiy
+// buferlash bo'lib ko'rinadi. Ya'ni "faqat kerak bo'lgan bo'lak
+// keshlanadi" qoidasi buzilmaydi.
+
+/// Keyingi oyna keshda paydo bo'lishini eng ko'pi shuncha kutamiz.
+const STITCH_WAIT_TICKS: u32 = 60;
+
+/// Oynadan (kesh yozuvidan) nisbiy oraliqni so'raydi.
+async fn window_slice(
+    file_name: &str,
+    widx: u64,
+    rel_start: u64,
+    rel_end: u64,
+) -> Result<Option<Response>> {
+    let h = Headers::new();
+    h.set("Range", &format!("bytes={rel_start}-{rel_end}"))?;
+    let req = Request::new_with_init(
+        &warm_window_url(file_name, widx),
+        RequestInit::new().with_method(Method::Get).with_headers(h),
+    )?;
+    Cache::default().get(&req, false).await
+}
+
+/// Javob AYNAN so'ralgan baytlarni o'z ichiga oladimi.
+fn slice_matches(hit: &Response, rel_start: u64, want_len: u64) -> bool {
+    match hit.status_code() {
+        200 => {
+            let len = hit
+                .headers()
+                .get("Content-Length")
+                .ok()
+                .flatten()
+                .and_then(|v| v.parse::<u64>().ok());
+            rel_start == 0 && len == Some(want_len)
+        }
+        206 => hit
+            .headers()
+            .get("Content-Range")
+            .ok()
+            .flatten()
+            .and_then(|c| parse_content_range(&c))
+            .map(|(s, e, _)| s == rel_start && e == rel_start + want_len - 1)
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+/// `src` oqimini `dst`ga quyadi, LEKIN `dst`ni yopmaydi (keyingi
+/// oyna ham shu quvurga yozilishi kerak).
+fn pipe_keep_open(
+    src: &web_sys::ReadableStream,
+    dst: &web_sys::WritableStream,
+) -> Result<js_sys::Promise> {
+    use worker::wasm_bindgen::{JsCast, JsValue};
+    let f = js_sys::Reflect::get(src, &JsValue::from_str("pipeTo"))
+        .map_err(|_| Error::RustError("pipeTo topilmadi".into()))?;
+    let f: js_sys::Function = f
+        .dyn_into()
+        .map_err(|_| Error::RustError("pipeTo funksiya emas".into()))?;
+    let opts = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(
+        &opts,
+        &JsValue::from_str("preventClose"),
+        &JsValue::TRUE,
+    );
+    let p = f
+        .call2(src, dst, &opts)
+        .map_err(|_| Error::RustError("pipeTo bajarilmadi".into()))?;
+    p.dyn_into::<js_sys::Promise>()
+        .map_err(|_| Error::RustError("pipeTo Promise qaytarmadi".into()))
+}
+
+/// Obyektning metodini nomi bo'yicha chaqiradi (web_sys'da
+/// mavjudligiga tayanmaslik uchun).
+fn call_method(obj: &worker::wasm_bindgen::JsValue, name: &str) -> Option<worker::wasm_bindgen::JsValue> {
+    use worker::wasm_bindgen::{JsCast, JsValue};
+    let f = js_sys::Reflect::get(obj, &JsValue::from_str(name)).ok()?;
+    let f: js_sys::Function = f.dyn_into().ok()?;
+    f.call0(obj).ok()
+}
+
+/// Quvurni yopadi (hamma oynalar yozilib bo'lgach).
+fn close_pipe(dst: &web_sys::WritableStream) {
+    use worker::wasm_bindgen::JsCast;
+    let v: &worker::wasm_bindgen::JsValue = dst.unchecked_ref();
+    if let Some(writer) = call_method(v, "getWriter") {
+        let _ = call_method(&writer, "close");
+    }
+}
+
+/// Quvurni uzadi (xato bo'lganda) — mijoz javobning tugamaganini
+/// ko'radi va qayta uriniladi.
+fn abort_pipe(dst: &web_sys::WritableStream) {
+    use worker::wasm_bindgen::JsCast;
+    let v: &worker::wasm_bindgen::JsValue = dst.unchecked_ref();
+    let _ = call_method(v, "abort");
 }
 
 /// Isitilgan oyna keshi so'ralgan oraliqni TO'LIQ qoplasa — javobni
@@ -908,6 +1110,7 @@ async fn b2_play(_env: &Env, file_name: &str, range: Option<String>) -> Result<R
 /// Shu sabab shubha bo'lsa `None` qaytariladi va baytlar B2'dan
 /// oqim bilan olinadi.
 async fn play_from_warm_cache(
+    ctx: &Context,
     file_name: &str,
     range: Option<&str>,
     reason: &mut String,
@@ -939,11 +1142,19 @@ async fn play_from_warm_cache(
         return Ok(None);
     }
     let req_end = req_end_opt.unwrap_or(total - 1).min(total - 1);
-    // So'ralgan oraliq oyna chegarasidan chiqib ketsa — keshdan
-    // to'liq berib bo'lmaydi.
-    if req_end < req_start || req_end >= win_start + WARM_WINDOW {
-        *reason = "outside-window".into();
+    if req_end < req_start {
+        *reason = "bad-end".into();
         return Ok(None);
+    }
+    // ── SO'ROV BIR NECHA OYNANI QAMRAB OLDIMI ────────────────
+    //
+    // Pleyer videoni ochganda `bytes=0-` deb so'raydi — 480 MiB'dan
+    // katta faylda bu bir necha oynaga tegishli bo'ladi. Ilgari
+    // shunday so'rov "outside-window" deb rad etilardi va katta
+    // videolar UMUMAN ochilmasdi. Endi javob oynalardan ketma-ket
+    // yig'iladi (yuqoridagi "stitching" izohiga qarang).
+    if req_end >= win_start + WARM_WINDOW {
+        return stitched_response(ctx, file_name, req_start, req_end, total, reason).await;
     }
 
     let rel_start = req_start - win_start;
@@ -1019,6 +1230,107 @@ async fn play_from_warm_cache(
             h.set("Content-Range", &format!("bytes {req_start}-{req_end}/{total}"))?;
         }
         h.set("X-Cache", "HIT-WINDOW")?;
+    }
+    Ok(Some(resp))
+}
+
+/// Bir nechta oynadan yig'ilgan BITTA uzluksiz javob.
+///
+/// Uzunlik oldindan to'g'ri e'lon qilinadi, shu sabab pleyer
+/// javobni "fayl tugadi" deb tushunmaydi. Baytlar oqim bilan
+/// o'tadi — worker xotirasiga hech narsa yig'ilmaydi va B2'ga
+/// BITTA HAM so'rov ketmaydi.
+async fn stitched_response(
+    ctx: &Context,
+    file_name: &str,
+    req_start: u64,
+    req_end: u64,
+    total: u64,
+    reason: &mut String,
+) -> Result<Option<Response>> {
+    let first = req_start / WARM_WINDOW;
+    let last = req_end / WARM_WINDOW;
+
+    // ── BIRINCHI OYNA KESHDA BO'LISHI SHART ──────────────────
+    // Aks holda javobni umuman boshlab bo'lmaydi: 503 qaytadi va
+    // ilova aynan shu oynani keshga oldiradi.
+    let fw = first * WARM_WINDOW;
+    let f_start = req_start - fw;
+    let f_end = (fw + WARM_WINDOW - 1).min(req_end) - fw;
+    match window_slice(file_name, first, f_start, f_end).await? {
+        Some(probe) if slice_matches(&probe, f_start, f_end - f_start + 1) => {}
+        Some(_) => {
+            *reason = "stitch-first-mismatch".into();
+            return Ok(None);
+        }
+        None => {
+            *reason = "stitch-first-miss".into();
+            return Ok(None);
+        }
+    }
+
+    let len = req_end - req_start + 1;
+    let (readable, writable) = fixed_length_pipe(len)?;
+    let name = file_name.to_string();
+
+    ctx.wait_until(async move {
+        for w in first..=last {
+            let ws = w * WARM_WINDOW;
+            let s = if w == first { req_start - ws } else { 0 };
+            let e = if w == last { req_end - ws } else { WARM_WINDOW - 1 };
+            let want = e - s + 1;
+
+            // Oyna hali keshda bo'lmasa — KUTAMIZ. Ayni paytda
+            // ilova uni keshga oldirayotgan bo'ladi; foydalanuvchi
+            // uchun bu oddiy buferlash bo'lib ko'rinadi. B2'ga bu
+            // yerdan hech qachon chiqilmaydi.
+            let mut got: Option<Response> = None;
+            for _ in 0..STITCH_WAIT_TICKS {
+                if let Ok(Some(r)) = window_slice(&name, w, s, e).await {
+                    if slice_matches(&r, s, want) {
+                        got = Some(r);
+                        break;
+                    }
+                }
+                Delay::from(core::time::Duration::from_millis(1000)).await;
+            }
+            let Some(r) = got else {
+                abort_pipe(&writable);
+                return;
+            };
+            let src = match r.body() {
+                ResponseBody::Stream(rs) => rs.clone(),
+                _ => {
+                    abort_pipe(&writable);
+                    return;
+                }
+            };
+            match pipe_keep_open(&src, &writable) {
+                Ok(pr) => {
+                    if worker::wasm_bindgen_futures::JsFuture::from(pr).await.is_err() {
+                        abort_pipe(&writable);
+                        return;
+                    }
+                }
+                Err(_) => {
+                    abort_pipe(&writable);
+                    return;
+                }
+            }
+        }
+        close_pipe(&writable);
+    });
+
+    let mut resp = Response::from_body(ResponseBody::Stream(readable))?.with_status(206);
+    set_cors(&mut resp);
+    {
+        let h = resp.headers_mut();
+        h.set("Content-Type", "video/mp4")?;
+        h.set("Accept-Ranges", "bytes")?;
+        h.set("Cache-Control", "no-store")?;
+        h.set("Content-Length", &len.to_string())?;
+        h.set("Content-Range", &format!("bytes {req_start}-{req_end}/{total}"))?;
+        h.set("X-Cache", "HIT-STITCH")?;
     }
     Ok(Some(resp))
 }
@@ -1405,10 +1717,146 @@ fn epizod_fields(b: &Value) -> (i64, String, String, String, String, String, Str
     )
 }
 
+// ═══════════════════════════════════════════════════════════════
+//  RO'YXAT SO'ROVLARI UCHUN CHEKKA (EDGE) KESHI
+// ═══════════════════════════════════════════════════════════════
+//
+// MUAMMO (miqyos): anime/bo'lim/qism ro'yxatlari HAR BIR ilova
+// ochilishida so'raladi va har bir so'rov Turso'ga boradi. Bir
+// vaqtda 100 ming (yoki 1 million) foydalanuvchi bo'lganda baza
+// birinchi bo'lib "yiqiladigan" joy aynan shu — chunki bazaning
+// bir soniyadagi so'rov chegarasi bor, Cloudflare chekkasiniki
+// esa amalda yo'q.
+//
+// YECHIM: ro'yxat javoblari Cloudflare chekkasida qisqa muddat
+// saqlanadi. Bir data-markazdagi MINGLAB foydalanuvchi bitta
+// baza so'rovi bilan xizmat qilinadi.
+//
+// ── NEGA 30 SONIYA ────────────────────────────────────────────
+// Kontent kuniga bir necha marta o'zgaradi, ya'ni 30 soniyalik
+// "eskirish" foydalanuvchi uchun umuman sezilmaydi. Boshqa
+// tomondan, 30 soniya bir data-markazdagi barcha so'rovlarni
+// BITTAGA jamlash uchun yetarlicha uzun.
+//
+// ── ADMIN DARHOL KO'RADI ──────────────────────────────────────
+// Har qanday yozish (POST/PUT/DELETE) so'rovidan keyin tegishli
+// kesh yozuvlari O'CHIRILADI. Admin ekranidagi keyingi so'rov
+// (odatda AYNAN O'SHA data-markazga tushadi) yangi ma'lumotni
+// oladi — ya'ni "saqladim, lekin ko'rinmayapti" holati yo'q.
+const LIST_CACHE_SECONDS: u64 = 30;
+
+/// Ro'yxat keshining kaliti. So'rov satri (query) ham kalitga
+/// kiradi — ya'ni turli filtrlar aralashib ketmaydi.
+fn list_cache_url(path: &str, query: Option<&str>) -> String {
+    match query {
+        Some(q) if !q.is_empty() => {
+            format!("https://fulutter-list-cache.internal{path}?{q}")
+        }
+        _ => format!("https://fulutter-list-cache.internal{path}"),
+    }
+}
+
+/// Shu manzil keshlanadigan (faqat o'qiydigan) ro'yxatmi.
+fn is_list_path(path: &str) -> bool {
+    path == "/api/anime"
+        || path == "/api/seasons"
+        || path.starts_with("/api/anime/janr/")
+        || path.starts_with("/api/seasons/anime/")
+        || path.starts_with("/api/epizods/")
+}
+
+/// Yozishdan keyin qaysi kesh yozuvlari eskiradi.
+fn invalidated_list_paths(path: &str) -> Vec<String> {
+    let mut out = vec!["/api/anime".to_string(), "/api/seasons".to_string()];
+    // /api/epizods/<anime>/<season>[/<epizod>] -> ro'yxat kaliti
+    if let Some(rest) = path.strip_prefix("/api/epizods/") {
+        let parts: Vec<&str> = rest.split('/').collect();
+        if parts.len() >= 2 {
+            out.push(format!("/api/epizods/{}/{}", parts[0], parts[1]));
+        }
+    }
+    // /api/seasons/<anime>/<season> -> o'sha anime bo'limlari
+    if let Some(rest) = path.strip_prefix("/api/seasons/") {
+        let first = rest.split('/').next().unwrap_or("");
+        if !first.is_empty() && first != "anime" {
+            out.push(format!("/api/seasons/anime/{first}"));
+        }
+    }
+    out
+}
+
+/// Kesh yozuvlarini o'chiradi (xatolar e'tiborsiz qoldiriladi —
+/// kesh eskirsa ham eng ko'pi 30 soniyadan keyin o'zi yangilanadi).
+async fn purge_list_cache(path: &str) {
+    let cache = Cache::default();
+    for p in invalidated_list_paths(path) {
+        if let Ok(k) = Request::new(&list_cache_url(&p, None), Method::Get) {
+            let _ = cache.delete(&k, false).await;
+        }
+    }
+}
+
 // ── Router ─────────────────────────────────────────────────────
 
 #[event(fetch)]
 async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
+    let url = req.url()?;
+    let path = url.path().to_string();
+    let query = url.query().map(|q| q.to_string());
+    let method = req.method();
+
+    let cacheable = method == Method::Get && is_list_path(&path);
+    let key_url = list_cache_url(&path, query.as_deref());
+
+    // 1) Chekkadagi kesh — bazaga umuman borilmaydi.
+    if cacheable {
+        if let Ok(k) = Request::new(&key_url, Method::Get) {
+            if let Ok(Some(hit)) = Cache::default().get(&k, false).await {
+                return Ok(hit);
+            }
+        }
+    }
+
+    let write = matches!(method, Method::Post | Method::Put | Method::Delete);
+    let mut resp = route(req, env, ctx).await?;
+
+    // 2) Yozishdan keyin eskirgan yozuvlar o'chiriladi.
+    if write && resp.status_code() < 400 {
+        purge_list_cache(&path).await;
+    }
+
+    // 3) Yangi ro'yxat javobi keshga yoziladi.
+    if cacheable && resp.status_code() == 200 {
+        let bytes = resp.bytes().await?;
+        if let Ok(k) = Request::new(&key_url, Method::Get) {
+            if let Ok(mut to_cache) = Response::from_bytes(bytes.clone()) {
+                set_cors(&mut to_cache);
+                let h = to_cache.headers_mut();
+                let _ = h.set("Content-Type", "application/json");
+                let _ = h.set(
+                    "Cache-Control",
+                    &format!("public, max-age={LIST_CACHE_SECONDS}"),
+                );
+                let _ = Cache::default().put(&k, to_cache).await;
+            }
+        }
+        let mut out = Response::from_bytes(bytes)?;
+        set_cors(&mut out);
+        {
+            let h = out.headers_mut();
+            h.set("Content-Type", "application/json")?;
+            h.set(
+                "Cache-Control",
+                &format!("public, max-age={LIST_CACHE_SECONDS}"),
+            )?;
+        }
+        return Ok(out);
+    }
+
+    Ok(resp)
+}
+
+async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
     let url = req.url()?;
     let path = url.path();
     let method = req.method();
@@ -1434,7 +1882,7 @@ async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
         // keshlash mantiqi umuman ishlatilmaydi — ya'ni pleyer
         // faqat o'zi so'ragan baytni oladi.
         if let Some(fname) = path.strip_prefix("/api/play/") {
-            return b2_play(&env, fname, range_header).await;
+            return b2_play(&env, &ctx, fname, range_header).await;
         }
         // Oynani keshga isitish — ilova video ochilganda BIR MARTA
         // chaqiradi va so'rov tugaguncha ulanib turadi (b2_warm
@@ -1452,7 +1900,7 @@ async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
         }
     }
 
-    init_db(&env).await;
+    ensure_db(&env).await;
 
     match (method.clone(), path) {
 
@@ -1794,3 +2242,4 @@ async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
         }
     }
 }
+

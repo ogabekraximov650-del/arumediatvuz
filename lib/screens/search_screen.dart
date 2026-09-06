@@ -54,14 +54,15 @@ class _SearchScreenState extends State<SearchScreen> {
           _allSeasons.map((s) => {...s, 'name': s['nomi'] ?? ''}).toList();
       final filtered = RustCore.instance.searchFilter(searchable, query);
 
+      if (!mounted) return;
       setState(() {
         _results = filtered;
         _hasSearched = true;
       });
     } catch (e) {
-      setState(() => _hasSearched = true);
+      if (mounted) setState(() => _hasSearched = true);
     } finally {
-      setState(() => _isSearching = false);
+      if (mounted) setState(() => _isSearching = false);
     }
   }
 
@@ -95,7 +96,7 @@ class _SearchScreenState extends State<SearchScreen> {
                     decoration: InputDecoration(
                       hintText: 'Anime qidirish...',
                       hintStyle:
-                          TextStyle(color: Colors.white.withOpacity(0.54)),
+                          TextStyle(color: Colors.white.withValues(alpha: 0.54)),
                       border: InputBorder.none,
                     ),
                   ),
@@ -109,7 +110,7 @@ class _SearchScreenState extends State<SearchScreen> {
                           child: Container(
                             padding: const EdgeInsets.all(4),
                             child: Icon(Icons.close_rounded,
-                                size: 20, color: Colors.white.withOpacity(0.7)),
+                                size: 20, color: Colors.white.withValues(alpha: 0.7)),
                           ),
                         )
                       : const SizedBox.shrink(key: ValueKey('empty')),
@@ -123,7 +124,7 @@ class _SearchScreenState extends State<SearchScreen> {
                 ? Center(
                     child: CircularProgressIndicator(
                       valueColor:
-                          AlwaysStoppedAnimation(Colors.white.withOpacity(0.6)),
+                          AlwaysStoppedAnimation(Colors.white.withValues(alpha: 0.6)),
                     ),
                   )
                 : _results.isEmpty && _hasSearched
@@ -136,7 +137,7 @@ class _SearchScreenState extends State<SearchScreen> {
                             const SizedBox(height: 12),
                             Text('Qidiruv natijalari topilmadi',
                                 style: TextStyle(
-                                    color: Colors.white.withOpacity(0.54))),
+                                    color: Colors.white.withValues(alpha: 0.54))),
                           ],
                         ),
                       )
@@ -150,7 +151,7 @@ class _SearchScreenState extends State<SearchScreen> {
                                 const SizedBox(height: 12),
                                 Text('Anime nomini yozib qidiruv qiling',
                                     style: TextStyle(
-                                        color: Colors.white.withOpacity(0.54))),
+                                        color: Colors.white.withValues(alpha: 0.54))),
                               ],
                             ),
                           )
@@ -225,7 +226,7 @@ class _SeasonSearchCard extends StatelessWidget {
                     fit: BoxFit.cover,
                     onError: (_, __) {},
                   ),
-                  color: Colors.white.withOpacity(0.10),
+                  color: Colors.white.withValues(alpha: 0.10),
                 ),
                 child: (season['photo_url'] == null ||
                         (season['photo_url'] as String).isEmpty)
@@ -252,7 +253,7 @@ class _SeasonSearchCard extends StatelessWidget {
                   Text(
                     season['janri'] ?? '',
                     style: TextStyle(
-                        fontSize: 12, color: Colors.white.withOpacity(0.6)),
+                        fontSize: 12, color: Colors.white.withValues(alpha: 0.6)),
                   ),
                 ],
               ),

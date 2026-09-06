@@ -40,6 +40,10 @@ class _SeasonManagementScreenState extends State<SeasonManagementScreen> {
     try {
       final res =
           await http.get(Uri.parse('$API_BASE/api/seasons/anime/$_animeId'));
+      // Ekran yopilib ketgan bo'lsa `setState` chaqirish
+      // istisno tashlaydi ("setState() called after dispose()") —
+      // shu sabab har bir kutishdan keyin tekshiriladi.
+      if (!mounted) return;
       if (res.statusCode == 200) {
         final data = jsonDecode(res.body) as List;
         setState(() => _seasons = data.cast<Map<String, dynamic>>());
@@ -47,9 +51,9 @@ class _SeasonManagementScreenState extends State<SeasonManagementScreen> {
         throw 'Bo\'limlar yuklab olib bo\'lmadi';
       }
     } catch (e) {
-      setState(() => _errorMsg = 'Xato: $e');
+      if (mounted) setState(() => _errorMsg = 'Xato: $e');
     } finally {
-      setState(() => _isLoading = false);
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
@@ -119,13 +123,13 @@ class _SeasonManagementScreenState extends State<SeasonManagementScreen> {
             style: TextStyle(color: Colors.white)),
         content: Text(
           '"$nomi" bo\'limini rostanxam o\'chirmoqchisiz?',
-          style: TextStyle(color: Colors.white.withOpacity(0.7)),
+          style: TextStyle(color: Colors.white.withValues(alpha: 0.7)),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
             child: Text('Yo\'q',
-                style: TextStyle(color: Colors.white.withOpacity(0.5))),
+                style: TextStyle(color: Colors.white.withValues(alpha: 0.5))),
           ),
           FilledButton(
             onPressed: () => Navigator.pop(ctx, true),
@@ -168,7 +172,7 @@ class _SeasonManagementScreenState extends State<SeasonManagementScreen> {
             onPressed: () => _navigateToAddSeason(),
             shape:
                 RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-            backgroundColor: Colors.white.withOpacity(0.18),
+            backgroundColor: Colors.white.withValues(alpha: 0.18),
             foregroundColor: Colors.white,
             child: const Icon(Icons.add_rounded, size: 28),
           ),
@@ -216,7 +220,7 @@ class _SeasonManagementScreenState extends State<SeasonManagementScreen> {
                             fit: BoxFit.cover,
                             onError: (_, __) {},
                           ),
-                          color: Colors.white.withOpacity(0.10),
+                          color: Colors.white.withValues(alpha: 0.10),
                         ),
                         child: animePhoto == null
                             ? const Icon(Icons.movie_creation_outlined,
@@ -241,7 +245,7 @@ class _SeasonManagementScreenState extends State<SeasonManagementScreen> {
                               'Bo\'limni boshqarish',
                               style: TextStyle(
                                   fontSize: 12,
-                                  color: Colors.white.withOpacity(0.5)),
+                                  color: Colors.white.withValues(alpha: 0.5)),
                             ),
                           ],
                         ),
@@ -257,14 +261,14 @@ class _SeasonManagementScreenState extends State<SeasonManagementScreen> {
                     ? Center(
                         child: CircularProgressIndicator(
                           valueColor: AlwaysStoppedAnimation(
-                              Colors.white.withOpacity(0.6)),
+                              Colors.white.withValues(alpha: 0.6)),
                         ),
                       )
                     : _errorMsg != null
                         ? Center(
                             child: Text(_errorMsg!,
                                 style: TextStyle(
-                                    color: Colors.white.withOpacity(0.7))),
+                                    color: Colors.white.withValues(alpha: 0.7))),
                           )
                         : _seasons.isEmpty
                             ? Center(
@@ -277,13 +281,13 @@ class _SeasonManagementScreenState extends State<SeasonManagementScreen> {
                                     Text('Hali bo\'lim qo\'shilmagan',
                                         style: TextStyle(
                                             color: Colors.white
-                                                .withOpacity(0.45))),
+                                                .withValues(alpha: 0.45))),
                                     const SizedBox(height: 4),
                                     Text('Pastdagi + tugmasi orqali qo\'sh',
                                         style: TextStyle(
                                             fontSize: 12,
                                             color:
-                                                Colors.white.withOpacity(0.3))),
+                                                Colors.white.withValues(alpha: 0.3))),
                                   ],
                                 ),
                               )
@@ -324,7 +328,7 @@ class _SeasonManagementScreenState extends State<SeasonManagementScreen> {
                                                   onError: (_, __) {},
                                                 ),
                                                 color: Colors.white
-                                                    .withOpacity(0.10),
+                                                    .withValues(alpha: 0.10),
                                               ),
                                               child: s['photo_url'] == null
                                                   ? const Icon(
@@ -371,7 +375,7 @@ class _SeasonManagementScreenState extends State<SeasonManagementScreen> {
                                                     style: TextStyle(
                                                         fontSize: 11,
                                                         color: AppColors.accent
-                                                            .withOpacity(0.8)),
+                                                            .withValues(alpha: 0.8)),
                                                   ),
                                                 ],
                                               ),
@@ -415,7 +419,7 @@ class _SeasonManagementScreenState extends State<SeasonManagementScreen> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
       decoration: BoxDecoration(
-        color: AppColors.accent.withOpacity(0.18),
+        color: AppColors.accent.withValues(alpha: 0.18),
         borderRadius: BorderRadius.circular(6),
       ),
       child: Text(text,

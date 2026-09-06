@@ -61,7 +61,7 @@ class AnimeDetailScreen extends StatelessWidget {
                           fit: BoxFit.cover,
                           onError: (_, __) {},
                         ),
-                        color: Colors.white.withOpacity(0.12),
+                        color: Colors.white.withValues(alpha: 0.12),
                       ),
                       child: anime['photo_url'] == null
                           ? const Center(
@@ -96,20 +96,20 @@ class AnimeDetailScreen extends StatelessWidget {
                           children: [
                             Chip(
                               label: Text(anime['janri'] ?? ''),
-                              backgroundColor: Colors.white.withOpacity(0.12),
+                              backgroundColor: Colors.white.withValues(alpha: 0.12),
                               labelStyle: const TextStyle(color: Colors.white),
                             ),
                             const SizedBox(width: 8),
                             Text(anime['davlat'] ?? '',
                                 style: TextStyle(
-                                    color: Colors.white.withOpacity(0.6),
+                                    color: Colors.white.withValues(alpha: 0.6),
                                     fontSize: 13)),
                           ],
                         ),
                         const SizedBox(height: 12),
                         Text('Studiya: ${anime['studiya'] ?? ''}',
                             style: TextStyle(
-                                color: Colors.white.withOpacity(0.7),
+                                color: Colors.white.withValues(alpha: 0.7),
                                 fontSize: 13)),
                         const SizedBox(height: 20),
                         Text(
@@ -117,7 +117,7 @@ class AnimeDetailScreen extends StatelessWidget {
                           style: TextStyle(
                             fontSize: 15,
                             height: 1.6,
-                            color: Colors.white.withOpacity(0.8),
+                            color: Colors.white.withValues(alpha: 0.8),
                           ),
                         ),
                         const SizedBox(height: 24),

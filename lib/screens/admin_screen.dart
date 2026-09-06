@@ -120,7 +120,7 @@ class _AdminButton extends StatelessWidget {
             Container(
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
-                color: Colors.white.withOpacity(0.12),
+                color: Colors.white.withValues(alpha: 0.12),
                 borderRadius: BorderRadius.circular(14),
               ),
               child: Icon(icon, color: Colors.white, size: 26),
@@ -138,7 +138,7 @@ class _AdminButton extends StatelessWidget {
                   const SizedBox(height: 3),
                   Text(subtitle,
                       style: TextStyle(
-                          color: Colors.white.withOpacity(0.55), fontSize: 12)),
+                          color: Colors.white.withValues(alpha: 0.55), fontSize: 12)),
                 ],
               ),
             ),

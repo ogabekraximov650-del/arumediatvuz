@@ -6,7 +6,6 @@ import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import '../widgets/glass.dart';
 import '../services/rust_bridge.dart';
-import '../theme/app_background.dart';
 import 'video_player_screen.dart';
 
 const String API_BASE = 'https://aniraxuzapp.ogabekraximov650.workers.dev';
@@ -127,7 +126,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       Text('Anime dunyosi',
                           style: TextStyle(
                               fontSize: 13,
-                              color: Colors.white.withOpacity(0.45))),
+                              color: Colors.white.withValues(alpha: 0.45))),
                     ],
                   ),
                   const Spacer(),
@@ -137,10 +136,10 @@ class _HomeScreenState extends State<HomeScreen> {
                       padding: const EdgeInsets.symmetric(
                           horizontal: 10, vertical: 5),
                       decoration: BoxDecoration(
-                        color: Colors.orange.withOpacity(0.18),
+                        color: Colors.orange.withValues(alpha: 0.18),
                         borderRadius: BorderRadius.circular(10),
                         border:
-                            Border.all(color: Colors.orange.withOpacity(0.4)),
+                            Border.all(color: Colors.orange.withValues(alpha: 0.4)),
                       ),
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
@@ -165,7 +164,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       border: Border.all(color: AppColors.border),
                     ),
                     child: Icon(Icons.notifications_none_rounded,
-                        color: Colors.white.withOpacity(0.7), size: 22),
+                        color: Colors.white.withValues(alpha: 0.7), size: 22),
                   ),
                 ],
               ),
@@ -214,14 +213,14 @@ class _HomeScreenState extends State<HomeScreen> {
                             ? Icons.wifi_off_rounded
                             : Icons.movie_creation_outlined,
                         size: 52,
-                        color: Colors.white.withOpacity(0.2),
+                        color: Colors.white.withValues(alpha: 0.2),
                       ),
                       const SizedBox(height: 12),
                       Text(
                         _isOffline
                             ? 'Internet yo\'q · yuqoriga torting'
                             : 'Anime topilmadi',
-                        style: TextStyle(color: Colors.white.withOpacity(0.4)),
+                        style: TextStyle(color: Colors.white.withValues(alpha: 0.4)),
                       ),
                     ],
                   ),
@@ -289,7 +288,7 @@ class SeasonCard extends StatelessWidget {
           border: Border.all(color: AppColors.border),
           boxShadow: [
             BoxShadow(
-                color: Colors.black.withOpacity(0.32),
+                color: Colors.black.withValues(alpha: 0.32),
                 blurRadius: 14,
                 offset: const Offset(0, 6)),
           ],
@@ -348,7 +347,7 @@ class SeasonCard extends StatelessWidget {
                       begin: Alignment.bottomCenter,
                       end: Alignment.topCenter,
                       colors: [
-                        Colors.black.withOpacity(0.85),
+                        Colors.black.withValues(alpha: 0.85),
                         Colors.transparent
                       ],
                     ),

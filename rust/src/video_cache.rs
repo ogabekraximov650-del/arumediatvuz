@@ -306,6 +306,9 @@ pub extern "C" fn rust_video_cache_start(cache_dir_ptr: *const c_char) -> i32 {
                 }
             }
             log(format!("Kesh oldindan skanerlandi: {n} ta video"));
+            // Skanerlash tugagach — tugallanmagan yuklab olishlar
+            // avtomatik davom etadi (`restore_queue` izohiga qarang).
+            restore_queue();
         })
         .ok();
 
@@ -1351,10 +1354,50 @@ const GROUP_CHUNKS: u64 = 8;
 ///      moslashadi va bu xato QAYTA TAKRORLANMAYDI.
 static SERVER_SPAN_MAX: AtomicU64 = AtomicU64::new(u64::MAX);
 
+/// Chegara OXIRGI MARTA qachon o'rnatilgan (server ishga tushgandan
+/// beri o'tgan millisekund). 0 — o'rnatilmagan.
+///
+/// ── NIMA UCHUN KERAK (tuzatilgan xato) ────────────────────────
+///
+/// Ilgari `SERVER_SPAN_MAX` FAQAT kamayardi va hech qachon
+/// tiklanmasdi. Ya'ni bitta noxush javob (masalan worker o'sha
+/// lahzada band bo'lib, kichikroq oraliq bergani) BUTUN ilovani
+/// ilova qayta ishga tushmaguncha mayda so'rovlarga o'tkazib
+/// yuborardi — yuklab olish esa shu sababdan sekinlashib qolardi
+/// va o'z-o'zidan hech qachon tuzalmasdi.
+///
+/// Endi chegara "muddatli": shu vaqtdan keyin u UNUTILADI va
+/// ilova yana to'liq o'lchamdagi so'rov bilan sinab ko'radi.
+/// Server chegarasi haqiqatan pastligicha qolsa — birinchi
+/// javobdayoq yana o'rnatiladi (bir marta ortiqcha so'rov, ya'ni
+/// deyarli hech qanday narx).
+static SERVER_SPAN_AT_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Chegara shu muddatdan keyin unutiladi.
+const SERVER_SPAN_TTL_MS: u64 = 5 * 60 * 1000;
+
+/// Server ishga tushgandan beri o'tgan millisekund.
+fn uptime_ms() -> u64 {
+    SHARED
+        .get()
+        .map(|s| s.start.elapsed().as_millis() as u64)
+        .unwrap_or(0)
+        .max(1)
+}
+
 /// Serverning kuzatilgan chegarasi bo'yicha oraliqni qisqartiradi.
 fn clamp_span(range_start: u64, range_end: u64) -> u64 {
     let cap = SERVER_SPAN_MAX.load(Ordering::Relaxed);
     if cap == u64::MAX {
+        return range_end;
+    }
+    // Chegara eskirgan bo'lsa — unutamiz va to'liq o'lchamda
+    // so'raymiz (yuqoridagi `SERVER_SPAN_AT_MS` izohiga qarang).
+    let set_at = SERVER_SPAN_AT_MS.load(Ordering::Relaxed);
+    if set_at > 0 && uptime_ms().saturating_sub(set_at) > SERVER_SPAN_TTL_MS {
+        SERVER_SPAN_MAX.store(u64::MAX, Ordering::Relaxed);
+        SERVER_SPAN_AT_MS.store(0, Ordering::Relaxed);
+        log("Server oraliq chegarasi eskirdi — to'liq o'lchamda qayta sinaladi".to_string());
         return range_end;
     }
     let want = range_end.saturating_sub(range_start) + 1;
@@ -1386,6 +1429,7 @@ fn note_server_span(asked: u64, granted: u64) {
     let prev = SERVER_SPAN_MAX.load(Ordering::Relaxed);
     if granted < prev {
         SERVER_SPAN_MAX.store(granted, Ordering::Relaxed);
+        SERVER_SPAN_AT_MS.store(uptime_ms(), Ordering::Relaxed);
         log(format!(
             "Server bir so'rovda eng ko'pi {:.1} MiB beradi — keyingi so'rovlar shunga moslashtirildi",
             granted as f64 / 1048576.0
@@ -1430,6 +1474,84 @@ static DL_EPOCH: AtomicU64 = AtomicU64::new(0);
 
 fn downloads() -> &'static Mutex<HashMap<String, DownloadState>> {
     DOWNLOADS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+// ── YUKLAB OLISH NAVBATI ILOVA YOPILSA HAM YO'QOLMAYDI ─────────
+//
+// TUZATILGAN XATO (foydalanuvchi: "yuklab olish barqaror emas"):
+// navbat FAQAT xotirada turardi. Android esa fon'dagi ilovani
+// xotira kerak bo'lganda istalgan vaqtda o'ldiradi — shundan
+// keyin yuklash O'Z-O'ZIDAN TIKLANMASDI: foydalanuvchi ilovani
+// qayta ochib, har bir qism uchun tugmani QAYTA bosishi kerak
+// edi. Ko'p qismli anime'da bu amalda "yuklab olish ishlamaydi"
+// degani.
+//
+// Endi navbat diskda oddiy JSON ro'yxat sifatida saqlanadi va
+// ilova ochilishi bilan avtomatik davom etadi. Olingan bo'laklar
+// allaqachon diskda, ya'ni yuklash aynan to'xtagan joyidan
+// davom etadi — bitta ham bayt qayta olinmaydi.
+
+/// Navbat fayli.
+fn queue_path() -> Option<PathBuf> {
+    Some(SHARED.get()?.cache_root.join("download_queue.json"))
+}
+
+/// Navbatni diskka yozadi. Chaqiruvchi `downloads()` qulfini
+/// USHLAB TURGAN bo'lishi kerak (qulf ikki marta olinmasin).
+fn save_queue_locked(map: &HashMap<String, DownloadState>) {
+    let Some(path) = queue_path() else { return };
+    let urls: Vec<&str> = map
+        .values()
+        .filter(|s| s.wanted)
+        .map(|s| s.url.as_str())
+        .collect();
+    match serde_json::to_string(&urls) {
+        Ok(json) => {
+            let tmp = path.with_extension("tmp");
+            if fs::write(&tmp, json).is_ok() {
+                let _ = fs::rename(&tmp, &path);
+            }
+        }
+        Err(_) => {}
+    }
+}
+
+/// Diskdagi navbatni o'qib, yuklashlarni qaytadan boshlaydi.
+fn restore_queue() {
+    let Some(path) = queue_path() else { return };
+    let Ok(text) = fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(urls) = serde_json::from_str::<Vec<String>>(&text) else {
+        return;
+    };
+    if urls.is_empty() {
+        return;
+    }
+    log(format!(
+        "Tugallanmagan yuklab olish tiklanmoqda: {} ta",
+        urls.len()
+    ));
+    for url in urls {
+        if url.is_empty() {
+            continue;
+        }
+        // To'liq yuklab bo'lingan bo'lsa qayta boshlanmaydi
+        // (`start_download` ichidagi tekshiruv emas — bu yerda
+        // tarmoqqa chiqmasdan, faqat diskka qarab hal qilinadi).
+        if let Some(shared) = SHARED.get() {
+            let key = cache_key(&url);
+            let dir = shared.cache_root.join(&key);
+            let total = meta_total_from_disk(&dir);
+            if total > 0 {
+                let count = total.div_ceil(CHUNK_SIZE);
+                if (0..count).all(|i| chunk_cached(&dir, i, total)) {
+                    continue;
+                }
+            }
+        }
+        start_download(&url);
+    }
 }
 
 /// Shu bo'lakni AYNI PAYTDA boshqa ish oqimi olayaptimi.
@@ -1551,11 +1673,13 @@ fn pool_worker() {
             // To'liq yuklandi — vazifa navbatdan chiqadi.
             Ok(DlOutcome::Done) => {
                 map.remove(&key);
+                save_queue_locked(&map);
                 log(format!("Yuklab olish TUGADI: {key}"));
             }
             // Foydalanuvchi pauza qildi.
             Ok(DlOutcome::Paused) => {
                 map.remove(&key);
+                save_queue_locked(&map);
             }
             // ── ENG MUHIM O'ZGARISH (yuklab olish tezligi) ─────────
             // Bir necha bo'lak olindi, ba'zilari esa olinmadi (tarmoq
@@ -1747,7 +1871,14 @@ fn run_download(key: &str, url: &str) -> Result<DlOutcome, String> {
                 // so'ralardi va natijada bir xil ma'lumot ikki marta
                 // olinardi (guruh + alohida bo'lak).
                 if second_pass {
-                    let deadline = Instant::now() + Duration::from_secs(10);
+                    // 10 -> 4 soniya. Bu kutish FAQAT bo'lakni
+                    // boshqa oqim (pleyer) olayotgan holat uchun.
+                    // 10 soniya juda uzun edi: oxirgi bir necha
+                    // bo'lakda yuklash sudralib qolar va foiz
+                    // 70-80% da "to'xtab qolgandek" ko'rinardi.
+                    // Bo'lak shu vaqtda kelmasa, uni O'ZIMIZ
+                    // olganimiz tezroq.
+                    let deadline = Instant::now() + Duration::from_secs(4);
                     while Instant::now() < deadline {
                         if chunk_cached(&d, i, total)
                             || !download_active(&k)
@@ -1762,6 +1893,15 @@ fn run_download(key: &str, url: &str) -> Result<DlOutcome, String> {
                         continue;
                     }
                 }
+                // ── TANBAL KESHLASH: shu bo'lak qaysi oynada? ──
+                // Faqat AYNAN KERAK bo'lgan oyna isitiladi (birinchi
+                // oynadan keyingilari yuklash o'sha joyga yetganda).
+                ensure_window_for_download(&u, &k, chunk_start);
+                if !download_active(&k) {
+                    paused.store(true, Ordering::SeqCst);
+                    break;
+                }
+
                 let prio = FetchPrio::Download;
 
                 let mut res = ChunkRes::Failed("urinilmadi".to_string());
@@ -1909,6 +2049,7 @@ fn start_download(url: &str) -> bool {
             );
         }
     }
+    save_queue_locked(&map);
     log(format!("Yuklab olish navbatga qo'yildi: {key}"));
     true
 }
@@ -1926,6 +2067,7 @@ fn stop_download(key: &str) {
         if map.get(key).map(|s| !s.running).unwrap_or(false) {
             map.remove(key);
         }
+        save_queue_locked(&map);
     }
 }
 
@@ -2353,6 +2495,20 @@ fn warm_state() -> &'static Mutex<HashMap<String, (WarmState, Instant)>> {
 /// isitilmoqda" qatori.
 const WARM_RETRY_COOLDOWN: Duration = Duration::from_secs(600);
 
+/// TANBAL isitish (`warm_window_bg`) uchun qayta urinish oralig'i.
+///
+/// Yuqoridagi 600 soniya `maybe_warm` uchun to'g'ri: u HAR BIR
+/// bo'lakdan chaqiriladi, ya'ni uzun tanaffus so'rovlar bo'ronining
+/// oldini oladi. Tanbal isitish esa BOSHQACHA — uni ilova ataylab,
+/// aniq bir oyna uchun chaqiradi (foydalanuvchi o'sha joyga sek
+/// qildi yoki yaqinlashdi). Bu yerda 10 daqiqa kutish foydalanuvchi
+/// uchun "video ochilmayapti" degani bo'lardi.
+///
+/// 15 soniya: tarmoq bir lahzaga uzilgan bo'lsa tez tiklanadi,
+/// lekin B2'ga bo'ron ham ketmaydi (bir oyna uchun eng ko'pi
+/// 15 soniyada bitta urinish).
+const WARM_LAZY_RETRY_COOLDOWN: Duration = Duration::from_secs(15);
+
 /// Video manzilidan isitish manzilini yasaydi:
 ///   .../api/image/ep_1_2_720p.mp4  ->  .../api/warm/ep_1_2_720p.mp4?w=0
 /// Manzil kutilgan shaklda bo'lmasa `None` (isitish o'tkazib
@@ -2511,13 +2667,30 @@ fn prepare_force() -> &'static Mutex<HashSet<String>> {
 /// yerda yangilanadi, ya'ni yuklab olish oqimi ham xuddi shu
 /// natijadan foydalanadi va B2'ga qo'shimcha so'rov ketmaydi.
 fn warm_one_window(url: &str, key: &str, widx: u64, force: bool) -> (bool, u64) {
-    let Some(shared) = SHARED.get() else {
-        return (false, 0);
-    };
-    let Some(warm_url) = warm_url_for_force(url, widx, force) else {
-        return (false, 0);
-    };
     let tag = format!("{key}#w{widx}");
+    // ── HOLAT HECH QACHON "KETYAPTI"DA QOLIB KETMASIN ──────────
+    //
+    // TUZATILGAN XATO: quyidagi ikki erta chiqishda oyna holati
+    // yangilanmasdi. Chaqiruvchi esa holatni "Running" deb ko'rib,
+    // hech qachon kelmaydigan natijani kutardi — yuklab olish
+    // har bir bo'lakda 90 soniyagacha muzlab turardi.
+    let fail = |t: &str| {
+        if let Ok(mut m) = warm_state().lock() {
+            m.insert(t.to_string(), (WarmState::Failed, Instant::now()));
+        }
+    };
+    let Some(shared) = SHARED.get() else {
+        fail(&tag);
+        return (false, 0);
+    };
+    // Manzil `/api/image/...` shaklida bo'lmasa isitish umuman
+    // mumkin emas (masalan sinovdagi to'g'ridan-to'g'ri manba) —
+    // bunday holatda baytlar odatdagidek to'g'ridan-to'g'ri
+    // olinaveradi.
+    let Some(warm_url) = warm_url_for_force(url, widx, force) else {
+        fail(&tag);
+        return (false, 0);
+    };
     log(format!("Isitish: {warm_url}"));
     match shared.warm_agent.get(&warm_url).call() {
         Ok(resp) => {
@@ -2652,19 +2825,28 @@ fn start_prepare(url: &str) -> bool {
                 log(format!("Tayyorlash: hajm aniqlandi — {total} bayt"));
             }
 
-            // 4) Fayl bitta oynaga sig'masa — qolgan oynalarni ham
-            //    isitamiz (sek qilinganda 503 chiqmasligi uchun).
+            // 4) QOLGAN OYNALAR SHU YERDA ISITILMAYDI — TANBAL
+            //    (lazy) KESHLASH.
+            //
+            //    Ilgari bu yerda faylning HAMMA oynasi ketma-ket
+            //    isitilardi. 1.5 GB'lik faylda bu 4 ta oyna, ya'ni
+            //    B2'dan 1.5 GB o'qish va foydalanuvchi uchun bir
+            //    necha daqiqalik kutish — holbuki u videoning
+            //    faqat boshini ko'rishi mumkin edi. Ya'ni pul ham,
+            //    vaqt ham behuda ketardi.
+            //
+            //    ENDI: faqat BIRINCHI oyna (0-480 MiB) isitiladi va
+            //    video shu zahoti ochiladi. Keyingi oyna FAQAT
+            //    pleyer o'sha joyga yaqinlashganda yoki foydalanuvchi
+            //    o'sha joyga sek qilganda isitiladi
+            //    (`rust_video_cache_warm_window`). Foydalanuvchi
+            //    videoning oxiriga umuman bormasa, oxirgi oyna
+            //    B2'dan HECH QACHON o'qilmaydi.
             let windows = total.div_ceil(WARM_WINDOW).max(1);
-            for widx in 1..windows {
-                let (ok, _) = warm_one_window(&u, &k, widx, force);
-                if !ok {
-                    log(format!("Tayyorlash: #{widx} oyna keshga tushmadi"));
-                    finish(PrepareState::Failed);
-                    return;
-                }
-            }
-
-            log(format!("Tayyorlash tayyor: {k} — {windows} oyna keshda"));
+            log(format!(
+                "Tayyorlash tayyor: {k} — #0 oyna keshda ({windows} oynadan). \
+                 Qolganlari faqat kerak bo'lganda isitiladi."
+            ));
             finish(PrepareState::Ready);
         });
     if spawned.is_err() {
@@ -2758,6 +2940,196 @@ pub extern "C" fn rust_video_cache_prepare_status(url_ptr: *const c_char) -> i32
     }
 }
 
+// ═══════════════════════════════════════════════════════════════
+//  TANBAL (LAZY) OYNA KESHLASH
+// ═══════════════════════════════════════════════════════════════
+//
+// TALAB (foydalanuvchi): 1.5 GB'lik video birinchi marta ochilganda
+// FAQAT boshidagi 480 MiB keshga olinsin. Foydalanuvchi ko'rib yoki
+// sek qilib o'sha bo'lakning oxiriga yetsagina — 481-960 MiB'lik
+// IKKINCHI bo'lak keshlansin. Ketma-ket hamma bo'lakni keshlash
+// xarajatni behuda ko'paytiradi.
+//
+// Shu sabab bu yerda ikkita ish bor:
+//
+//   1. `rust_video_cache_warm_window` — berilgan oynani FON'DA
+//      isitishni boshlaydi (idempotent: bir necha marta chaqirilsa
+//      ham B2'ga bitta so'rov ketadi). Pleyer oyna chegarasiga
+//      yaqinlashganda ILOVA shuni chaqiradi — ya'ni keyingi oyna
+//      foydalanuvchi u yerga yetib borgunicha tayyor bo'ladi va
+//      hech qanday kutish sezilmaydi.
+//
+//   2. `rust_video_cache_window_status` — o'sha oynaning holati.
+//      Foydalanuvchi hali isitilmagan joyga SEK qilsa, ilova
+//      pleyerga tegmasdan (buferni saqlagan holda) shu holat
+//      "tayyor" bo'lishini kutadi va faqat keyin sek qiladi.
+//      Shu bilan pleyer HECH QACHON 503 ko'rmaydi — ya'ni xato
+//      ham, bufer tozalanishi ham bo'lmaydi.
+//
+// B2'GA ORTIQCHA SO'ROV KETMAYDI: baytlar faqat isitish paytida,
+// oynasiga bir marta o'qiladi. Boshqa hech qaysi yo'l B2'ga
+// chiqmaydi.
+
+/// Oynaning hozirgi holati (ichki).
+fn window_state_of(key: &str, widx: u64) -> Option<WarmState> {
+    let tag = format!("{key}#w{widx}");
+    warm_state().lock().ok().and_then(|m| m.get(&tag).map(|(s, _)| *s))
+}
+
+/// Oynani FON'DA isitishni boshlaydi. Allaqachon ketayotgan yoki
+/// tugagan bo'lsa — hech narsa qilmaydi (B2'ga takroriy so'rov
+/// KETMAYDI).
+fn warm_window_bg(url: &str, widx: u64) -> bool {
+    if SHARED.get().is_none() {
+        return false;
+    }
+    let key = cache_key(url);
+    let tag = format!("{key}#w{widx}");
+    {
+        let Ok(mut m) = warm_state().lock() else {
+            return false;
+        };
+        match m.get(&tag) {
+            // Ketyapti yoki tayyor — qayta boshlamaymiz.
+            Some((WarmState::Running, _)) | Some((WarmState::Done, _)) => return true,
+            // Yaqinda muvaffaqiyatsiz tugagan — darhol qayta
+            // urinmaymiz (so'rovlar bo'roni bo'lmasligi uchun).
+            Some((WarmState::Failed, at)) if at.elapsed() < WARM_LAZY_RETRY_COOLDOWN => {
+                return false
+            }
+            _ => {}
+        }
+        m.insert(tag.clone(), (WarmState::Running, Instant::now()));
+    }
+    let (u, k) = (url.to_string(), key.clone());
+    let spawned = thread::Builder::new()
+        .name("video-cache-warmw".into())
+        .stack_size(256 * 1024)
+        .spawn(move || {
+            log(format!("Tanbal isitish: #{widx} oyna ({k})"));
+            let (ok, total) = warm_one_window(&u, &k, widx, false);
+            if !ok {
+                // Qo'shimcha kafolat: holat "ketyapti"da qolmaydi.
+                if let Ok(mut m) = warm_state().lock() {
+                    let tag = format!("{k}#w{widx}");
+                    if m.get(&tag).map(|(s, _)| *s) == Some(WarmState::Running) {
+                        m.insert(tag, (WarmState::Failed, Instant::now()));
+                    }
+                }
+            }
+            // Hajm ma'lum bo'ldi — meta.json'ga yozib qo'yamiz
+            // (keyingi safar so'rov kerak bo'lmasin).
+            if ok && total > 0 {
+                if let Some(shared) = SHARED.get() {
+                    let dir = shared.cache_root.join(&k);
+                    if meta_total_from_disk(&dir) == 0 {
+                        let _ = fs::create_dir_all(&dir);
+                        let meta = CacheMeta {
+                            total_size: total,
+                            content_type: "video/mp4".to_string(),
+                            chunk_size: CHUNK_SIZE,
+                            duration_secs: 0.0,
+                            chunk_start_ms: Vec::new(),
+                        };
+                        if let Ok(json) = serde_json::to_string(&meta) {
+                            let _ = fs::write(dir.join("meta.json"), json);
+                        }
+                    }
+                }
+            }
+            log(format!(
+                "Tanbal isitish tugadi: #{widx} oyna — {}",
+                if ok { "tayyor" } else { "muvaffaqiyatsiz" }
+            ));
+        });
+    if spawned.is_err() {
+        if let Ok(mut m) = warm_state().lock() {
+            m.insert(tag, (WarmState::Failed, Instant::now()));
+        }
+        return false;
+    }
+    true
+}
+
+/// Oynani isitishni boshlaydi (yoki allaqachon ketayotgan bo'lsa —
+/// hech narsa qilmaydi). DARHOL qaytadi.
+#[no_mangle]
+pub extern "C" fn rust_video_cache_warm_window(url_ptr: *const c_char, widx: u64) -> i32 {
+    let Some(url) = (unsafe { cstr_to_str(url_ptr) }) else {
+        return 0;
+    };
+    if url.is_empty() {
+        return 0;
+    }
+    if warm_window_bg(url, widx) {
+        1
+    } else {
+        0
+    }
+}
+
+/// Oyna holati:
+///   0 — isitilyapti (kutish kerak);
+///   1 — TAYYOR (keshda — o'sha joyni ijro qilsa bo'ladi);
+///   2 — muvaffaqiyatsiz (qayta urinsa bo'ladi);
+///   3 — hali umuman boshlanmagan.
+///
+/// Fayl DISKDA to'liq bo'lsa oyna tushunchasining o'zi kerak
+/// emas — 1 qaytariladi (tarmoqqa umuman chiqilmaydi).
+#[no_mangle]
+pub extern "C" fn rust_video_cache_window_status(url_ptr: *const c_char, widx: u64) -> i32 {
+    let Some(url) = (unsafe { cstr_to_str(url_ptr) }) else {
+        return 3;
+    };
+    if url.is_empty() {
+        return 3;
+    }
+    let key = cache_key(url);
+    // Diskdagi to'liq fayl uchun isitish kerak emas.
+    if let Some(shared) = SHARED.get() {
+        let dir = shared.cache_root.join(&key);
+        let total = meta_total_from_disk(&dir);
+        if total > 0 {
+            let count = total.div_ceil(CHUNK_SIZE);
+            if (0..count).all(|i| chunk_cached(&dir, i, total)) {
+                return 1;
+            }
+        }
+    }
+    match window_state_of(&key, widx) {
+        Some(WarmState::Running) => 0,
+        Some(WarmState::Done) => 1,
+        Some(WarmState::Failed) => 2,
+        None => 3,
+    }
+}
+
+/// Faylning umumiy hajmi (bayt). 0 — hali noma'lum.
+///
+/// Ilova shu son orqali "pleyer hozir qaysi oynada" degan savolga
+/// javob beradi: `bayt = (pozitsiya / davomiylik) * hajm`.
+#[no_mangle]
+pub extern "C" fn rust_video_cache_total(url_ptr: *const c_char) -> u64 {
+    let Some(url) = (unsafe { cstr_to_str(url_ptr) }) else {
+        return 0;
+    };
+    if url.is_empty() {
+        return 0;
+    }
+    let Some(shared) = SHARED.get() else {
+        return 0;
+    };
+    meta_total_from_disk(&shared.cache_root.join(cache_key(url)))
+}
+
+/// Bitta oynadagi baytlar soni — ilova oyna chegarasini AYNAN shu
+/// songa qarab hisoblaydi (Rust va worker bilan bir xil bo'lishi
+/// shart, shu sabab qiymat qo'lda takrorlanmaydi).
+#[no_mangle]
+pub extern "C" fn rust_video_cache_window_size() -> u64 {
+    WARM_WINDOW
+}
+
 /// ── YUKLAB OLISH ISITISHNI KUTADI ─────────────────────────────
 ///
 /// Foydalanuvchi "yuklab olish"ni bosganda eng tejamkor va eng tez
@@ -2803,6 +3175,39 @@ fn wait_for_warm(key: &str, byte_pos: u64) {
             ));
         }
         thread::sleep(Duration::from_millis(300));
+    }
+}
+
+/// ── YUKLAB OLISH: KERAKLI OYNANI ISITIB, KUTADI ───────────────
+///
+/// Tanbal keshlashda yuklab olish ham aynan pleyer kabi ishlaydi:
+/// bo'lak qaysi oynaga tegishli bo'lsa, FAQAT o'sha oyna isitiladi.
+/// Yuklash tartib bilan borgani uchun oynalar ham tartib bilan,
+/// kerak bo'lgan sari isitiladi — ya'ni foydalanuvchi yuklashni
+/// yarmida to'xtatsa, qolgan oynalar B2'dan umuman o'qilmaydi.
+///
+/// Kutish CHEGARALANGAN va pauza bosilsa darhol uziladi.
+/// `true` — oyna keshda (yoki kutish tugadi, baribir davom etamiz).
+fn ensure_window_for_download(url: &str, key: &str, byte_pos: u64) {
+    let widx = byte_pos / WARM_WINDOW;
+    if window_state_of(key, widx) == Some(WarmState::Done) {
+        return;
+    }
+    warm_window_bg(url, widx);
+    let deadline = Instant::now() + WARM_WAIT_MAX;
+    while Instant::now() < deadline {
+        if !download_active(key) {
+            return;
+        }
+        match window_state_of(key, widx) {
+            Some(WarmState::Running) => {}
+            // Tayyor, muvaffaqiyatsiz yoki umuman boshlanmagan —
+            // kutadigan narsa yo'q (muvaffaqiyatsiz bo'lsa bo'lak
+            // baribir olinishga urinadi, xato bo'lsa odatdagi
+            // qayta urinish mantiqi ishlaydi).
+            _ => return,
+        }
+        thread::sleep(Duration::from_millis(200));
     }
 }
 
@@ -5373,4 +5778,156 @@ mod tests {
         }
         last
     }
+
+    // ═══════════════════════════════════════════════════════════
+    //  TANBAL (LAZY) OYNA KESHLASH
+    // ═══════════════════════════════════════════════════════════
+    //
+    // TALAB: 1.5 GB'lik video birinchi marta ochilganda FAQAT
+    // boshidagi 480 MiB keshga olinsin. Keyingi bo'lak esa faqat
+    // foydalanuvchi o'sha joyga yetganda (yoki sek qilganda)
+    // olinsin. Ketma-ket hamma bo'lakni keshlash xarajatni behuda
+    // ko'paytiradi.
+    //
+    // Bu test aynan shuni tekshiradi: tayyorlashda manbaga ATIGI
+    // BITTA isitish so'rovi (w=0) ketadi; #2 oyna esa faqat
+    // ALOHIDA so'ralganda olinadi va #1 oynaga UMUMAN tegilmaydi.
+
+    /// Test uchun soxta "worker": faqat `/api/warm/...?w=N` ni
+    /// biladi va kelgan har bir oyna raqamini yozib boradi.
+    fn start_warm_origin(total: u64) -> (u16, Arc<Mutex<Vec<u64>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let log: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let l2 = Arc::clone(&log);
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut st) = stream else { continue };
+                let l3 = Arc::clone(&l2);
+                thread::spawn(move || {
+                    let mut buf = [0u8; 4096];
+                    let n = st.read(&mut buf).unwrap_or(0);
+                    let text = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let first = text.split("\r\n").next().unwrap_or("").to_string();
+                    if let Some(i) = first.find("/api/warm/") {
+                        let widx = first[i..]
+                            .split("w=")
+                            .nth(1)
+                            .map(|v| {
+                                v.chars()
+                                    .take_while(|c| c.is_ascii_digit())
+                                    .collect::<String>()
+                            })
+                            .and_then(|v| v.parse::<u64>().ok())
+                            .unwrap_or(0);
+                        l3.lock().unwrap().push(widx);
+                        let body = format!("{{\"status\":\"warmed\",\"total\":{total}}}");
+                        let head = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = st.write_all(head.as_bytes());
+                        let _ = st.write_all(body.as_bytes());
+                        return;
+                    }
+                    let _ = st.write_all(
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    );
+                });
+            }
+        });
+        (port, log)
+    }
+
+    #[test]
+    fn tanbal_keshlash_faqat_kerakli_oynani_oladi() {
+        let (_port, _root) = ensure_server();
+        // Uch oynaga bo'linadigan "katta" fayl (1.4 GB).
+        const WINDOWS: u64 = 3;
+        let total = WARM_WINDOW * WINDOWS - 1024;
+        let (w_port, w_log) = start_warm_origin(total);
+        let name = "tanbal.mp4";
+        let url = format!("http://127.0.0.1:{w_port}/api/image/{name}");
+        let c_url = std::ffi::CString::new(url.clone()).unwrap();
+
+        // ── 1) TAYYORLASH: FAQAT #0 OYNA ──────────────────────
+        assert_eq!(rust_video_cache_prepare(c_url.as_ptr()), 1);
+        let mut ready = false;
+        for _ in 0..200 {
+            if rust_video_cache_prepare_status(c_url.as_ptr()) == 1 {
+                ready = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(ready, "tayyorlash tugamadi");
+
+        let asked = w_log.lock().unwrap().clone();
+        assert_eq!(
+            asked,
+            vec![0u64],
+            "tayyorlashda faqat #0 oyna olinishi kerak edi, olingani: {asked:?}"
+        );
+
+        // Hajm isitish javobidan olinadi — buning uchun manbaga
+        // ALOHIDA so'rov ketmaydi.
+        assert_eq!(
+            rust_video_cache_total(c_url.as_ptr()),
+            total,
+            "hajm isitish javobidan olinmadi"
+        );
+
+        // ── 2) BOSHQA OYNALAR HALI OLINMAGAN ──────────────────
+        assert_eq!(
+            rust_video_cache_window_status(c_url.as_ptr(), 0),
+            1,
+            "#0 oyna tayyor bo'lishi kerak"
+        );
+        assert_eq!(
+            rust_video_cache_window_status(c_url.as_ptr(), 1),
+            3,
+            "#1 oyna umuman boshlanmagan bo'lishi kerak"
+        );
+
+        // ── 3) FOYDALANUVCHI #2 OYNAGA SEK QILDI ──────────────
+        // Faqat AYNAN o'sha oyna olinadi; #1 ga tegilmaydi.
+        assert_eq!(rust_video_cache_warm_window(c_url.as_ptr(), 2), 1);
+        let mut got = false;
+        for _ in 0..200 {
+            if rust_video_cache_window_status(c_url.as_ptr(), 2) == 1 {
+                got = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(got, "#2 oyna keshga olinmadi");
+
+        let asked = w_log.lock().unwrap().clone();
+        assert_eq!(
+            asked,
+            vec![0u64, 2],
+            "faqat #0 va #2 oyna olinishi kerak edi, olingani: {asked:?}"
+        );
+        assert_eq!(
+            rust_video_cache_window_status(c_url.as_ptr(), 1),
+            3,
+            "#1 oynaga umuman tegilmasligi kerak edi"
+        );
+
+        // ── 4) TAKRORIY SO'ROV MANBAGA CHIQMAYDI ──────────────
+        // Tayyor oyna qayta so'ralsa, manbaga BITTA ham qo'shimcha
+        // so'rov ketmasligi kerak (xarajat behuda oshmasin).
+        for _ in 0..5 {
+            assert_eq!(rust_video_cache_warm_window(c_url.as_ptr(), 0), 1);
+            assert_eq!(rust_video_cache_warm_window(c_url.as_ptr(), 2), 1);
+        }
+        thread::sleep(Duration::from_millis(300));
+        let asked = w_log.lock().unwrap().clone();
+        assert_eq!(
+            asked,
+            vec![0u64, 2],
+            "tayyor oyna uchun manbaga takroriy so'rov ketdi: {asked:?}"
+        );
+    }
+
 }

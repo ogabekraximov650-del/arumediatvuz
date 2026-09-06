@@ -29,11 +29,6 @@ class _EpizodManagementScreenState extends State<EpizodManagementScreen> {
   String get _animeId => widget.anime['id'].toString();
   String get _seasonId => widget.season['season_id'].toString();
 
-  String get _seasonLabel {
-    final b = widget.season['bolim_id'] ?? widget.season['season_id'] ?? '?';
-    return '$b-bo\'lim';
-  }
-
   @override
   void initState() {
     super.initState();
@@ -48,6 +43,10 @@ class _EpizodManagementScreenState extends State<EpizodManagementScreen> {
     try {
       final res = await http
           .get(Uri.parse('$_apiBase/api/epizods/$_animeId/$_seasonId'));
+      // Ekran yopilib ketgan bo'lsa `setState` chaqirish
+      // istisno tashlaydi ("setState() called after dispose()") —
+      // shu sabab har bir kutishdan keyin tekshiriladi.
+      if (!mounted) return;
       if (res.statusCode == 200) {
         final data = jsonDecode(res.body) as List;
         setState(() => _epizodlar = data.cast<Map<String, dynamic>>());
@@ -55,9 +54,9 @@ class _EpizodManagementScreenState extends State<EpizodManagementScreen> {
         throw 'Epizodlar yuklab olib bo\'lmadi';
       }
     } catch (e) {
-      setState(() => _errorMsg = 'Xato: $e');
+      if (mounted) setState(() => _errorMsg = 'Xato: $e');
     } finally {
-      setState(() => _isLoading = false);
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
@@ -100,13 +99,13 @@ class _EpizodManagementScreenState extends State<EpizodManagementScreen> {
             style: TextStyle(color: Colors.white)),
         content: Text(
           '"$label" epizodini rostanxam o\'chirmoqchisiz?\nBarcha fayl linklari ham o\'chadi.',
-          style: TextStyle(color: Colors.white.withOpacity(0.7)),
+          style: TextStyle(color: Colors.white.withValues(alpha: 0.7)),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
             child: Text('Yo\'q',
-                style: TextStyle(color: Colors.white.withOpacity(0.5))),
+                style: TextStyle(color: Colors.white.withValues(alpha: 0.5))),
           ),
           FilledButton(
             onPressed: () => Navigator.pop(ctx, true),
@@ -150,7 +149,7 @@ class _EpizodManagementScreenState extends State<EpizodManagementScreen> {
             onPressed: () => _navigateToAddEpizod(),
             shape:
                 RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-            backgroundColor: Colors.white.withOpacity(0.18),
+            backgroundColor: Colors.white.withValues(alpha: 0.18),
             foregroundColor: Colors.white,
             child: const Icon(Icons.add_rounded, size: 28),
           ),
@@ -196,7 +195,7 @@ class _EpizodManagementScreenState extends State<EpizodManagementScreen> {
                                   onError: (_, __) {},
                                 )
                               : null,
-                          color: Colors.white.withOpacity(0.10),
+                          color: Colors.white.withValues(alpha: 0.10),
                         ),
                         child: seasonPhoto == null || seasonPhoto.isEmpty
                             ? const Icon(Icons.movie_creation_outlined,
@@ -221,7 +220,7 @@ class _EpizodManagementScreenState extends State<EpizodManagementScreen> {
                               'Epizodlarni boshqarish',
                               style: TextStyle(
                                   fontSize: 12,
-                                  color: Colors.white.withOpacity(0.5)),
+                                  color: Colors.white.withValues(alpha: 0.5)),
                             ),
                           ],
                         ),
@@ -235,14 +234,14 @@ class _EpizodManagementScreenState extends State<EpizodManagementScreen> {
                     ? Center(
                         child: CircularProgressIndicator(
                           valueColor: AlwaysStoppedAnimation(
-                              Colors.white.withOpacity(0.6)),
+                              Colors.white.withValues(alpha: 0.6)),
                         ),
                       )
                     : _errorMsg != null
                         ? Center(
                             child: Text(_errorMsg!,
                                 style: TextStyle(
-                                    color: Colors.white.withOpacity(0.7))),
+                                    color: Colors.white.withValues(alpha: 0.7))),
                           )
                         : _epizodlar.isEmpty
                             ? Center(
@@ -257,13 +256,13 @@ class _EpizodManagementScreenState extends State<EpizodManagementScreen> {
                                     Text('Hali epizod qo\'shilmagan',
                                         style: TextStyle(
                                             color: Colors.white
-                                                .withOpacity(0.45))),
+                                                .withValues(alpha: 0.45))),
                                     const SizedBox(height: 4),
                                     Text('Pastdagi + tugmasi orqali qo\'sh',
                                         style: TextStyle(
                                             fontSize: 12,
                                             color:
-                                                Colors.white.withOpacity(0.3))),
+                                                Colors.white.withValues(alpha: 0.3))),
                                   ],
                                 ),
                               )
@@ -325,9 +324,9 @@ class _AdminEpizodCard extends StatelessWidget {
               width: 44,
               height: 44,
               decoration: BoxDecoration(
-                color: AppColors.accent.withOpacity(0.12),
+                color: AppColors.accent.withValues(alpha: 0.12),
                 borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: AppColors.accent.withOpacity(0.25)),
+                border: Border.all(color: AppColors.accent.withValues(alpha: 0.25)),
               ),
               child: Center(
                 child: Text('$num',
@@ -354,7 +353,7 @@ class _AdminEpizodCard extends StatelessWidget {
                   const SizedBox(height: 3),
                   Text(_qualities,
                       style: TextStyle(
-                          fontSize: 11, color: Colors.white.withOpacity(0.5))),
+                          fontSize: 11, color: Colors.white.withValues(alpha: 0.5))),
                 ],
               ),
             ),

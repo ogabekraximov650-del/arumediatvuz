@@ -34,6 +34,10 @@ class _AnimeManagementScreenState extends State<AnimeManagementScreen> {
     });
     try {
       final res = await http.get(Uri.parse('$API_BASE/api/anime'));
+      // Ekran yopilib ketgan bo'lsa `setState` chaqirish
+      // istisno tashlaydi ("setState() called after dispose()") —
+      // shu sabab har bir kutishdan keyin tekshiriladi.
+      if (!mounted) return;
       if (res.statusCode == 200) {
         final data = jsonDecode(res.body) as List;
         setState(() => _animes = data.cast<Map<String, dynamic>>());
@@ -41,9 +45,9 @@ class _AnimeManagementScreenState extends State<AnimeManagementScreen> {
         throw 'Animelar yuklab olib bo\'lmadi';
       }
     } catch (e) {
-      setState(() => _errorMsg = 'Xato: $e');
+      if (mounted) setState(() => _errorMsg = 'Xato: $e');
     } finally {
-      setState(() => _isLoading = false);
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
@@ -102,13 +106,13 @@ class _AnimeManagementScreenState extends State<AnimeManagementScreen> {
             style: TextStyle(color: Colors.white)),
         content: Text(
           '"$name" animeni rostanxam o\'chirmoqchisiz?',
-          style: TextStyle(color: Colors.white.withOpacity(0.7)),
+          style: TextStyle(color: Colors.white.withValues(alpha: 0.7)),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
             child: Text('Yo\'q',
-                style: TextStyle(color: Colors.white.withOpacity(0.5))),
+                style: TextStyle(color: Colors.white.withValues(alpha: 0.5))),
           ),
           FilledButton(
             onPressed: () => Navigator.pop(ctx, true),
@@ -128,7 +132,7 @@ class _AnimeManagementScreenState extends State<AnimeManagementScreen> {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: const Text('Anime o\'chirildi'),
-              backgroundColor: Colors.green.withOpacity(0.8),
+              backgroundColor: Colors.green.withValues(alpha: 0.8),
             ),
           );
           _loadAnimes();
@@ -156,7 +160,7 @@ class _AnimeManagementScreenState extends State<AnimeManagementScreen> {
             onPressed: () => _navigateToAddAnime(),
             shape:
                 RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-            backgroundColor: Colors.white.withOpacity(0.18),
+            backgroundColor: Colors.white.withValues(alpha: 0.18),
             foregroundColor: Colors.white,
             child: const Icon(Icons.add_rounded, size: 28),
           ),
@@ -204,7 +208,7 @@ class _AnimeManagementScreenState extends State<AnimeManagementScreen> {
                     ? Center(
                         child: CircularProgressIndicator(
                           valueColor: AlwaysStoppedAnimation(
-                              Colors.white.withOpacity(0.6)),
+                              Colors.white.withValues(alpha: 0.6)),
                         ),
                       )
                     : _errorMsg != null
@@ -217,7 +221,7 @@ class _AnimeManagementScreenState extends State<AnimeManagementScreen> {
                                 const SizedBox(height: 12),
                                 Text(_errorMsg!,
                                     style: TextStyle(
-                                        color: Colors.white.withOpacity(0.7))),
+                                        color: Colors.white.withValues(alpha: 0.7))),
                                 const SizedBox(height: 16),
                                 FilledButton(
                                   onPressed: _loadAnimes,
@@ -237,7 +241,7 @@ class _AnimeManagementScreenState extends State<AnimeManagementScreen> {
                                     Text('Hali anime qo\'shilmagan',
                                         style: TextStyle(
                                             color: Colors.white
-                                                .withOpacity(0.45))),
+                                                .withValues(alpha: 0.45))),
                                   ],
                                 ),
                               )
@@ -292,7 +296,7 @@ class _AnimeManagementScreenState extends State<AnimeManagementScreen> {
                                                       onError: (_, __) {},
                                                     ),
                                                     color: Colors.white
-                                                        .withOpacity(0.10),
+                                                        .withValues(alpha: 0.10),
                                                   ),
                                                   child: anime['photo_url'] ==
                                                           null
@@ -325,7 +329,7 @@ class _AnimeManagementScreenState extends State<AnimeManagementScreen> {
                                                           style: TextStyle(
                                                               color: Colors
                                                                   .white
-                                                                  .withOpacity(
+                                                                  .withValues(alpha: 
                                                                       0.5),
                                                               fontSize: 12)),
                                                     ],

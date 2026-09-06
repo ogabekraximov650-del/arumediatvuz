@@ -73,6 +73,9 @@ class _AddAnimeScreenState extends State<AddAnimeScreen> {
       source: ImageSource.gallery,
       imageQuality: 85,
     );
+    // Rasm tanlash oynasi ochiq turganda ekran yopilgan bo'lishi
+    // mumkin — `setState` o'shanda istisno tashlaydi.
+    if (!mounted) return;
     if (pickedFile != null) {
       setState(() {
         _selectedImage = File(pickedFile.path);
@@ -127,10 +130,10 @@ class _AddAnimeScreenState extends State<AddAnimeScreen> {
       _photoFileName = b2FileName;
       return _photoFileName;
     } catch (e) {
-      setState(() => _errorMsg = 'Rasm yuklashda xato: $e');
+      if (mounted) setState(() => _errorMsg = 'Rasm yuklashda xato: $e');
       return null;
     } finally {
-      setState(() => _isLoading = false);
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
@@ -238,7 +241,7 @@ class _AddAnimeScreenState extends State<AddAnimeScreen> {
                             width: double.infinity,
                             height: 200,
                             decoration: BoxDecoration(
-                              color: Colors.white.withOpacity(0.08),
+                              color: Colors.white.withValues(alpha: 0.08),
                               borderRadius: BorderRadius.circular(16),
                             ),
                             child: _selectedImage != null
@@ -269,7 +272,7 @@ class _AddAnimeScreenState extends State<AddAnimeScreen> {
                                           Text('Rasm tanlang (ixtiyoriy)',
                                               style: TextStyle(
                                                   color: Colors.white
-                                                      .withOpacity(0.6))),
+                                                      .withValues(alpha: 0.6))),
                                         ],
                                       ),
                           ),
@@ -280,10 +283,10 @@ class _AddAnimeScreenState extends State<AddAnimeScreen> {
                         Container(
                           padding: const EdgeInsets.all(12),
                           decoration: BoxDecoration(
-                            color: Colors.red.withOpacity(0.2),
+                            color: Colors.red.withValues(alpha: 0.2),
                             borderRadius: BorderRadius.circular(12),
                             border:
-                                Border.all(color: Colors.red.withOpacity(0.5)),
+                                Border.all(color: Colors.red.withValues(alpha: 0.5)),
                           ),
                           child: Text(_errorMsg!,
                               style: const TextStyle(
@@ -320,7 +323,7 @@ class _AddAnimeScreenState extends State<AddAnimeScreen> {
                                     : () => Navigator.of(context).pop(),
                                 style: FilledButton.styleFrom(
                                   backgroundColor:
-                                      Colors.white.withOpacity(0.1),
+                                      Colors.white.withValues(alpha: 0.1),
                                   foregroundColor: Colors.white,
                                 ),
                                 child: const Text('Bekor'),
@@ -376,7 +379,7 @@ class _AddAnimeScreenState extends State<AddAnimeScreen> {
         style: const TextStyle(color: Colors.white),
         decoration: InputDecoration(
           hintText: label,
-          hintStyle: TextStyle(color: Colors.white.withOpacity(0.4)),
+          hintStyle: TextStyle(color: Colors.white.withValues(alpha: 0.4)),
           prefixIcon: Icon(icon, color: Colors.white54),
           border: InputBorder.none,
         ),

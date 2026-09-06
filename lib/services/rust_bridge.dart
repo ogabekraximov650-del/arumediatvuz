@@ -67,6 +67,26 @@ typedef _VideoSetPosDart = int Function(Pointer<Utf8>, int);
 typedef _VideoUrlActionC = Int32 Function(Pointer<Utf8>);
 typedef _VideoUrlActionDart = int Function(Pointer<Utf8>);
 
+// ── TANBAL (LAZY) OYNA KESHLASH ─────────────────────────────────
+//
+// Katta fayl (masalan 1.5 GB) 480 MiB'lik "oynalarga" bo'linadi va
+// KESHGA FAQAT KERAK BO'LGANI olinadi:
+//   * video ochilganda — faqat #0 oyna (0-480 MiB);
+//   * foydalanuvchi ko'rib yoki sek qilib #1 oynaga yaqinlashsa —
+//     o'shanda #1 oyna (480-960 MiB) keshlanadi;
+//   * foydalanuvchi videoning oxiriga umuman bormasa, oxirgi oyna
+//     manbadan HECH QACHON o'qilmaydi.
+//
+// Shu bilan xarajat faqat HAQIQATAN ko'rilgan qism uchun to'lanadi.
+typedef _VideoWindowC = Int32 Function(Pointer<Utf8>, Uint64);
+typedef _VideoWindowDart = int Function(Pointer<Utf8>, int);
+
+typedef _VideoTotalC = Uint64 Function(Pointer<Utf8>);
+typedef _VideoTotalDart = int Function(Pointer<Utf8>);
+
+typedef _VideoWindowSizeC = Uint64 Function();
+typedef _VideoWindowSizeDart = int Function();
+
 typedef _CryptoGenKeyC = Pointer<Utf8> Function();
 typedef _CryptoGenKeyDart = Pointer<Utf8> Function();
 typedef _CryptoSetKeyC = Int32 Function(Pointer<Utf8>);
@@ -98,6 +118,10 @@ class RustCore {
   late final _VideoUrlActionDart _videoPrepareStatus;
   late final _VideoUrlActionDart _videoComplete;
   late final _VideoUrlActionDart _videoPrepareReset;
+  late final _VideoWindowDart _videoWarmWindow;
+  late final _VideoWindowDart _videoWindowStatus;
+  late final _VideoTotalDart _videoTotal;
+  late final _VideoWindowSizeDart _videoWindowSize;
   late final _CryptoGenKeyDart _cryptoGenKey;
   late final _CryptoSetKeyDart _cryptoSetKey;
 
@@ -162,6 +186,15 @@ class RustCore {
     _videoPrepareReset =
         _lib.lookupFunction<_VideoUrlActionC, _VideoUrlActionDart>(
             'rust_video_cache_prepare_reset');
+    _videoWarmWindow = _lib.lookupFunction<_VideoWindowC, _VideoWindowDart>(
+        'rust_video_cache_warm_window');
+    _videoWindowStatus = _lib.lookupFunction<_VideoWindowC, _VideoWindowDart>(
+        'rust_video_cache_window_status');
+    _videoTotal = _lib.lookupFunction<_VideoTotalC, _VideoTotalDart>(
+        'rust_video_cache_total');
+    _videoWindowSize =
+        _lib.lookupFunction<_VideoWindowSizeC, _VideoWindowSizeDart>(
+            'rust_video_cache_window_size');
     _cryptoGenKey = _lib.lookupFunction<_CryptoGenKeyC, _CryptoGenKeyDart>(
         'rust_crypto_generate_key');
     _cryptoSetKey = _lib.lookupFunction<_CryptoSetKeyC, _CryptoSetKeyDart>(
@@ -572,6 +605,77 @@ class RustCore {
   /// keyingi `videoPrepare` oynani HAQIQATDAN qayta isitadi.
   void videoPrepareReset(String url) =>
       _videoUrlAction(_videoPrepareReset, url);
+
+  // ── TANBAL (LAZY) OYNA KESHLASH ────────────────────────────
+  //
+  // Ish tartibi pleyerda (video_player_screen.dart) shunday:
+  //   1. Video ochilganda `videoPrepare` faqat #0 oynani keshlaydi
+  //      — foydalanuvchi shu bittasini kutadi, boshqa hech narsa
+  //      manbadan o'qilmaydi.
+  //   2. Ijro davomida pleyer oyna chegarasiga yaqinlashganda ilova
+  //      `videoWarmWindow(url, keyingi)` ni chaqiradi — keyingi oyna
+  //      FON'DA tayyorlanadi va foydalanuvchi hech narsa sezmaydi.
+  //   3. Foydalanuvchi hali keshlanmagan joyga SEK qilsa, ilova
+  //      avval `videoWarmWindow` chaqirib, `videoWindowStatus`
+  //      "tayyor" bo'lishini kutadi va faqat KEYIN sek qiladi.
+  //      Shu sabab pleyer hech qachon "keshda yo'q" xatosini
+  //      ko'rmaydi — ya'ni bufer ham tozalanmaydi.
+
+  /// Berilgan oynani keshga olishni boshlaydi (fon'da). Bir necha
+  /// marta chaqirilsa ham manbaga BITTA so'rov ketadi.
+  void videoWarmWindow(String url, int windowIndex) {
+    if (!_loaded || url.isEmpty || windowIndex < 0) return;
+    final ptr = url.toNativeUtf8();
+    try {
+      _videoWarmWindow(ptr, windowIndex);
+    } catch (_) {
+    } finally {
+      malloc.free(ptr);
+    }
+  }
+
+  /// Oyna holati:
+  ///   0 — keshlanyapti (kutish kerak);
+  ///   1 — TAYYOR (o'sha joyni ijro qilsa bo'ladi);
+  ///   2 — muvaffaqiyatsiz (qayta urinsa bo'ladi);
+  ///   3 — hali umuman boshlanmagan.
+  int videoWindowStatus(String url, int windowIndex) {
+    if (!_loaded || url.isEmpty || windowIndex < 0) return 3;
+    final ptr = url.toNativeUtf8();
+    try {
+      return _videoWindowStatus(ptr, windowIndex);
+    } catch (_) {
+      return 3;
+    } finally {
+      malloc.free(ptr);
+    }
+  }
+
+  /// Faylning umumiy hajmi (bayt). 0 — hali noma'lum.
+  int videoTotalBytes(String url) {
+    if (!_loaded || url.isEmpty) return 0;
+    final ptr = url.toNativeUtf8();
+    try {
+      return _videoTotal(ptr);
+    } catch (_) {
+      return 0;
+    } finally {
+      malloc.free(ptr);
+    }
+  }
+
+  /// Bitta oynadagi baytlar soni. Qiymat Rust yadrosidan olinadi —
+  /// ilovada qo'lda takrorlanmaydi, ya'ni ikki tomon hech qachon
+  /// bir-biriga zid bo'lib qolmaydi.
+  int get videoWindowSize {
+    if (!_loaded) return 480 * 1024 * 1024;
+    try {
+      final v = _videoWindowSize();
+      return v > 0 ? v : 480 * 1024 * 1024;
+    } catch (_) {
+      return 480 * 1024 * 1024;
+    }
+  }
 
   void _videoUrlAction(_VideoUrlActionDart fn, String url) {
     if (!_loaded || url.isEmpty) return;

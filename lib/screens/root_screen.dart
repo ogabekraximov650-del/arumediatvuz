@@ -190,7 +190,7 @@ class _BottomNav extends StatelessWidget {
           border: Border.all(color: AppColors.border, width: 1),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withOpacity(0.40),
+              color: Colors.black.withValues(alpha: 0.40),
               blurRadius: 24,
               offset: const Offset(0, 8),
             ),
@@ -222,7 +222,7 @@ class _BottomNav extends StatelessWidget {
                           borderRadius: BorderRadius.circular(20),
                           boxShadow: [
                             BoxShadow(
-                              color: AppColors.accent.withOpacity(0.35),
+                              color: AppColors.accent.withValues(alpha: 0.35),
                               blurRadius: 12,
                               offset: const Offset(0, 4),
                             ),
@@ -238,7 +238,7 @@ class _BottomNav extends StatelessWidget {
                         final t = 1.0 - distance;
                         final scale = 1.0 + 0.12 * t;
                         final color = Color.lerp(
-                          Colors.white.withOpacity(0.40),
+                          Colors.white.withValues(alpha: 0.40),
                           Colors.white,
                           t,
                         )!;

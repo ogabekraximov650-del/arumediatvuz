@@ -34,7 +34,7 @@ class ProfileScreen extends StatelessWidget {
                 const SizedBox(height: 4),
                 Text('Profilni sozlash uchun kiring',
                     style: TextStyle(
-                        color: Colors.white.withOpacity(0.6), fontSize: 13)),
+                        color: Colors.white.withValues(alpha: 0.6), fontSize: 13)),
               ],
             ),
           ),
@@ -89,7 +89,7 @@ class ProfileScreen extends StatelessWidget {
                   Container(
                     padding: const EdgeInsets.all(8),
                     decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(0.12),
+                      color: Colors.white.withValues(alpha: 0.12),
                       borderRadius: BorderRadius.circular(12),
                     ),
                     child: const Icon(Icons.admin_panel_settings_rounded,
@@ -115,7 +115,7 @@ class ProfileScreen extends StatelessWidget {
   }
 
   Widget _divider() =>
-      Divider(height: 1, color: Colors.white.withOpacity(0.12));
+      Divider(height: 1, color: Colors.white.withValues(alpha: 0.12));
 }
 
 class _ProfileTile extends StatelessWidget {

@@ -189,6 +189,70 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   int _playToken = 0;
   String? _playerError;
 
+  // ═══════════════════════════════════════════════════════════
+  //  TANBAL (LAZY) OYNA KESHLASH — PLEYER TOMONI
+  // ═══════════════════════════════════════════════════════════
+  //
+  // Katta fayl (masalan 1.5 GB) 480 MiB'lik OYNALARGA bo'linadi va
+  // keshga FAQAT KERAK BO'LGANI olinadi:
+  //
+  //   * video ochilganda — faqat #0 oyna (0-480 MiB). Foydalanuvchi
+  //     shu bittasini kutadi, boshqa hech narsa manbadan o'qilmaydi;
+  //   * ijro davomida pleyer #0 oynaning OXIRIGA YAQINLASHGANDA
+  //     ilova #1 oynani (480-960 MiB) FON'DA keshga oldiradi —
+  //     foydalanuvchi u yerga yetib borgunicha tayyor bo'ladi va
+  //     hech qanday kutish sezilmaydi;
+  //   * foydalanuvchi hali keshlanmagan joyga SEK qilsa, ilova
+  //     avval o'sha oynani keshlatadi va faqat KEYIN sek qiladi.
+  //
+  // ── NEGA AYNAN SHUNDAY ────────────────────────────────────
+  //
+  // Pleyer keshda YO'Q joyni so'rasa, server "hali tayyor emas"
+  // (503) deb javob beradi. ExoPlayer uchun bu QAYTARIB
+  // BO'LMAYDIGAN xato: pleyerni butunlay qaytadan ochishga
+  // to'g'ri keladi va SHU PAYT YIG'ILGAN BUTUN BUFER YO'QOLADI.
+  // Foydalanuvchi buni aynan "sek qilsam bufer tozalanadi va
+  // video qaytadan sekin ochiladi" deb ko'rgan edi.
+  //
+  // Endi ilova pleyerdan OLDINDA yuradi: kerakli oyna har doim
+  // pleyer so'rashidan avval tayyor bo'ladi. Ya'ni 503 umuman
+  // yuz bermaydi — demak bufer ham hech qachon tozalanmaydi.
+
+  /// Faylning umumiy hajmi (bayt). 0 — hali noma'lum.
+  int _totalBytes = 0;
+
+  /// Bitta oynadagi baytlar soni (Rust yadrosidan olinadi).
+  int _windowBytes = 480 * 1024 * 1024;
+
+  /// Oldindan keshlash chegarasi: bufer uchi oyna oxiriga shu
+  /// masofadan yaqinlashsa, keyingi oyna FON'DA tayyorlanadi.
+  ///
+  /// 64 MiB — 1.5 GB / 90 daqiqalik faylda bu ~4 daqiqalik zaxira,
+  /// ya'ni keyingi oyna foydalanuvchi u yerga yetguncha allaqachon
+  /// tayyor bo'ladi.
+  static const int _prefetchMarginBytes = 64 * 1024 * 1024;
+
+  /// Oyna tayyor bo'lishini eng ko'pi shuncha kutamiz.
+  static const Duration _windowWaitMax = Duration(seconds: 120);
+
+  /// Keyingi oynani oldindan tayyorlab turuvchi taymer.
+  Timer? _windowTimer;
+
+  /// Hozir oyna keshga olinishi kutilyaptimi (ekranda yozuv
+  /// ko'rsatiladi). Pleyerga bu paytda TEGILMAYDI — bufer
+  /// joyida qoladi.
+  bool _windowWaiting = false;
+
+  /// Ayni paytda nechta kutish ketyapti. Foydalanuvchi kutish
+  /// davomida yana sek qilsa, ikkita kutish yonma-yon ketishi
+  /// mumkin — sanoqsiz bo'lsa, birinchisi tugagach ekrandagi
+  /// yozuv ikkinchisi hali kutayotgan bo'lsa ham yo'qolib qolardi.
+  int _windowWaiters = 0;
+
+  /// Qisqa muddatli xabar (masalan "bu joy hali tayyor emas").
+  String? _notice;
+  Timer? _noticeTimer;
+
   // ── Ikki marta bosib sek qilishda tarmoqqa yuboriladigan seekTo
   // so'rovini debounce qilish uchun: tez-tez ketma-ket bosilganda
   // faqat OXIRGI holatga BITTA marta sek qilinadi.
@@ -249,6 +313,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _seekIdleTimer?.cancel();
     _pendingSingleTapTimer?.cancel();
     _healthTimer?.cancel();
+    _windowTimer?.cancel();
+    _noticeTimer?.cancel();
     _recoveryStreakResetTimer?.cancel();
     _restoreSystemUI();
     final c = _controller;
@@ -458,6 +524,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _queuedSeek = null;
     _seekBusy = false;
     _healthTimer?.cancel();
+    _windowTimer?.cancel();
+    _windowWaiters = 0;
+    _windowWaiting = false;
 
     // ── ESKI CONTROLLERNI XAVFSIZ YOPISH ─────────────────────
     // Tartib muhim: avval uni daraxtdan olib tashlaymiz (setState),
@@ -633,6 +702,21 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _pendingEofAt = null;
 
     if (resumeAt != null && resumeAt > Duration.zero) {
+      // ── TANBAL KESHLASH: DAVOM ETTIRILADIGAN JOY TAYYORMI ──
+      //
+      // Sifat almashtirilganda (yoki pleyer qayta ochilganda) video
+      // 0-sekunddan emas, o'sha joydan boshlanadi. O'sha joy esa
+      // videoning IKKINCHI yoki UCHINCHI bo'lagida bo'lishi mumkin —
+      // u hali keshda bo'lmasa pleyer darhol xatoga chiqardi.
+      // Shu sabab avval o'sha bo'lak tayyorlanadi.
+      _refreshTotalBytes();
+      await _ensureWindowFor(resumeAt, ctrl.value.duration);
+      if (!mounted || myToken != _playToken) {
+        try {
+          await ctrl.dispose();
+        } catch (_) {}
+        return;
+      }
       try {
         await ctrl.seekTo(resumeAt);
       } catch (_) {}
@@ -648,6 +732,16 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
         await ctrl.play();
       } catch (_) {}
     }
+    // Oxirgi tekshiruv: kutish davomida ekran yopilgan yoki
+    // foydalanuvchi boshqa qismni bosgan bo'lishi mumkin. Bunday
+    // holatda yangi controller ekranga QO'YILMAYDI va darhol
+    // yopiladi — aks holda u xotirada osilib qolardi.
+    if (!mounted || myToken != _playToken) {
+      try {
+        await ctrl.dispose();
+      } catch (_) {}
+      return;
+    }
 
     ctrl.addListener(_onControllerUpdate);
     setState(() {
@@ -658,6 +752,11 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // boshlaydi.
     _syncWatchedUrls();
     _startHealthWatchdog();
+    // Hajm endi ma'lum (isitish javobidan meta.json'ga yozilgan) —
+    // shu bilan oyna chegaralari hisoblanadi va keyingi oyna
+    // oldindan tayyorlanadi.
+    _refreshTotalBytes();
+    _startWindowPrefetch();
     _scheduleHide();
   }
 
@@ -773,6 +872,157 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     return '${url.substring(0, i)}/api/play/${url.substring(i + mark.length)}';
   }
 
+  // ═══════════════════════════════════════════════════════════
+  //  OYNA HISOBI VA OLDINDAN TAYYORLASH
+  // ═══════════════════════════════════════════════════════════
+
+  /// Berilgan ijro nuqtasi faylning taxminan nechanchi baytiga
+  /// to'g'ri keladi.
+  ///
+  /// Hisob oddiy nisbat bilan qilinadi (`bayt = hajm * poz / davomiylik`).
+  /// Video o'zgaruvchan bitreytda bo'lsa bu ANIQ emas — lekin bizga
+  /// aniqlik kerak emas: chegara 64 MiB zaxira bilan olinadi, ya'ni
+  /// xato bir necha o'n megabaytga yetsa ham keyingi oyna baribir
+  /// vaqtida tayyorlanadi.
+  int _byteAt(Duration pos, Duration dur) {
+    if (_totalBytes <= 0 || dur <= Duration.zero) return 0;
+    final ms = dur.inMilliseconds;
+    if (ms <= 0) return 0;
+    var r = pos.inMilliseconds / ms;
+    if (r < 0) r = 0;
+    if (r > 1) r = 1;
+    return (_totalBytes * r).floor();
+  }
+
+  /// Ijro nuqtasi qaysi oynada.
+  int _windowAt(Duration pos, Duration dur) {
+    if (_windowBytes <= 0) return 0;
+    return _byteAt(pos, dur) ~/ _windowBytes;
+  }
+
+  /// Fayl bitta oynaga sig'adimi (u holda tanbal keshlashning o'zi
+  /// kerak emas — hamma narsa allaqachon tayyor).
+  bool get _singleWindow =>
+      _playViaLocal || _totalBytes <= 0 || _totalBytes <= _windowBytes;
+
+  /// Hajmni yadrodan yangilaydi (isitish javobidan meta.json'ga
+  /// yozilgan bo'ladi — tarmoqqa chiqilmaydi).
+  void _refreshTotalBytes() {
+    if (_currentUrl.isEmpty) return;
+    try {
+      _windowBytes = RustCore.instance.videoWindowSize;
+      final t = RustCore.instance.videoTotalBytes(_currentUrl);
+      if (t > 0) _totalBytes = t;
+    } catch (_) {}
+  }
+
+  /// ── KEYINGI OYNANI OLDINDAN TAYYORLASH ────────────────────
+  ///
+  /// Har 2 soniyada pleyerning BUFER UCHIGA qaraydi (ijro
+  /// nuqtasiga emas — bufer har doim oldinda va aynan u
+  /// serverdan bayt so'raydi). Bufer uchi oyna chegarasiga
+  /// yaqinlashsa, keyingi oyna fon'da keshga olinadi.
+  ///
+  /// Chaqiruv juda arzon: Rust tomonida bitta HashMap tekshiruvi.
+  /// Oyna allaqachon tayyor yoki tayyorlanayotgan bo'lsa manbaga
+  /// BITTA HAM so'rov ketmaydi.
+  void _startWindowPrefetch() {
+    _windowTimer?.cancel();
+    // Mahalliy (to'liq yuklab olingan) faylda oyna tushunchasining
+    // o'zi yo'q — tarmoqqa umuman chiqilmaydi.
+    if (_playViaLocal) return;
+    _windowTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      if (!mounted || _playViaLocal) return;
+      // Hajm hali noma'lum bo'lsa (isitish javobi kechikkan bo'lishi
+      // mumkin) — uni qayta so'raymiz. Hajmsiz oyna chegarasini
+      // hisoblab bo'lmaydi.
+      if (_totalBytes <= 0) {
+        _refreshTotalBytes();
+        return;
+      }
+      if (_singleWindow) return;
+      final c = _controller;
+      if (c == null) return;
+      final v = c.value;
+      if (!v.isInitialized || v.duration <= Duration.zero) return;
+
+      // Bufer uchi — pleyer serverdan qayergacha o'qib qo'ygani.
+      var ahead = v.position;
+      for (final r in v.buffered) {
+        if (r.end > ahead) ahead = r.end;
+      }
+      final aheadBytes = _byteAt(ahead, v.duration);
+      final w = aheadBytes ~/ _windowBytes;
+      final boundary = (w + 1) * _windowBytes;
+      if (boundary >= _totalBytes) return; // oxirgi oyna — davomi yo'q
+      if (boundary - aheadBytes > _prefetchMarginBytes) return;
+      if (RustCore.instance.videoWindowStatus(_currentUrl, w + 1) == 1) {
+        return;
+      }
+      VideoCacheServer.log(
+          'Keyingi bo\'lak oldindan tayyorlanmoqda: #${w + 1}');
+      RustCore.instance.videoWarmWindow(_currentUrl, w + 1);
+    });
+  }
+
+  /// ── SEK QILINADIGAN JOY TAYYORMI ──────────────────────────
+  ///
+  /// Foydalanuvchi hali keshlanmagan joyga sek qilsa, avval
+  /// O'SHA oyna keshga olinadi va faqat keyin sek bajariladi.
+  /// Shu sabab pleyer "keshda yo'q" xatosini HECH QACHON
+  /// ko'rmaydi — bufer ham, ijro ham buzilmaydi.
+  ///
+  /// `true` — sek qilsa bo'ladi.
+  Future<bool> _ensureWindowFor(Duration target, Duration dur) async {
+    // Hajm noma'lum bo'lsa oyna raqamini hisoblab bo'lmaydi — avval
+    // uni yadrodan so'raymiz (tarmoqqa chiqilmaydi).
+    if (!_playViaLocal && _totalBytes <= 0) _refreshTotalBytes();
+    if (_singleWindow) return true;
+    final url = _currentUrl;
+    if (url.isEmpty) return true;
+    final w = _windowAt(target, dur);
+    if (RustCore.instance.videoWindowStatus(url, w) == 1) return true;
+
+    VideoCacheServer.log('Sek: #$w bo\'lak hali keshda yo\'q — olinmoqda');
+    RustCore.instance.videoWarmWindow(url, w);
+    _windowWaiters++;
+    if (mounted && !_windowWaiting) setState(() => _windowWaiting = true);
+    final started = DateTime.now();
+    var lastRetry = started;
+    try {
+      while (mounted && _currentUrl == url) {
+        final st = RustCore.instance.videoWindowStatus(url, w);
+        if (st == 1) return true;
+        final now = DateTime.now();
+        if (now.difference(started) > _windowWaitMax) break;
+        // Muvaffaqiyatsiz tugagan bo'lsa vaqti-vaqti bilan qayta
+        // urinamiz (Rust tomonining o'z tanaffusi bor, ya'ni
+        // manbaga so'rovlar bo'roni ketmaydi).
+        if (st == 2 && now.difference(lastRetry).inSeconds >= 5) {
+          lastRetry = now;
+          RustCore.instance.videoWarmWindow(url, w);
+        }
+        await Future.delayed(const Duration(milliseconds: 250));
+      }
+    } finally {
+      if (_windowWaiters > 0) _windowWaiters--;
+      if (mounted && _windowWaiters == 0 && _windowWaiting) {
+        setState(() => _windowWaiting = false);
+      }
+    }
+    return RustCore.instance.videoWindowStatus(url, w) == 1;
+  }
+
+  /// Ekranda 3 soniya turadigan qisqa xabar.
+  void _showNotice(String text) {
+    if (!mounted) return;
+    _noticeTimer?.cancel();
+    setState(() => _notice = text);
+    _noticeTimer = Timer(const Duration(seconds: 3), () {
+      if (mounted) setState(() => _notice = null);
+    });
+  }
+
   // Bitta manzildan controller ochishga urinadi. Muvaffaqiyatsiz
   // bo'lsa (yoki 25 soniyada javob kelmasa) null qaytaradi.
   Future<VideoPlayerController?> _openController(Uri uri, int myToken) async {
@@ -848,7 +1098,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     if (c == null || !mounted) return;
     if (c.value.hasError && !_recovering) {
       VideoCacheServer.log('Pleyer xatosi: ${c.value.errorDescription}');
-      _recoverPlayer(c.value.position);
+      _handleFatalError(c.value.position);
       return;
     }
     final v = c.value;
@@ -920,7 +1170,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
         'Oqim erta uzildi (${reached.inSeconds}s / ${v.duration.inSeconds}s) — '
         'shu nuqtadan qayta ochilmoqda');
     _pendingEofAt = reached;
-    _recoverPlayer(reached);
+    _handleFatalError(reached);
   }
 
   // ── IJRO NUQTASINI YADROGA XABAR QILISH — OLIB TASHLANDI ─────
@@ -961,7 +1211,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       // qolmasligi uchun shu yerda takrorlanadi.
       final eofAt = _pendingEofAt;
       if (eofAt != null && v.isCompleted && !_recovering) {
-        _recoverPlayer(eofAt);
+        _handleFatalError(eofAt);
         return;
       }
 
@@ -988,6 +1238,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
           !_seekBusy &&
           !recentSeek &&
           !_recovering &&
+          // Bo'lak keshga olinishini kutayotgan bo'lsak, pozitsiya
+          // qimirlamasligi BUTUNLAY NORMAL — bu qotish emas.
+          !_windowWaiting &&
           !nearEnd;
       if (!shouldBeMoving) {
         _stuckTicks = 0;
@@ -1006,11 +1259,28 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       // ~9.6s (12 × 800ms) harakatsiz -> pleyer haqiqatan qotgan,
       // qaytadan ochamiz. Fayl mahalliy diskda tayyor turgani uchun
       // bu tez va internetsiz bo'ladi.
-      if (_stuckTicks >= 12) {
+      // ── IKKI BOSQICHLI TIKLANISH ───────────────────────────
+      //
+      // 1) ~4.8 s harakatsiz -> YENGIL TURTKI. Bufer saqlanadi,
+      //    foydalanuvchi deyarli hech narsa sezmaydi. Qotishlarning
+      //    katta qismi shu bilan tugaydi.
+      // 2) turtkidan keyin ham ~6.4 s harakatsiz -> pleyer
+      //    haqiqatan qotgan, faqat SHUNDA qaytadan ochamiz.
+      //
+      // Ilgari BIRINCHI belgidayoq pleyer qaytadan ochilardi va
+      // yig'ilgan butun bufer yo'qolardi — foydalanuvchi ko'rgan
+      // "video qaytadan sekin ochiladi" holati aynan shu edi.
+      final sinceNudge = now.difference(_lastNudge);
+      if (_stuckTicks >= 6 && sinceNudge > const Duration(seconds: 10)) {
+        _stuckTicks = 0;
+        _nudgePlayer(c, v.position);
+        return;
+      }
+      if (_stuckTicks >= 14) {
         VideoCacheServer.log(
             'Pleyer harakatsiz qotib qoldi (${v.position}) — qaytadan ochilmoqda');
         _stuckTicks = 0;
-        _recoverPlayer(v.position);
+        _handleFatalError(v.position);
       }
     });
   }
@@ -1096,6 +1366,79 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     }
   }
 
+  // ═══════════════════════════════════════════════════════════
+  //  XATO: AVVAL SABABNI YO'QOT, KEYIN QAYTA OCH
+  // ═══════════════════════════════════════════════════════════
+  //
+  // Pleyer xatosining eng ehtimolli sababi — o'sha joydagi bo'lak
+  // hali keshda yo'q. Ilgari ilova darhol pleyerni qaytadan ochardi;
+  // bo'lak esa baribir keshda bo'lmagani uchun xato TAKRORLANARDI —
+  // va bir necha urinishdan keyin "Videoni ijro etib bo'lmadi
+  // (takroriy xato)" chiqardi.
+  //
+  // Endi avval AYNAN O'SHA bo'lak keshga olinadi va faqat shundan
+  // keyin pleyer qayta ochiladi. Ya'ni qayta ochish bir marta
+  // bo'ladi va muvaffaqiyatli tugaydi.
+  /// Ayni paytda xato ustida ishlanyaptimi.
+  ///
+  /// MUHIM: pleyer xato holatida HAR BIR yangilanishda xabar
+  /// beradi. Bu bayroqsiz `_handleFatalError` o'nlab marta
+  /// yonma-yon ishga tushib, o'nlab kutish sikli ochilib ketardi.
+  /// (`_recoverPlayer`ning o'z bayrog'i bu yerda yetarli emas —
+  /// unga yetguncha KUTISH bor.)
+  bool _handlingError = false;
+
+  Future<void> _handleFatalError(Duration at) async {
+    if (_recovering || _handlingError) return;
+    _handlingError = true;
+    try {
+      await _handleFatalErrorInner(at);
+    } finally {
+      _handlingError = false;
+    }
+  }
+
+  Future<void> _handleFatalErrorInner(Duration at) async {
+    final c = _controller;
+    final dur = c?.value.duration ?? Duration.zero;
+    if (!_singleWindow && dur > Duration.zero) {
+      final ok = await _ensureWindowFor(at, dur);
+      if (!mounted) return;
+      if (!ok) {
+        VideoCacheServer.log('Xatodan keyin bo\'lak tayyorlanmadi');
+      }
+    }
+    if (!mounted) return;
+    await _recoverPlayer(at);
+  }
+
+  // ── YENGIL TURTKI (nudge) ────────────────────────────────────
+  //
+  // Pleyer qotib qolganday ko'rinsa, uni DARHOL qaytadan ochish
+  // eng qimmat yo'l: butun bufer yo'qoladi va video 1-2 soniya
+  // qora bo'lib turadi.
+  //
+  // Amalda "qotish"larning katta qismi shunchaki dekoderning bir
+  // lahzalik tiqilishi bo'lib, `seekTo(joriy joy)` + `play()` bilan
+  // O'ZI ochiladi — bufer esa BUTUNLAY saqlanadi. Shu sabab endi
+  // avval shu yengil turtki sinaladi, pleyerni qaytadan ochish esa
+  // faqat turtki ham yordam bermaganda bo'ladi.
+  DateTime _lastNudge = DateTime.fromMillisecondsSinceEpoch(0);
+
+  Future<void> _nudgePlayer(VideoPlayerController c, Duration at) async {
+    _lastNudge = DateTime.now();
+    VideoCacheServer.log('Yengil turtki: ${at.inSeconds}s');
+    try {
+      await c.seekTo(at).timeout(const Duration(seconds: 2));
+    } catch (_) {}
+    if (!mounted || _controller != c) return;
+    if (_intendedPlaying) {
+      try {
+        await c.play();
+      } catch (_) {}
+    }
+  }
+
   void _scheduleHide() {
     _hideTimer?.cancel();
     _hideTimer = Timer(const Duration(seconds: 3), () {
@@ -1171,7 +1514,14 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   // MUHIM: shu 500 ms ichida pleyerga (demak worker'ga ham) BITTA
   // ham so'rov yuborilmaydi — video pauzada, `seekTo` esa faqat
   // tinchlik davri tugagach, AYNAN BIR MARTA yuboriladi.
-  static const Duration _seekIdle = Duration(milliseconds: 500);
+  // 500 -> 200 ms (foydalanuvchi: "sek sekin ishlaydi").
+  //
+  // Bu tanaffusning YAGONA vazifasi — ketma-ket bosilgan taplarni
+  // (+5, +10, +15...) BITTA sek qilib yig'ish. Taplar orasidagi
+  // masofa odatda 200-400 ms, ya'ni 200 ms ularni yig'ib olishga
+  // yetadi; bitta marta bosilganda esa video deyarli DARHOL
+  // (yarim soniyaga emas, beshdan bir soniyaga) sakraydi.
+  static const Duration _seekIdle = Duration(milliseconds: 200);
 
   // ── Ichki holat ──────────────────────────────────────────────
   // Bir vaqtda faqat BITTA `seekTo` uchib turadi; undan keyingilari
@@ -1232,9 +1582,16 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       // vaqtincha "to'xtagan" bo'lishi mumkin — o'shanda isPlaying
       // false bo'lib, sekdan keyin video PAUZADA qolib ketardi.
       _resumeAfterSeek = _intendedPlaying;
-      if (ctrl.value.isPlaying) {
-        ctrl.pause();
-      }
+      // ── IJRO ENDI TO'XTATILMAYDI ──────────────────────────
+      //
+      // Avval har bir sek buyrug'ida video MAJBURAN pauza
+      // qilinardi va 0.5 soniyalik tanaffusdan keyin qaytadan
+      // ishga tushardi. Foydalanuvchi buni "sek qilsam video
+      // to'xtab qoladi va sekin ishlaydi" deb ko'rardi.
+      //
+      // ExoPlayer sekni ijro davomida ham bemalol bajaradi —
+      // YouTube ham aynan shunday ishlaydi: siz +5s bosganingizda
+      // video to'xtamaydi. Shu sabab bu yerda pleyerga tegilmaydi.
     }
 
     var t = target;
@@ -1258,6 +1615,29 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       if (mounted) setState(() => _pendingTarget = null);
       return;
     }
+
+    // ── SEK QILINADIGAN JOY KESHDA BORMI ────────────────────
+    //
+    // Yo'q bo'lsa — AVVAL o'sha bo'lak keshga olinadi va faqat
+    // keyin sek bajariladi. Pleyerga bu paytda umuman tegilmaydi,
+    // ya'ni yig'ilgan bufer joyida qoladi.
+    final wasPlaying = _intendedPlaying;
+    if (!await _ensureWindowFor(target, c.value.duration)) {
+      // Tayyorlab bo'lmadi (masalan internet uzildi). Sekni BEKOR
+      // qilamiz — pleyerni buzib, buferni yo'qotishdan ko'ra
+      // foydalanuvchini o'z joyida qoldirgan yaxshiroq.
+      if (!mounted || _controller != c) return;
+      setState(() => _pendingTarget = null);
+      _showNotice('Bu joy hali tayyor emas — birozdan keyin urinib ko\'ring');
+      if (wasPlaying) {
+        try {
+          await c.play();
+        } catch (_) {}
+      }
+      return;
+    }
+    if (!mounted || _controller != c) return;
+
     await _runSeek(c, target);
     if (!mounted || _controller != c) return;
 
@@ -1530,7 +1910,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                       decoration: BoxDecoration(
                         color: sel
                             ? AppColors.accent
-                            : Colors.white.withOpacity(0.06),
+                            : Colors.white.withValues(alpha: 0.06),
                         borderRadius: BorderRadius.circular(16),
                       ),
                       child: Row(
@@ -1581,13 +1961,21 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   // ── UI ──────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
-    return WillPopScope(
-      onWillPop: () async {
-        if (_isFullscreen) {
-          _toggleFullscreen();
-          return false;
-        }
-        return true;
+    // ── "ORQAGA" TUGMASI: PopScope (WillPopScope ESKIRGAN) ─────
+    //
+    // `WillPopScope` Flutter'da eskirgan va Android'ning "bashoratli
+    // orqaga" (predictive back) imkoniyati bilan UMUMAN ishlamaydi —
+    // yangi Android'larda fullscreen'dan chiqish o'rniga ekran
+    // butunlay yopilib ketishi mumkin edi.
+    //
+    // `PopScope` esa rasmiy o'rinbosar: `canPop: false` bo'lganda
+    // tizim orqaga qaytishni BAJARMAYDI va bizga xabar beradi —
+    // biz esa avval fullscreen'dan chiqamiz.
+    return PopScope(
+      canPop: !_isFullscreen,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        if (_isFullscreen) _toggleFullscreen();
       },
       child: _isFullscreen ? _buildFullscreenPlayer() : _buildNormalScreen(),
     );
@@ -1937,16 +2325,50 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
           // Bu yerda faqat YOZUV qoladi va u aynan halqaning
           // TAGIDA turadi (halqa diametri 76, ya'ni 60 px pastga
           // surish uni halqa ostiga tushiradi).
-          if (_currentEp != null && _preparing)
+          if (_currentEp != null && (_preparing || _windowWaiting))
             Center(
               child: Transform.translate(
                 offset: const Offset(0, 60),
-                child: const Text(
-                  'Video tayyorlanyabdi...',
-                  style: TextStyle(
+                child: Text(
+                  // Video ochilayotgani va videoning KEYINGI bo'lagi
+                  // tayyorlanayotgani — foydalanuvchi uchun ikki xil
+                  // holat, shu sabab yozuv ham boshqacha.
+                  _windowWaiting
+                      ? 'Videoning bu qismi tayyorlanmoqda...'
+                      : 'Video tayyorlanyabdi...',
+                  style: const TextStyle(
                     color: Colors.white70,
                     fontSize: 13,
                     fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ),
+
+          // ── QISQA XABAR ───────────────────────────────────────
+          // Masalan: sek qilingan joyni tayyorlab bo'lmadi. Xato
+          // ekrani (`_playerError`) dan farqli o'laroq bu ijroni
+          // TO'XTATMAYDI — video o'z joyida ishlab turaveradi.
+          if (_currentEp != null && _notice != null)
+            Align(
+              alignment: const Alignment(0, 0.62),
+              child: IgnorePointer(
+                child: Container(
+                  margin: const EdgeInsets.symmetric(horizontal: 24),
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 14, vertical: 9),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.72),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Text(
+                    _notice!,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
                 ),
               ),
@@ -2062,10 +2484,10 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
           colors: [
-            Colors.black.withOpacity(0.60),
+            Colors.black.withValues(alpha: 0.60),
             Colors.transparent,
             Colors.transparent,
-            Colors.black.withOpacity(0.85),
+            Colors.black.withValues(alpha: 0.85),
           ],
           stops: const [0.0, 0.3, 0.68, 1.0],
         ),
@@ -2157,6 +2579,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
             value.isBuffering ||
             _isScrubbing ||
             _seekBusy ||
+            // Videoning keyingi bo'lagi keshga olinayotgan payt ham
+            // "kutish" holati — halqa aylanib turishi kerak.
+            _windowWaiting ||
             _pendingTarget != null;
         if (!busy) return const SizedBox.shrink();
         return _spinnerOnly(isFullscreen);
@@ -2189,6 +2614,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
             value.isBuffering ||
             _isScrubbing ||
             _seekBusy ||
+            _windowWaiting ||
             _pendingTarget != null;
         final dur = value.duration.inMilliseconds;
         final shown = _pendingTarget ?? value.position;
@@ -2225,7 +2651,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
             strokeWidth: 2.6,
             color: AppColors.accent,
             trackColor:
-                busy ? Colors.transparent : Colors.white.withOpacity(0.22),
+                busy ? Colors.transparent : Colors.white.withValues(alpha: 0.22),
             busy: busy,
             progress: progress,
           ),
@@ -2248,7 +2674,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: Colors.black.withOpacity(0.42),
+        color: Colors.black.withValues(alpha: 0.42),
         shape: BoxShape.circle,
       ),
       child: Icon(playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
@@ -2546,14 +2972,14 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
           height: 38,
           alignment: Alignment.center,
           decoration: BoxDecoration(
-            color: Colors.white.withOpacity(enabled ? 0.10 : 0.035),
+            color: Colors.white.withValues(alpha: enabled ? 0.10 : 0.035),
             borderRadius: BorderRadius.circular(12),
             border: Border.all(
-                color: Colors.white.withOpacity(enabled ? 0.20 : 0.06)),
+                color: Colors.white.withValues(alpha: enabled ? 0.20 : 0.06)),
           ),
           child: Icon(icon,
               size: 24,
-              color: Colors.white.withOpacity(enabled ? 0.95 : 0.22)),
+              color: Colors.white.withValues(alpha: enabled ? 0.95 : 0.22)),
         ),
       );
     }
@@ -2661,7 +3087,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     if (eps.isEmpty) {
       return Center(
           child: Text('Qismlar topilmadi',
-              style: TextStyle(color: Colors.white.withOpacity(0.5))));
+              style: TextStyle(color: Colors.white.withValues(alpha: 0.5))));
     }
     return ListView.builder(
       controller: _epScrollCtrl,
@@ -2708,7 +3134,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     if (_seasons.isEmpty) {
       return Center(
           child: Text('Bo\'limlar topilmadi',
-              style: TextStyle(color: Colors.white.withOpacity(0.5))));
+              style: TextStyle(color: Colors.white.withValues(alpha: 0.5))));
     }
     return ListView.builder(
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 120),
@@ -2736,12 +3162,12 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
             decoration: BoxDecoration(
               color: isCur
-                  ? AppColors.accent.withOpacity(0.12)
-                  : Colors.white.withOpacity(0.07),
+                  ? AppColors.accent.withValues(alpha: 0.12)
+                  : Colors.white.withValues(alpha: 0.07),
               borderRadius: BorderRadius.circular(14),
               border: Border.all(
                   color: isCur
-                      ? AppColors.accent.withOpacity(0.4)
+                      ? AppColors.accent.withValues(alpha: 0.4)
                       : Colors.white12),
             ),
             child: Row(
@@ -2784,7 +3210,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                               fontSize: 14)),
                       Text('$bolimId-bo\'lim',
                           style: TextStyle(
-                              color: Colors.white.withOpacity(0.45),
+                              color: Colors.white.withValues(alpha: 0.45),
                               fontSize: 12)),
                     ],
                   ),
@@ -2831,7 +3257,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
               const SizedBox(height: 6),
               Text(tavsif,
                   style: TextStyle(
-                      color: Colors.white.withOpacity(0.8),
+                      color: Colors.white.withValues(alpha: 0.8),
                       fontSize: 14,
                       height: 1.6)),
             ],
@@ -2852,7 +3278,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
               width: 90,
               child: Text(label,
                   style: TextStyle(
-                      color: Colors.white.withOpacity(0.5), fontSize: 13))),
+                      color: Colors.white.withValues(alpha: 0.5), fontSize: 13))),
           Expanded(
               child: Text(value,
                   style: const TextStyle(color: Colors.white, fontSize: 13))),
@@ -2927,12 +3353,12 @@ class _EpisodeTile extends StatelessWidget {
       margin: const EdgeInsets.only(bottom: 8),
       decoration: BoxDecoration(
         color: isCurrent
-            ? AppColors.accent.withOpacity(0.14)
-            : Colors.white.withOpacity(0.07),
+            ? AppColors.accent.withValues(alpha: 0.14)
+            : Colors.white.withValues(alpha: 0.07),
         borderRadius: BorderRadius.circular(14),
         border: Border.all(
             color: isCurrent
-                ? AppColors.accent.withOpacity(0.5)
+                ? AppColors.accent.withValues(alpha: 0.5)
                 : Colors.white12),
       ),
       child: Column(
@@ -2954,8 +3380,8 @@ class _EpisodeTile extends StatelessWidget {
                           height: 36,
                           decoration: BoxDecoration(
                             color: isCurrent
-                                ? AppColors.accent.withOpacity(0.28)
-                                : Colors.white.withOpacity(0.08),
+                                ? AppColors.accent.withValues(alpha: 0.28)
+                                : Colors.white.withValues(alpha: 0.08),
                             borderRadius: BorderRadius.circular(10),
                           ),
                           child: Icon(
@@ -2995,7 +3421,7 @@ class _EpisodeTile extends StatelessWidget {
                     padding: const EdgeInsets.symmetric(
                         horizontal: 11, vertical: 8),
                     decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(0.08),
+                      color: Colors.white.withValues(alpha: 0.08),
                       borderRadius: BorderRadius.circular(11),
                       border: Border.all(color: Colors.white24),
                     ),
@@ -3070,7 +3496,7 @@ class _QualityRow extends StatelessWidget {
                         style: TextStyle(
                             color: st.complete
                                 ? Colors.white
-                                : Colors.white.withOpacity(0.72),
+                                : Colors.white.withValues(alpha: 0.72),
                             fontSize: 12,
                             fontWeight: FontWeight.w600)),
                     const SizedBox(height: 5),
@@ -3083,7 +3509,7 @@ class _QualityRow extends StatelessWidget {
                         child: LinearProgressIndicator(
                           value: st.ratio,
                           minHeight: 4,
-                          backgroundColor: Colors.white.withOpacity(0.10),
+                          backgroundColor: Colors.white.withValues(alpha: 0.10),
                           valueColor: AlwaysStoppedAnimation(
                               st.complete ? Colors.white : AppColors.accent),
                         ),
@@ -3145,8 +3571,8 @@ class _MiniIconButton extends StatelessWidget {
         height: 44,
         decoration: BoxDecoration(
           color: highlighted
-              ? AppColors.accent.withOpacity(0.22)
-              : Colors.white.withOpacity(0.08),
+              ? AppColors.accent.withValues(alpha: 0.22)
+              : Colors.white.withValues(alpha: 0.08),
           borderRadius: BorderRadius.circular(12),
         ),
         child: Icon(icon,
@@ -3302,7 +3728,7 @@ class _PlayerRingPainter extends CustomPainter {
       ..color = color;
 
     if (!busy) {
-      if (trackColor.alpha != 0) {
+      if (trackColor.a != 0) {
         canvas.drawCircle(
           center,
           r,
@@ -3388,7 +3814,7 @@ class _SeekBadgeState extends State<_SeekBadge>
       height: widget.diameter,
       alignment: Alignment.center,
       decoration: BoxDecoration(
-        color: Colors.black.withOpacity(0.55),
+        color: Colors.black.withValues(alpha: 0.55),
         shape: BoxShape.circle,
       ),
       child: Column(
@@ -3560,7 +3986,7 @@ class _BottomBarState extends State<_BottomBar> {
               padding: EdgeInsets.symmetric(
                   horizontal: compact ? 10 : 7, vertical: compact ? 6 : 3),
               decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.15),
+                  color: Colors.white.withValues(alpha: 0.15),
                   borderRadius: BorderRadius.circular(7),
                   border: Border.all(color: Colors.white30)),
               child: Text('HQ',
@@ -3676,7 +4102,7 @@ class _VideoProgressBarState extends State<_VideoProgressBar> {
                 // Yuklanmagan qism ATAYLAB shaffof qoldirilgan.
                 layer(1.0, Colors.transparent),
                 // Diskda tayyor turgan qism — real vaqtda o'sib boradi.
-                layer(widget.downloaded, Colors.white.withOpacity(0.85)),
+                layer(widget.downloaded, Colors.white.withValues(alpha: 0.85)),
                 // Ijro etilgan qism.
                 layer(played, AppColors.accent),
                 Positioned(

@@ -101,6 +101,9 @@ class _AddSeasonScreenState extends State<AddSeasonScreen> {
     final picker = ImagePicker();
     final pickedFile =
         await picker.pickImage(source: ImageSource.gallery, imageQuality: 85);
+    // Rasm tanlash oynasi ochiq turganda ekran yopilgan bo'lishi
+    // mumkin — `setState` o'shanda istisno tashlaydi.
+    if (!mounted) return;
     if (pickedFile != null) {
       setState(() {
         _selectedImage = File(pickedFile.path);
@@ -144,10 +147,10 @@ class _AddSeasonScreenState extends State<AddSeasonScreen> {
       _photoFileName = b2FileName;
       return _photoFileName;
     } catch (e) {
-      setState(() => _errorMsg = 'Rasm yuklashda xato: $e');
+      if (mounted) setState(() => _errorMsg = 'Rasm yuklashda xato: $e');
       return null;
     } finally {
-      setState(() => _isLoading = false);
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
@@ -262,7 +265,7 @@ class _AddSeasonScreenState extends State<AddSeasonScreen> {
                             width: double.infinity,
                             height: 180,
                             decoration: BoxDecoration(
-                              color: Colors.white.withOpacity(0.08),
+                              color: Colors.white.withValues(alpha: 0.08),
                               borderRadius: BorderRadius.circular(16),
                             ),
                             child: _selectedImage != null
@@ -293,7 +296,7 @@ class _AddSeasonScreenState extends State<AddSeasonScreen> {
                                           Text('Rasm tanlang (ixtiyoriy)',
                                               style: TextStyle(
                                                   color: Colors.white
-                                                      .withOpacity(0.6))),
+                                                      .withValues(alpha: 0.6))),
                                         ],
                                       ),
                           ),
@@ -305,10 +308,10 @@ class _AddSeasonScreenState extends State<AddSeasonScreen> {
                         Container(
                           padding: const EdgeInsets.all(12),
                           decoration: BoxDecoration(
-                            color: Colors.red.withOpacity(0.2),
+                            color: Colors.red.withValues(alpha: 0.2),
                             borderRadius: BorderRadius.circular(12),
                             border:
-                                Border.all(color: Colors.red.withOpacity(0.5)),
+                                Border.all(color: Colors.red.withValues(alpha: 0.5)),
                           ),
                           child: Text(_errorMsg!,
                               style: const TextStyle(
@@ -375,7 +378,7 @@ class _AddSeasonScreenState extends State<AddSeasonScreen> {
                                     : () => Navigator.of(context).pop(),
                                 style: FilledButton.styleFrom(
                                   backgroundColor:
-                                      Colors.white.withOpacity(0.1),
+                                      Colors.white.withValues(alpha: 0.1),
                                   foregroundColor: Colors.white,
                                 ),
                                 child: const Text('Bekor qilish'),
@@ -424,7 +427,7 @@ class _AddSeasonScreenState extends State<AddSeasonScreen> {
       alignment: Alignment.centerLeft,
       child: Text(text,
           style: TextStyle(
-              color: Colors.white.withOpacity(0.6),
+              color: Colors.white.withValues(alpha: 0.6),
               fontSize: 13,
               fontWeight: FontWeight.w600)),
     );
@@ -446,12 +449,12 @@ class _AddSeasonScreenState extends State<AddSeasonScreen> {
                 decoration: BoxDecoration(
                   color: isSelected
                       ? AppColors.accent
-                      : Colors.white.withOpacity(0.06),
+                      : Colors.white.withValues(alpha: 0.06),
                   borderRadius: BorderRadius.circular(12),
                   border: Border.all(
                     color: isSelected
                         ? AppColors.accent
-                        : Colors.white.withOpacity(0.12),
+                        : Colors.white.withValues(alpha: 0.12),
                   ),
                 ),
                 child: Center(
@@ -460,7 +463,7 @@ class _AddSeasonScreenState extends State<AddSeasonScreen> {
                     style: TextStyle(
                       color: isSelected
                           ? Colors.white
-                          : Colors.white.withOpacity(0.6),
+                          : Colors.white.withValues(alpha: 0.6),
                       fontWeight:
                           isSelected ? FontWeight.w700 : FontWeight.w500,
                       fontSize: 13,
@@ -489,7 +492,7 @@ class _AddSeasonScreenState extends State<AddSeasonScreen> {
         style: const TextStyle(color: Colors.white),
         decoration: InputDecoration(
           hintText: label,
-          hintStyle: TextStyle(color: Colors.white.withOpacity(0.4)),
+          hintStyle: TextStyle(color: Colors.white.withValues(alpha: 0.4)),
           prefixIcon: Icon(icon, color: Colors.white54),
           border: InputBorder.none,
         ),

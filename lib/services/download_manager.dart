@@ -36,6 +36,7 @@
 
 import 'dart:async';
 
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
 
 import 'rust_bridge.dart';
@@ -102,6 +103,49 @@ class DownloadManager extends ChangeNotifier {
   final Map<String, VideoCacheStat> _stats = {};
 
   Timer? _timer;
+
+  // ── TARMOQ QAYTGANDA YUKLASH DARHOL DAVOM ETSIN ──────────────
+  //
+  // TUZATILGAN XATO (foydalanuvchi: "yuklab olish barqaror emas"):
+  // internet uzilganda Rust yadrosi qayta urinishlar orasini
+  // asta-sekin uzaytiradi — 2, 4, 8, 16, 32 va nihoyat 60 soniya.
+  // Bu tarmoq HAQIQATAN yo'q bo'lganda to'g'ri (behuda urinish
+  // batareyani yeydi). Lekin internet QAYTGANDA ham yuklash yana
+  // bir daqiqagacha kutib turardi — foydalanuvchi buni "yuklash
+  // to'xtab qoldi" deb ko'rardi.
+  //
+  // Endi ulanish qaytishi bilan barcha faol yuklashlar UYG'OTILADI:
+  // `videoDownload` qayta yuborilganda Rust tomonida kutish
+  // hisoblagichi nolga tushadi va ish DARHOL davom etadi.
+  // Yangi yuklash boshlanmaydi — vazifa o'sha-o'sha, faqat
+  // kutish bekor qilinadi.
+  StreamSubscription<List<ConnectivityResult>>? _connSub;
+  bool _online = true;
+
+  void _ensureConnectivityWatch() {
+    if (_connSub != null) return;
+    try {
+      _connSub = Connectivity().onConnectivityChanged.listen((r) {
+        final online =
+            r.isNotEmpty && !r.every((e) => e == ConnectivityResult.none);
+        final wasOffline = !_online;
+        _online = online;
+        if (online && wasOffline) _resumeActive();
+      });
+    } catch (_) {
+      // Tarmoq holatini kuzatib bo'lmadi — yuklash avvalgidek
+      // (Rust tomonidagi qayta urinish bilan) ishlayveradi.
+    }
+  }
+
+  /// Faol yuklashlarni uyg'otadi (kutishni bekor qiladi).
+  void _resumeActive() {
+    if (_active.isEmpty) return;
+    for (final url in _active) {
+      RustCore.instance.videoDownload(url);
+    }
+    _poll();
+  }
 
   VideoCacheStat statOf(String url) => _stats[url] ?? VideoCacheStat.empty;
 
@@ -234,6 +278,7 @@ class DownloadManager extends ChangeNotifier {
   /// olinadi.
   void download(String url) {
     if (url.isEmpty) return;
+    _ensureConnectivityWatch();
     // Odatiy holat: kesh-server ilova ochilishida allaqachon ishga
     // tushgan — yuklash shu zahoti boshlanadi.
     RustCore.instance.videoDownload(url);

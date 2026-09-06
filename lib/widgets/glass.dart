@@ -48,7 +48,7 @@ class Glass extends StatelessWidget {
         boxShadow: shadows ??
             [
               BoxShadow(
-                color: AppColors.accent2.withOpacity(0.10),
+                color: AppColors.accent2.withValues(alpha: 0.10),
                 blurRadius: 20,
                 offset: const Offset(0, 8),
               ),
@@ -116,10 +116,10 @@ class AccentCard extends StatelessWidget {
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(borderRadius),
         color: AppColors.card,
-        border: Border.all(color: accentColor.withOpacity(0.25), width: 1),
+        border: Border.all(color: accentColor.withValues(alpha: 0.25), width: 1),
         boxShadow: [
           BoxShadow(
-            color: accentColor.withOpacity(0.18),
+            color: accentColor.withValues(alpha: 0.18),
             blurRadius: 24,
             offset: const Offset(0, 8),
           ),
