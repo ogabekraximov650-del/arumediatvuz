@@ -149,6 +149,63 @@ jobs:
           flutter build apk --release \
             --target-platform android-arm
 
+      # ── APK HAQIQATAN 32-BIT BO'LISHI SHART ───────────────────
+      #
+      # TOPILGAN JIDDIY XATO (0.0.1+1 versiyada ham bor edi):
+      #
+      # `--target-platform android-arm` berilganiga QARAMAY, tayyor
+      # APK ichida UCHTA arxitektura papkasi bor edi:
+      #   lib/armeabi-v7a, lib/arm64-v8a, lib/x86_64
+      # (aapt: `native-code: 'arm64-v8a' 'armeabi-v7a' 'x86_64'`).
+      # Bular Flutter embedding AAR'idan kelib qoladi.
+      #
+      # NEGA BU XAVFLI: Rust yadrosi (`librust_core.so`) FAQAT
+      # armeabi-v7a papkasida bor. Android esa 64-bitli telefonda
+      # `arm64-v8a` papkasini TANLAYDI va faqat o'shandan kutubxona
+      # yuklaydi — ya'ni `librust_core.so` TOPILMAYDI va ilova
+      # ochilishida yiqiladi (kesh, qidiruv, shifrlash — hammasi shu
+      # kutubxonada).
+      #
+      # YECHIM: ortiqcha arxitekturalar APK'dan olib tashlanadi.
+      # Shundan keyin Android 64-bitli telefonda ham 32-bitli
+      # kutubxonalarni ishlatadi (ARM64 qurilmalari 32-bit kodni
+      # qo'llab-quvvatlaydi) va librust_core.so har doim topiladi.
+      #
+      # Imzolash BUNDAN KEYIN bo'ladi — shu sabab o'zgartirilgan APK
+      # qaytadan, to'g'ri imzolanadi.
+      - name: Ortiqcha arxitekturalarni olib tashlash (faqat armeabi-v7a qolsin)
+        run: |
+          set -e
+          APK="build/app/outputs/flutter-apk/app-release.apk"
+
+          echo "── O'zgartirishdan OLDIN ──"
+          unzip -l "$APK" | grep "lib/" || true
+
+          # 32-bitli papkada KERAKLI kutubxonalar borligini tekshiramiz.
+          # Bo'lmasa — o'chirish ilovani buzardi, shu sabab build
+          # ATAYLAB yiqiladi (jimgina buzuq APK chiqarishdan yaxshiroq).
+          for so in libapp.so libflutter.so librust_core.so; do
+            if ! unzip -l "$APK" | grep -q "lib/armeabi-v7a/$so"; then
+              echo "❌ XATO: lib/armeabi-v7a/$so topilmadi — APK 32-bit uchun to'liq emas"
+              exit 1
+            fi
+          done
+
+          # Qolgan barcha arxitekturalar olib tashlanadi.
+          zip -q -d "$APK" "lib/arm64-v8a/*" || true
+          zip -q -d "$APK" "lib/x86_64/*" || true
+          zip -q -d "$APK" "lib/x86/*" || true
+
+          # `zip -d` fayllar joylashuvini buzadi — .so fayllar xotiraga
+          # to'g'ridan-to'g'ri joylashishi (memory-map) uchun APK
+          # qaytadan tekislanishi kerak.
+          ZIPALIGN=$(ls "$ANDROID_HOME"/build-tools/*/zipalign | sort -V | tail -1)
+          "$ZIPALIGN" -f -p 4 "$APK" "$APK.aligned"
+          mv "$APK.aligned" "$APK"
+
+          echo "── O'zgartirishdan KEYIN ──"
+          unzip -l "$APK" | grep "lib/" || true
+
       # ── APK'ni ESKI IMZO SXEMASI (v1) BILAN HAM IMZOLASH ──────
       #
       # Android 7.0 dan boshlab APK "v2" sxemasi bilan imzolanadi va
@@ -202,13 +259,24 @@ jobs:
           echo "── Imzo tekshiruvi ──"
           "$APKSIGNER" verify -v "$APK"
 
-      - name: APK tarkibini tekshirish (minSdk, arxitekturalar)
+      - name: APK tarkibini tekshirish (versiya, arxitektura)
         run: |
+          set -e
           APK="build/app/outputs/flutter-apk/app-release.apk"
           AAPT=$(ls "$ANDROID_HOME"/build-tools/*/aapt2 | sort -V | tail -1)
           "$AAPT" dump badging "$APK" | grep -E "^(package|sdkVersion|targetSdkVersion|native-code)" || true
           echo "── Ichidagi kutubxonalar ──"
-          unzip -l "$APK" | grep "lib/" | awk '{print $4}' | cut -d/ -f2 | sort -u
+          ABIS=$(unzip -l "$APK" | grep "lib/" | awk '{print $4}' | cut -d/ -f2 | sort -u)
+          echo "$ABIS"
+
+          # QAT'IY TEKSHIRUV: APK faqat 32-bit bo'lishi SHART.
+          # Boshqa arxitektura qolib ketsa, 64-bitli telefonlar
+          # o'shani tanlab, Rust yadrosini topa olmasdi.
+          if [ "$ABIS" != "armeabi-v7a" ]; then
+            echo "❌ XATO: APK faqat armeabi-v7a bo'lishi kerak edi, ichidagisi: $ABIS"
+            exit 1
+          fi
+          echo "✅ APK faqat 32-bit (armeabi-v7a)"
 
       - name: APK hajmini ko'rsatish
         run: |
