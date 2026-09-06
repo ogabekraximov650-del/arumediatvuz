@@ -600,7 +600,12 @@ fn fixed_length_stream(
 /// Tana OQIM (quvur) orqali o'tadi — xotiraga umuman yig'ilmaydi,
 /// shu sabab worker'ning 128 MB chegarasi muammo bo'lmaydi.
 ///
-/// Javob: {"status":"cached"|"warming"|"warmed"|"error"}
+/// Javob: {"status":"cached"|"warmed"|"error ...","total":N}
+///
+/// "warming" holati BOSHQA YO'Q: boshqa birov isitayotgan bo'lsa
+/// bu so'rov o'sha isitish tugashini KUTADI va natijani qaytaradi.
+/// Faqat "cached"/"warmed" javobi oyna keshda ekanini bildiradi va
+/// ilova AYNAN shunga qarab pleyerni ochadi.
 async fn b2_warm(env: &Env, file_name: &str, widx: u64, force: bool) -> Result<Response> {
     // Javobda faylning UMUMIY hajmi ham qaytariladi — shu bilan
     // ilova hajmni bilish uchun ALOHIDA so'rov yubormaydi, ya'ni
