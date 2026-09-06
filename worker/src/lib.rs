@@ -475,7 +475,15 @@ const WARM_WINDOW: u64 = 480 * 1024 * 1024;
 
 /// Isitish belgisi shu muddat yashaydi — bir vaqtda bitta oyna
 /// uchun faqat BITTA isitish ketishini ta'minlaydi.
-const WARM_MARKER_SECONDS: u64 = 15 * 60;
+///
+/// AVVAL 15 DAQIQA EDI va bu xato edi: isitish o'rtada uzilib
+/// qolsa (tarmoq uzildi, ilova yopildi), belgi yana 15 daqiqa
+/// turar va SHU DAVOMIDA qayta isitish umuman boshlanmasdi —
+/// kesh esa bo'sh qolaverardi. Endi 2 daqiqa: uzilgan isitish
+/// tezda qayta boshlanadi. Bitta isitishning o'zi (480 MiB)
+/// odatda 10-30 soniyada tugaydi, ya'ni 2 daqiqa yetarli
+/// zaxira.
+const WARM_MARKER_SECONDS: u64 = 120;
 
 fn warm_marker_url(file_name: &str, widx: u64) -> String {
     cache_key_url(file_name, &format!("warm{widx}"))
@@ -702,17 +710,17 @@ async fn b2_warm(env: &Env, file_name: &str, widx: u64, force: bool) -> Result<R
 ///  GET /api/play/:filename  — PLEYER SHU YERDAN OQIM OLADI
 /// ═══════════════════════════════════════════════════════════════
 ///
-/// ── QAT'IY QOIDA: BU YERDAN B2'GA CHIQILMAYDI ───────────────────
+/// ── QOIDA: KESH BOR BO'LSA — KESHDAN, AKS HOLDA B2'DAN ──────────
 ///
-/// Javob FAQAT Cloudflare keshidagi "isitilgan oyna"dan beriladi.
-/// B2'ga murojaat butun tizimda ATIGI BITTA joyda bo'ladi —
-/// `/api/warm/...` oynani (480 MiB) keshga ko'chirayotganda.
-/// Ilova pleyerni ochishdan oldin aynan o'sha isitishni chaqiradi
-/// va tugashini kutadi.
+/// Birinchi navbatda javob Cloudflare keshidagi "isitilgan
+/// oyna"dan beriladi (`X-Cache: HIT-WINDOW`) — bu eng arzon va eng
+/// tez yo'l. Kesh o'sha data-markazda hali yo'q bo'lsa, baytlar
+/// B2'dan to'g'ridan-to'g'ri oqim bilan beriladi
+/// (`X-Cache: B2-STREAM`).
 ///
-/// Kesh hali tayyor bo'lmasa bu yerda 503 qaytadi (B2'ga
-/// chiqilmaydi) — ilova buni xato deb bilib, isitishni qaytadan
-/// chaqiradi va keyin ijroni davom ettiradi.
+/// ILGARI bu yerda kesh bo'lmasa 503 qaytarilardi va aynan shu
+/// "onlayn video umuman ochilmaydi" muammosini keltirib
+/// chiqargan edi — batafsil sababi funksiya ichidagi izohda.
 ///
 /// ── NEGA ALOHIDA MANZIL KERAK BO'LDI ────────────────────────────
 ///
@@ -745,33 +753,46 @@ async fn b2_play(env: &Env, file_name: &str, range: Option<String>) -> Result<Re
         return Ok(resp);
     }
 
-    // ── YAGONA ISTISNO: FAYL BITTA OYNAGA SIG'MAYDI ──────────
+    // ══════════════════════════════════════════════════════════
+    //  KESHDA YO'Q -> B2'DAN OQIM (503 QAYTARILMAYDI)
+    // ══════════════════════════════════════════════════════════
     //
-    // Kesh yozuvi bor, lekin so'ralgan oraliq oyna chegarasidan
-    // chiqib ketyapti — bu FAQAT fayl 480 MiB'dan katta bo'lganda
-    // yuz beradi (Cloudflare kesh yozuvining chegarasi 512 MB).
-    // Bunday faylni keshdan BUTUNLAY berib bo'lmaydi, javobni
-    // kesish esa mumkin emas (pleyer uni "fayl tugadi" deb
-    // tushunadi). Shu sabab bu holatda — va FAQAT bu holatda —
-    // baytlar B2'dan oqim bilan beriladi.
+    // TUZATILGAN XATO (foydalanuvchi ko'rgan asosiy muammo):
+    // "pleyer faqat yuklab olingan videolarni ochadi, onlayn
+    // ko'rsatmaydi — 'Videoni yuklab bo'lmadi' deb yozadi".
     //
-    // Kesh shunchaki hali TAYYOR EMAS bo'lsa (reason = no-window),
-    // bu yerga tushilmaydi: 503 qaytadi va ilova avval isitadi.
-    if reason == "outside-window" {
-        return b2_stream(env, file_name, range).await;
-    }
-
-    // ── KESH TAYYOR EMAS ─────────────────────────────────────
-    // B2'ga CHIQILMAYDI. Ilova isitishni (`/api/warm/...`)
-    // chaqirib, keyin qaytadan uriniladi.
-    let mut resp = Response::error("Oyna hali keshga isitilmagan", 503)?;
-    set_cors(&mut resp);
-    {
-        let h = resp.headers_mut();
-        h.set("Cache-Control", "no-store")?;
-        h.set("X-Cache", "NOT-WARMED")?;
-        h.set("X-Warm-Reason", &reason)?;
-    }
+    // SABABI: bu yerda ilgari QAT'IY qoida bor edi — javob FAQAT
+    // "isitilgan oyna" keshidan berilardi, kesh tayyor bo'lmasa
+    // 503. Amalda esa kesh tayyor bo'lmasligining bir nechta
+    // butunlay oddiy sababi bor:
+    //
+    //   * Cloudflare keshi HAR BIR DATA-MARKAZDA (colo) alohida.
+    //     Isitish bitta colo'da bajarilgan bo'lsa ham,
+    //     foydalanuvchining keyingi so'rovi boshqa colo'ga tushsa
+    //     — u yerda kesh BO'SH;
+    //   * katta yozuvlarni (480 MiB) Cloudflare xotira siqilganda
+    //     istalgan vaqtda o'chirib yuboradi;
+    //   * isitish "belgisi" (marker) turganda ikkinchi isitish
+    //     `{"status":"warming"}` qaytaradi. Agar birinchi isitish
+    //     uzilib qolgan bo'lsa, kesh HECH QACHON to'lmaydi, belgi
+    //     esa qayta urinishni bloklab turadi — natijada video
+    //     umuman ochilmasdi.
+    //
+    // Har uchala holatda ham foydalanuvchi uchun natija bir xil
+    // edi: 503 -> ExoPlayer xatoga chiqadi -> "Videoni yuklab
+    // bo'lmadi".
+    //
+    // ENDI: kesh bo'lmasa baytlar B2'dan TO'G'RIDAN-TO'G'RI oqim
+    // bilan beriladi. `Range` B2'ga O'ZGARISHSIZ uzatiladi, ya'ni
+    // javob HECH QACHON sun'iy kesilmaydi va ExoPlayer uni "fayl
+    // tugadi" deb tushunmaydi. Ya'ni video HAR DOIM ochiladi.
+    //
+    // Isitish o'z ishini yo'qotmadi: u fon'da davom etadi va
+    // tugashi bilan keyingi barcha oraliqlar yana chekkadagi
+    // keshdan (X-Cache: HIT-WINDOW) keladi. Ya'ni kesh endi
+    // TEZLASHTIRUVCHI, lekin ijro uchun SHART emas.
+    let mut resp = b2_stream(env, file_name, range).await?;
+    resp.headers_mut().set("X-Warm-Reason", &reason)?;
     Ok(resp)
 }
 
