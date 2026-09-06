@@ -627,8 +627,14 @@ async fn b2_warm(env: &Env, file_name: &str, widx: u64, force: bool) -> Result<R
     // yozuv eskirgan yoki noto'g'ri shaklda bo'lsa, uni QAYTADAN
     // yozish uchun kerak.
     if !force {
+        // MUHIM: hajmi 0 bo'lgan yozuv "keshda bor" hisoblanmaydi —
+        // undan pleyerga oraliq kesib berib bo'lmaydi
+        // (`play_from_warm_cache` ham uni rad etadi). Aks holda
+        // isitish "cached" deb yolg'on javob qaytarardi.
         if let Some(total) = warm_window_total(file_name, widx).await {
-            return reply("cached", total);
+            if total > 0 {
+                return reply("cached", total);
+            }
         }
     }
 
@@ -693,13 +699,49 @@ async fn b2_warm(env: &Env, file_name: &str, widx: u64, force: bool) -> Result<R
         .headers()
         .get("Content-Type")?
         .unwrap_or_else(|| "application/octet-stream".to_string());
-    let total = resp
+
+    // ── FAYLNING UMUMIY HAJMINI ANIQLASH ─────────────────────
+    //
+    // TUZATILGAN XATO (qurilmada emas, worker'da o'lchandi):
+    // hajm FAQAT `Content-Range` dan olinardi. B2 esa oraliq
+    // butun faylni qoplaganda (biz har doim 480 MiB so'raymiz,
+    // fayl esa odatda undan kichik) javobni `206 + Content-Range`
+    // emas, `200` bilan — Content-Range'siz — qaytarishi mumkin.
+    // O'shanda hajm 0 bo'lib chiqar, isitish esa
+    // "error hajm noma'lum" bilan tugardi. `?force=1` yo'li AYNAN
+    // shu sabab HAR DOIM yiqilardi — ya'ni ilovaning "majburan
+    // qayta isitish" yo'li umuman ishlamasdi.
+    //
+    // Endi uch manba ketma-ket sinaladi:
+    //   1) `Content-Range` (206 javob) — eng ishonchlisi;
+    //   2) 200 javobda `Content-Length` = FAYLNING to'liq hajmi;
+    //   3) 206 bo'lsa-yu Content-Range o'qilmasa — oyna boshi +
+    //      uzatilayotgan uzunlik.
+    let cr_total = resp
         .headers()
         .get("Content-Range")?
         .and_then(|c| parse_content_range(&c))
         .map(|(_, _, t)| t)
-        .filter(|t| *t > 0)
-        .unwrap_or(0);
+        .filter(|t| *t > 0);
+    let content_len = resp
+        .headers()
+        .get("Content-Length")?
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0);
+    let total = match cr_total {
+        Some(t) => t,
+        None if status == 200 => content_len.unwrap_or(0),
+        None => content_len.map(|l| win_start + l).unwrap_or(0),
+    };
+
+    // 200 javob BUTUN faylni beradi (0-baytdan boshlab). Bu faqat
+    // birinchi oyna uchun to'g'ri keladi; keyingi oynalar uchun
+    // baytlar noto'g'ri joydan bo'lardi, shu sabab bunday holatda
+    // isitmaymiz (bu amalda faqat 480 MiB'dan katta fayllarda va
+    // faqat B2 Range'ni e'tiborsiz qoldirsa yuz beradi).
+    if status == 200 && win_start > 0 {
+        return reply("error 200 javob oyna uchun yaramaydi", total);
+    }
 
     // ── ENG MUHIM SARLAVHA: `Content-Length` ─────────────────
     //
@@ -720,7 +762,14 @@ async fn b2_warm(env: &Env, file_name: &str, widx: u64, force: bool) -> Result<R
     };
 
     if win_len == 0 {
-        return reply("error hajm noma'lum", total);
+        // Diagnostika: kelasi safar sabab darhol ko'rinsin.
+        return reply(
+            &format!(
+                "error hajm noma'lum (status {status}, content-length {})",
+                content_len.unwrap_or(0)
+            ),
+            total,
+        );
     }
     let src = match resp.body() {
         ResponseBody::Stream(rs) => rs.clone(),
