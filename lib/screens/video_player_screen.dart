@@ -75,12 +75,37 @@ import 'package:http/http.dart' as http;
 //     o'qishni to'xtatadi) — ortiqcha bayt olinmaydi.
 //
 //     MUHIM: `/api/play/...` FAQAT Cloudflare keshidan xizmat
-//     qiladi. B2'ga murojaat butun tizimda ATIGI BITTA joyda
-//     bo'ladi — isitish so'rovi 480 MiB'lik oynani keshga
-//     ko'chirganda. Shu sabab pleyer ochilishidan oldin ilova
-//     o'sha isitishni chaqirib, tugashini kutadi ("Video
-//     tayyorlanyabdi..."). Kesh tayyor bo'lmasa worker 503
-//     qaytaradi va B2'ga chiqmaydi.
+//     qiladi va B2'ga UMUMAN chiqmaydi — kesh tekin, B2'ning
+//     har bir so'rovi esa pul. B2'ga murojaat butun ijro
+//     yo'lida ATIGI BITTA joyda bo'ladi: isitish so'rovi
+//     480 MiB'lik oynani keshga ko'chirganda. Shu sabab pleyer
+//     ochilishidan oldin ilova o'sha isitishni chaqirib,
+//     HAQIQATAN tugashini kutadi ("Video tayyorlanyabdi...").
+//
+//     ILGARI shu yerda xato bor edi: worker boshqa birov
+//     isitayotganini ko'rsa darhol "warming" deb qaytarar,
+//     Rust yadrosi esa bunday javobda ham "tayyor" deb
+//     belgilardi. Ilova pleyerni ochar, kesh esa bo'sh bo'lgani
+//     uchun 503 kelar va ekranda "Videoni yuklab bo'lmadi"
+//     chiqardi — onlayn video umuman ochilmasligining sababi
+//     aynan shu edi. Endi worker oyna keshda paydo bo'lishini
+//     kutadi va yozilganini O'QIB tasdiqlaydi; ilova esa
+//     muvaffaqiyatsizlikni ko'rsa isitishni majburan qayta
+//     boshlaydi.
+//
+// ── PLEYER QANCHA BAYT SO'RAYDI ───────────────────────────────
+//
+// Onlayn ijroda baytlarni PLEYERNING O'ZI (ExoPlayer) so'raydi,
+// oradagi hech qanday "bo'laklovchi" qatlam yo'q. ExoPlayer
+// bitta `Range: bytes=N-` so'rovini ochadi va buferi to'lishi
+// bilan soketdan o'qishni TO'XTATADI (TCP oqim boshqaruvi) —
+// ya'ni tarmoqdan aynan buferga sig'adigan bayt keladi.
+// Buferning standart sig'imi — 50 SONIYA (ExoPlayer'ning
+// `DefaultLoadControl` qiymati), va bufer shu chegaradan
+// kamayishi bilan o'qish avtomatik qayta boshlanadi, ya'ni
+// faqat BO'SHAGAN JOYNI to'ldiradigancha bayt olinadi.
+// Yuklab olish tugmasidagi 1 MiB'lik bo'laklar bunga UMUMAN
+// aloqador emas — u boshqa yo'l (`/api/image/...`).
 //
 //   * Fayl to'liq emas + internet yo'q  ->  ijro etib bo'lmaydi,
 //     foydalanuvchiga aniq xabar ko'rsatiladi.
@@ -499,17 +524,35 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
 
     // ── WORKER'DAN IJRO: AVVAL OYNA KESHGA TAYYOR BO'LSIN ─────
     //
-    // `/api/play/...` faqat Cloudflare keshidan xizmat qiladi va
-    // B2'ga UMUMAN chiqmaydi. B2'ga murojaat butun tizimda atigi
-    // bitta joyda bo'ladi — isitish so'rovi 480 MiB'lik oynani
-    // keshga ko'chirganda. Shu sabab pleyerni ochishdan oldin
-    // aynan o'sha isitishni chaqiramiz va tugashini kutamiz.
+    // `/api/play/...` FAQAT Cloudflare keshidan xizmat qiladi va
+    // B2'ga UMUMAN chiqmaydi — kesh tekin, B2'ning har bir so'rovi
+    // esa pul. B2'ga murojaat butun ijro yo'lida atigi bitta joyda
+    // bo'ladi: isitish 480 MiB'lik oynani keshga ko'chirganda.
+    // Shu sabab pleyerni ochishdan oldin aynan o'sha isitishni
+    // chaqiramiz va HAQIQATAN tugashini kutamiz.
     //
     // Fayl allaqachon to'liq telefonda bo'lsa bu bosqich umuman
     // bo'lmaydi (yuqoridagi mahalliy yo'l).
+    var prepared = true;
     if (!_playViaLocal) {
-      await _prepareSource(url, myToken);
+      prepared = await _prepareSource(url, myToken);
       if (!mounted || myToken != _playToken) return;
+      // Isitish chiqmadi — MAJBURAN bir marta qayta urinamiz
+      // (worker'ning eskirgan kesh yozuvi va o'lib qolgan isitish
+      // belgisi e'tiborsiz qoldiriladi).
+      if (!prepared) {
+        prepared = await _prepareAgain(url, myToken);
+        if (!mounted || myToken != _playToken) return;
+      }
+      if (!prepared) {
+        // Pleyerni ochish behuda: 503 keladi. Foydalanuvchiga
+        // ANIQ sabab ko'rsatamiz.
+        setState(() {
+          _playerLoading = false;
+          _playerError = 'Video keshga tayyorlanmadi — qayta urinib ko\'ring';
+        });
+        return;
+      }
     }
 
     var ctrl = await _openController(source, myToken);
@@ -521,27 +564,28 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       VideoCacheServer.log('Zaxira: worker orqali qayta urinilyapti...');
       _playViaLocal = false;
       source = Uri.parse(_workerPlayUrl(url));
-      await _prepareSource(url, myToken);
+      if (await _prepareSource(url, myToken)) {
+        if (!mounted || myToken != _playToken) return;
+        ctrl = await _openController(source, myToken);
+      }
       if (!mounted || myToken != _playToken) return;
-      ctrl = await _openController(source, myToken);
     }
 
     // ── KESH OYNASI ESKIRGAN BO'LISHI MUMKIN ─────────────────
     //
-    // `/api/play/...` faqat Cloudflare keshidan xizmat qiladi.
-    // Cloudflare esa katta yozuvlarni (480 MiB'lik oyna) xotira
-    // siqilganda o'chirib yuborishi mumkin — o'shanda u 503
-    // qaytaradi va video ochilmaydi. Bu holatda isitish belgisini
-    // tozalab, oynani QAYTADAN isitamiz va bir marta qayta
-    // urinamiz. (B2'ga murojaat baribir faqat shu isitishda
-    // bo'ladi — qoida buzilmaydi.)
+    // Cloudflare katta yozuvlarni (480 MiB'lik oyna) xotira
+    // siqilganda o'chirib yuborishi mumkin — o'shanda `/api/play`
+    // 503 qaytaradi va video ochilmaydi. Bu holatda oynani
+    // MAJBURAN qaytadan isitamiz va bir marta qayta urinamiz.
+    // (B2'ga murojaat baribir faqat shu isitishda bo'ladi —
+    // qoida buzilmaydi.)
     if (ctrl == null && !_playViaLocal && !_offline) {
       if (!mounted || myToken != _playToken) return;
       VideoCacheServer.log('Kesh oynasi topilmadi — qaytadan isitilmoqda...');
-      RustCore.instance.videoPrepareReset(url);
-      await _prepareSource(url, myToken);
-      if (!mounted || myToken != _playToken) return;
-      ctrl = await _openController(source, myToken);
+      if (await _prepareAgain(url, myToken)) {
+        if (!mounted || myToken != _playToken) return;
+        ctrl = await _openController(source, myToken);
+      }
     }
 
     if (!mounted || myToken != _playToken) {
@@ -636,25 +680,45 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   /// ── OYNANI KESHGA ISITISHNI KUTISH ──────────────────────────
   ///
   /// Worker'ga "480 MiB'lik oynani B2'dan Cloudflare keshiga
-  /// ko'chir" degan BITTA so'rov yuboriladi va tugashi kutiladi.
-  /// Shundan keyin videoning har bir bayti chekkadagi keshdan
-  /// keladi — B2'ga boshqa umuman chiqilmaydi.
+  /// ko'chir" degan BITTA so'rov yuboriladi va HAQIQATAN tugashi
+  /// kutiladi. Shundan keyin videoning har bir bayti chekkadagi
+  /// keshdan keladi — ijro paytida B2'ga UMUMAN chiqilmaydi.
   ///
-  /// NEGA KUTISH AYNAN SHU YERDA: kutishni pleyerning HTTP javobi
-  /// ichida qilib bo'lmaydi — ExoPlayer javob sarlavhasini 8
-  /// soniyadan ortiq kutmaydi va ulanishni uzib xatoga chiqadi. Bu
-  /// yerda esa ekranda oddiy "tayyorlanmoqda" belgisi turadi.
+  /// ── NEGA KUTISH SHART ───────────────────────────────────────
   ///
-  /// Kutish CHEGARALANGAN (`_prepareMax`): shu vaqt ichida
-  /// tugamasa, video baribir ochiladi — ya'ni ilova hech qachon
+  /// `/api/play/...` qat'iy qoida bilan ishlaydi: faqat keshdan
+  /// xizmat qiladi, kesh bo'sh bo'lsa 503. Bu ataylab shunday —
+  /// kesh tekin, B2'ning har bir so'rovi esa pul. Ya'ni pleyerni
+  /// kesh tayyor bo'lmasdan ochish behuda.
+  ///
+  /// ── NIMA TUZATILDI ──────────────────────────────────────────
+  ///
+  /// Ilgari kutish YOLG'ON edi: worker boshqa birov isitayotganini
+  /// ko'rsa darhol `{"status":"warming"}` qaytarardi, Rust yadrosi
+  /// esa bunday javobda ham "tayyor" deb belgilardi. Ilova
+  /// pleyerni ochar, 503 kelar va ekranda "Videoni yuklab
+  /// bo'lmadi" chiqardi — foydalanuvchi ko'rgan asosiy muammo
+  /// aynan shu edi.
+  ///
+  /// Endi:
+  ///   * worker "warming" qaytarmaydi — u oyna keshda paydo
+  ///     bo'lishini kutadi va yozilganini O'QIB tasdiqlaydi;
+  ///   * Rust yadrosi muvaffaqiyatsizlikni ALOHIDA holat sifatida
+  ///     qaytaradi (`videoPrepareStatus` == 2);
+  ///   * ilova bu holatda isitishni MAJBURAN bir marta qayta
+  ///     boshlaydi va faqat shundan keyin ham chiqmasa aniq xabar
+  ///     ko'rsatadi.
+  ///
+  /// Kutish CHEGARALANGAN (`_prepareMax`) — ilova hech qachon
   /// "muzlab" qolmaydi.
-  static const Duration _prepareMax = Duration(minutes: 3);
+  static const Duration _prepareMax = Duration(seconds: 100);
 
-  Future<void> _prepareSource(String url, int myToken) async {
+  /// `true` — oyna keshda, pleyerni ochsa bo'ladi.
+  Future<bool> _prepareSource(String url, int myToken) async {
     RustCore.instance.videoPrepare(url);
     // Darhol tayyor bo'lsa (oyna allaqachon keshda) — hech qanday
     // yozuv ko'rsatmaymiz.
-    if (RustCore.instance.videoPrepareReady(url)) return;
+    if (RustCore.instance.videoPrepareStatus(url) == 1) return true;
 
     if (mounted && myToken == _playToken) {
       setState(() => _preparing = true);
@@ -662,18 +726,35 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     final started = DateTime.now();
     try {
       while (mounted && myToken == _playToken) {
-        if (RustCore.instance.videoPrepareReady(url)) return;
+        final st = RustCore.instance.videoPrepareStatus(url);
+        if (st == 1) return true;
+        if (st == 2) {
+          VideoCacheServer.log('Isitish muvaffaqiyatsiz tugadi');
+          return false;
+        }
         if (DateTime.now().difference(started) > _prepareMax) {
           VideoCacheServer.log(
-              'Tayyorlash ${_prepareMax.inMinutes} daqiqada tugamadi — '
-              'video baribir ochilmoqda');
-          return;
+              'Isitish ${_prepareMax.inSeconds} soniyada tugamadi');
+          return false;
         }
-        await Future.delayed(const Duration(milliseconds: 300));
+        await Future.delayed(const Duration(milliseconds: 200));
       }
     } finally {
       if (mounted) setState(() => _preparing = false);
     }
+    return false;
+  }
+
+  /// Isitishni MAJBURAN qaytadan boshlab, yana kutadi.
+  ///
+  /// Worker'ning keshdagi eskirgan yozuvi ham, o'lib qolgan
+  /// isitishning "belgisi" ham e'tiborsiz qoldiriladi — shusiz
+  /// qayta urinish ko'pincha aynan o'sha ishlamaydigan holatni
+  /// qaytarardi.
+  Future<bool> _prepareAgain(String url, int myToken) async {
+    VideoCacheServer.log('Isitish majburan qaytadan boshlanmoqda...');
+    RustCore.instance.videoPrepareReset(url);
+    return _prepareSource(url, myToken);
   }
 
   /// Worker'dagi TO'G'RIDAN-TO'G'RI ijro manzili.
@@ -1081,13 +1162,16 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   // saqlanadi), uni o'rab turgan halqa esa aylanib turadi — ya'ni
   // "sek kutilmoqda" degani.
   //
-  // KUTISH VAQTI: 1 SONIYA (foydalanuvchi talabi; avval 3 edi).
-  // 3 soniya amalda uzun tuyulardi: bitta marta sek qilib qo'yib
-  // yuborilganda ham video shuncha vaqt muzlab turardi. 1 soniya
-  // ketma-ket bosilgan taplarni yig'ib olishga baribir yetadi
-  // (odatda ular 200-400 ms oralig'ida keladi), lekin bitta sek
-  // deyarli darhol bajarilgandek his qilinadi.
-  static const Duration _seekIdle = Duration(seconds: 1);
+  // KUTISH VAQTI: 0.5 SONIYA (foydalanuvchi talabi; avval 1, undan
+  // ham avval 3 soniya edi). Ketma-ket bosilgan taplar odatda
+  // 200-400 ms oralig'ida keladi, ya'ni 500 ms ularni yig'ib
+  // olishga baribir yetadi — lekin bitta marta sek qilib qo'yib
+  // yuborilganda video deyarli darhol ishlab ketadi.
+  //
+  // MUHIM: shu 500 ms ichida pleyerga (demak worker'ga ham) BITTA
+  // ham so'rov yuborilmaydi — video pauzada, `seekTo` esa faqat
+  // tinchlik davri tugagach, AYNAN BIR MARTA yuboriladi.
+  static const Duration _seekIdle = Duration(milliseconds: 500);
 
   // ── Ichki holat ──────────────────────────────────────────────
   // Bir vaqtda faqat BITTA `seekTo` uchib turadi; undan keyingilari
@@ -1558,38 +1642,47 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                   child: _buildInlinePlayer(),
                 ),
               ),
-              const SizedBox(height: 10),
+              const SizedBox(height: 8),
               // Tartib (foydalanuvchi talabi):
               //   video -> tablar -> [<] N-qism [>] -> qismlar ro'yxati
+              //
+              // ── BO'YI KICHRAYTIRILDI (foydalanuvchi talabi) ────
+              // Avval `Tab` o'zining standart bo'yida (46 dp) edi va
+              // atrofida 4 dp to'ldirish bilan butun panel 54 dp joy
+              // egallardi. Yozuvlar bir qatorli bo'lgani uchun bu
+              // ortiqcha edi — endi `Tab(height: 32)` va 3 dp
+              // to'ldirish, ya'ni 38 dp. Qismlar ro'yxatiga 16 dp
+              // qo'shimcha joy chiqdi.
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16),
                 child: Glass(
-                  borderRadius: 16,
+                  borderRadius: 14,
                   blur: 12,
-                  padding: const EdgeInsets.all(4),
+                  padding: const EdgeInsets.all(3),
                   child: TabBar(
                     controller: _tabCtrl,
                     indicator: BoxDecoration(
                         color: AppColors.accent,
-                        borderRadius: BorderRadius.circular(12)),
+                        borderRadius: BorderRadius.circular(11)),
                     labelColor: Colors.white,
                     unselectedLabelColor: Colors.white54,
+                    labelPadding: EdgeInsets.zero,
                     labelStyle: const TextStyle(
                         fontWeight: FontWeight.w600, fontSize: 13),
                     unselectedLabelStyle: const TextStyle(fontSize: 13),
                     dividerColor: Colors.transparent,
                     tabs: const [
-                      Tab(text: 'Qismlar'),
-                      Tab(text: 'Bo\'limlar'),
-                      Tab(text: 'Ma\'lumot'),
+                      Tab(height: 32, text: 'Qismlar'),
+                      Tab(height: 32, text: 'Bo\'limlar'),
+                      Tab(height: 32, text: 'Ma\'lumot'),
                     ],
                   ),
                 ),
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: 6),
               // [<]  N-qism  [>] — tablarning TAGIDA, ro'yxat ustida.
               _buildEpisodeNav(),
-              const SizedBox(height: 8),
+              const SizedBox(height: 6),
               Expanded(
                 // ── NEGA TabBarView EMAS ──────────────────────────
                 // TabBarView sahifalarni PageView kabi yonma-yon
@@ -1624,16 +1717,37 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                     // `false` — xabar yuqoriga o'tishda davom etadi.
                     return false;
                   },
-                  child: AnimatedBuilder(
-                    animation: _tabCtrl,
-                    builder: (context, _) => IndexedStack(
-                      index: _tabCtrl.index,
-                      sizing: StackFit.expand,
-                      children: [
-                        _lazyTab(0, _buildEpisodeTab),
-                        _lazyTab(1, _buildSeasonsTab),
-                        _lazyTab(2, () => _buildInfoTab(tavsif.toString())),
-                      ],
+                  // ── TABLAR ORASIDA SURIB O'TISH (foydalanuvchi talabi) ──
+                  //
+                  // Pastki qismni chapdan o'ngga (yoki teskarisiga)
+                  // surib "Qismlar" <-> "Bo'limlar" <-> "Ma'lumot"
+                  // orasida o'tish mumkin.
+                  //
+                  // NEGA `TabBarView` EMAS: yuqoridagi izohda
+                  // tushuntirilganidek, u o'tish paytida ORADAGI
+                  // tabni ham qurishga majbur bo'lardi va ilova bir
+                  // zumga qotib qolardi. Bu yerda esa faqat surish
+                  // HARAKATI ushlanadi, ko'rsatish esa avvalgidek
+                  // `IndexedStack` orqali (bitta tab — bitta qurish).
+                  //
+                  // `translucent` — tapni yutmaydi: ro'yxatdagi
+                  // tugmalar va vertikal surish avvalgidek ishlaydi
+                  // (vertikal surish gorizontal gesture bilan
+                  // to'qnashmaydi, Flutter arena ularni ajratadi).
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.translucent,
+                    onHorizontalDragEnd: _onTabSwipe,
+                    child: AnimatedBuilder(
+                      animation: _tabCtrl,
+                      builder: (context, _) => IndexedStack(
+                        index: _tabCtrl.index,
+                        sizing: StackFit.expand,
+                        children: [
+                          _lazyTab(0, _buildEpisodeTab),
+                          _lazyTab(1, _buildSeasonsTab),
+                          _lazyTab(2, () => _buildInfoTab(tavsif.toString())),
+                        ],
+                      ),
                     ),
                   ),
                 ),
@@ -1643,6 +1757,19 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
         ),
       ),
     );
+  }
+
+  /// Pastki qismni chapga/o'ngga surganda tabni almashtiradi.
+  ///
+  /// Chapga surish (`primaryVelocity < 0`) — KEYINGI tab,
+  /// o'ngga surish — OLDINGISI. Tasodifiy mayda siljishlar tabni
+  /// almashtirib yubormasligi uchun tezlik chegarasi qo'yilgan.
+  void _onTabSwipe(DragEndDetails d) {
+    final v = d.primaryVelocity ?? 0;
+    if (v.abs() < 200) return;
+    final next = _tabCtrl.index + (v < 0 ? 1 : -1);
+    if (next < 0 || next >= _tabCtrl.length) return;
+    _tabCtrl.animateTo(next);
   }
 
   /// Tab BIRINCHI MARTA ochilgandagina quriladi; keyin esa o'z
@@ -2404,24 +2531,28 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
         ? '${eps[i]['epizod_number'] ?? ''}-qism'
         : (eps.isEmpty ? '—' : 'Qismni tanlang');
 
-    // Tugmalar barmoq bilan qulay tegiladigan o'lchamda (Android'ning
-    // tavsiya etilgan 48 dp minimumidan katta).
+    // ── BO'YI KICHRAYTIRILDI (foydalanuvchi talabi) ─────────────
+    // Avval tugmalar 76x50 dp, atrofida 7 dp to'ldirish bilan butun
+    // qator 64 dp edi. Endi 68x38 dp va 5 dp to'ldirish, ya'ni
+    // 48 dp — barmoq bilan tegish uchun baribir qulay (Android'ning
+    // tavsiyasi 48x48 dp bo'lib, tugmaning ENI aynan shundan katta),
+    // lekin qismlar ro'yxatiga yana 16 dp joy chiqadi.
     Widget btn(IconData icon, bool enabled, VoidCallback onTap) {
       return GestureDetector(
         behavior: HitTestBehavior.opaque,
         onTap: enabled ? onTap : null,
         child: Container(
-          width: 76,
-          height: 50,
+          width: 68,
+          height: 38,
           alignment: Alignment.center,
           decoration: BoxDecoration(
             color: Colors.white.withOpacity(enabled ? 0.10 : 0.035),
-            borderRadius: BorderRadius.circular(14),
+            borderRadius: BorderRadius.circular(12),
             border: Border.all(
                 color: Colors.white.withOpacity(enabled ? 0.20 : 0.06)),
           ),
           child: Icon(icon,
-              size: 30,
+              size: 24,
               color: Colors.white.withOpacity(enabled ? 0.95 : 0.22)),
         ),
       );
@@ -2430,8 +2561,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16),
       child: Glass(
-        borderRadius: 18,
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
+        borderRadius: 14,
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
         child: Row(
           children: [
             btn(Icons.skip_previous_rounded, hasPrev, () => _stepEpisode(-1)),
@@ -2443,7 +2574,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     color: i >= 0 ? Colors.white : Colors.white54,
-                    fontSize: 18,
+                    fontSize: 16,
                     fontWeight: FontWeight.w700,
                   ),
                 ),

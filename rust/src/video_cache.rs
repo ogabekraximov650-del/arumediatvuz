@@ -2304,15 +2304,16 @@ const BUSY_ERR: &str = "__band__";
 // qoladi. Aynan shuning uchun bu yerda alohida `warm_agent` bor:
 // uning o'qish chegarasi 15 soniya emas, 15 daqiqa.
 //
-// ── ILOVA KUTMAYDI ────────────────────────────────────────────
+// ── QUYIDAGI `maybe_warm` FAQAT YUKLAB OLISH UCHUN ────────────
 //
-// Isitish FON ish oqimida ketadi. Video shu payt odatdagidek,
-// darhol ochiladi va birinchi soniyalar uchun kerakli 2-3 guruh
-// to'g'ridan-to'g'ri olinadi. Isitish tugashi bilan (odatda yarim
-// daqiqa ichida) qolgan hamma narsa keshdan keladi.
+// U fon ish oqimida ketadi va yuklab olish oqimini bloklamaydi:
+// bo'laklar isitish tugashini `wait_for_warm` orqali kutadi,
+// lekin kutish chegaralangan.
 //
-// Agar ilova yopilsa yoki tarmoq uzilsa — belgisi olib tashlanadi
-// va keyingi ochilishda qaytadan uriniladi.
+// IJRO (pleyer) yo'li BOSHQACHA: u `start_prepare` orqali boradi
+// va isitish HAQIQATAN tugagunicha kutadi — chunki
+// `/api/play/...` faqat keshdan xizmat qiladi va kesh bo'sh
+// bo'lsa 503 qaytaradi.
 
 /// Kesh oynasi — worker'dagi `WARM_WINDOW` bilan AYNAN bir xil
 /// bo'lishi shart (ikkalasi bir xil oyna raqamini hisoblaydi).
@@ -2357,6 +2358,13 @@ const WARM_RETRY_COOLDOWN: Duration = Duration::from_secs(600);
 /// Manzil kutilgan shaklda bo'lmasa `None` (isitish o'tkazib
 /// yuboriladi, qolgan hamma narsa avvalgidek ishlaydi).
 fn warm_url_for(url: &str, widx: u64) -> Option<String> {
+    warm_url_for_force(url, widx, false)
+}
+
+/// `force = true` bo'lsa worker keshdagi eskirgan yozuvni ham,
+/// o'lib qolgan isitishning "belgisi"ni ham e'tiborsiz qoldirib,
+/// oynani QAYTADAN isitadi.
+fn warm_url_for_force(url: &str, widx: u64, force: bool) -> Option<String> {
     const MARK: &str = "/api/image/";
     let i = url.find(MARK)?;
     let head = &url[..i];
@@ -2365,7 +2373,8 @@ fn warm_url_for(url: &str, widx: u64) -> Option<String> {
     if name.is_empty() {
         return None;
     }
-    Some(format!("{head}/api/warm/{name}?w={widx}"))
+    let suffix = if force { "&force=1" } else { "" };
+    Some(format!("{head}/api/warm/{name}?w={widx}{suffix}"))
 }
 
 /// Kerakli oynani keshga isitishni BIR MARTA boshlaydi. Darhol
@@ -2460,11 +2469,80 @@ fn maybe_warm(url: &str, key: &str, byte_pos: u64) {
 // narsa qilinmaydi: tayyorlash darhol "tayyor" deb qaytadi va
 // tarmoqqa umuman chiqilmaydi.
 
-/// Tayyorlash holati: 0 = ketyapti, 1 = tayyor.
-static PREPARE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+/// Tayyorlash holati.
+///
+/// ── NEGA UCH HOLAT (tuzatilgan xato) ────────────────────────────
+///
+/// Ilgari bu shunchaki `bool` edi va isitish MUVAFFAQIYATSIZ
+/// tugaganda ham "tayyor" deb belgilanardi. Natijada ilova
+/// pleyerni ochar, `/api/play/...` esa kesh bo'sh bo'lgani uchun
+/// 503 qaytarardi va ekranda "Videoni yuklab bo'lmadi" chiqardi —
+/// foydalanuvchi ko'rgan asosiy muammo aynan shu edi.
+///
+/// Endi muvaffaqiyatsizlik ALOHIDA holat: ilova buni ko'rib
+/// isitishni majburan (`force`) qayta boshlaydi va faqat shundan
+/// keyin ham chiqmasa aniq xabar ko'rsatadi.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PrepareState {
+    /// Isitish ketyapti.
+    Running,
+    /// Oyna(lar) keshda — ijro qilsa bo'ladi.
+    Ready,
+    /// Isitib bo'lmadi.
+    Failed,
+}
 
-fn prepares() -> &'static Mutex<HashMap<String, bool>> {
+static PREPARE: OnceLock<Mutex<HashMap<String, PrepareState>>> = OnceLock::new();
+
+fn prepares() -> &'static Mutex<HashMap<String, PrepareState>> {
     PREPARE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Keyingi tayyorlash MAJBURAN (worker keshini e'tiborsiz
+/// qoldirib) bajarilishi kerak bo'lgan kalitlar.
+static PREPARE_FORCE: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn prepare_force() -> &'static Mutex<HashSet<String>> {
+    PREPARE_FORCE.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Bitta oynani isitadi va natijasini qaytaradi: (muvaffaqiyatmi,
+/// faylning umumiy hajmi). Isitish holati (`warm_state`) ham shu
+/// yerda yangilanadi, ya'ni yuklab olish oqimi ham xuddi shu
+/// natijadan foydalanadi va B2'ga qo'shimcha so'rov ketmaydi.
+fn warm_one_window(url: &str, key: &str, widx: u64, force: bool) -> (bool, u64) {
+    let Some(shared) = SHARED.get() else {
+        return (false, 0);
+    };
+    let Some(warm_url) = warm_url_for_force(url, widx, force) else {
+        return (false, 0);
+    };
+    let tag = format!("{key}#w{widx}");
+    log(format!("Isitish: {warm_url}"));
+    match shared.warm_agent.get(&warm_url).call() {
+        Ok(resp) => {
+            let body = resp.into_string().unwrap_or_default();
+            log(format!("Isitish javobi: {body}"));
+            // Worker endi "warming" qaytarmaydi — u oyna keshda
+            // paydo bo'lishini KUTADI va natijani tekshiradi.
+            // Shu sabab bu yerda javob aniq: "cached"/"warmed" —
+            // oyna keshda; boshqa hamma narsa — muvaffaqiyatsizlik.
+            let ok = body.contains("\"cached\"") || body.contains("\"warmed\"");
+            let total = parse_warm_total(&body);
+            if let Ok(mut m) = warm_state().lock() {
+                let st = if ok { WarmState::Done } else { WarmState::Failed };
+                m.insert(tag, (st, Instant::now()));
+            }
+            (ok && total > 0, total)
+        }
+        Err(e) => {
+            log(format!("Isitish uzildi: {e}"));
+            if let Ok(mut m) = warm_state().lock() {
+                m.insert(tag, (WarmState::Failed, Instant::now()));
+            }
+            (false, 0)
+        }
+    }
 }
 
 /// Isitish javobidan hajmni ajratib oladi: {"status":"...","total":N}
@@ -2482,20 +2560,44 @@ fn parse_warm_total(body: &str) -> u64 {
 }
 
 /// Videoni ijroga tayyorlaydi. DARHOL qaytadi — ish fon oqimida.
+///
+/// ── NIMA QILADI ────────────────────────────────────────────────
+///
+/// Faylning BARCHA oynalarini (480 MiB'lik bo'laklarini) worker
+/// orqali Cloudflare keshiga isitadi va faqat HAMMASI keshda
+/// bo'lgandagina "tayyor" deb belgilaydi.
+///
+/// NEGA HAMMASI: `/api/play/...` B2'ga umuman chiqmaydi — u faqat
+/// keshdan xizmat qiladi. Foydalanuvchi 480 MiB'dan katta
+/// videoning ikkinchi yarmiga sek qilsa, o'sha oyna ham keshda
+/// bo'lishi shart, aks holda 503 keladi. Odatdagi epizodlar
+/// (~200 MB) bitta oynaga sig'adi, ya'ni amalda BITTA isitish
+/// bo'ladi.
+///
+/// B2'ga ketadigan so'rovlar soni: har bir oyna uchun ATIGI BITTA
+/// (va u ham faqat o'sha oyna keshda bo'lmaganda). Keyin video
+/// necha marta ko'rilsa ham B2'ga umuman chiqilmaydi.
 fn start_prepare(url: &str) -> bool {
     let Some(shared) = SHARED.get() else {
         return false;
     };
     let key = cache_key(url);
+    // Reset'dan keyin keyingi tayyorlash MAJBURAN bajariladi.
+    let force = prepare_force()
+        .lock()
+        .map(|mut m| m.remove(&key))
+        .unwrap_or(false);
     {
         let Ok(mut m) = prepares().lock() else {
             return false;
         };
-        // Allaqachon ketyapti yoki tayyor.
-        if m.contains_key(&key) {
-            return true;
+        // Allaqachon ketyapti yoki tayyor — qayta boshlamaymiz.
+        // "Failed" esa QAYTA URINISHGA ruxsat beradi.
+        match m.get(&key) {
+            Some(PrepareState::Running) | Some(PrepareState::Ready) => return true,
+            _ => {}
         }
-        m.insert(key.clone(), false);
+        m.insert(key.clone(), PrepareState::Running);
     }
     let dir = shared.cache_root.join(&key);
     let (k, u) = (key.clone(), url.to_string());
@@ -2503,58 +2605,39 @@ fn start_prepare(url: &str) -> bool {
         .name("video-cache-prepare".into())
         .stack_size(256 * 1024)
         .spawn(move || {
-            let done = || {
+            let finish = |state: PrepareState| {
                 if let Ok(mut m) = prepares().lock() {
-                    m.insert(k.clone(), true);
+                    m.insert(k.clone(), state);
                 }
             };
             let _ = fs::create_dir_all(&dir);
 
-            // 1) Fayl butunlay diskda bo'lsa — hech narsa kerak emas.
+            // 1) Fayl butunlay diskda bo'lsa — hech narsa kerak emas
+            //    (tarmoqqa umuman chiqilmaydi).
             let known_total = meta_total_from_disk(&dir);
             if known_total > 0 {
                 let count = known_total.div_ceil(CHUNK_SIZE);
                 if (0..count).all(|i| chunk_cached(&dir, i, known_total)) {
                     log(format!("Tayyorlash: {k} allaqachon to'liq diskda"));
-                    done();
+                    finish(PrepareState::Ready);
                     return;
                 }
             }
 
-            // 2) Oynani keshga isitamiz VA TUGASHINI KUTAMIZ.
-            //    B2'ga ketadigan yagona so'rov aynan shu.
-            let Some(shared) = SHARED.get() else {
-                done();
-                return;
-            };
-            let Some(warm_url) = warm_url_for(&u, 0) else {
-                // Manzil kutilmagan shaklda — odatdagi yo'l bilan
-                // davom etamiz.
-                done();
-                return;
-            };
-            log(format!("Tayyorlash: oyna keshga isitilmoqda — {warm_url}"));
-            let total = match shared.warm_agent.get(&warm_url).call() {
-                Ok(resp) => {
-                    let body = resp.into_string().unwrap_or_default();
-                    log(format!("Tayyorlash javobi: {body}"));
-                    if let Ok(mut m) = warm_state().lock() {
-                        let tag = format!("{k}#w0");
-                        let ok = body.contains("cached") || body.contains("warmed");
-                        let st = if ok { WarmState::Done } else { WarmState::Failed };
-                        m.insert(tag, (st, Instant::now()));
-                    }
-                    parse_warm_total(&body)
-                }
-                Err(e) => {
-                    log(format!("Tayyorlash uzildi: {e}"));
-                    0
-                }
-            };
-
-            // 3) Hajm isitish javobidan olindi — meta.json shu
-            //    yerda yoziladi, ya'ni hajmni aniqlash uchun ham
+            // 2) BIRINCHI oynani isitamiz. Javobda faylning umumiy
+            //    hajmi ham bo'ladi — ya'ni hajmni bilish uchun ham
             //    B2'ga alohida so'rov KETMAYDI.
+            let (ok, total) = warm_one_window(&u, &k, 0, force);
+            if !ok {
+                log(format!(
+                    "Tayyorlash MUVAFFAQIYATSIZ: {k} oynasi keshga tushmadi"
+                ));
+                finish(PrepareState::Failed);
+                return;
+            }
+
+            // 3) Hajm isitish javobidan olindi — meta.json shu yerda
+            //    yoziladi.
             if total > 0 && meta_total_from_disk(&dir) == 0 {
                 let meta = CacheMeta {
                     total_size: total,
@@ -2568,11 +2651,25 @@ fn start_prepare(url: &str) -> bool {
                 }
                 log(format!("Tayyorlash: hajm aniqlandi — {total} bayt"));
             }
-            done();
+
+            // 4) Fayl bitta oynaga sig'masa — qolgan oynalarni ham
+            //    isitamiz (sek qilinganda 503 chiqmasligi uchun).
+            let windows = total.div_ceil(WARM_WINDOW).max(1);
+            for widx in 1..windows {
+                let (ok, _) = warm_one_window(&u, &k, widx, force);
+                if !ok {
+                    log(format!("Tayyorlash: #{widx} oyna keshga tushmadi"));
+                    finish(PrepareState::Failed);
+                    return;
+                }
+            }
+
+            log(format!("Tayyorlash tayyor: {k} — {windows} oyna keshda"));
+            finish(PrepareState::Ready);
         });
     if spawned.is_err() {
         if let Ok(mut m) = prepares().lock() {
-            m.insert(key, true);
+            m.insert(key, PrepareState::Failed);
         }
     }
     true
@@ -2594,11 +2691,15 @@ pub extern "C" fn rust_video_cache_prepare(url_ptr: *const c_char) -> i32 {
     }
 }
 
-/// Tayyorlash tugadimi (kalit bo'yicha).
+/// Tayyorlash TUGADIMI (muvaffaqiyatli yoki muvaffaqiyatsiz).
+///
+/// Yuklab olish oqimi shu javobga qarab kutishni to'xtatadi —
+/// isitish muvaffaqiyatsiz bo'lsa ham abadiy kutib o'tirmasligi
+/// kerak.
 fn prepare_ready(key: &str) -> bool {
     prepares()
         .lock()
-        .map(|m| m.get(key).copied().unwrap_or(true))
+        .map(|m| !matches!(m.get(key), Some(PrepareState::Running)))
         .unwrap_or(true)
 }
 
@@ -2627,20 +2728,33 @@ pub extern "C" fn rust_video_cache_prepare_reset(url_ptr: *const c_char) -> i32 
     if let Ok(mut m) = warm_state().lock() {
         m.retain(|k, _| !k.starts_with(&prefix));
     }
-    log(format!("Tayyorlash holati tozalandi — qayta isitiladi: {key}"));
+    // Keyingi tayyorlash MAJBURAN bo'lsin: worker o'zining
+    // eskirgan kesh yozuvini ham, o'lib qolgan isitishning
+    // "belgisi"ni ham e'tiborsiz qoldirib qaytadan isitadi. Bu
+    // belgisiz qayta urinish ko'pincha aynan o'sha eski,
+    // ishlamaydigan holatni qaytarardi.
+    if let Ok(mut m) = prepare_force().lock() {
+        m.insert(key.clone());
+    }
+    log(format!("Tayyorlash holati tozalandi — majburan qayta isitiladi: {key}"));
     1
 }
 
-/// Tayyorlash holati: 1 = tayyor, 0 = hali ketyapti/boshlanmagan.
+/// Tayyorlash holati:
+///   0 — hali ketyapti;
+///   1 — TAYYOR (oyna(lar) keshda, ijro qilsa bo'ladi);
+///   2 — MUVAFFAQIYATSIZ (isitish chiqmadi — ilova majburan qayta
+///       urinadi, keyin esa aniq xabar ko'rsatadi).
 #[no_mangle]
 pub extern "C" fn rust_video_cache_prepare_status(url_ptr: *const c_char) -> i32 {
     let Some(url) = (unsafe { cstr_to_str(url_ptr) }) else {
         return 1;
     };
-    if prepare_ready(&cache_key(url)) {
-        1
-    } else {
-        0
+    match prepares().lock().ok().and_then(|m| m.get(&cache_key(url)).copied()) {
+        Some(PrepareState::Running) => 0,
+        Some(PrepareState::Failed) => 2,
+        // Yozuv yo'q — kutadigan narsa ham yo'q.
+        _ => 1,
     }
 }
 
@@ -2656,7 +2770,10 @@ pub extern "C" fn rust_video_cache_prepare_status(url_ptr: *const c_char) -> i32
 /// yuklash baribir davom etadi (ya'ni hech qachon "muzlab" qolmaydi).
 /// Foydalanuvchi pauza bossa ham kutish darhol uziladi.
 ///
-/// Pleyer (ijro) HECH QACHON kutmaydi — video darhol ochilishi kerak.
+/// Pleyer (ijro) ham isitishni kutadi, lekin kutish MANTIG'I
+/// boshqa joyda — Dart tomonida (`_prepareSource`), chunki u yerda
+/// ekranda "Video tayyorlanyabdi..." belgisi ko'rsatiladi va
+/// foydalanuvchi boshqa qismni bosib kutishni bekor qila oladi.
 const WARM_WAIT_MAX: Duration = Duration::from_secs(90);
 
 fn wait_for_warm(key: &str, byte_pos: u64) {

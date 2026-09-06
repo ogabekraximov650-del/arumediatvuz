@@ -475,7 +475,26 @@ const WARM_WINDOW: u64 = 480 * 1024 * 1024;
 
 /// Isitish belgisi shu muddat yashaydi — bir vaqtda bitta oyna
 /// uchun faqat BITTA isitish ketishini ta'minlaydi.
-const WARM_MARKER_SECONDS: u64 = 15 * 60;
+///
+/// AVVAL 15 DAQIQA EDI va bu xato edi: isitish o'rtada uzilib
+/// qolsa (tarmoq uzildi, ilova yopildi), belgi yana 15 daqiqa
+/// turar va SHU DAVOMIDA qayta isitish umuman boshlanmasdi —
+/// kesh esa bo'sh qolaverardi. Endi 2 daqiqa: uzilgan isitish
+/// tezda qayta boshlanadi. Bitta isitishning o'zi (480 MiB)
+/// odatda 10-30 soniyada tugaydi, ya'ni 2 daqiqa yetarli
+/// zaxira.
+const WARM_MARKER_SECONDS: u64 = 120;
+
+/// Boshqa birov isitayotganda kutish qadami va qadamlar soni.
+/// 60 x 1000 ms = 60 soniya. Bitta oynani (480 MiB) isitish odatda
+/// 10-30 soniyada tugaydi, ya'ni bu yetarli zaxira. Cloudflare
+/// mijoz ulanib turganda so'rov davomiyligini cheklamaydi.
+const WARM_WAIT_STEP_MS: u64 = 1000;
+const WARM_WAIT_TICKS: u32 = 60;
+
+/// Keshga yozilgandan keyin uni o'qib tasdiqlash urinishlari.
+/// Yozuv chekkada ko'rinishi uchun ba'zan bir-ikki soniya kerak.
+const WARM_VERIFY_TICKS: u32 = 5;
 
 fn warm_marker_url(file_name: &str, widx: u64) -> String {
     cache_key_url(file_name, &format!("warm{widx}"))
@@ -613,11 +632,41 @@ async fn b2_warm(env: &Env, file_name: &str, widx: u64, force: bool) -> Result<R
         }
     }
 
-    // 2) Boshqa birov aynan hozir isitayaptimi.
+    // ── 2) BOSHQA BIROV AYNAN HOZIR ISITAYAPTIMI ─────────────
+    //
+    // TUZATILGAN XATO (onlayn video ochilmasligining asosiy
+    // sababi): ilgari bu yerda shunchaki `{"status":"warming"}`
+    // qaytarilardi. Ilova esa buni "tayyor" deb hisoblab pleyerni
+    // ochar, `/api/play/...` hali keshsiz bo'lgani uchun 503
+    // qaytarar va ekranda "Videoni yuklab bo'lmadi" chiqardi.
+    // Bundan ham yomoni: birinchi isitish uzilib qolgan bo'lsa,
+    // belgi qayta urinishni bloklab turar va muammo o'z-o'zidan
+    // tuzalmasdi.
+    //
+    // ENDI: belgi turgan bo'lsa, biz KUTAMIZ — oyna keshda paydo
+    // bo'lishini har soniyada tekshirib turamiz va paydo bo'lishi
+    // bilan "cached" deb javob beramiz. Ya'ni ikkinchi chaqiruvchi
+    // ham HAQIQIY natijani oladi va B2'ga BITTA ham qo'shimcha
+    // so'rov ketmaydi.
+    //
+    // Belgi turgani bilan oyna kutish muddati ichida paydo
+    // bo'lmasa — demak o'sha isitish o'lgan. Bunday holatda belgi
+    // e'tiborsiz qoldiriladi va isitish O'ZIMIZ tomonidan
+    // qaytadan boshlanadi (aks holda video hech qachon
+    // ochilmasdi).
     let cache = Cache::default();
     let marker_key = Request::new(&warm_marker_url(file_name, widx), Method::Get)?;
     if !force && cache.get(&marker_key, false).await?.is_some() {
-        return reply("warming", 0);
+        for _ in 0..WARM_WAIT_TICKS {
+            Delay::from(core::time::Duration::from_millis(WARM_WAIT_STEP_MS)).await;
+            if let Some(total) = warm_window_total(file_name, widx).await {
+                if total > 0 {
+                    return reply("cached", total);
+                }
+            }
+        }
+        // Belgi bor, lekin oyna paydo bo'lmadi — o'sha isitish
+        // o'lgan. Pastda o'zimiz isitamiz.
     }
     let mut marker = Response::ok("1")?;
     marker
@@ -692,27 +741,50 @@ async fn b2_warm(env: &Env, file_name: &str, widx: u64, force: bool) -> Result<R
     let to_cache = Response::from_body(ResponseBody::Stream(readable))?
         .with_headers(headers)
         .with_status(200);
-    match cache.put(&key, to_cache).await {
-        Ok(_) => reply("warmed", total),
-        Err(_) => reply("error", total),
+    if cache.put(&key, to_cache).await.is_err() {
+        return reply("error keshga yozilmadi", total);
     }
+
+    // ── YOZILGANINI TEKSHIRAMIZ ──────────────────────────────
+    //
+    // `cache.put` xatosiz tugashi yozuv HAQIQATAN o'qiladigan
+    // bo'ldi degani emas: Cloudflare uni darhol chetga surib
+    // qo'yishi ham mumkin. Ilgari bu tekshirilmasdi va ilova
+    // "warmed" javobiga ishonib pleyerni ochar, `/api/play/...`
+    // esa 503 qaytarardi.
+    //
+    // Endi oyna keshdan O'QIB ko'riladi. Tekshiruv juda arzon —
+    // atigi bitta bayt so'raladi va u ham keshdan (B2'ga
+    // chiqilmaydi).
+    for _ in 0..WARM_VERIFY_TICKS {
+        if let Some(t) = warm_window_total(file_name, widx).await {
+            if t > 0 {
+                return reply("warmed", t);
+            }
+        }
+        Delay::from(core::time::Duration::from_millis(WARM_WAIT_STEP_MS)).await;
+    }
+    reply("error kesh tasdiqlanmadi", total)
 }
 
 /// ═══════════════════════════════════════════════════════════════
 ///  GET /api/play/:filename  — PLEYER SHU YERDAN OQIM OLADI
 /// ═══════════════════════════════════════════════════════════════
 ///
-/// ── QAT'IY QOIDA: BU YERDAN B2'GA CHIQILMAYDI ───────────────────
+/// ── QAT'IY QOIDA: BU YERDAN B2'GA UMUMAN CHIQILMAYDI ───────────
 ///
-/// Javob FAQAT Cloudflare keshidagi "isitilgan oyna"dan beriladi.
-/// B2'ga murojaat butun tizimda ATIGI BITTA joyda bo'ladi —
-/// `/api/warm/...` oynani (480 MiB) keshga ko'chirayotganda.
-/// Ilova pleyerni ochishdan oldin aynan o'sha isitishni chaqiradi
-/// va tugashini kutadi.
+/// Javob FAQAT Cloudflare keshidagi "isitilgan oyna"dan beriladi
+/// (`X-Cache: HIT-WINDOW`). Kesh tekin, B2'ning har bir so'rovi esa
+/// pul — shu sabab ijro oqimi B2'ga HECH QACHON tegmaydi.
 ///
-/// Kesh hali tayyor bo'lmasa bu yerda 503 qaytadi (B2'ga
-/// chiqilmaydi) — ilova buni xato deb bilib, isitishni qaytadan
-/// chaqiradi va keyin ijroni davom ettiradi.
+/// B2'ga murojaat butun ijro yo'lida ATIGI BITTA joyda bo'ladi:
+/// `/api/warm/...` oynani (480 MiB) B2'dan keshga ko'chirganda.
+/// Ilova pleyerni ochishdan OLDIN aynan o'sha isitishni chaqiradi
+/// va HAQIQATAN tugashini kutadi.
+///
+/// Kesh tayyor bo'lmasa bu yerda 503 qaytadi va javobda
+/// `X-Warm-Window` sarlavhasi bo'ladi — ilova AYNAN o'sha oynani
+/// isitib, qaytadan uriniladi.
 ///
 /// ── NEGA ALOHIDA MANZIL KERAK BO'LDI ────────────────────────────
 ///
@@ -735,7 +807,7 @@ async fn b2_warm(env: &Env, file_name: &str, widx: u64, force: bool) -> Result<R
 /// holda 503. `/api/image/...` (bo'laklab keshlaydigan yo'l)
 /// o'zgarishsiz qoladi — undan endi FAQAT "yuklab olish" tugmasi
 /// foydalanadi.
-async fn b2_play(env: &Env, file_name: &str, range: Option<String>) -> Result<Response> {
+async fn b2_play(_env: &Env, file_name: &str, range: Option<String>) -> Result<Response> {
     // Nima uchun keshdan berib bo'lmaganini aytadi (diagnostika —
     // `X-Warm-Reason` sarlavhasida ko'rinadi).
     let mut reason = String::new();
@@ -745,25 +817,22 @@ async fn b2_play(env: &Env, file_name: &str, range: Option<String>) -> Result<Re
         return Ok(resp);
     }
 
-    // ── YAGONA ISTISNO: FAYL BITTA OYNAGA SIG'MAYDI ──────────
+    // ── KESH TAYYOR EMAS: 503, B2'GA CHIQILMAYDI ─────────────
     //
-    // Kesh yozuvi bor, lekin so'ralgan oraliq oyna chegarasidan
-    // chiqib ketyapti — bu FAQAT fayl 480 MiB'dan katta bo'lganda
-    // yuz beradi (Cloudflare kesh yozuvining chegarasi 512 MB).
-    // Bunday faylni keshdan BUTUNLAY berib bo'lmaydi, javobni
-    // kesish esa mumkin emas (pleyer uni "fayl tugadi" deb
-    // tushunadi). Shu sabab bu holatda — va FAQAT bu holatda —
-    // baytlar B2'dan oqim bilan beriladi.
+    // Ilova buni xato deb emas, "oynani isitish kerak" deb
+    // tushunadi: `X-Warm-Window` qaysi oynani isitish kerakligini
+    // aytadi (480 MiB'dan katta fayllarda bu 0 dan katta bo'ladi).
     //
-    // Kesh shunchaki hali TAYYOR EMAS bo'lsa (reason = no-window),
-    // bu yerga tushilmaydi: 503 qaytadi va ilova avval isitadi.
-    if reason == "outside-window" {
-        return b2_stream(env, file_name, range).await;
-    }
-
-    // ── KESH TAYYOR EMAS ─────────────────────────────────────
-    // B2'ga CHIQILMAYDI. Ilova isitishni (`/api/warm/...`)
-    // chaqirib, keyin qaytadan uriniladi.
+    // MUHIM: bu yerda B2'ga chiqib "shunchaki ishlab ketsin" deyish
+    // MUMKIN EMAS. Har bir bayt B2'dan qayta-qayta olinsa, bu
+    // to'g'ridan-to'g'ri pul; kesh esa tekin. Shu sabab yechim
+    // "B2'ga chiqish" emas, ISITISHNI ISHONCHLI QILISH — buning
+    // uchun `b2_warm` endi haqiqatan kutadi va natijani tekshiradi.
+    let widx = range
+        .as_deref()
+        .and_then(parse_range)
+        .map(|(start, _)| start / WARM_WINDOW)
+        .unwrap_or(0);
     let mut resp = Response::error("Oyna hali keshga isitilmagan", 503)?;
     set_cors(&mut resp);
     {
@@ -771,48 +840,7 @@ async fn b2_play(env: &Env, file_name: &str, range: Option<String>) -> Result<Re
         h.set("Cache-Control", "no-store")?;
         h.set("X-Cache", "NOT-WARMED")?;
         h.set("X-Warm-Reason", &reason)?;
-    }
-    Ok(resp)
-}
-
-/// B2'dan to'g'ridan-to'g'ri oqim (faqat 480 MiB'dan katta fayllar
-/// uchun — `b2_play` izohiga qarang).
-///
-/// `Range` B2'ga O'ZGARISHSIZ uzatiladi, ya'ni javob hech qachon
-/// sun'iy kesilmaydi.
-async fn b2_stream(env: &Env, file_name: &str, range: Option<String>) -> Result<Response> {
-    let acc = b2_access(env).await?;
-    let h = Headers::new();
-    h.set("Authorization", &acc.token)?;
-    if let Some(r) = range.as_deref() {
-        h.set("Range", r)?;
-    }
-    let req = Request::new_with_init(
-        &format!("{}/file/aniraxuz/{file_name}", acc.dl_url),
-        RequestInit::new().with_method(Method::Get).with_headers(h),
-    )?;
-    let mut b2 = Fetch::Request(req).send().await?;
-    let status = b2.status_code();
-    if status != 200 && status != 206 {
-        return Err(Error::RustError(format!("B2 oqim xatosi: {status}")));
-    }
-    let ct = b2
-        .headers()
-        .get("Content-Type")?
-        .unwrap_or_else(|| "application/octet-stream".to_string());
-    let cr = b2.headers().get("Content-Range")?;
-    let stream = b2.stream()?;
-    let mut resp = Response::from_stream(stream)?.with_status(status);
-    set_cors(&mut resp);
-    {
-        let h = resp.headers_mut();
-        h.set("Content-Type", &ct)?;
-        h.set("Accept-Ranges", "bytes")?;
-        h.set("Cache-Control", "no-store")?;
-        if let Some(c) = cr {
-            h.set("Content-Range", &c)?;
-        }
-        h.set("X-Cache", "B2-STREAM")?;
+        h.set("X-Warm-Window", &widx.to_string())?;
     }
     Ok(resp)
 }

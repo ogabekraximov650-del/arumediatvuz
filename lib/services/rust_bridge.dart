@@ -537,18 +537,32 @@ class RustCore {
     }
   }
 
-  /// Tayyorlash tugadimi. `true` — pleyerni ochish mumkin.
-  bool videoPrepareReady(String url) {
-    if (!_loaded || url.isEmpty) return true;
+  /// Tayyorlash holati:
+  ///   0 — hali ketyapti (kutish kerak);
+  ///   1 — TAYYOR: oyna(lar) Cloudflare keshida, pleyerni ochsa
+  ///       bo'ladi va ijro paytida B2'ga umuman chiqilmaydi;
+  ///   2 — MUVAFFAQIYATSIZ: isitib bo'lmadi. Bu holatda pleyerni
+  ///       ochish behuda — `/api/play/...` 503 qaytaradi va
+  ///       "Videoni yuklab bo'lmadi" chiqadi.
+  ///
+  /// AVVAL bu yerda faqat "tayyor/tayyor emas" bor edi va
+  /// muvaffaqiyatsizlik ham "tayyor" deb ko'rsatilardi — onlayn
+  /// videoning ochilmasligiga aynan shu olib kelgan edi.
+  int videoPrepareStatus(String url) {
+    if (!_loaded || url.isEmpty) return 1;
     final ptr = url.toNativeUtf8();
     try {
-      return _videoPrepareStatus(ptr) == 1;
+      return _videoPrepareStatus(ptr);
     } catch (_) {
-      return true;
+      return 1;
     } finally {
       malloc.free(ptr);
     }
   }
+
+  /// Tayyorlash muvaffaqiyatli tugadimi. `true` — pleyerni ochish
+  /// mumkin.
+  bool videoPrepareReady(String url) => videoPrepareStatus(url) == 1;
 
   /// ── ISITISHNI BOSHIDAN QAYTA BOSHLASH ───────────────────────
   ///
