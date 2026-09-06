@@ -74,14 +74,24 @@ import 'package:http/http.dart' as http;
 //     PLEYERNING O'ZI hal qiladi (buferi to'lishi bilan soketdan
 //     o'qishni to'xtatadi) — ortiqcha bayt olinmaydi.
 //
-//     `/api/play/...` avval Cloudflare keshidagi "isitilgan
-//     oyna"dan berishga urinadi (eng arzon va tez yo'l), kesh
-//     o'sha data-markazda hali bo'lmasa esa baytlarni B2'dan
-//     oqim bilan beradi. ILGARI u kesh bo'lmasa 503 qaytarardi
-//     va aynan shu "onlayn video umuman ochilmaydi" muammosini
-//     keltirib chiqargan edi. Isitish o'z ishini yo'qotmadi —
-//     u endi fon'da ketadi va tugashi bilan qolgan baytlar
-//     keshdan kela boshlaydi (ilova uni kutib turmaydi).
+//     MUHIM: `/api/play/...` FAQAT Cloudflare keshidan xizmat
+//     qiladi va B2'ga UMUMAN chiqmaydi — kesh tekin, B2'ning
+//     har bir so'rovi esa pul. B2'ga murojaat butun ijro
+//     yo'lida ATIGI BITTA joyda bo'ladi: isitish so'rovi
+//     480 MiB'lik oynani keshga ko'chirganda. Shu sabab pleyer
+//     ochilishidan oldin ilova o'sha isitishni chaqirib,
+//     HAQIQATAN tugashini kutadi ("Video tayyorlanyabdi...").
+//
+//     ILGARI shu yerda xato bor edi: worker boshqa birov
+//     isitayotganini ko'rsa darhol "warming" deb qaytarar,
+//     Rust yadrosi esa bunday javobda ham "tayyor" deb
+//     belgilardi. Ilova pleyerni ochar, kesh esa bo'sh bo'lgani
+//     uchun 503 kelar va ekranda "Videoni yuklab bo'lmadi"
+//     chiqardi — onlayn video umuman ochilmasligining sababi
+//     aynan shu edi. Endi worker oyna keshda paydo bo'lishini
+//     kutadi va yozilganini O'QIB tasdiqlaydi; ilova esa
+//     muvaffaqiyatsizlikni ko'rsa isitishni majburan qayta
+//     boshlaydi.
 //
 // ── PLEYER QANCHA BAYT SO'RAYDI ───────────────────────────────
 //
@@ -514,17 +524,35 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
 
     // ── WORKER'DAN IJRO: AVVAL OYNA KESHGA TAYYOR BO'LSIN ─────
     //
-    // `/api/play/...` faqat Cloudflare keshidan xizmat qiladi va
-    // B2'ga UMUMAN chiqmaydi. B2'ga murojaat butun tizimda atigi
-    // bitta joyda bo'ladi — isitish so'rovi 480 MiB'lik oynani
-    // keshga ko'chirganda. Shu sabab pleyerni ochishdan oldin
-    // aynan o'sha isitishni chaqiramiz va tugashini kutamiz.
+    // `/api/play/...` FAQAT Cloudflare keshidan xizmat qiladi va
+    // B2'ga UMUMAN chiqmaydi — kesh tekin, B2'ning har bir so'rovi
+    // esa pul. B2'ga murojaat butun ijro yo'lida atigi bitta joyda
+    // bo'ladi: isitish 480 MiB'lik oynani keshga ko'chirganda.
+    // Shu sabab pleyerni ochishdan oldin aynan o'sha isitishni
+    // chaqiramiz va HAQIQATAN tugashini kutamiz.
     //
     // Fayl allaqachon to'liq telefonda bo'lsa bu bosqich umuman
     // bo'lmaydi (yuqoridagi mahalliy yo'l).
+    var prepared = true;
     if (!_playViaLocal) {
-      await _prepareSource(url, myToken);
+      prepared = await _prepareSource(url, myToken);
       if (!mounted || myToken != _playToken) return;
+      // Isitish chiqmadi — MAJBURAN bir marta qayta urinamiz
+      // (worker'ning eskirgan kesh yozuvi va o'lib qolgan isitish
+      // belgisi e'tiborsiz qoldiriladi).
+      if (!prepared) {
+        prepared = await _prepareAgain(url, myToken);
+        if (!mounted || myToken != _playToken) return;
+      }
+      if (!prepared) {
+        // Pleyerni ochish behuda: 503 keladi. Foydalanuvchiga
+        // ANIQ sabab ko'rsatamiz.
+        setState(() {
+          _playerLoading = false;
+          _playerError = 'Video keshga tayyorlanmadi — qayta urinib ko\'ring';
+        });
+        return;
+      }
     }
 
     var ctrl = await _openController(source, myToken);
@@ -536,27 +564,28 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       VideoCacheServer.log('Zaxira: worker orqali qayta urinilyapti...');
       _playViaLocal = false;
       source = Uri.parse(_workerPlayUrl(url));
-      await _prepareSource(url, myToken);
+      if (await _prepareSource(url, myToken)) {
+        if (!mounted || myToken != _playToken) return;
+        ctrl = await _openController(source, myToken);
+      }
       if (!mounted || myToken != _playToken) return;
-      ctrl = await _openController(source, myToken);
     }
 
     // ── KESH OYNASI ESKIRGAN BO'LISHI MUMKIN ─────────────────
     //
-    // `/api/play/...` faqat Cloudflare keshidan xizmat qiladi.
-    // Cloudflare esa katta yozuvlarni (480 MiB'lik oyna) xotira
-    // siqilganda o'chirib yuborishi mumkin — o'shanda u 503
-    // qaytaradi va video ochilmaydi. Bu holatda isitish belgisini
-    // tozalab, oynani QAYTADAN isitamiz va bir marta qayta
-    // urinamiz. (B2'ga murojaat baribir faqat shu isitishda
-    // bo'ladi — qoida buzilmaydi.)
+    // Cloudflare katta yozuvlarni (480 MiB'lik oyna) xotira
+    // siqilganda o'chirib yuborishi mumkin — o'shanda `/api/play`
+    // 503 qaytaradi va video ochilmaydi. Bu holatda oynani
+    // MAJBURAN qaytadan isitamiz va bir marta qayta urinamiz.
+    // (B2'ga murojaat baribir faqat shu isitishda bo'ladi —
+    // qoida buzilmaydi.)
     if (ctrl == null && !_playViaLocal && !_offline) {
       if (!mounted || myToken != _playToken) return;
       VideoCacheServer.log('Kesh oynasi topilmadi — qaytadan isitilmoqda...');
-      RustCore.instance.videoPrepareReset(url);
-      await _prepareSource(url, myToken);
-      if (!mounted || myToken != _playToken) return;
-      ctrl = await _openController(source, myToken);
+      if (await _prepareAgain(url, myToken)) {
+        if (!mounted || myToken != _playToken) return;
+        ctrl = await _openController(source, myToken);
+      }
     }
 
     if (!mounted || myToken != _playToken) {
@@ -648,39 +677,48 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     return RustCore.instance.videoIsComplete(url);
   }
 
-  /// ── OYNANI KESHGA ISITISHNI BOSHLASH ────────────────────────
+  /// ── OYNANI KESHGA ISITISHNI KUTISH ──────────────────────────
   ///
   /// Worker'ga "480 MiB'lik oynani B2'dan Cloudflare keshiga
-  /// ko'chir" degan BITTA so'rov yuboriladi. Isitish tugagach
-  /// videoning har bir bayti chekkadagi keshdan keladi — bu eng
-  /// arzon va eng tez yo'l.
+  /// ko'chir" degan BITTA so'rov yuboriladi va HAQIQATAN tugashi
+  /// kutiladi. Shundan keyin videoning har bir bayti chekkadagi
+  /// keshdan keladi — ijro paytida B2'ga UMUMAN chiqilmaydi.
   ///
-  /// ── NEGA ENDI DEYARLI KUTILMAYDI (tuzatilgan xato) ──────────
+  /// ── NEGA KUTISH SHART ───────────────────────────────────────
   ///
-  /// Ilgari ilova isitish TUGAGUNCHA (3 daqiqagacha!) kutar edi,
-  /// chunki `/api/play/...` kesh tayyor bo'lmasa 503 qaytarardi.
-  /// Amalda esa isitish bir necha oddiy sabab bilan tugamasligi
-  /// mumkin (Cloudflare keshi har bir data-markazda alohida;
-  /// katta yozuv o'chirilib ketishi mumkin; uzilib qolgan
-  /// isitishning "belgisi" qayta urinishni bloklab turishi
-  /// mumkin) — va o'shanda video UMUMAN ochilmasdi
-  /// ("Videoni yuklab bo'lmadi").
+  /// `/api/play/...` qat'iy qoida bilan ishlaydi: faqat keshdan
+  /// xizmat qiladi, kesh bo'sh bo'lsa 503. Bu ataylab shunday —
+  /// kesh tekin, B2'ning har bir so'rovi esa pul. Ya'ni pleyerni
+  /// kesh tayyor bo'lmasdan ochish behuda.
   ///
-  /// Endi worker kesh bo'lmasa baytlarni B2'dan oqim bilan
-  /// beradi, ya'ni video ISITISHSIZ ham normal ochiladi. Shu
-  /// sabab bu yerda faqat QISQA (`_prepareMax`) muhlat kutiladi:
-  ///   * oyna allaqachon keshda bo'lsa, worker ~100 ms ichida
-  ///     "cached" deb javob beradi va kutish sezilmaydi;
-  ///   * aks holda video darhol ochiladi, isitish esa fon'da
-  ///     davom etadi va tugashi bilan qolgan baytlar keshdan
-  ///     kela boshlaydi.
-  static const Duration _prepareMax = Duration(milliseconds: 1500);
+  /// ── NIMA TUZATILDI ──────────────────────────────────────────
+  ///
+  /// Ilgari kutish YOLG'ON edi: worker boshqa birov isitayotganini
+  /// ko'rsa darhol `{"status":"warming"}` qaytarardi, Rust yadrosi
+  /// esa bunday javobda ham "tayyor" deb belgilardi. Ilova
+  /// pleyerni ochar, 503 kelar va ekranda "Videoni yuklab
+  /// bo'lmadi" chiqardi — foydalanuvchi ko'rgan asosiy muammo
+  /// aynan shu edi.
+  ///
+  /// Endi:
+  ///   * worker "warming" qaytarmaydi — u oyna keshda paydo
+  ///     bo'lishini kutadi va yozilganini O'QIB tasdiqlaydi;
+  ///   * Rust yadrosi muvaffaqiyatsizlikni ALOHIDA holat sifatida
+  ///     qaytaradi (`videoPrepareStatus` == 2);
+  ///   * ilova bu holatda isitishni MAJBURAN bir marta qayta
+  ///     boshlaydi va faqat shundan keyin ham chiqmasa aniq xabar
+  ///     ko'rsatadi.
+  ///
+  /// Kutish CHEGARALANGAN (`_prepareMax`) — ilova hech qachon
+  /// "muzlab" qolmaydi.
+  static const Duration _prepareMax = Duration(seconds: 100);
 
-  Future<void> _prepareSource(String url, int myToken) async {
+  /// `true` — oyna keshda, pleyerni ochsa bo'ladi.
+  Future<bool> _prepareSource(String url, int myToken) async {
     RustCore.instance.videoPrepare(url);
     // Darhol tayyor bo'lsa (oyna allaqachon keshda) — hech qanday
     // yozuv ko'rsatmaymiz.
-    if (RustCore.instance.videoPrepareReady(url)) return;
+    if (RustCore.instance.videoPrepareStatus(url) == 1) return true;
 
     if (mounted && myToken == _playToken) {
       setState(() => _preparing = true);
@@ -688,18 +726,35 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     final started = DateTime.now();
     try {
       while (mounted && myToken == _playToken) {
-        if (RustCore.instance.videoPrepareReady(url)) return;
+        final st = RustCore.instance.videoPrepareStatus(url);
+        if (st == 1) return true;
+        if (st == 2) {
+          VideoCacheServer.log('Isitish muvaffaqiyatsiz tugadi');
+          return false;
+        }
         if (DateTime.now().difference(started) > _prepareMax) {
           VideoCacheServer.log(
-              'Isitish hali tugamadi — video baribir ochilmoqda '
-              '(baytlar B2 oqimidan keladi, isitish fon\'da davom etadi)');
-          return;
+              'Isitish ${_prepareMax.inSeconds} soniyada tugamadi');
+          return false;
         }
-        await Future.delayed(const Duration(milliseconds: 100));
+        await Future.delayed(const Duration(milliseconds: 200));
       }
     } finally {
       if (mounted) setState(() => _preparing = false);
     }
+    return false;
+  }
+
+  /// Isitishni MAJBURAN qaytadan boshlab, yana kutadi.
+  ///
+  /// Worker'ning keshdagi eskirgan yozuvi ham, o'lib qolgan
+  /// isitishning "belgisi" ham e'tiborsiz qoldiriladi — shusiz
+  /// qayta urinish ko'pincha aynan o'sha ishlamaydigan holatni
+  /// qaytarardi.
+  Future<bool> _prepareAgain(String url, int myToken) async {
+    VideoCacheServer.log('Isitish majburan qaytadan boshlanmoqda...');
+    RustCore.instance.videoPrepareReset(url);
+    return _prepareSource(url, myToken);
   }
 
   /// Worker'dagi TO'G'RIDAN-TO'G'RI ijro manzili.

@@ -215,12 +215,6 @@ jobs:
           echo "📦 Tayyor APK:"
           ls -lh build/app/outputs/flutter-apk/app-release.apk
 
-      - name: Upload APK Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: fulutter-app-release
-          path: build/app/outputs/flutter-apk/app-release.apk
-          retention-days: 30
 
       # ── APK'ni TO'G'RIDAN-TO'G'RI yuklab olinadigan qilib chiqarish ──
       #
@@ -244,6 +238,28 @@ jobs:
             Commit: ${{ github.sha }}
           prerelease: true
           files: build/app/outputs/flutter-apk/app-release.apk
+
+      # ── ARTIFACT YUKLASH — MAJBURIY EMAS ──────────────────────
+      #
+      # TUZATILGAN XATO: bu qadam ilgari Release'dan OLDIN turardi
+      # va "Artifact storage quota has been hit" xatosi bilan
+      # yiqilardi. Natijada APK muvaffaqiyatli qurilib, imzolanib
+      # turgani holda Release qadami umuman ishga tushmasdi — ya'ni
+      # tayyor APK'ni HECH QAYERDAN yuklab bo'lmasdi.
+      #
+      # Endi:
+      #   * Release BIRINCHI chiqadi (telefonga to'g'ridan-to'g'ri
+      #     yuklab olinadigan asosiy yo'l);
+      #   * artifact esa qo'shimcha nusxa va `continue-on-error`
+      #     bilan — kvota to'lgan bo'lsa build baribir muvaffaqiyatli
+      #     hisoblanadi.
+      - name: Upload APK Artifact (qo'shimcha nusxa)
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: fulutter-app-release
+          path: build/app/outputs/flutter-apk/app-release.apk
+          retention-days: 30
 
       - name: Done
         run: |
