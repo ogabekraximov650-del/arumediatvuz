@@ -606,10 +606,17 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     if (!_playViaLocal) {
       prepared = await _prepareSource(url, myToken);
       if (!mounted || myToken != _playToken) return;
-      // Isitish chiqmadi — MAJBURAN bir marta qayta urinamiz
-      // (worker'ning eskirgan kesh yozuvi va o'lib qolgan isitish
-      // belgisi e'tiborsiz qoldiriladi).
-      if (!prepared) {
+      // Isitish ANIQ yiqilgan bo'lsa — MAJBURAN bir marta qayta
+      // urinamiz (worker'ning eskirgan kesh yozuvi va o'lib qolgan
+      // isitish belgisi e'tiborsiz qoldiriladi).
+      //
+      // Kutish muddati tugagan bo'lsa esa MAJBURLAMAYMIZ: isitish
+      // odatda hali DAVOM ETAYOTGAN bo'ladi va uni qaytadan
+      // boshlash manbadan 480 MiB'ni ikkinchi marta o'qishga
+      // majbur qilardi (bekorga xarajat). Bunday holatda ekranda
+      // "Qayta urinish" tugmasi ko'rsatiladi — qaror foydalanuvchida
+      // qoladi va u kutgan sari isitish baribir davom etaveradi.
+      if (!prepared && _prepareFailedHard) {
         prepared = await _prepareAgain(url, myToken);
         if (!mounted || myToken != _playToken) return;
       }
@@ -618,7 +625,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
         // ANIQ sabab ko'rsatamiz.
         setState(() {
           _playerLoading = false;
-          _playerError = 'Video keshga tayyorlanmadi — qayta urinib ko\'ring';
+          _playerError = _prepareFailedHard
+              ? 'Video keshga tayyorlanmadi — qayta urinib ko\'ring'
+              : 'Video hali tayyorlanmoqda — biroz kutib, qayta urinib ko\'ring';
         });
         return;
       }
@@ -810,10 +819,27 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   ///
   /// Kutish CHEGARALANGAN (`_prepareMax`) — ilova hech qachon
   /// "muzlab" qolmaydi.
-  static const Duration _prepareMax = Duration(seconds: 100);
+  ///
+  /// 100 -> 150 soniya: server boshqa birov isitayotganini ko'rsa
+  /// uni 110 soniyagacha kutadi. Ilova undan OLDIN taslim bo'lsa,
+  /// keyingi urinish isitishni MAJBURAN qaytadan boshlar va o'sha
+  /// 480 MiB manbadan IKKINCHI marta o'qilardi — bu esa bekorga
+  /// xarajat. Endi ilova serverdan biroz uzoqroq kutadi.
+  static const Duration _prepareMax = Duration(seconds: 150);
+
+  /// Oxirgi tayyorlash ANIQ muvaffaqiyatsizlik bilan tugadimi
+  /// (kutish muddati tugagani emas).
+  ///
+  /// MUHIM: majburan qayta isitish (`_prepareAgain`) manbadan
+  /// 480 MiB'ni QAYTA o'qishga majbur qiladi. Shu sabab u FAQAT
+  /// isitish haqiqatan yiqilganda chaqiriladi. Kutish muddati
+  /// tugaganda esa isitish odatda hali DAVOM ETAYOTGAN bo'ladi —
+  /// uni majburan qayta boshlash sof isrof bo'lardi.
+  bool _prepareFailedHard = false;
 
   /// `true` — oyna keshda, pleyerni ochsa bo'ladi.
   Future<bool> _prepareSource(String url, int myToken) async {
+    _prepareFailedHard = false;
     RustCore.instance.videoPrepare(url);
     // Darhol tayyor bo'lsa (oyna allaqachon keshda) — hech qanday
     // yozuv ko'rsatmaymiz.
@@ -829,6 +855,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
         if (st == 1) return true;
         if (st == 2) {
           VideoCacheServer.log('Isitish muvaffaqiyatsiz tugadi');
+          _prepareFailedHard = true;
           return false;
         }
         if (DateTime.now().difference(started) > _prepareMax) {

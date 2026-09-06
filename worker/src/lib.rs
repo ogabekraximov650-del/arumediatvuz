@@ -520,11 +520,22 @@ const WARM_WINDOW: u64 = 480 * 1024 * 1024;
 const WARM_MARKER_SECONDS: u64 = 120;
 
 /// Boshqa birov isitayotganda kutish qadami va qadamlar soni.
-/// 60 x 1000 ms = 60 soniya. Bitta oynani (480 MiB) isitish odatda
-/// 10-30 soniyada tugaydi, ya'ni bu yetarli zaxira. Cloudflare
-/// mijoz ulanib turganda so'rov davomiyligini cheklamaydi.
+///
+/// ── NEGA 110 SONIYA (avval 60 edi) ────────────────────────────
+///
+/// Bir vaqtda minglab foydalanuvchi bitta yangi qismni ochsa,
+/// birinchisi "isitish belgisi"ni qo'yadi va oynani keshga
+/// ko'chiradi; qolganlari esa kutadi. Kutish belgining muddatidan
+/// (`WARM_MARKER_SECONDS` = 120 s) QISQA bo'lsa, kutayotganlar
+/// vaqtidan oldin taslim bo'lib, O'ZLARI ham isitishni boshlab
+/// yuborardi — ya'ni bitta oyna B2'dan bir necha marta o'qilardi
+/// (bu esa to'g'ridan-to'g'ri pul).
+///
+/// 110 soniya belgining muddatidan bir oz qisqa: hali tirik
+/// isitish har doim kutib olinadi, o'lib qolgani esa (belgi
+/// muddati o'tgach) qaytadan boshlanadi.
 const WARM_WAIT_STEP_MS: u64 = 1000;
-const WARM_WAIT_TICKS: u32 = 60;
+const WARM_WAIT_TICKS: u32 = 110;
 
 /// Keshga yozilgandan keyin uni o'qib tasdiqlash urinishlari.
 /// Yozuv chekkada ko'rinishi uchun ba'zan bir-ikki soniya kerak.
