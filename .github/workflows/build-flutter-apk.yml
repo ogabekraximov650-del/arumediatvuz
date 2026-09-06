@@ -243,10 +243,28 @@ jobs:
           #      .idsig fayl yaratadi va oddiy o'rnatishga xalaqit
           #      bermaydi). Eski build-tools v4 ni bilmasligi mumkin —
           #      shunday holatda v1+v2+v3 bilan qayta imzolanadi.
+          # ── NEGA `--min-sdk-version 21` (tuzatilgan xato) ──────
+          #
+          # Avval imzo tekshiruvi HAR SAFAR shuni ko'rsatardi:
+          #   Verified using v1 scheme (JAR signing): FALSE
+          # ya'ni `--v1-signing-enabled true` berilgan bo'lsa ham
+          # v1 imzo AMALDA QO'YILMASDI. Sabab: apksigner v1 kerakmi
+          # yoki yo'qmi degan qarorni APK'ning `minSdkVersion`iga
+          # qarab qabul qiladi — u 24 (Android 7) bo'lgani uchun
+          # v1 ni "keraksiz" deb o'tkazib yuborardi.
+          #
+          # Endi apksigner'ga eng past qo'llab-quvvatlanadigan
+          # versiya ANIQ aytiladi, shu sabab v1 imzo HAQIQATAN
+          # qo'yiladi. Bu ba'zi qobiqlar (MIUI kabi) va fayl
+          # menejerlaridagi o'rnatgichlar uchun muhim — ular
+          # v1 imzoni talab qilib qoladi va usiz "Paketni tahlil
+          # qilishda muammo" deb chiqaradi.
+          MIN_SDK=21
           sign_apk() {
             "$APKSIGNER" sign \
               --ks "$KS" --ks-pass pass:android --key-pass pass:android \
               --ks-key-alias androiddebugkey \
+              --min-sdk-version "$MIN_SDK" \
               --v1-signing-enabled true \
               --v2-signing-enabled true \
               --v3-signing-enabled true \
@@ -257,7 +275,18 @@ jobs:
             sign_apk
           fi
           echo "── Imzo tekshiruvi ──"
-          "$APKSIGNER" verify -v "$APK"
+          "$APKSIGNER" verify -v --min-sdk-version "$MIN_SDK" "$APK" | tee /tmp/verify.txt
+
+          # v1 va v2 HAQIQATAN qo'yilganini TASDIQLAYMIZ — aks holda
+          # build ataylab yiqiladi (jimgina yarim imzolangan APK
+          # chiqarishdan yaxshiroq).
+          for scheme in "v1 scheme (JAR signing)" "v2 scheme (APK Signature Scheme v2)"; do
+            if ! grep -q "Verified using $scheme: true" /tmp/verify.txt; then
+              echo "❌ XATO: $scheme imzosi qo'yilmadi"
+              exit 1
+            fi
+          done
+          echo "✅ v1 va v2 imzolar tasdiqlandi"
 
       - name: APK tarkibini tekshirish (versiya, arxitektura)
         run: |
