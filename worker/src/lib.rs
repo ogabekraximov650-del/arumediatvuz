@@ -1394,18 +1394,31 @@ async fn b2_proxy_range(
     req_start: u64,
     req_end_opt: Option<u64>,
 ) -> Result<Response> {
-    // Bir so'rovda xotiraga olinadigan eng katta hajm.
+    // ── BIR SO'ROVDA BERILADIGAN ENG KATTA ORALIQ ─────────────
     //
-    // Ilova bo'laklarni 4 MiB'lik GURUH bilan so'raydi (B2
-    // tranzaksiyalarini kamaytirish uchun — `GROUP_CHUNKS` izohiga
-    // qarang), shu sabab 8 MB zaxira bilan yetarli. Ochiq (oxiri
-    // ko'rsatilmagan) so'rov shu chegaragacha qisqartiriladi — bu
-    // HTTP jihatidan mutlaqo to'g'ri 206 javob.
+    // Ilova yuklab olishda 16 MiB'lik GURUH so'raydi (worker'ga va
+    // B2'ga ketadigan so'rovlar sonini kamaytirish uchun —
+    // `GROUP_CHUNKS` izohiga qarang). Kesh oynasi 480 MiB va
+    // `480 / 16 = 30`, ya'ni guruh hech qachon oyna chegarasini
+    // kesib o'tmaydi.
     //
-    // Worker'ning 128 MB xotirasi bir nechta bir vaqtdagi so'rov
-    // o'rtasida bo'linadi, shu sabab bu chegara ATAYLAB kichik:
-    // 6 ta parallel so'rov ham eng ko'pi ~48 MB egallaydi.
-    const RANGE_MAX: u64 = 8 * 1024 * 1024;
+    // Bu chegara ISITILGAN OYNADAN kesib berish uchun: u yerda
+    // baytlar OQIM bilan o'tadi va worker xotirasiga hech narsa
+    // yig'ilmaydi, shu sabab 16 MiB xavfsiz.
+    const RANGE_MAX: u64 = 16 * 1024 * 1024;
+
+    // ── B2'DAN OLINGANDA CHEGARA KICHIKROQ ────────────────────
+    //
+    // Kesh bo'sh bo'lgan (nodir) holatda baytlar B2'dan olinadi va
+    // XOTIRAGA yig'iladi. Worker'ning 128 MB xotirasi barcha bir
+    // vaqtdagi so'rovlar orasida bo'linadi, shu sabab bu yo'lda
+    // chegara ataylab kichik.
+    //
+    // Javob qisqaroq kelishi mijoz uchun muammo emas: u
+    // `X-Cache: MISS` sarlavhasini ko'rib, buni serverning DOIMIY
+    // chegarasi deb HISOBLAMAYDI va keyingi so'rovlarni baribir
+    // 16 MiB bilan yuboradi.
+    const B2_RANGE_MAX: u64 = 8 * 1024 * 1024;
 
     let req_end = req_end_opt
         .unwrap_or(req_start + RANGE_MAX - 1)
@@ -1485,7 +1498,13 @@ async fn b2_proxy_range(
     // ── 2) SHU ANIQ ORALIQ KESHIDA BORMI ─────────────────────
     // Oyna hali isitilmagan bo'lsa, oldingi so'rovlardan qolgan
     // aniq oraliqlar shu yerda topiladi.
-    let cache_url = cache_key_url(file_name, &format!("r{req_start}-{req_end}"));
+    //
+    // MUHIM: bunday yozuvlar HAR DOIM `B2_RANGE_MAX` o'lchamida
+    // saqlanadi (3-bosqichga qarang), shu sabab qidiruv kaliti ham
+    // aynan shu o'lchamda hisoblanadi — aks holda yozuv yozilgani
+    // bilan hech qachon topilmasdi.
+    let miss_end = req_end.min(req_start + B2_RANGE_MAX - 1);
+    let cache_url = cache_key_url(file_name, &format!("r{req_start}-{miss_end}"));
     let key = Request::new(&cache_url, Method::Get)?;
     if let Some(mut hit) = cache.get(&key, false).await? {
         let ct = hit
@@ -1521,13 +1540,16 @@ async fn b2_proxy_range(
     }
 
     // ── 3) KESH MISS: B2'dan BIR MARTA olamiz ────────────────
+    // Bu yo'lda javob xotiraga yig'ilgani uchun oraliq qo'shimcha
+    // qisqartiriladi (yuqoridagi `B2_RANGE_MAX` izohiga qarang).
+    let req_end = miss_end;
     let (mut b2, total) = b2_fetch_range(env, file_name, req_start, req_end).await?;
     let ct = b2
         .headers()
         .get("Content-Type")?
         .unwrap_or_else(|| "application/octet-stream".to_string());
-    // Eng ko'pi RANGE_MAX (4 MB) — worker xotirasi uchun mutlaqo
-    // xavfsiz. Katta oyna endi HECH QACHON xotiraga olinmaydi.
+    // Eng ko'pi B2_RANGE_MAX (8 MiB) — worker xotirasi uchun
+    // xavfsiz. Katta oyna HECH QACHON xotiraga olinmaydi.
     let bytes = b2.bytes().await?;
     let got = bytes.len() as u64;
     if got == 0 {

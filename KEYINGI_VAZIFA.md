@@ -28,20 +28,57 @@
 
 ```
 flutter analyze          # 0 muammo bo'lishi kerak
-cd rust && cargo test --lib     # 15/15 o'tishi kerak
+cd rust && cargo test --lib     # 10/10 o'tishi kerak
 cd worker && cargo check --target wasm32-unknown-unknown
 ```
 
-## Videoni ko'rsatish: uch yo'l
+## PLEYER VA YUKLAB OLISH — IKKI MUSTAQIL TIZIM
 
-1. **Fayl telefonda TO'LIQ bor** → mahalliy Rust kesh-serveri
-   (`127.0.0.1`, `rust/src/video_cache.rs`). Tarmoqqa umuman
-   chiqilmaydi.
-2. **Fayl to'liq emas + internet bor** → to'g'ridan-to'g'ri worker:
-   `/api/play/<fayl>`. Bu yo'l **faqat Cloudflare keshidan** xizmat
-   qiladi va **B2'ga hech qachon chiqmaydi**.
-3. **Fayl to'liq emas + internet yo'q** → ijro etib bo'lmaydi, aniq
-   xabar ko'rsatiladi.
+Bu loyihadagi **eng muhim qoida**. Buzilsa, foydalanuvchi darhol
+sezadi: video o'zi yuklab olina boshlaydi.
+
+| Holat | Manba | Diskka yozadimi |
+|---|---|---|
+| Fayl **100%** diskda | Mahalliy server (`127.0.0.1`) | Yo'q (faqat o'qiydi) |
+| Fayl to'liq emas | **Faqat** worker `/api/play/...` | **Yo'q** |
+| Internet yo'q + fayl to'liq emas | Ijro etib bo'lmaydi | — |
+
+**Mahalliy server (`serve()`) TARMOQQA UMUMAN CHIQMAYDI.** U:
+
+- bo'laklarni faqat **diskdan** o'qiydi (`read_cached_chunk`);
+- faylning hajmini ham faqat **diskdagi `meta.json`** dan oladi;
+- bo'lak yoki `meta.json` topilmasa — **404** qaytaradi va ilova
+  workerga o'tadi.
+
+Ilgari `serve()` yetishmayotgan bo'lakni tarmoqdan olib diskka
+yozardi. Natijada "videoni ko'rish" amalda "yuklab olish"ga
+aylanardi: foydalanuvchi tugmani bosmagan bo'lsa ham video diskka
+yozilardi; videoni o'chirgandan keyin esa u butunlay qaytadan
+yuklanardi.
+
+Qoidani **`keshdan_bir_javobda_va_sek_bosimiga_bardosh`** testi
+qo'riqlaydi: mahalliy serverga yuklab olinmagan video so'ralganda
+manba jurnali **bo'sh** qolishi shart.
+
+**To'liq yuklanganlikni faqat DISK hal qiladi**
+(`RustCore.videoIsComplete` — diskni skanerlaydi). Ekrandagi hisob
+(`DownloadManager.statOf`) bu qarorda **ishlatilmaydi**: u bir necha
+soniya eskirgan bo'ladi va aynan shu o'chirilgandan keyingi qayta
+yuklanishga olib kelgan edi.
+
+## Internet uzilishi
+
+- Onlayn ijro paytida internet uzilsa pleyer **o'ldirilmaydi**;
+  ekranda xabar chiqadi va joriy nuqta eslab qolinadi.
+- Internet qaytishi bilan video **o'sha nuqtadan avtomatik** davom
+  etadi (`_onNetworkBack`), "takroriy xato" hisoblagichi esa nolga
+  tushadi — internetning yo'qligi pleyerning nosozligi emas.
+
+## Qayerda to'xtaganini eslab qolish
+
+`lib/services/watch_progress.dart` — barcha nuqtalar bitta JSON
+ro'yxatda (`watch_positions`). Boshidagi 15 soniya va oxiridagi
+30 soniya saqlanmaydi; yozish 5 soniyada bir marta.
 
 ## TANBAL (LAZY) OYNA KESHLASH — eng muhim qoida
 
@@ -106,8 +143,14 @@ javob **kutadi** (B2'ga chiqmaydi).
   ham yuklash o'zi davom etadi;
 - internet qaytganda kutish darhol bekor qilinadi
   (`DownloadManager._resumeActive`);
-- bo'laklar 1 MiB, so'rovlar 8 MiB'lik guruh bilan (`GROUP_CHUNKS`),
-  worker chegarasi bilan aynan mos (`RANGE_MAX`);
+- diskdagi bo'lak **1 MiB** (foiz va "to'xtagan joydan davom" shunga
+  tayanadi), workerga so'rov esa **16 MiB** guruh bilan ketadi
+  (`GROUP_CHUNKS = 16`). `480 / 16 = 30` — guruh oyna chegarasini
+  hech qachon kesib o'tmaydi (`480 / 10` butun emas, shu sabab
+  10 MB tanlanmadi);
+- worker keshdan 16 MiB beradi, B2'dan esa 8 MiB (`B2_RANGE_MAX`) —
+  xotira uchun. Qisqa javob `X-Cache: MISS` bilan keladi va ilova
+  undan chegara "o'rganmaydi";
 - server chegarasi (`SERVER_SPAN_MAX`) 5 daqiqada unutiladi — bitta
   noxush javob ilovani abadiy sekinlashtirmaydi.
 

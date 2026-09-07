@@ -118,6 +118,7 @@ import 'package:video_player/video_player.dart';
 import '../services/download_manager.dart';
 import '../services/rust_bridge.dart';
 import '../services/video_cache_server.dart';
+import '../services/watch_progress.dart';
 import '../theme/app_background.dart';
 import '../widgets/glass.dart';
 
@@ -422,12 +423,70 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       // Oflayn'da BARCHA qismlarning holati kerak (qaysi biri to'liq
       // yuklanganini bilish uchun), onlayn'da esa faqat ekrandagilar.
       _syncWatchedUrls();
+      if (off) {
+        _onNetworkLost();
+      } else {
+        _onNetworkBack();
+      }
     }
 
     try {
       apply(await Connectivity().checkConnectivity());
     } catch (_) {}
     _connSub = Connectivity().onConnectivityChanged.listen(apply);
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  //  INTERNET UZILDI / QAYTDI
+  // ═══════════════════════════════════════════════════════════
+  //
+  // TUZATILGAN XATO (foydalanuvchi ko'rgan): onlayn ko'rayotganda
+  // internet uzilsa pleyer xatoga chiqar, ilova uni bir necha marta
+  // qaytadan ochishga urinar va "Videoni ijro etib bo'lmadi
+  // (takroriy xato)" deb BUTUNLAY taslim bo'lardi. Internet qaytsa
+  // ham hech narsa bo'lmasdi — foydalanuvchi ilovani yopib qayta
+  // ochishga majbur edi.
+  //
+  // Endi:
+  //   * internet uzilganda pleyer O'LDIRILMAYDI, faqat ekranda
+  //     xabar chiqadi va joriy nuqta eslab qolinadi;
+  //   * internet QAYTGANDA video AYNAN O'SHA nuqtadan avtomatik
+  //     davom etadi;
+  //   * "taslim bo'lish" hisoblagichi nolga tushadi — internetning
+  //     yo'qligi pleyerning nosozligi EMAS.
+
+  void _onNetworkLost() {
+    // Mahalliy (to'liq yuklab olingan) ijroga internetning aloqasi
+    // yo'q — u tarmoqqa umuman chiqmaydi.
+    if (_playViaLocal || _currentEp == null) return;
+    _showNotice('Internet yo\'q — ulanish qaytishi kutilmoqda');
+  }
+
+  void _onNetworkBack() {
+    final ep = _currentEp;
+    if (ep == null || _playViaLocal) return;
+    // Internet yo'qligi sabab yig'ilgan "takroriy xato" hisobi
+    // bekor qilinadi.
+    _recoveryStreakResetTimer?.cancel();
+    _recoveryStreak = 0;
+    _lastRecovery = DateTime.fromMillisecondsSinceEpoch(0);
+
+    final c = _controller;
+    final broken = _playerError != null || c == null || c.value.hasError;
+    if (!broken) {
+      // Pleyer sog'lom — hech narsaga tegmaymiz (bufer joyida).
+      return;
+    }
+    final at = _lastGoodPosition;
+    VideoCacheServer.log(
+        'Internet qaytdi — video ${at.inSeconds}s dan davom ettirilmoqda');
+    if (mounted) {
+      setState(() {
+        _playerError = null;
+        _playerLoading = true;
+      });
+    }
+    _playEpisode(ep, resumeAt: at, resumePlaying: true, isRecovery: true);
   }
 
   /// Shu sifat TO'LIQ yuklab olinganmi.
@@ -495,6 +554,13 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     final url = _getUrl(ep);
     if (url.isEmpty) return;
 
+    // ── QAYERDA TO'XTAGAN BO'LSA — O'SHA JOYDAN ──────────────
+    // Sifat almashtirilganda yoki pleyer qayta ochilganda nuqta
+    // chaqiruvchidan keladi; oddiy ochilishda esa eslab qolingan
+    // nuqta ishlatiladi (`WatchProgress`).
+    final startAt =
+        resumeAt ?? (isRecovery ? null : WatchProgress.instance.positionOf(url));
+
     if (!isRecovery) {
       _recoveryStreakResetTimer?.cancel();
       _recoveryStreak = 0;
@@ -537,6 +603,12 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // native halokat xavfi YO'Q.
     final old = _controller;
     if (old != null) {
+      // Eski qismning "qayerda to'xtagan" nuqtasi yo'qolmasin.
+      if (old.value.isInitialized && _lastPlayedUrl.isNotEmpty) {
+        WatchProgress.instance
+            .save(_lastPlayedUrl, old.value.position, old.value.duration);
+        WatchProgress.instance.flush();
+      }
       setState(() => _controller = null);
       await WidgetsBinding.instance.endOfFrame;
       try {
@@ -706,11 +778,11 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     try {
       await ctrl.setLooping(false);
     } catch (_) {}
-    _lastGoodPosition = resumeAt ?? Duration.zero;
+    _lastGoodPosition = startAt ?? Duration.zero;
     _handlingCompleted = false;
     _pendingEofAt = null;
 
-    if (resumeAt != null && resumeAt > Duration.zero) {
+    if (startAt != null && startAt > Duration.zero) {
       // ── TANBAL KESHLASH: DAVOM ETTIRILADIGAN JOY TAYYORMI ──
       //
       // Sifat almashtirilganda (yoki pleyer qayta ochilganda) video
@@ -719,7 +791,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       // u hali keshda bo'lmasa pleyer darhol xatoga chiqardi.
       // Shu sabab avval o'sha bo'lak tayyorlanadi.
       _refreshTotalBytes();
-      await _ensureWindowFor(resumeAt, ctrl.value.duration);
+      await _ensureWindowFor(startAt, ctrl.value.duration);
       if (!mounted || myToken != _playToken) {
         try {
           await ctrl.dispose();
@@ -727,7 +799,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
         return;
       }
       try {
-        await ctrl.seekTo(resumeAt);
+        await ctrl.seekTo(startAt);
       } catch (_) {}
     }
     if (!mounted || myToken != _playToken) {
@@ -759,6 +831,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     });
     // Progress chizig'idagi "yuklab olingan" qism shu videoni kuzata
     // boshlaydi.
+    _lastPlayedUrl = _currentUrl;
     _syncWatchedUrls();
     _startHealthWatchdog();
     // Hajm endi ma'lum (isitish javobidan meta.json'ga yozilgan) —
@@ -781,7 +854,20 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   /// ro'yxatni surishga hech qanday ta'siri yo'q.
   bool _isFullyDownloaded(String url) {
     if (url.isEmpty) return false;
-    if (DownloadManager.instance.statOf(url).complete) return true;
+    // ── FAQAT DISK — XOTIRADAGI HISOBGA ISHONMAYMIZ ──────────
+    //
+    // TUZATILGAN XATO (foydalanuvchi ko'rgan): ilgari bu yerda
+    // avval ekrandagi hisob (`DownloadManager.statOf`) so'ralardi.
+    // U esa har 0.5-5 soniyada yangilanadi, ya'ni videoni
+    // O'CHIRGANDAN keyin ham bir necha soniya "to'liq" deb turardi.
+    // Pleyer shunga ishonib MAHALLIY serverga borar, u yerda fayl
+    // yo'q bo'lgani uchun butun video QAYTADAN yuklab olinardi —
+    // foydalanuvchi "yuklab olishni bosmasam ham o'zi yuklab
+    // olyapti" deb ko'rgan holat aynan shu edi.
+    //
+    // Endi javob YAGONA ishonchli manbadan — diskni skanerlashdan
+    // olinadi. Chaqiruv faqat video ochilganda bo'lgani uchun
+    // ro'yxatning silliqligiga ta'siri yo'q.
     return RustCore.instance.videoIsComplete(url);
   }
 
@@ -1009,6 +1095,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     if (url.isEmpty) return true;
     final w = _windowAt(target, dur);
     if (RustCore.instance.videoWindowStatus(url, w) == 1) return true;
+    // Internet yo'q — kutishning ma'nosi yo'q (2 daqiqa bekorga
+    // aylanma halqa ko'rsatilardi).
+    if (_offline) return false;
 
     VideoCacheServer.log('Sek: #$w bo\'lak hali keshda yo\'q — olinmoqda');
     RustCore.instance.videoWarmWindow(url, w);
@@ -1231,6 +1320,14 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       if (c == null) return;
       final VideoPlayerValue v = c.value;
       if (!v.isInitialized || v.duration <= Duration.zero) return;
+
+      // ── QAYERDA TO'XTAGANINI ESLAB QOLISH ──────────────────
+      // Har 5 soniyada bir marta va faqat O'ZGARGAN bo'lsa
+      // yoziladi — ijroga sezilarli ta'siri yo'q.
+      if (DateTime.now().difference(_lastProgressSave).inSeconds >= 5) {
+        _lastProgressSave = DateTime.now();
+        WatchProgress.instance.save(_currentUrl, v.position, v.duration);
+      }
 
       // ── ERTA UZILGAN OQIM: QAYTA OCHISHNI TAKRORLASH ─────────
       // `_recoverPlayer` ichidagi 6 soniyalik tormoz sabab birinchi
@@ -1564,6 +1661,13 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   Timer? _healthTimer;
   DateTime _lastSeekRequest = DateTime.fromMillisecondsSinceEpoch(0);
   DateTime _lastSeekDone = DateTime.fromMillisecondsSinceEpoch(0);
+  /// "Qayerda to'xtagan" nuqtasi oxirgi marta qachon saqlangan.
+  DateTime _lastProgressSave = DateTime.fromMillisecondsSinceEpoch(0);
+
+  /// Oldingi qismning manzili — epizod almashganda uning nuqtasini
+  /// saqlab qolish uchun.
+  String _lastPlayedUrl = '';
+
   // Sog'liq kuzatuvchisi uchun: pozitsiya o'zgarmay turgan takrorlar.
   int _stuckTicks = 0;
   Duration? _lastWatchPosition;
@@ -3087,6 +3191,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     );
     if (ok != true) return;
     DownloadManager.instance.delete(q.url);
+    // Video o'chirilgach "qayerda to'xtagan" nuqtasi ham kerak emas.
+    WatchProgress.instance.forget(q.url);
 
     // ── HOZIR IJRO ETILAYOTGAN SIFAT O'CHIRILGAN BO'LSA ────────
     // Kesh papkasi shu zahoti yo'q qilinadi, ya'ni pleyer o'qib
@@ -3968,24 +4074,36 @@ class _BottomBarState extends State<_BottomBar> {
             : widget.position;
 
     // ── O'LCHAMLAR ────────────────────────────────────────────
-    // Oddiy (fullscreen bo'lmagan) rejimda pleyer oynasi kichik
-    // bo'lgani uchun boshqaruv elementlari ham kichik chiqardi va
-    // ularni barmoq bilan bosish noqulay edi. Endi oddiy rejimda
-    // ular KATTAROQ: chiziq qalinroq, tugma va yozuvlar yirikroq,
-    // pastki qism to'liqroq ko'rinadi. Fullscreen'da esa ekran
-    // allaqachon keng — u yerda o'lchamlar biroz jamroq.
+    //
+    // TALAB (foydalanuvchi): "progress chizig'i, vaqt va tugmalarni
+    // kichraytir, vaqt bilan tugmalarni o'ng tarafga sur va progress
+    // chizig'ini o'ng tarafga cho'z — shunda chiziq uchun kengroq
+    // joy ochiladi va ishlatish qulayroq bo'ladi".
+    //
+    // Avval oddiy (fullscreen bo'lmagan) rejimda elementlar ataylab
+    // KATTA edi (vaqt 14, fullscreen ikonkasi 31 px). Ular pastki
+    // qatorning yarmiga yaqinini egallab, progress chizig'iga juda
+    // kam joy qoldirardi — 24 daqiqalik videoda bir-ikki piksel bir
+    // necha soniyaga teng bo'lib, aniq surish qiyin edi.
+    //
+    // Endi o'lchamlar ixcham: vaqt 14 -> 11.5, ikonka 31 -> 22,
+    // HQ 13 -> 10.5, tugmalar orasidagi bo'shliqlar ham qisqardi.
+    // Bo'shagan ~70 piksel to'liq progress chizig'iga o'tadi
+    // (`Expanded` qolgan hamma joyni oladi).
     final compact = !widget.isFullscreen;
-    final trackHeight = compact ? 4.0 : 3.0;
-    final thumbRadius = compact ? 8.0 : 6.0;
-    final timeFont = compact ? 14.0 : 12.0;
-    final iconSize = compact ? 31.0 : 25.0;
-    final hqFont = compact ? 13.0 : 11.0;
+    final trackHeight = compact ? 3.5 : 3.0;
+    final thumbRadius = compact ? 6.0 : 5.0;
+    final timeFont = compact ? 11.5 : 10.5;
+    final iconSize = compact ? 22.0 : 20.0;
+    final hqFont = compact ? 10.5 : 10.0;
 
     return Padding(
       // Panel IKKALA CHETGACHA to'ladi va biroz pastroqda turadi
       // (foydalanuvchi talabi). Chap chetda progress chizig'i
       // boshlanadi, o'ng chetda esa vaqt / HQ / fullscreen turadi.
-      padding: EdgeInsets.fromLTRB(0, 0, compact ? 6 : 4, compact ? 4 : 2),
+      // O'ng chetdagi bo'shliq ham qisqardi — chiziq o'ngga
+      // cho'ziladi.
+      padding: EdgeInsets.fromLTRB(0, 0, compact ? 4 : 3, compact ? 4 : 2),
       child: Row(
         children: [
           Expanded(
@@ -4003,7 +4121,7 @@ class _BottomBarState extends State<_BottomBar> {
               onTapSeek: _commit,
             ),
           ),
-          SizedBox(width: compact ? 8 : 6),
+          SizedBox(width: compact ? 6 : 5),
           // Vaqt: joriy pozitsiya ham, UMUMIY davomiylik ham TO'LIQ OQ.
           Text(
             '${widget.fmt(shownPosition)}/${widget.fmt(widget.duration)}',
@@ -4012,12 +4130,12 @@ class _BottomBarState extends State<_BottomBar> {
                 fontSize: timeFont,
                 fontWeight: FontWeight.w600),
           ),
-          SizedBox(width: compact ? 10 : 8),
+          SizedBox(width: compact ? 6 : 5),
           GestureDetector(
             onTap: widget.onQualityTap,
             child: Container(
               padding: EdgeInsets.symmetric(
-                  horizontal: compact ? 10 : 7, vertical: compact ? 6 : 3),
+                  horizontal: compact ? 7 : 6, vertical: compact ? 4 : 3),
               decoration: BoxDecoration(
                   color: Colors.white.withValues(alpha: 0.15),
                   borderRadius: BorderRadius.circular(7),
@@ -4029,18 +4147,17 @@ class _BottomBarState extends State<_BottomBar> {
                       fontWeight: FontWeight.w700)),
             ),
           ),
-          SizedBox(width: compact ? 6 : 4),
+          SizedBox(width: compact ? 3 : 3),
           GestureDetector(
             onTap: widget.onFullscreen,
             child: Padding(
               padding: EdgeInsets.symmetric(
-                  horizontal: compact ? 4 : 3, vertical: compact ? 6 : 2),
+                  horizontal: compact ? 3 : 3, vertical: compact ? 4 : 2),
               child: Icon(
                   widget.isFullscreen
                       ? Icons.fullscreen_exit_rounded
                       : Icons.fullscreen_rounded,
                   color: Colors.white,
-                  // Yana kattalashtirildi (foydalanuvchi talabi).
                   size: iconSize),
             ),
           ),
@@ -4128,7 +4245,11 @@ class _VideoProgressBarState extends State<_VideoProgressBar> {
           onHorizontalDragCancel: () => widget.onDragEnd(_last),
           child: SizedBox(
             // Barmoq bilan qulay tegish uchun chiziqdan ancha baland.
-            height: thumb + 16,
+            //
+            // Tutqich kichraytirilgani sabab (8 -> 6) bu qo'shimcha
+            // balandlik biroz oshirildi: ko'rinish ixchamlashdi,
+            // lekin BOSISH ZONASI avvalgidek qulay qoldi.
+            height: thumb + 20,
             child: Stack(
               alignment: Alignment.centerLeft,
               children: [
