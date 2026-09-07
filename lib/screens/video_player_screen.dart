@@ -455,6 +455,70 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   //   * "taslim bo'lish" hisoblagichi nolga tushadi — internetning
   //     yo'qligi pleyerning nosozligi EMAS.
 
+  // ═══════════════════════════════════════════════════════════
+  //  MANBA KUZATUVCHISI: MAHALLIY <-> WORKER
+  // ═══════════════════════════════════════════════════════════
+  //
+  // TALAB (foydalanuvchi):
+  //   * video ko'rilayotganda fayl TO'LIQ yuklab olinsa — AYNAN
+  //     o'sha joydan mahalliy server orqali davom etsin;
+  //   * mahalliy ko'rish paytida fayl O'CHIRILSA — kelib qolgan
+  //     joydan tezda workerga ulanib, onlayn davom etsin.
+  //
+  // Ilgari manba FAQAT BIR MARTA, video ochilganda tanlanar va
+  // keyin o'zgarmasdi. Shu sabab yuklab olish tugasa ham video
+  // worker orqali ketaverar, internet uzilganda esa xatoga chiqib
+  // boshidan boshlanardi.
+  //
+  // Tekshiruv ARZON: avval xotiradagi hisob (ishora) ko'riladi va
+  // faqat u O'ZGARGANDA diskdan aniq javob so'raladi.
+
+  /// Ayni paytda manba almashtirilyaptimi.
+  bool _switchingSource = false;
+
+  /// Oxirgi ko'rilgan "to'liq yuklangan" ishorasi.
+  bool? _lastCompleteHint;
+
+  void _checkSourceSwitch() {
+    final ep = _currentEp;
+    final c = _controller;
+    if (ep == null ||
+        c == null ||
+        _switchingSource ||
+        _recovering ||
+        _handlingError ||
+        _windowWaiting) {
+      return;
+    }
+    if (!c.value.isInitialized) return;
+    final url = _currentUrl;
+    if (url.isEmpty) return;
+
+    final hint = DownloadManager.instance.statOf(url).complete;
+    if (hint == _lastCompleteHint) return;
+    _lastCompleteHint = hint;
+    if (hint == _playViaLocal) return;
+
+    // Ishora o'zgardi — endi DISKDAN aniq javob (bu qimmatroq, shu
+    // sabab faqat shu yerda chaqiriladi).
+    final real = _isFullyDownloaded(url);
+    if (real == _playViaLocal) return;
+
+    _switchingSource = true;
+    final at = c.value.position;
+    VideoCacheServer.log(real
+        ? 'Fayl to\'liq yuklandi — mahalliy serverga o\'tilmoqda (${at.inSeconds}s)'
+        : 'Fayl o\'chirildi — workerga o\'tilmoqda (${at.inSeconds}s)');
+    _showNotice(real
+        ? 'Yuklab olindi — endi telefondan ko\'rsatilmoqda'
+        : 'Fayl o\'chirildi — onlayn davom etilmoqda');
+    _playEpisode(ep,
+            resumeAt: at,
+            resumePlaying: _intendedPlaying,
+            isRecovery: true)
+        .whenComplete(() => _switchingSource = false);
+  }
+
   void _onNetworkLost() {
     // Mahalliy (to'liq yuklab olingan) ijroga internetning aloqasi
     // yo'q — u tarmoqqa umuman chiqmaydi.
@@ -593,6 +657,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _windowTimer?.cancel();
     _windowWaiters = 0;
     _windowWaiting = false;
+    _lastCompleteHint = null;
 
     // ── ESKI CONTROLLERNI XAVFSIZ YOPISH ─────────────────────
     // Tartib muhim: avval uni daraxtdan olib tashlaymiz (setState),
@@ -611,12 +676,20 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       }
       setState(() => _controller = null);
       await WidgetsBinding.instance.endOfFrame;
-      try {
-        await old.pause();
-      } catch (_) {}
-      try {
-        await old.dispose();
-      } catch (_) {}
+      // ── YOPISH KUTILMAYDI ─────────────────────────────────
+      // Eski pleyerni yopish (ExoPlayer + platform view) bir necha
+      // yuz millisekund olishi mumkin. Uni KUTIB o'tirish yangi
+      // videoning ochilishini shuncha kechiktirardi. U allaqachon
+      // ekrandan olib tashlangan, shu sabab yopilishini fon'da
+      // qoldiramiz.
+      () async {
+        try {
+          await old.pause();
+        } catch (_) {}
+        try {
+          await old.dispose();
+        } catch (_) {}
+      }();
     }
     if (!mounted || myToken != _playToken) return;
 
@@ -675,7 +748,26 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // Fayl allaqachon to'liq telefonda bo'lsa bu bosqich umuman
     // bo'lmaydi (yuqoridagi mahalliy yo'l).
     var prepared = true;
-    if (!_playViaLocal) {
+    if (!_playViaLocal && RustCore.instance.videoWindowSeen(url, 0)) {
+      // ── TEZ YO'L: BO'LAK AVVAL KESHDA KO'RILGAN ─────────────
+      //
+      // TUZATILGAN XATO (foydalanuvchi: "video keshda bo'lsa ham
+      // sekin ochilyapti"): ilova HAR SAFAR isitish so'rovini
+      // yuborib, javobini KUTARDI — hatto kesh allaqachon tayyor
+      // bo'lganda ham. O'lchandi: bunday "bo'sh" so'rov
+      // data-markazdan 0.26-0.63 s, telefonda mobil tarmoqda esa
+      // 1-3 s. `/api/play` ning o'zi atigi 0.3 s.
+      //
+      // Endi bo'lak avval keshda ko'rilgan bo'lsa (diskdagi belgi)
+      // pleyer DARHOL ochiladi, isitish esa fon'da ishga tushadi
+      // (kesh o'chgan bo'lsa keyingi safar tayyor bo'lsin).
+      //
+      // Kesh kutilmaganda o'chirilgan bo'lsa pleyer xatoga chiqadi
+      // va odatdagi tiklanish yo'li (`_handleFatalError`) oynani
+      // isitib, AYNAN O'SHA joydan qayta ochadi.
+      RustCore.instance.videoPrepare(url);
+      VideoCacheServer.log('Tez yo\'l: bo\'lak keshda ko\'rilgan — kutilmaydi');
+    } else if (!_playViaLocal) {
       prepared = await _prepareSource(url, myToken);
       if (!mounted || myToken != _playToken) return;
       // Isitish ANIQ yiqilgan bo'lsa — MAJBURAN bir marta qayta
@@ -949,7 +1041,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
               'Isitish ${_prepareMax.inSeconds} soniyada tugamadi');
           return false;
         }
-        await Future.delayed(const Duration(milliseconds: 200));
+        // 200 -> 60 ms: isitish tugagan lahzani tezroq ilg'aymiz.
+        // Chaqiruv mahalliy (FFI), tarmoqqa chiqmaydi — arzon.
+        await Future.delayed(const Duration(milliseconds: 60));
       }
     } finally {
       if (mounted) setState(() => _preparing = false);
@@ -1321,10 +1415,18 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       final VideoPlayerValue v = c.value;
       if (!v.isInitialized || v.duration <= Duration.zero) return;
 
+      // ── MANBA O'ZGARDIMI (yuklab olindi / o'chirildi) ──────
+      if (DateTime.now().difference(_lastSourceCheck).inMilliseconds >= 2000) {
+        _lastSourceCheck = DateTime.now();
+        _checkSourceSwitch();
+      }
+
       // ── QAYERDA TO'XTAGANINI ESLAB QOLISH ──────────────────
-      // Har 5 soniyada bir marta va faqat O'ZGARGAN bo'lsa
-      // yoziladi — ijroga sezilarli ta'siri yo'q.
-      if (DateTime.now().difference(_lastProgressSave).inSeconds >= 5) {
+      // HAR SONIYA — foydalanuvchi talabi. Bu faqat telefon
+      // xotirasiga yoziladi, serverga UMUMAN yuborilmaydi, shu
+      // sabab ijroga sezilarli ta'siri yo'q (bir necha kilobaytlik
+      // JSON).
+      if (DateTime.now().difference(_lastProgressSave).inMilliseconds >= 1000) {
         _lastProgressSave = DateTime.now();
         WatchProgress.instance.save(_currentUrl, v.position, v.duration);
       }
@@ -1638,20 +1740,24 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   // MUHIM: shu 500 ms ichida pleyerga (demak worker'ga ham) BITTA
   // ham so'rov yuborilmaydi — video pauzada, `seekTo` esa faqat
   // tinchlik davri tugagach, AYNAN BIR MARTA yuboriladi.
-  // 500 -> 320 ms (foydalanuvchi: "sek sekin ishlaydi").
+  // ── SEK KUTISHI: 200 ms (foydalanuvchi talabi) ─────────────
   //
-  // Bu tanaffusning YAGONA vazifasi — ketma-ket bosilgan taplarni
-  // (+5, +10, +15...) BITTA sek qilib yig'ish.
+  // Bu tanaffusning yagona vazifasi — ketma-ket buyruqlarni bitta
+  // sek qilib yig'ish. Progress chizig'ini surganda yig'iladigan
+  // narsa yo'q, shu sabab u AYNAN 200 ms bilan ishlaydi: barmoq
+  // uzilishi bilan video deyarli darhol sakraydi.
+  static const Duration _seekIdle = Duration(milliseconds: 200);
+
+  // ── IKKI MARTA BOSISH UCHUN BIROZ UZUNROQ ─────────────────
   //
-  // NEGA AYNAN 320 ms: ketma-ket tap deb hisoblanadigan oraliq —
-  // 300 ms (`_handleVideoTap`). Tanaffus undan KICHIK bo'lsa, sek
-  // ikki tap ORASIDA yuborilib ketardi: jamlash buzilib, ikkinchi
-  // tap eskirgan pozitsiyadan hisoblanardi (ya'ni "+10" o'rniga
-  // ikkita alohida "+5" bo'lardi va ekrandagi son bilan haqiqiy
-  // sakrash mos kelmasdi). 320 ms — 300 dan bir oz katta, ya'ni
-  // jamlash har doim to'g'ri ishlaydi, lekin kutish avvalgidan
-  // ancha qisqa.
-  static const Duration _seekIdle = Duration(milliseconds: 320);
+  // Ketma-ket tap deb hisoblanadigan oraliq 300 ms
+  // (`_handleVideoTap`). Agar sek shu oraliqdan TEZROQ yuborilsa,
+  // u ikki tap ORASIDA ketib qolardi: "+10" o'rniga ikkita alohida
+  // "+5" bo'lar va ekrandagi son haqiqiy sakrashga mos kelmasdi.
+  //
+  // Shu sabab FAQAT tap yo'li uchun tanaffus 320 ms. Progress
+  // chizig'i esa yuqoridagi 200 ms bilan ishlaydi.
+  static const Duration _seekIdleTap = Duration(milliseconds: 320);
 
   // ── Ichki holat ──────────────────────────────────────────────
   // Bir vaqtda faqat BITTA `seekTo` uchib turadi; undan keyingilari
@@ -1663,6 +1769,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   DateTime _lastSeekDone = DateTime.fromMillisecondsSinceEpoch(0);
   /// "Qayerda to'xtagan" nuqtasi oxirgi marta qachon saqlangan.
   DateTime _lastProgressSave = DateTime.fromMillisecondsSinceEpoch(0);
+
+  /// Manba (mahalliy/worker) oxirgi marta qachon tekshirilgan.
+  DateTime _lastSourceCheck = DateTime.fromMillisecondsSinceEpoch(0);
 
   /// Oldingi qismning manzili — epizod almashganda uning nuqtasini
   /// saqlab qolish uchun.
@@ -1699,15 +1808,17 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     return c?.value.position ?? Duration.zero;
   }
 
-  /// Nisbiy sek (ekranga ikki marta bosish).
+  /// Nisbiy sek (ekranga ikki marta bosish) — jamlash uchun
+  /// biroz uzunroq tanaffus.
   void _scheduleSeek(int deltaSeconds) {
-    _requestSeek(_seekBase + Duration(seconds: deltaSeconds));
+    _requestSeek(_seekBase + Duration(seconds: deltaSeconds),
+        idle: _seekIdleTap);
   }
 
-  /// Mutlaq sek (progress chizig'i).
+  /// Mutlaq sek (progress chizig'i) — eng qisqa tanaffus.
   void _scheduleSeekTo(Duration target) => _requestSeek(target);
 
-  void _requestSeek(Duration target) {
+  void _requestSeek(Duration target, {Duration? idle}) {
     final ctrl = _controller;
     if (ctrl == null || !ctrl.value.isInitialized) return;
 
@@ -1740,7 +1851,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
 
     // Har bir yangi sek kutish taymerini QAYTADAN boshlaydi.
     _seekIdleTimer?.cancel();
-    _seekIdleTimer = Timer(_seekIdle, _commitPendingSeek);
+    _seekIdleTimer = Timer(idle ?? _seekIdle, _commitPendingSeek);
   }
 
   /// Qisqa tinchlikdan keyin: BITTA sek va ijroni davom ettirish.
@@ -1901,7 +2012,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       // Sek qisqa tinchlikdan keyin bajarilgani uchun ko'rsatkich
       // ham shu vaqtgacha turadi (avval 2 soniyada yo'qolib, hali
       // sek bo'lmagan holda foydalanuvchini chalg'itardi).
-      _leftSeekHideTimer = Timer(_seekIdle + const Duration(milliseconds: 400), () {
+      _leftSeekHideTimer = Timer(_seekIdleTap + const Duration(milliseconds: 400), () {
         if (mounted) {
           setState(() {
             _showLeftSeek = false;
@@ -1911,7 +2022,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       });
     } else {
       _rightSeekHideTimer?.cancel();
-      _rightSeekHideTimer = Timer(_seekIdle + const Duration(milliseconds: 400), () {
+      _rightSeekHideTimer = Timer(_seekIdleTap + const Duration(milliseconds: 400), () {
         if (mounted) {
           setState(() {
             _showRightSeek = false;

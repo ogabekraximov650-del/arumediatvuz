@@ -28,7 +28,7 @@
 
 ```
 flutter analyze          # 0 muammo bo'lishi kerak
-cd rust && cargo test --lib     # 10/10 o'tishi kerak
+cd rust && cargo test --lib     # 11/11 o'tishi kerak
 cd worker && cargo check --target wasm32-unknown-unknown
 ```
 
@@ -66,6 +66,35 @@ manba jurnali **bo'sh** qolishi shart.
 soniya eskirgan bo'ladi va aynan shu o'chirilgandan keyingi qayta
 yuklanishga olib kelgan edi.
 
+## Manba ALMASHISHI (mahalliy <-> worker)
+
+Manba video ochilganda bir marta tanlanadi va keyin **kuzatib
+boriladi** (`_checkSourceSwitch`, har 2 soniyada):
+
+- onlayn ko'rilayotganda fayl **to'liq yuklab olinsa** — aynan
+  o'sha joydan mahalliy serverga o'tadi;
+- mahalliy ko'rilayotganda fayl **o'chirilsa** — aynan o'sha joydan
+  workerga o'tadi.
+
+Tekshiruv arzon: avval xotiradagi hisob (ishora) ko'riladi, faqat
+u **o'zgarganda** disk skanerlanadi.
+
+## VIDEO TEZ OCHILISHI: "keshda ko'rilgan" belgisi
+
+Ilova ilgari HAR SAFAR `/api/warm` ga so'rov yuborib javobini
+kutardi — hatto kesh tayyor bo'lganda ham. O'lchandi: bunday
+"bo'sh" so'rov data-markazdan **0.26-0.63 s**, telefonda mobil
+tarmoqda **1-3 s**; `/api/play` ning o'zi esa atigi **0.3 s**.
+
+Endi isitish muvaffaqiyatli tugaganda diskka belgi yoziladi
+(`w<N>.warm`, 6 soat yashaydi). Belgi yangi bo'lsa ilova
+**kutmaydi**: pleyerni darhol ochadi, isitishni fon'da ishga
+tushiradi. Kesh kutilmaganda o'chgan bo'lsa — pleyer xatoga chiqadi
+va odatdagi tiklanish yo'li oynani isitib, o'sha joydan qayta
+ochadi.
+
+FFI: `rust_video_cache_window_seen(url, widx)`.
+
 ## Internet uzilishi
 
 - Onlayn ijro paytida internet uzilsa pleyer **o'ldirilmaydi**;
@@ -78,7 +107,8 @@ yuklanishga olib kelgan edi.
 
 `lib/services/watch_progress.dart` — barcha nuqtalar bitta JSON
 ro'yxatda (`watch_positions`). Boshidagi 15 soniya va oxiridagi
-30 soniya saqlanmaydi; yozish 5 soniyada bir marta.
+30 soniya saqlanmaydi; yozish **har soniyada, darhol diskka**
+(faqat telefon xotirasiga — serverga umuman yuborilmaydi).
 
 ## TANBAL (LAZY) OYNA KESHLASH — eng muhim qoida
 
@@ -148,6 +178,12 @@ javob **kutadi** (B2'ga chiqmaydi).
   (`GROUP_CHUNKS = 16`). `480 / 16 = 30` — guruh oyna chegarasini
   hech qachon kesib o'tmaydi (`480 / 10` butun emas, shu sabab
   10 MB tanlanmadi);
+- **navbat GURUHLAR bo'yicha yuritiladi** (`cursor` guruh raqamini
+  beradi). Ilgari navbatdan bitta BO'LAK olinar, tarmoqqa esa GURUH
+  so'ralardi — natijada 6 oqimdan amalda bittasi ishlar, qolganlari
+  "band" deb chetga qo'yilardi va oxirida bittalab yig'ishtirilardi
+  (tezlik shu sabab oxiriga borib tushardi). Buni
+  `yuklab_olish_guruhlar_bilan_parallel_ketadi` testi qo'riqlaydi;
 - worker keshdan 16 MiB beradi, B2'dan esa 8 MiB (`B2_RANGE_MAX`) —
   xotira uchun. Qisqa javob `X-Cache: MISS` bilan keladi va ilova
   undan chegara "o'rganmaydi";

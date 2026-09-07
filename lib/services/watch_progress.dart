@@ -19,8 +19,9 @@
 //   * oxiridagi 30 soniya — qism ko'rib bo'lingan, keyingi safar
 //     boshidan boshlangani to'g'ri.
 //
-// Yozish TEZLIKKA ta'sir qilmaydi: nuqta har 5 soniyada bir marta
-// va faqat O'ZGARGAN bo'lsa saqlanadi.
+// Yozish TEZLIKKA ta'sir qilmaydi: nuqta HAR SONIYA, faqat
+// O'ZGARGAN bo'lsa saqlanadi va faqat telefon xotirasiga yoziladi
+// (serverga umuman yuborilmaydi).
 
 import 'rust_bridge.dart';
 
@@ -87,10 +88,17 @@ class WatchProgress {
     }
     final ms = position.inMilliseconds;
     final old = _positions[url];
-    // 3 soniyadan kam o'zgarish uchun diskka yozmaymiz.
-    if (old != null && (old - ms).abs() < 3000) return;
+    // 900 ms dan kam o'zgarish — yozishga arzimaydi (chaqiruv
+    // sekundiga bir marta keladi).
+    if (old != null && (old - ms).abs() < 900) return;
     _positions[url] = ms;
     _dirty = true;
+    // ── DARHOL DISKKA ─────────────────────────────────────────
+    // TALAB (foydalanuvchi): "har soniyada diskda yangilansin,
+    // hech qanday 10 soniya farq bo'lmasin". Yozuv kichik
+    // (bir necha kilobayt JSON) va telefon xotirasiga boradi —
+    // serverga UMUMAN yuborilmaydi.
+    flush();
   }
 
   /// Video o'chirilganda uning nuqtasi ham kerak emas.

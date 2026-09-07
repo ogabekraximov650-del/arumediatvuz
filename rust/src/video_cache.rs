@@ -1777,7 +1777,9 @@ fn run_download(key: &str, url: &str) -> Result<DlOutcome, String> {
     let _ = stat_snapshot(key, &dir);
 
     let count = total.div_ceil(CHUNK_SIZE);
-    // Navbat: keyingi olinadigan bo'lak indeksi.
+    // Navbat GURUHLAR bo'yicha yuritiladi (yuqoridagi izohga qarang).
+    let group_count = count.div_ceil(GROUP_CHUNKS);
+    // Navbat: keyingi olinadigan GURUH raqami.
     let cursor = Arc::new(AtomicU64::new(0));
     // AYNI PAYTDA boshqa ish oqimi (pleyer yoki oldindan yuklash)
     // olayotgan bo'laklar shu yerga chetga qo'yiladi va navbat
@@ -1811,12 +1813,32 @@ fn run_download(key: &str, url: &str) -> Result<DlOutcome, String> {
                 if paused.load(Ordering::SeqCst) {
                     break;
                 }
-                // ── IKKI BOSQICH ─────────────────────────────────
-                // 1) Navbat bo'yicha: band bo'lak chetga qo'yiladi.
-                // 2) Navbat tugagach: chetga qo'yilganlari olinadi
-                //    (endi kutish ham mumkin — bu oxirgi qoldiq).
+                // ═══════════════════════════════════════════════
+                //  ISH BIRLIGI — BITTA GURUH (16 MiB)
+                // ═══════════════════════════════════════════════
+                //
+                // TUZATILGAN XATO (foydalanuvchi: "yuklash boshida
+                // 5 MB/s, oxiriga borib 800 KB/s ga tushib qoladi"):
+                //
+                // Ilgari navbatdan BITTA BO'LAK olinardi, tarmoqqa
+                // esa 16 bo'lakli GURUH so'ralardi. Natijada 1-oqim
+                // 0-bo'lakni olib butun 0-15 guruhini tortar, qolgan
+                // 5 oqim esa 1, 2, 3... bo'laklarni olib AYNAN O'SHA
+                // guruhga urilar va "band" deb chetga qo'yilardi.
+                //
+                // Ya'ni 6 ta oqimdan amalda FAQAT BITTASI ishlardi,
+                // bo'laklarning 15/16 qismi esa "chetga qo'yilganlar"
+                // ro'yxatiga tushib, oxirida bittalab, kutish bilan
+                // yig'ishtirilardi. Tezlik aynan shu sabab oxiriga
+                // borib tushib ketardi (guruh 8 dan 16 ga oshirilgach
+                // bu yanada kuchaydi).
+                //
+                // ENDI navbat GURUHLAR bo'yicha yuritiladi: har bir
+                // oqim O'Z guruhini oladi — 6 oqim haqiqatan parallel
+                // ishlaydi (6 x 16 = 96 MiB havoda) va chetga qo'yish
+                // deyarli umuman bo'lmaydi.
                 let n = cursor.fetch_add(1, Ordering::SeqCst);
-                let (i, second_pass) = if n < count {
+                let (g, second_pass) = if n < group_count {
                     (n, false)
                 } else {
                     match deferred.lock().ok().and_then(|mut d| d.pop()) {
@@ -1829,70 +1851,52 @@ fn run_download(key: &str, url: &str) -> Result<DlOutcome, String> {
                     break;
                 }
 
-                let chunk_start = i * CHUNK_SIZE;
-                let chunk_end = (chunk_start + CHUNK_SIZE - 1).min(total - 1);
-                let expected_len = (chunk_end - chunk_start + 1) as usize;
-                let on_disk_len = chunk_on_disk_len(expected_len as u64);
-                let path = d.join(chunk_name(i));
+                let g_first = g * GROUP_CHUNKS;
+                let g_last = (g_first + GROUP_CHUNKS - 1).min(count - 1);
 
-                // Diskda TO'LIQ bor bo'lsa — tarmoqqa umuman
-                // chiqilmaydi (yuklash to'xtagan joyidan davom etadi).
-                if let Ok(m) = fs::metadata(&path) {
-                    if m.len() == on_disk_len {
-                        stat_note_chunk(&k, i, expected_len as u64);
-                        continue;
+                // Guruhdagi diskda YO'Q birinchi bo'lakni topamiz.
+                // Hammasi joyida bo'lsa — guruh tayyor, tarmoqqa
+                // umuman chiqilmaydi.
+                let mut missing: Option<u64> = None;
+                for i in g_first..=g_last {
+                    if chunk_cached(&d, i, total) {
+                        stat_note_chunk(&k, i, chunk_plain_len(i, total));
+                    } else if missing.is_none() {
+                        missing = Some(i);
                     }
                 }
+                let Some(start_idx) = missing else { continue };
 
-                // Bo'lakni AYNI PAYTDA pleyer (yoki oldindan yuklash)
-                // olayotgan bo'lsa, uni KUTMAYMIZ: chetga qo'yamiz va
-                // keyingi bo'lakka o'tamiz.
-                if !second_pass && chunk_in_flight(shared, &k, i) {
+                // Guruhni ayni paytda boshqa oqim olayotgan bo'lsa —
+                // kutmaymiz, chetga qo'yamiz va keyingisiga o'tamiz.
+                if !second_pass && chunk_in_flight(shared, &k, start_idx) {
                     if let Ok(mut dd) = deferred.lock() {
-                        dd.push(i);
+                        dd.push(g);
                     }
                     continue;
                 }
-
-                // ── CHETGA QO'YILGAN BO'LAK (ikkinchi bosqich) ──
-                // Uni boshqa oqim GURUH bilan olayotgan bo'lishi
-                // mumkin. Shu sabab avval diskda paydo bo'lishini
-                // kutamiz. Ilgari bu yerda darhol bitta bo'lak
-                // so'ralardi va natijada bir xil ma'lumot ikki marta
-                // olinardi (guruh + alohida bo'lak).
+                // Chetga qo'yilgan guruh (ikkinchi bosqich): uni
+                // boshqa oqim olayotgan bo'lishi mumkin, shu sabab
+                // avval diskda paydo bo'lishini qisqa kutamiz.
                 if second_pass {
-                    // 10 -> 4 soniya. Bu kutish FAQAT bo'lakni
-                    // boshqa oqim (pleyer) olayotgan holat uchun.
-                    // 10 soniya juda uzun edi: oxirgi bir necha
-                    // bo'lakda yuklash sudralib qolar va foiz
-                    // 70-80% da "to'xtab qolgandek" ko'rinardi.
-                    // Bo'lak shu vaqtda kelmasa, uni O'ZIMIZ
-                    // olganimiz tezroq.
                     let deadline = Instant::now() + Duration::from_secs(4);
                     while Instant::now() < deadline {
-                        if chunk_cached(&d, i, total)
+                        if chunk_cached(&d, start_idx, total)
                             || !download_active(&k)
-                            || !chunk_in_flight(shared, &k, i)
+                            || !chunk_in_flight(shared, &k, start_idx)
                         {
                             break;
                         }
                         thread::sleep(Duration::from_millis(100));
                     }
-                    if chunk_cached(&d, i, total) {
-                        stat_note_chunk(&k, i, expected_len as u64);
-                        continue;
-                    }
                 }
-                // ── TANBAL KESHLASH: shu bo'lak qaysi oynada? ──
-                // Faqat AYNAN KERAK bo'lgan oyna isitiladi (birinchi
-                // oynadan keyingilari yuklash o'sha joyga yetganda).
-                ensure_window_for_download(&u, &k, chunk_start);
+
+                // ── TANBAL KESHLASH: shu guruh qaysi oynada? ──
+                ensure_window_for_download(&u, &k, start_idx * CHUNK_SIZE);
                 if !download_active(&k) {
                     paused.store(true, Ordering::SeqCst);
                     break;
                 }
-
-                let prio = FetchPrio::Download;
 
                 let mut res = ChunkRes::Failed("urinilmadi".to_string());
                 for attempt in 0..3u32 {
@@ -1900,32 +1904,38 @@ fn run_download(key: &str, url: &str) -> Result<DlOutcome, String> {
                         paused.store(true, Ordering::SeqCst);
                         break;
                     }
+                    // Guruhdagi hali yo'q birinchi bo'lakni so'raymiz:
+                    // `fetch_and_store_chunk` uni GURUH bilan oladi va
+                    // hammasini diskka yozadi.
+                    let idx = (g_first..=g_last)
+                        .find(|i| !chunk_cached(&d, *i, total))
+                        .unwrap_or(start_idx);
+                    let c_start = idx * CHUNK_SIZE;
+                    let c_end = (c_start + CHUNK_SIZE - 1).min(total - 1);
                     match fetch_and_store_chunk(
                         shared,
                         &k,
                         &d,
                         &u,
-                        i,
-                        chunk_start,
-                        chunk_end,
-                        expected_len,
+                        idx,
+                        c_start,
+                        c_end,
+                        (c_end - c_start + 1) as usize,
                         total,
-                        prio,
+                        FetchPrio::Download,
                         None,
                     ) {
                         Ok(_) => {
-                            // Bo'lak QAYTDI, lekin diskda to'liq
-                            // turibdimi? Yarim olingan bo'lsa qoldiq
-                            // saqlangan bo'ladi va keyingi urinish
-                            // o'sha joydan davom etadi.
-                            let landed = fs::metadata(&path)
-                                .map(|m| m.len() == on_disk_len)
-                                .unwrap_or(false);
-                            if landed {
+                            // Guruh TO'LIQ tushdimi? Yarim olingan
+                            // bo'lsa qoldiq saqlanadi va keyingi
+                            // urinish o'sha joydan davom etadi.
+                            if (g_first..=g_last).all(|i| chunk_cached(&d, i, total)) {
                                 res = ChunkRes::Ok;
                                 break;
                             }
-                            res = ChunkRes::Failed(format!("bo'lak #{i} to'liq olinmadi"));
+                            res = ChunkRes::Failed(format!(
+                                "#{g} guruh to'liq olinmadi"
+                            ));
                         }
                         Err(e) if e == BUSY_ERR => {
                             res = ChunkRes::Deferred;
@@ -1937,7 +1947,6 @@ fn run_download(key: &str, url: &str) -> Result<DlOutcome, String> {
                     }
                     // Qisqa tanaffus — tarmoq bir lahzaga uzilgan
                     // bo'lsa shu yerda tiklanadi (uzoq kutish YO'Q).
-                    // Oxirgi urinishdan keyin kutish MA'NOSIZ.
                     if attempt < 2 {
                         thread::sleep(Duration::from_millis(300 * (attempt as u64 + 1)));
                     }
@@ -1945,11 +1954,14 @@ fn run_download(key: &str, url: &str) -> Result<DlOutcome, String> {
 
                 match res {
                     ChunkRes::Ok => {
+                        for i in g_first..=g_last {
+                            stat_note_chunk(&k, i, chunk_plain_len(i, total));
+                        }
                         done_count.fetch_add(1, Ordering::SeqCst);
                     }
                     ChunkRes::Deferred => {
                         if let Ok(mut dd) = deferred.lock() {
-                            dd.push(i);
+                            dd.push(g);
                         }
                     }
                     ChunkRes::Failed(e) => {
@@ -1959,7 +1971,7 @@ fn run_download(key: &str, url: &str) -> Result<DlOutcome, String> {
                                 *slot = Some(e);
                             }
                         }
-                        // TO'XTAMAYMIZ — keyingi bo'lakka o'tamiz.
+                        // TO'XTAMAYMIZ — keyingi guruhga o'tamiz.
                     }
                 }
             });
@@ -2657,6 +2669,12 @@ fn warm_one_window(url: &str, key: &str, widx: u64, force: bool) -> (bool, u64) 
                 let st = if ok { WarmState::Done } else { WarmState::Failed };
                 m.insert(tag, (st, Instant::now()));
             }
+            // Diskka BELGI: "bu oyna keshda ko'rilgan". Ilova keyingi
+            // ochilishda shu belgiga qarab isitish so'rovini UMUMAN
+            // yubormaydi (`warm_marker_fresh` izohiga qarang).
+            if ok && total > 0 {
+                write_warm_marker(key, widx);
+            }
             (ok && total > 0, total)
         }
         Err(e) => {
@@ -2666,6 +2684,102 @@ fn warm_one_window(url: &str, key: &str, widx: u64, force: bool) -> (bool, u64) 
             }
             (false, 0)
         }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  "BU OYNA KESHDA KO'RILGAN" BELGISI
+// ═══════════════════════════════════════════════════════════════
+//
+// ── MUAMMO (foydalanuvchi: "video keshda bo'lsa ham sekin
+//    ochilyapti") ─────────────────────────────────────────────
+//
+// Ilova video ochilishidan OLDIN har safar `/api/warm` ga so'rov
+// yuborar va javobni KUTARDI — hatto oyna allaqachon keshda
+// bo'lsa ham. O'lchandi: bunday "bo'sh" so'rov data-markazdan
+// 0.26-0.63 soniya, telefonda mobil tarmoqda esa 1-3 soniya.
+// `/api/play` ning o'zi atigi 0.3 soniyada javob beradi — ya'ni
+// kutishning KATTA QISMI shu keraksiz so'rovga ketardi.
+//
+// ── YECHIM ───────────────────────────────────────────────────
+//
+// Isitish muvaffaqiyatli tugaganda diskka kichik belgi yoziladi.
+// Belgi YANGI bo'lsa, ilova isitishni KUTMAYDI: pleyerni darhol
+// ochadi va isitishni fon'da ishga tushiradi. Kesh kutilmaganda
+// o'chirilgan bo'lsa, pleyer xatoga chiqadi va odatdagi tiklanish
+// yo'li (`_handleFatalError`) oynani isitib, o'sha joydan qayta
+// ochadi.
+//
+// Ya'ni: eng ko'p uchraydigan holat (kesh joyida) TEZ bo'ladi,
+// nodir holat (kesh o'chgan) esa avvalgidek ishlaydi.
+
+/// Belgi shu muddat ichida "ishonchli" hisoblanadi.
+const WARM_MARKER_TTL_SECS: u64 = 6 * 60 * 60;
+
+fn warm_marker_path(key: &str, widx: u64) -> Option<PathBuf> {
+    Some(
+        SHARED
+            .get()?
+            .cache_root
+            .join(key)
+            .join(format!("w{widx}.warm")),
+    )
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn write_warm_marker(key: &str, widx: u64) {
+    let Some(path) = warm_marker_path(key, widx) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(&path, unix_now().to_string());
+}
+
+/// Belgi bor va hali eskirmaganmi.
+fn warm_marker_fresh(key: &str, widx: u64) -> bool {
+    let Some(path) = warm_marker_path(key, widx) else {
+        return false;
+    };
+    let Ok(text) = fs::read_to_string(&path) else {
+        return false;
+    };
+    let Ok(at) = text.trim().parse::<u64>() else {
+        return false;
+    };
+    let now = unix_now();
+    // Soat orqaga surilgan bo'lsa ham noto'g'ri "yangi" demaymiz.
+    at <= now && now - at <= WARM_MARKER_TTL_SECS
+}
+
+/// Shu oyna KESHDA KO'RILGANMI (belgi yangi bo'lsa 1).
+///
+/// Ilova buni pleyerni ochishdan oldin so'raydi: 1 bo'lsa isitish
+/// KUTILMAYDI va video darhol ochiladi.
+#[no_mangle]
+pub extern "C" fn rust_video_cache_window_seen(url_ptr: *const c_char, widx: u64) -> i32 {
+    let Some(url) = (unsafe { cstr_to_str(url_ptr) }) else {
+        return 0;
+    };
+    if url.is_empty() {
+        return 0;
+    }
+    let key = cache_key(url);
+    // Xotirada "tayyor" deb turgan bo'lsa — shubhasiz.
+    if window_state_of(&key, widx) == Some(WarmState::Done) {
+        return 1;
+    }
+    if warm_marker_fresh(&key, widx) {
+        1
+    } else {
+        0
     }
 }
 
@@ -2860,6 +2974,19 @@ pub extern "C" fn rust_video_cache_prepare_reset(url_ptr: *const c_char) -> i32 
     let prefix = format!("{key}#w");
     if let Ok(mut m) = warm_state().lock() {
         m.retain(|k, _| !k.starts_with(&prefix));
+    }
+    // Diskdagi "keshda ko'rilgan" belgilari ham o'chadi — aks holda
+    // ilova majburan qayta isitishdan keyin ham eski belgiga
+    // ishonib qolardi.
+    if let Some(shared) = SHARED.get() {
+        let dir = shared.cache_root.join(&key);
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for e in entries.flatten() {
+                if e.file_name().to_string_lossy().ends_with(".warm") {
+                    let _ = fs::remove_file(e.path());
+                }
+            }
+        }
     }
     // Keyingi tayyorlash MAJBURAN bo'lsin: worker o'zining
     // eskirgan kesh yozuvini ham, o'lib qolgan isitishning
@@ -5284,6 +5411,85 @@ mod tests {
             }
         });
         (port, log)
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  YUKLAB OLISH GURUHLAR BILAN, PARALLEL KETADI
+    // ═══════════════════════════════════════════════════════════
+    //
+    // TUZATILGAN XATO (foydalanuvchi: "yuklash boshida 5 MB/s,
+    // oxiriga borib 800 KB/s ga tushib qoladi"):
+    //
+    // Navbatdan BITTA BO'LAK olinar, tarmoqqa esa 16 bo'lakli
+    // GURUH so'ralardi. Natijada oqimlar bir-birining guruhiga
+    // urilib, 15/16 bo'lak "chetga qo'yilganlar" ro'yxatiga
+    // tushardi va oxirida bittalab, kutish bilan yig'ishtirilardi.
+    //
+    // Bu test manbaga ketgan HAR BIR so'rovni tekshiradi: ular
+    // guruh chegarasiga tekislangan va bir-birini takrorlamaydigan
+    // bo'lishi SHART. Bo'lakma-bo'lak (1 MiB) so'rov paydo bo'lsa —
+    // demak eski nuqson qaytgan.
+    #[test]
+    fn yuklab_olish_guruhlar_bilan_parallel_ketadi() {
+        let (_port, root) = ensure_server();
+        // 3 ta to'liq guruh (3 x 16 MiB).
+        let total = 3 * GROUP_CHUNKS * CHUNK_SIZE;
+        let (o_port, o_log) = start_origin(total);
+        let name = "guruhlar.mp4";
+        let url = format!("http://127.0.0.1:{o_port}/{name}");
+        let c_url = std::ffi::CString::new(url.clone()).unwrap();
+        let dir = root.join("video_byte_cache").join(name);
+
+        assert_eq!(rust_video_cache_download(c_url.as_ptr()), 1);
+
+        let count = total.div_ceil(CHUNK_SIZE);
+        let mut done = false;
+        for _ in 0..600 {
+            if (0..count).all(|i| chunk_cached(&dir, i, total)) {
+                done = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(done, "yuklab olish tugamadi");
+
+        let ranges: Vec<String> = o_log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| *r != "bytes=0-0")
+            .cloned()
+            .collect();
+
+        let group_bytes = GROUP_CHUNKS * CHUNK_SIZE;
+        for r in &ranges {
+            let (rs, re) = parse_test_range(r, total);
+            assert_eq!(
+                rs % group_bytes,
+                0,
+                "so'rov guruh chegarasiga tekislanmagan: {r}"
+            );
+            assert_eq!(
+                re - rs + 1,
+                group_bytes,
+                "so'rov guruh o'lchamida emas (bo'lakma-bo'lak so'ralyapti): {r}"
+            );
+        }
+
+        // Uchta guruh — uchta so'rov. Qayta urinishlar bo'lmasligi
+        // kerak, shu sabab chegara 3 (ehtiyot uchun 4).
+        assert!(
+            ranges.len() <= 4,
+            "guruhlar takroran so'ralgan ({} ta so'rov): {ranges:?}",
+            ranges.len()
+        );
+        let mut starts: Vec<u64> = ranges
+            .iter()
+            .map(|r| parse_test_range(r, total).0)
+            .collect();
+        starts.sort_unstable();
+        starts.dedup();
+        assert_eq!(starts.len(), 3, "uchala guruh ham olinishi kerak edi");
     }
 
     #[test]

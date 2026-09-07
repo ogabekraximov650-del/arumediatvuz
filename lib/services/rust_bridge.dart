@@ -120,6 +120,7 @@ class RustCore {
   late final _VideoUrlActionDart _videoPrepareReset;
   late final _VideoWindowDart _videoWarmWindow;
   late final _VideoWindowDart _videoWindowStatus;
+  late final _VideoWindowDart _videoWindowSeen;
   late final _VideoTotalDart _videoTotal;
   late final _VideoWindowSizeDart _videoWindowSize;
   late final _CryptoGenKeyDart _cryptoGenKey;
@@ -190,6 +191,8 @@ class RustCore {
         'rust_video_cache_warm_window');
     _videoWindowStatus = _lib.lookupFunction<_VideoWindowC, _VideoWindowDart>(
         'rust_video_cache_window_status');
+    _videoWindowSeen = _lib.lookupFunction<_VideoWindowC, _VideoWindowDart>(
+        'rust_video_cache_window_seen');
     _videoTotal = _lib.lookupFunction<_VideoTotalC, _VideoTotalDart>(
         'rust_video_cache_total');
     _videoWindowSize =
@@ -646,6 +649,33 @@ class RustCore {
       return _videoWindowStatus(ptr, windowIndex);
     } catch (_) {
       return 3;
+    } finally {
+      malloc.free(ptr);
+    }
+  }
+
+  /// ── BU BO'LAK AVVAL KESHDA KO'RILGANMI ────────────────────
+  ///
+  /// `true` bo'lsa ilova pleyerni ochishdan oldin isitishni
+  /// KUTMAYDI — video darhol ochiladi, isitish esa fon'da ketadi.
+  ///
+  /// NEGA KERAK: o'lchandi, "bo'sh" isitish so'rovi (kesh
+  /// allaqachon tayyor bo'lgan holat) data-markazdan 0.26-0.63
+  /// soniya, telefonda mobil tarmoqda esa 1-3 soniya oladi.
+  /// `/api/play` ning o'zi atigi 0.3 soniyada javob beradi. Ya'ni
+  /// "video keshda bo'lsa ham sekin ochilyapti" muammosining
+  /// katta qismi aynan shu keraksiz kutish edi.
+  ///
+  /// Kesh kutilmaganda o'chirilgan bo'lsa pleyer xatoga chiqadi va
+  /// odatdagi tiklanish yo'li oynani isitib, o'sha joydan qayta
+  /// ochadi.
+  bool videoWindowSeen(String url, int windowIndex) {
+    if (!_loaded || url.isEmpty || windowIndex < 0) return false;
+    final ptr = url.toNativeUtf8();
+    try {
+      return _videoWindowSeen(ptr, windowIndex) == 1;
+    } catch (_) {
+      return false;
     } finally {
       malloc.free(ptr);
     }
