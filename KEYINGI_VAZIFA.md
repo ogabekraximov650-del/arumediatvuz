@@ -174,21 +174,49 @@ javob **kutadi** (B2'ga chiqmaydi).
 - internet qaytganda kutish darhol bekor qilinadi
   (`DownloadManager._resumeActive`);
 - diskdagi bo'lak **1 MiB** (foiz va "to'xtagan joydan davom" shunga
-  tayanadi), workerga so'rov esa **16 MiB** guruh bilan ketadi
-  (`GROUP_CHUNKS = 16`). `480 / 16 = 30` — guruh oyna chegarasini
-  hech qachon kesib o'tmaydi (`480 / 10` butun emas, shu sabab
-  10 MB tanlanmadi);
-- **navbat GURUHLAR bo'yicha yuritiladi** (`cursor` guruh raqamini
-  beradi). Ilgari navbatdan bitta BO'LAK olinar, tarmoqqa esa GURUH
-  so'ralardi — natijada 6 oqimdan amalda bittasi ishlar, qolganlari
-  "band" deb chetga qo'yilardi va oxirida bittalab yig'ishtirilardi
-  (tezlik shu sabab oxiriga borib tushardi). Buni
-  `yuklab_olish_guruhlar_bilan_parallel_ketadi` testi qo'riqlaydi;
-- worker keshdan 16 MiB beradi, B2'dan esa 8 MiB (`B2_RANGE_MAX`) —
-  xotira uchun. Qisqa javob `X-Cache: MISS` bilan keladi va ilova
-  undan chegara "o'rganmaydi";
+  tayanadi), workerga so'rov esa **64 MiB** bilan ketadi
+  (`DL_REQUEST_CHUNKS = 64`, worker'dagi `RANGE_MAX` bilan bir xil).
+  166 MB'lik qism uchun so'rovlar soni 11 -> 6;
+- **ish YO'LAKLARGA bo'linadi** (`Lane`): oynadagi yetishmayotgan
+  bo'laklar 6 ta teng yo'lakka bo'linadi, har bir oqim faqat o'z
+  yo'lagini oladi. Yo'lagi tugagan oqim BO'SH TURMAYDI — eng ko'p
+  ish qolgan yo'lakning orqa yarmini o'ziga oladi (`steal_locked`),
+  va bu chegara hech qachon HOZIR HAVODA turgan so'rovdan berini
+  kesmaydi (`hold`), ya'ni bitta bayt ham ikki marta olinmaydi.
+  Yo'laklar bitta qulf ostida — poyga imkonsiz;
+- **NEGA**: ilgari navbat "guruh" birligida edi va navbat tugagan
+  oqim butunlay chiqib ketardi. 166 MB = 11 guruh, 6 oqim: oxirgi
+  guruh YOLG'IZ qolardi va tezlik 6 barobar tushardi (5 MB/s ->
+  800 KB/s — foydalanuvchi aynan shu raqamlarni aytdi). Endi
+  oxirgi baytgacha 6 oqim ham band. Buni
+  `yuklab_olish_oxirigacha_parallel_ketadi` (tezlik) va
+  `yuklab_olish_yolaklar_bilan_takrorsiz_ketadi` (qoplama) testlari
+  qo'riqlaydi;
+- worker keshdan 64 MiB beradi, B2'dan esa 8 MiB (`B2_RANGE_MAX`) —
+  xotira uchun. Xotiradan beriladigan javoblar `X-Cache: MISS` yoki
+  `HIT-RANGE` bilan keladi va ilova ulardan chegara "o'rganmaydi";
 - server chegarasi (`SERVER_SPAN_MAX`) 5 daqiqada unutiladi — bitta
   noxush javob ilovani abadiy sekinlashtirmaydi.
+
+## Javob uzunligi E'LON QILINISHI SHART (`fixed_length_stream`)
+
+`Response::from_stream` javobni `Transfer-Encoding: chunked` bilan
+yuboradi va qo'lda yozilgan `Content-Length`ni runtime tashlab
+yuboradi. Jonli o'lchovda bu og'ir nuqsonga olib kelgani aniqlandi:
+bitta 16 MiB so'rovning javobi **10 urinishdan 5-6 tasida
+0.6-1.5 MB da jimgina uzilib** qolardi — na xato, na belgi. Ilova
+esa buni "shuncha ekan" deb qabul qilib, qolganini qayta-qayta
+so'rardi.
+
+Shu sabab **keshdan kesib beriladigan HAR BIR javob**
+`fixed_length_stream` quvuridan o'tkaziladi (`play_from_warm_cache`,
+`b2_proxy_range`ning ikkala kesh yo'li, `b2_proxy_full`). Shunda
+runtime `Content-Length`ni o'zi qo'yadi va javob erta uzilsa mijoz
+buni DARHOL xato deb ko'radi. Xotiraga hech narsa yig'ilmaydi.
+
+Ilova tomoni baribir bardoshli: uzilgan javobdan olingani diskda
+qoladi va keyingi urinish aynan o'sha joydan davom etadi — buni
+`javob_yarmida_uzilsa_ham_yuklash_tugaydi` testi qo'riqlaydi.
 
 ## Miqyos (yuz minglab foydalanuvchi)
 

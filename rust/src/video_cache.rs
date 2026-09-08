@@ -65,23 +65,6 @@ const CHUNK_SIZE: u64 = 1024 * 1024;
 /// u endi faqat haqiqiy nosozlikdan himoya vazifasini bajaradi.
 const MAX_CONNS: usize = 64;
 
-/// Bir vaqtda TARMOQDAN yuklanadigan bo'laklarning eng ko'p soni.
-///
-/// Foydalanuvchi progress chizig'ini tez-tez surganda pleyer ketma-ket
-/// bir necha yangi ulanish ochadi va ularning har biri o'z bo'lagini
-/// yuklamoqchi bo'ladi. Chegarasiz holda o'nlab parallel yuklash
-/// boshlanib, ular bir xil (cheklangan) tarmoq tezligini bo'lishib
-/// oladi — natijada HECH BIRI o'z vaqtida tugamaydi, pleyer esa
-/// javob kutib qotib qoladi. Endi bir vaqtda eng ko'pi 6 ta yuklash
-/// bo'ladi; qolganlari navbat kutadi (rad etilmaydi).
-///
-/// 6 -> 8: yuklab olish endi DOWNLOAD_THREADS (4) ta oqimda ketadi,
-/// shu sabab pleyerning oldindan yuklashi (3 ta oqim) bilan birga
-/// 7 ta bo'ladi. Chegara 6 da qolsa, ular bir-birini navbatda ushlab
-/// qolardi. 8 — ikkalasiga ham joy beradi, lekin xotira sarfi hamon
-/// bashorat qilinadigan (eng ko'pi ~8 MiB bufer) bo'lib qoladi.
-const MAX_NET_FETCHES: usize = 8;
-static NET_FETCHES: AtomicUsize = AtomicUsize::new(0);
 
 
 
@@ -98,9 +81,6 @@ const TRASH_PREFIX: &str = ".axlat_";
 struct Shared {
     cache_root: PathBuf,
     start: Instant,
-    // Hozir tarmoqdan yuklanayotgan "key#index" bo'laklari — parallel
-    // so'rovlar bir xil bo'lakni ikki marta yuklab olmasligi uchun.
-    in_flight: Mutex<HashSet<String>>,
     logs: Mutex<Vec<String>>,
     agent: ureq::Agent,
     // Fon to'ldiruvchisi (filler) uchun joriy vazifa. Faqat BITTA
@@ -216,7 +196,6 @@ pub extern "C" fn rust_video_cache_start(cache_dir_ptr: *const c_char) -> i32 {
     let shared = Shared {
         cache_root,
         start: Instant::now(),
-        in_flight: Mutex::new(HashSet::new()),
         logs: Mutex::new(Vec::new()),
         agent,
         warm_agent,
@@ -1271,57 +1250,20 @@ const DOWNLOAD_WORKERS: usize = 2;
 /// TALAB: "yuklab olish tugmasi bosilsa, fayl hech qanday cheklovsiz,
 /// foydalanuvchi interneti qancha tez bo'lsa shuncha tez olinsin".
 ///
-/// Shu sabab yuklab olish oqimlari:
-///   * 8 ta (mobil tarmoqdagi yuqori kechikishni "yashirish" uchun —
-///     tezlik amalda oqimlar soniga proporsional o'sadi);
-///   * NAVBATDA KUTMAYDI: `fetch_and_store_chunk` ga `no_queue = true`
-///     bilan boradi, ya'ni MAX_NET_FETCHES ularni ushlab qolmaydi.
+/// Shu sabab yuklab olish 6 ta oqimda ketadi: mobil tarmoqdagi
+/// yuqori kechikish shu bilan "yashiriladi" va tezlik amalda
+/// oqimlar soniga proporsional o'sadi.
 ///
-/// Yagona chegara — oqimlar soni, va u xotira uchun kerak: bir vaqtda
-/// eng ko'pi 12 x 1 MiB bufer bo'ladi. Tezlikni esa endi faqat
+/// MUHIM: oqimlar endi umumiy navbatdan emas, HAR BIRI O'Z
+/// YO'LAGIDAN (`Lane`) oladi va yo'lagi tugasa boshqasining ishini
+/// bo'lishib oladi. Shu sabab oxirgi baytgacha 6 tasi ham band
+/// bo'ladi — yuklash oxiriga borib sekinlashmaydi.
+///
+/// Yagona chegara — oqimlar soni, va u xotira uchun kerak: bir
+/// vaqtda eng ko'pi 6 x 1 MiB bufer bo'ladi. Tezlikni esa faqat
 /// foydalanuvchining tarmog'i belgilaydi.
 const DOWNLOAD_THREADS: usize = 6;
 
-/// ── BITTA USTKI SO'ROVDA NECHTA BO'LAK OLINADI ────────────────
-///
-/// Diskda bo'laklar avvalgidek 1 MiB bo'lib, alohida shifrlangan
-/// holda saqlanadi — sek, foiz hisobi va uzilishdan keyin davom
-/// ettirish shunga tayanadi va o'zgarmaydi.
-///
-/// LEKIN worker'ga (va u orqali B2'ga) so'rov endi bo'lakma-bo'lak
-/// emas, GURUH bilan yuboriladi.
-///
-/// NEGA: har bir ustki so'rov B2'da bitta "Class B" tranzaksiya —
-/// ya'ni PUL. 1 MiB bo'lak bilan 166 MB'lik video = 166 ta so'rov
-/// edi. 10 tadan guruh bilan bu 17 ga tushadi, ya'ni B2 xarajati
-/// O'N BAROBAR kamayadi. Ustiga har bir so'rovning yo'l vaqti
-/// (latency) endi 1 MiB'ga emas, 10 MiB'ga taqsimlanadi — shu sabab
-/// yuklab olish TEZLIGI ham oshadi.
-///
-/// Xotira oshmaydi: javob oqimi bo'lakma-bo'lak o'qiladi, bir vaqtda
-/// faqat bitta 1 MiB bufer turadi (`fetch_and_store_chunk` ga
-/// qarang).
-///
-/// 8 -> 16 bo'lak, ya'ni bitta so'rovda 16 MiB (foydalanuvchi
-/// talabi: "boʻlaklarni kattaroq qilsak boʻladimi, workerga
-/// ketadigan soʻrovlar sonini tejash uchun").
-///
-/// NEGA 16 MiB, 10 MB EMAS: kesh oynasi 480 MiB va `480 / 16 = 30`
-/// — butun son. Ya'ni guruh hech qachon ikki oyna chegarasini
-/// kesib o'tmaydi. `480 / 10` esa butun emas: chegaraga tushgan
-/// guruh kesilib, qolgani alohida, sekin yo'l bilan olinardi.
-///
-/// Natija: 166 MB'lik qism uchun so'rovlar soni 21 -> 11.
-///
-/// Bu FAQAT YUKLAB OLISH yo'liga tegishli. Pleyer mahalliy
-/// serverdan faqat DISKDAGI bo'laklarni oladi va tarmoqqa umuman
-/// chiqmaydi.
-///
-/// Guruh kattalashgani sayin "pauza"da havoda qolgan oqim ham
-/// kattalashadi — shu sabab pauza endi oqimni O'RTASIDAN uzadi
-/// (pastdagi `'outer` sikliga qarang), ya'ni pauzadan keyin bitta
-/// ham ortiqcha bayt kelmaydi.
-const GROUP_CHUNKS: u64 = 16;
 
 /// ── SERVERNING HAQIQIY ORALIQ CHEGARASI ────────────────────────
 ///
@@ -1336,7 +1278,8 @@ const GROUP_CHUNKS: u64 = 16;
 /// natijada foiz 80% ga borib SUDRALIB qolardi.
 ///
 /// Endi ikki himoya bor:
-///   1) `GROUP_CHUNKS = 8` — so'rov worker chegarasiga aynan mos;
+///   1) `DL_REQUEST_CHUNKS` worker'ning `RANGE_MAX` chegarasiga
+///      aynan mos qilib tanlangan;
 ///   2) shunga qaramay server so'ralganidan KAM qaytarsa, uning
 ///      haqiqiy chegarasi shu yerda ESLAB QOLINADI va keyingi
 ///      so'rovlar o'sha o'lchamda yuboriladi. Ya'ni server
@@ -1544,28 +1487,6 @@ fn restore_queue() {
     }
 }
 
-/// Shu bo'lakni AYNI PAYTDA boshqa ish oqimi olayaptimi.
-///
-/// Yuklab olish uchun kerak: pleyer (yoki oldindan yuklash) allaqachon
-/// olayotgan bo'lakni KUTIB o'tirmaymiz — uni chetga qo'yib, keyingi
-/// bo'lakka o'tamiz va oxirida qaytib kelamiz.
-///
-/// NEGA: `fetch_and_store_chunk` bir xil bo'lakni ikki marta
-/// yuklamaslik uchun 6 SONIYAGACHA kutadi. Video ochiq turganda
-/// foydalanuvchi yuklab olishni bosса, yuklovchining hamma oqimlari
-/// aynan pleyer olayotgan birinchi bo'laklarga urilib, o'sha yerda
-/// kutib qolardi — yuklab olish shu sabab sudralib ketardi.
-fn chunk_in_flight(shared: &Shared, key: &str, index: u64) -> bool {
-    // Yuklovchi guruh bilan ishlaydi, shu sabab uning "uchish"
-    // kaliti ham guruh boshiga tekislangan bo'ladi.
-    let first = (index / GROUP_CHUNKS) * GROUP_CHUNKS;
-    let flight_key = format!("{key}#s{GROUP_CHUNKS}:{first}");
-    shared
-        .in_flight
-        .lock()
-        .map(|s| s.contains(&flight_key))
-        .unwrap_or(false)
-}
 
 /// Yuklash NAVBATDA yoki KETAYAPTIMI (foydalanuvchi uchun ikkalasi
 /// ham "yuklanmoqda" degani).
@@ -1720,31 +1641,164 @@ fn pool_worker() {
     }
 }
 
-/// Bitta bo'lakni olishga urinishning natijasi.
-enum ChunkRes {
-    /// Tarmoqdan olindi va diskka tushdi.
-    Ok,
-    /// Ayni payt boshqa oqim (pleyer) olyapti — chetga qo'yiladi va
-    /// navbat oxirida qaytib olinadi. XATO EMAS.
-    Deferred,
-    /// Bir necha urinishdan keyin ham olinmadi.
-    Failed(String),
+/// ── BITTA SO'ROVDA ENG KO'PI SHUNCHA BO'LAK ───────────────────
+///
+/// Worker isitilgan oynadan baytlarni OQIM bilan kesib beradi
+/// (xotiraga yig'ilmaydi), shu sabab bitta so'rov katta bo'lishi
+/// mumkin. Bu to'g'ridan-to'g'ri xarajat: 166 MB'lik video
+/// 16 MiB'lik so'rovlarda 11 ta, 64 MiB'lik so'rovlarda esa
+/// atigi 6 ta so'rov bo'ladi.
+///
+/// Worker tomondagi `RANGE_MAX` bilan AYNAN bir xil bo'lishi
+/// kerak. Farq bo'lib qolsa ham xato bo'lmaydi: `note_server_span`
+/// serverning haqiqiy chegarasini birinchi javobdayoq o'rganib
+/// oladi va keyingi so'rovlar shunga moslashadi.
+const DL_REQUEST_CHUNKS: u64 = 64;
+
+/// ── YO'LAK (LANE): BITTA OQIMGA TEGISHLI UZLUKSIZ BO'LAK ──────
+///
+/// TUZATILGAN XATO (foydalanuvchi: "yuklab olish oxiriga qarab
+/// toshbaqadanham battar sekinlashib, sal kam to'xtab qolyabdi").
+///
+/// SABABI. Ilgari navbat "guruh" (16 MiB) birligida yuritilardi:
+/// 6 ta oqim umumiy hisoblagichdan navbatdagi guruh raqamini
+/// olardi, navbat tugagach esa oqim BUTUNLAY chiqib ketardi.
+/// 166 MB'lik videoda guruhlar soni 11 ta, ya'ni:
+///
+///     1-bosqich:  6 ta oqim  ->  0..5  guruhlar
+///     2-bosqich:  5 ta oqim  ->  6..10 guruhlar
+///     oxirida:    1 ta oqim  ->  oxirgi guruh YOLG'IZ qoladi
+///
+/// Tezlik esa deyarli to'g'ridan-to'g'ri OQIMLAR SONIGA
+/// proporsional (har bir so'rovning o'z yo'l vaqti bor va u
+/// faqat parallellik bilan "yashiriladi"). Shu sabab boshida
+/// 6 x 0.83 = ~5 MB/s bo'lgan tezlik oxirgi guruhda AYNAN bitta
+/// oqimning tezligiga — ~800 KB/s ga tushib qolardi va o'sha
+/// oxirgi 16 MiB 20 soniyacha sudralardi. Foydalanuvchi aytgan
+/// raqamlar (5 MB/s -> 800 KB/s, ya'ni roppa-rosa 6 barobar)
+/// buni aniq tasdiqlaydi.
+///
+/// YECHIM — "YO'LAK + ISH O'G'IRLASH" (segmented download):
+///
+///   1) Oyna ichidagi yetishmayotgan bo'laklar 6 ta TENG yo'lakka
+///      bo'linadi; har bir oqim FAQAT o'z yo'lagini boshidan
+///      oxirigacha ketma-ket oladi.
+///   2) Yo'laklar teng bo'lgani uchun oqimlar deyarli BIR VAQTDA
+///      tugaydi — "yolg'iz qolgan oxirgi guruh" degan holat
+///      umuman yo'q.
+///   3) Kimdir baribir oldin tugatsa (masalan yo'lagining bir
+///      qismi allaqachon diskda edi), u BO'SH TURMAYDI: eng ko'p
+///      ish qolgan yo'lakning ORQA YARMINI o'ziga oladi — "ish
+///      o'g'irlash". Qurbon yo'lak shu zahoti o'z chegarasini
+///      qisqartiradi.
+///   4) O'g'irlash chegarasi hech qachon HOZIR HAVODA turgan
+///      so'rovdan berini kesmaydi (`hold`), ya'ni bitta bayt ham
+///      ikki marta olinmaydi.
+///
+/// Natija: birinchi baytdan oxirgi baytgacha 6 ta oqim ham
+/// to'xtovsiz ishlaydi — tezlik oxirigacha BIR XIL qoladi.
+///
+/// Yo'laklar HAMMASI bitta qulf ostida turadi. Ular juda kam
+/// o'zgaradi (bitta so'rov — bitta o'zgarish, ya'ni 64 MiB'ga bir
+/// marta), shu sabab qulf hech narsani sekinlashtirmaydi; buning
+/// evaziga "o'g'irlash" bilan "yangi so'rov ochish" o'rtasidagi
+/// poyga IMKONSIZ bo'ladi va bitta bayt ham ikki marta olinmaydi.
+#[derive(Clone, Copy)]
+struct Lane {
+    /// Keyingi olinishi kerak bo'lgan bo'lak raqami.
+    next: u64,
+    /// Yo'lak chegarasi (bu raqam KIRMAYDI). O'g'irlashda
+    /// qisqarishi mumkin.
+    end: u64,
+    /// HOZIR havoda turgan so'rov qamrab olgan chegara (bu raqam
+    /// kirmaydi). O'g'irlovchi bundan berini hech qachon olmaydi.
+    hold: u64,
+}
+
+/// Bitta oqim uchun navbatdagi ish: `first..=last` bo'laklar.
+type Claim = Option<(u64, u64)>;
+
+/// Bo'sh qolgan yo'lakka boshqasining ORQA YARMINI olib beradi.
+/// Qulf CHAQIRUVCHIDA ushlab turilgan bo'lishi kerak.
+fn steal_locked(ls: &mut [Lane], me: usize) -> bool {
+    let mut best = usize::MAX;
+    let mut best_rem = 0u64;
+    for (j, l) in ls.iter().enumerate() {
+        if j == me {
+            continue;
+        }
+        let base = l.next.max(l.hold);
+        let rem = l.end.saturating_sub(base);
+        if rem > best_rem {
+            best_rem = rem;
+            best = j;
+        }
+    }
+    // Ikkiga bo'lishga arzimasa — hamma ish taqsimlangan.
+    if best == usize::MAX || best_rem < 2 {
+        return false;
+    }
+    let base = ls[best].next.max(ls[best].hold);
+    let old_end = ls[best].end;
+    let mid = base + (old_end - base) / 2;
+    ls[best].end = mid;
+    ls[me].next = mid;
+    ls[me].hold = mid;
+    ls[me].end = old_end;
+    true
+}
+
+/// Oqim uchun navbatdagi so'rov oralig'ini ajratadi.
+///
+/// Diskda allaqachon bor bo'laklar o'tkazib yuboriladi (ular
+/// `cached` ro'yxatiga yig'iladi — hisobni qulfdan TASHQARIDA
+/// yangilash uchun), yo'lak tugagan bo'lsa ish o'g'irlanadi.
+/// `None` — butun oyna bo'yicha ish qolmadi.
+fn claim_next(
+    lanes: &Mutex<Vec<Lane>>,
+    me: usize,
+    dir: &PathBuf,
+    total: u64,
+    cached: &mut Vec<u64>,
+) -> Claim {
+    let mut ls = lanes.lock().ok()?;
+    // Har bir muvaffaqiyatli o'g'irlash taqsimlanmagan ishni
+    // KAMAYTIRADI (yarmiga bo'ladi), shu sabab bu sikl albatta
+    // tugaydi: yo ish topiladi, yo o'g'irlanadigan narsa qolmaydi.
+    loop {
+        // Diskda bor bo'laklarni o'tkazib yuboramiz.
+        let mut i = ls[me].next;
+        while i < ls[me].end && chunk_cached(dir, i, total) {
+            cached.push(i);
+            i += 1;
+        }
+        ls[me].next = i;
+        if i < ls[me].end {
+            let last = (ls[me].end - 1).min(i + DL_REQUEST_CHUNKS - 1);
+            // "Bu yergacha meniki" — o'g'irlovchi bundan berini
+            // hech qachon olmaydi.
+            ls[me].hold = last + 1;
+            return Some((i, last));
+        }
+        // Yo'lak tugadi — bo'sh turmaymiz.
+        if !steal_locked(&mut ls, me) {
+            return None;
+        }
+    }
 }
 
 /// Bitta videoni yuklaydi (bitta bosqich).
 ///
-/// Bo'laklar DOWNLOAD_THREADS ta oqimda PARALLEL olinadi: navbat —
-/// oddiy atomik hisoblagich, har bir oqim keyingi raqamni olib o'sha
-/// bo'lakni yuklaydi. Shu bilan tarmoq kechikishi "yashiriladi" va
-/// tezlik faqat foydalanuvchining internetiga bog'liq bo'ladi.
+/// Ish OYNA-OYNA boradi (tanbal keshlash qoidasi buzilmasin:
+/// faqat kerak bo'lgan oyna isitiladi), oyna ichida esa
+/// yetishmayotgan bo'laklar teng yo'laklarga bo'linib, hamma
+/// oqim oxirgi baytgacha band bo'ladi (yuqoridagi `Lane` izohi).
 ///
-/// ── QAT'IY QOIDA: BITTA BO'LAKNING XATOSI QOLGANINI TO'XTATMAYDI ──
-/// Ilgari birinchi xatoda 12 ta oqimning HAMMASI to'xtardi va butun
-/// vazifa uzoq kutishga ketardi. Endi xato bo'lgan bo'lak uchun
-/// o'sha oqimning O'ZI qisqa tanaffus bilan 3 marta urinib ko'radi;
-/// baribir olinmasa — chetga yoziladi va oqim KEYINGI bo'lakka
-/// o'tadi. Bosqich oxirida yetishmaganlari bo'lsa, vazifa darhol
-/// yangi bosqich bilan davom etadi.
+/// ── QAT'IY QOIDA: BITTA XATO QOLGANINI TO'XTATMAYDI ──
+/// Xato bo'lgan yo'lak qisqa tanaffus bilan qayta urinadi;
+/// uch marta ketma-ket bo'lmasa — bo'lak o'tkazib yuboriladi va
+/// bosqich oxiridagi DISK tekshiruvi uni baribir ko'radi, vazifa
+/// esa darhol yangi bosqich bilan davom etadi.
 fn run_download(key: &str, url: &str) -> Result<DlOutcome, String> {
     let Some(shared) = SHARED.get() else {
         return Err("kesh-server ishga tushmagan".to_string());
@@ -1777,232 +1831,193 @@ fn run_download(key: &str, url: &str) -> Result<DlOutcome, String> {
     let _ = stat_snapshot(key, &dir);
 
     let count = total.div_ceil(CHUNK_SIZE);
-    // Navbat GURUHLAR bo'yicha yuritiladi (yuqoridagi izohga qarang).
-    let group_count = count.div_ceil(GROUP_CHUNKS);
-    // Navbat: keyingi olinadigan GURUH raqami.
-    let cursor = Arc::new(AtomicU64::new(0));
-    // AYNI PAYTDA boshqa ish oqimi (pleyer yoki oldindan yuklash)
-    // olayotgan bo'laklar shu yerga chetga qo'yiladi va navbat
-    // tugagach qaytib olinadi — ular ustida KUTIB turilmaydi.
-    let deferred: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+    let win_chunks = (WARM_WINDOW / CHUNK_SIZE).max(1);
+    let windows = count.div_ceil(win_chunks).max(1);
+
     // Foydalanuvchi pauza bosdimi (oqimlar buni ko'rib chiqadi).
     let paused = Arc::new(AtomicBool::new(false));
-    // Birinchi xato — faqat jurnal va xabar uchun; u endi qolgan
-    // oqimlarni TO'XTATMAYDI.
+    // Birinchi xato — faqat jurnal va xabar uchun.
     let first_err: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    // Shu bosqichda TARMOQDAN muvaffaqiyatli olingan bo'laklar soni.
+    // Shu bosqichda TARMOQDAN muvaffaqiyatli olingan so'rovlar soni.
     let done_count = Arc::new(AtomicU64::new(0));
-    // Uch urinishdan keyin ham olinmagan bo'laklar soni.
-    let failed_count = Arc::new(AtomicU64::new(0));
 
-    let mut workers = Vec::with_capacity(DOWNLOAD_THREADS);
-    for _ in 0..DOWNLOAD_THREADS {
-        let cursor = Arc::clone(&cursor);
-        let deferred = Arc::clone(&deferred);
-        let paused = Arc::clone(&paused);
-        let first_err = Arc::clone(&first_err);
-        let done_count = Arc::clone(&done_count);
-        let failed_count = Arc::clone(&failed_count);
-        let (k, d, u) = (key.to_string(), dir.clone(), url.to_string());
-        let h = thread::Builder::new()
-            .name("video-download-w".into())
-            // Kichik stek yetarli: oqim faqat bitta bo'lakni oladi
-            // va diskka yozadi.
-            .stack_size(256 * 1024)
-            .spawn(move || loop {
-                if paused.load(Ordering::SeqCst) {
-                    break;
-                }
-                // ═══════════════════════════════════════════════
-                //  ISH BIRLIGI — BITTA GURUH (16 MiB)
-                // ═══════════════════════════════════════════════
-                //
-                // TUZATILGAN XATO (foydalanuvchi: "yuklash boshida
-                // 5 MB/s, oxiriga borib 800 KB/s ga tushib qoladi"):
-                //
-                // Ilgari navbatdan BITTA BO'LAK olinardi, tarmoqqa
-                // esa 16 bo'lakli GURUH so'ralardi. Natijada 1-oqim
-                // 0-bo'lakni olib butun 0-15 guruhini tortar, qolgan
-                // 5 oqim esa 1, 2, 3... bo'laklarni olib AYNAN O'SHA
-                // guruhga urilar va "band" deb chetga qo'yilardi.
-                //
-                // Ya'ni 6 ta oqimdan amalda FAQAT BITTASI ishlardi,
-                // bo'laklarning 15/16 qismi esa "chetga qo'yilganlar"
-                // ro'yxatiga tushib, oxirida bittalab, kutish bilan
-                // yig'ishtirilardi. Tezlik aynan shu sabab oxiriga
-                // borib tushib ketardi (guruh 8 dan 16 ga oshirilgach
-                // bu yanada kuchaydi).
-                //
-                // ENDI navbat GURUHLAR bo'yicha yuritiladi: har bir
-                // oqim O'Z guruhini oladi — 6 oqim haqiqatan parallel
-                // ishlaydi (6 x 16 = 96 MiB havoda) va chetga qo'yish
-                // deyarli umuman bo'lmaydi.
-                let n = cursor.fetch_add(1, Ordering::SeqCst);
-                let (g, second_pass) = if n < group_count {
-                    (n, false)
-                } else {
-                    match deferred.lock().ok().and_then(|mut d| d.pop()) {
-                        Some(x) => (x, true),
-                        None => break,
-                    }
-                };
-                if !download_active(&k) {
-                    paused.store(true, Ordering::SeqCst);
-                    break;
-                }
-
-                let g_first = g * GROUP_CHUNKS;
-                let g_last = (g_first + GROUP_CHUNKS - 1).min(count - 1);
-
-                // Guruhdagi diskda YO'Q birinchi bo'lakni topamiz.
-                // Hammasi joyida bo'lsa — guruh tayyor, tarmoqqa
-                // umuman chiqilmaydi.
-                let mut missing: Option<u64> = None;
-                for i in g_first..=g_last {
-                    if chunk_cached(&d, i, total) {
-                        stat_note_chunk(&k, i, chunk_plain_len(i, total));
-                    } else if missing.is_none() {
-                        missing = Some(i);
-                    }
-                }
-                let Some(start_idx) = missing else { continue };
-
-                // Guruhni ayni paytda boshqa oqim olayotgan bo'lsa —
-                // kutmaymiz, chetga qo'yamiz va keyingisiga o'tamiz.
-                if !second_pass && chunk_in_flight(shared, &k, start_idx) {
-                    if let Ok(mut dd) = deferred.lock() {
-                        dd.push(g);
-                    }
-                    continue;
-                }
-                // Chetga qo'yilgan guruh (ikkinchi bosqich): uni
-                // boshqa oqim olayotgan bo'lishi mumkin, shu sabab
-                // avval diskda paydo bo'lishini qisqa kutamiz.
-                if second_pass {
-                    let deadline = Instant::now() + Duration::from_secs(4);
-                    while Instant::now() < deadline {
-                        if chunk_cached(&d, start_idx, total)
-                            || !download_active(&k)
-                            || !chunk_in_flight(shared, &k, start_idx)
-                        {
-                            break;
-                        }
-                        thread::sleep(Duration::from_millis(100));
-                    }
-                }
-
-                // ── TANBAL KESHLASH: shu guruh qaysi oynada? ──
-                ensure_window_for_download(&u, &k, start_idx * CHUNK_SIZE);
-                if !download_active(&k) {
-                    paused.store(true, Ordering::SeqCst);
-                    break;
-                }
-
-                let mut res = ChunkRes::Failed("urinilmadi".to_string());
-                for attempt in 0..3u32 {
-                    if !download_active(&k) {
-                        paused.store(true, Ordering::SeqCst);
-                        break;
-                    }
-                    // Guruhdagi hali yo'q birinchi bo'lakni so'raymiz:
-                    // `fetch_and_store_chunk` uni GURUH bilan oladi va
-                    // hammasini diskka yozadi.
-                    let idx = (g_first..=g_last)
-                        .find(|i| !chunk_cached(&d, *i, total))
-                        .unwrap_or(start_idx);
-                    let c_start = idx * CHUNK_SIZE;
-                    let c_end = (c_start + CHUNK_SIZE - 1).min(total - 1);
-                    match fetch_and_store_chunk(
-                        shared,
-                        &k,
-                        &d,
-                        &u,
-                        idx,
-                        c_start,
-                        c_end,
-                        (c_end - c_start + 1) as usize,
-                        total,
-                        FetchPrio::Download,
-                        None,
-                    ) {
-                        Ok(_) => {
-                            // Guruh TO'LIQ tushdimi? Yarim olingan
-                            // bo'lsa qoldiq saqlanadi va keyingi
-                            // urinish o'sha joydan davom etadi.
-                            if (g_first..=g_last).all(|i| chunk_cached(&d, i, total)) {
-                                res = ChunkRes::Ok;
-                                break;
-                            }
-                            res = ChunkRes::Failed(format!(
-                                "#{g} guruh to'liq olinmadi"
-                            ));
-                        }
-                        Err(e) if e == BUSY_ERR => {
-                            res = ChunkRes::Deferred;
-                            break;
-                        }
-                        Err(e) => {
-                            res = ChunkRes::Failed(e);
-                        }
-                    }
-                    // Qisqa tanaffus — tarmoq bir lahzaga uzilgan
-                    // bo'lsa shu yerda tiklanadi (uzoq kutish YO'Q).
-                    if attempt < 2 {
-                        thread::sleep(Duration::from_millis(300 * (attempt as u64 + 1)));
-                    }
-                }
-
-                match res {
-                    ChunkRes::Ok => {
-                        for i in g_first..=g_last {
-                            stat_note_chunk(&k, i, chunk_plain_len(i, total));
-                        }
-                        done_count.fetch_add(1, Ordering::SeqCst);
-                    }
-                    ChunkRes::Deferred => {
-                        if let Ok(mut dd) = deferred.lock() {
-                            dd.push(g);
-                        }
-                    }
-                    ChunkRes::Failed(e) => {
-                        failed_count.fetch_add(1, Ordering::SeqCst);
-                        if let Ok(mut slot) = first_err.lock() {
-                            if slot.is_none() {
-                                *slot = Some(e);
-                            }
-                        }
-                        // TO'XTAMAYMIZ — keyingi guruhga o'tamiz.
-                    }
-                }
-            });
-        match h {
-            Ok(h) => workers.push(h),
-            Err(_) => log("XATO: yuklab olish oqimi ochilmadi".to_string()),
+    for widx in 0..windows {
+        if paused.load(Ordering::SeqCst) || !download_active(key) {
+            break;
         }
-    }
-    // Birorta oqim ochilmagan bo'lsa — vazifa bajarilmadi.
-    if workers.is_empty() {
-        return Err("yuklab olish oqimlari ochilmadi".to_string());
-    }
-    for w in workers {
-        let _ = w.join();
+        let w_first = widx * win_chunks;
+        let w_last = (w_first + win_chunks - 1).min(count - 1);
+
+        // Oynadagi hamma bo'lak diskda bo'lsa — u UMUMAN isitilmaydi
+        // (B2'ga ham, worker'ga ham bitta so'rov ketmaydi).
+        let mut missing_first: Option<u64> = None;
+        for i in w_first..=w_last {
+            if chunk_cached(&dir, i, total) {
+                stat_note_chunk(key, i, chunk_plain_len(i, total));
+            } else if missing_first.is_none() {
+                missing_first = Some(i);
+            }
+        }
+        let Some(start_idx) = missing_first else {
+            continue;
+        };
+
+        // ── TANBAL KESHLASH: FAQAT SHU OYNA ISITILADI ──
+        ensure_window_for_download(url, key, widx * WARM_WINDOW);
+        if !download_active(key) {
+            paused.store(true, Ordering::SeqCst);
+            break;
+        }
+
+        // ── YO'LAKLARNI TENG BO'LIB CHIQAMIZ ──
+        let span = w_last + 1 - start_idx;
+        let lanes_n = (DOWNLOAD_THREADS as u64).min(span).max(1) as usize;
+        let per = span / lanes_n as u64;
+        let extra = span % lanes_n as u64;
+        let mut lane_vec: Vec<Lane> = Vec::with_capacity(lanes_n);
+        let mut cur = start_idx;
+        for i in 0..lanes_n as u64 {
+            let len = per + if i < extra { 1 } else { 0 };
+            lane_vec.push(Lane {
+                next: cur,
+                end: cur + len,
+                hold: cur,
+            });
+            cur += len;
+        }
+        let lanes = Arc::new(Mutex::new(lane_vec));
+
+        let mut workers = Vec::with_capacity(lanes_n);
+        for me in 0..lanes_n {
+            let lanes = Arc::clone(&lanes);
+            let paused = Arc::clone(&paused);
+            let first_err = Arc::clone(&first_err);
+            let done_count = Arc::clone(&done_count);
+            let (k, d, u) = (key.to_string(), dir.clone(), url.to_string());
+            let h = thread::Builder::new()
+                .name("video-download-w".into())
+                // Kichik stek yetarli: oqim faqat bitta bo'lakni
+                // xotirada tutadi va diskka yozadi.
+                .stack_size(256 * 1024)
+                .spawn(move || {
+                    let mut fails: u32 = 0;
+                    // Diskda topilgan bo'laklar — hisob qulfdan
+                    // TASHQARIDA yangilanadi.
+                    let mut cached: Vec<u64> = Vec::new();
+                    loop {
+                        if paused.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        if !download_active(&k) {
+                            paused.store(true, Ordering::SeqCst);
+                            break;
+                        }
+                        // ── NAVBATDAGI ISHNI OLAMIZ ──
+                        // Qulf ostida: diskda bor bo'laklar
+                        // o'tkaziladi, yo'lak tugagan bo'lsa ish
+                        // o'g'irlanadi, oraliq esa `hold` bilan
+                        // BAND deb belgilanadi. Shu sabab ikkita
+                        // oqim hech qachon bir xil baytni
+                        // so'ramaydi.
+                        let claim = claim_next(&lanes, me, &d, total, &mut cached);
+                        for idx in cached.drain(..) {
+                            stat_note_chunk(&k, idx, chunk_plain_len(idx, total));
+                        }
+                        let Some((first, last)) = claim else { break };
+
+                        let res = fetch_span(shared, &k, &d, &u, first, last, total, &mut |idx| {
+                            stat_note_chunk(&k, idx, chunk_plain_len(idx, total));
+                            if let Ok(mut ls) = lanes.lock() {
+                                if idx + 1 > ls[me].next {
+                                    ls[me].next = idx + 1;
+                                }
+                            }
+                        });
+
+                        // Havodagi so'rov tugadi — `hold` bo'shaydi.
+                        let advanced = match lanes.lock() {
+                            Ok(mut ls) => {
+                                ls[me].hold = ls[me].next;
+                                ls[me].next > first
+                            }
+                            Err(_) => false,
+                        };
+
+                        match res {
+                            Ok(()) if advanced => {
+                                fails = 0;
+                                done_count.fetch_add(1, Ordering::SeqCst);
+                            }
+                            Ok(()) => {
+                                // Hech narsa siljimadi — cheksiz
+                                // aylanmaslik uchun bir bo'lak
+                                // oldinga suramiz. Yetishmagani
+                                // yakuniy disk tekshiruvida
+                                // ko'rinadi va keyingi bosqichda
+                                // olinadi.
+                                fails = 0;
+                                if let Ok(mut ls) = lanes.lock() {
+                                    ls[me].next = first + 1;
+                                    ls[me].hold = ls[me].next;
+                                }
+                            }
+                            Err(e) => {
+                                if let Ok(mut slot) = first_err.lock() {
+                                    if slot.is_none() {
+                                        *slot = Some(e);
+                                    }
+                                }
+                                if advanced {
+                                    // Qisman olindi — bu ilgarilash,
+                                    // xato hisoblanmaydi.
+                                    fails = 0;
+                                    done_count.fetch_add(1, Ordering::SeqCst);
+                                    continue;
+                                }
+                                fails += 1;
+                                if fails >= 3 {
+                                    // Uch marta ketma-ket bo'lmadi —
+                                    // TO'XTAMAYMIZ, oldinga suramiz.
+                                    fails = 0;
+                                    if let Ok(mut ls) = lanes.lock() {
+                                        ls[me].next = first + 1;
+                                        ls[me].hold = ls[me].next;
+                                    }
+                                    continue;
+                                }
+                                // Qisqa tanaffus — tarmoq bir lahzaga
+                                // uzilgan bo'lsa shu yerda tiklanadi.
+                                thread::sleep(Duration::from_millis(300 * fails as u64));
+                            }
+                        }
+                    }
+                });
+            match h {
+                Ok(h) => workers.push(h),
+                Err(_) => log("XATO: yuklab olish oqimi ochilmadi".to_string()),
+            }
+        }
+        // Birorta oqim ochilmagan bo'lsa — vazifa bajarilmadi.
+        if workers.is_empty() {
+            return Err("yuklab olish oqimlari ochilmadi".to_string());
+        }
+        for w in workers {
+            let _ = w.join();
+        }
     }
 
     if paused.load(Ordering::SeqCst) || !download_active(key) {
         return Ok(DlOutcome::Paused);
     }
 
-    // YAKUNIY HAQIQAT — DISK. Chetga qo'yilgan bo'lak poyga sabab
-    // e'tibordan chetda qolgan bo'lsa ham, bu tekshiruv uni ko'radi.
+    // YAKUNIY HAQIQAT — DISK.
     let missing = (0..count).filter(|i| !chunk_cached(&dir, *i, total)).count() as u64;
     if missing == 0 {
         return Ok(DlOutcome::Done);
     }
     let done = done_count.load(Ordering::SeqCst);
-    let failed = failed_count.load(Ordering::SeqCst);
-    if done > 0 || failed == 0 {
-        // Ilgarilash bor (yoki xato umuman bo'lmagan, faqat band
-        // bo'laklar qolgan) — kutmasdan davom etamiz.
+    if done > 0 {
+        // Ilgarilash bor — kutmasdan davom etamiz.
         return Ok(DlOutcome::Partial(done));
     }
     Err(first_err
@@ -2355,28 +2370,6 @@ fn invalidate_cache(dir: &PathBuf) {
     }
 }
 
-/// Bo'lakni kim so'rayotgani — kutish qoidalari shunga qarab
-/// belgilanadi.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum FetchPrio {
-    /// PLEYER bo'lakni HOZIR kutyapti. Navbatda turmaydi; bo'lakni
-    /// boshqa oqim olayotgan bo'lsa uni 6 soniyagacha kutadi (ikki
-    /// marta yuklab olmaslik uchun), keyin o'zi oladi.
-    Player,
-    /// FOYDALANUVCHI yuklab olish tugmasini bosgan. Navbatda ham
-    /// turmaydi, band bo'lakni ham UMUMAN kutmaydi — `BUSY_ERR`
-    /// qaytadi va yuklovchi uni chetga qo'yib keyingi bo'lakka
-    /// o'tadi. Shu bilan yuklab olish oqimlari pleyer olayotgan
-    /// bo'laklarda kutib qolmaydi.
-    Download,
-    /// Fon'da OLDINDAN yuklash. Yagona qatlam — u MAX_NET_FETCHES
-    /// navbatida kutishi mumkin.
-    Prefetch,
-}
-
-/// "Bo'lakni ayni payt boshqa oqim olyapti" — bu XATO EMAS, faqat
-/// "keyinroq qaytib kel" degan belgi.
-const BUSY_ERR: &str = "__band__";
 
 // ═══════════════════════════════════════════════════════════════
 //  OYNANI KESHGA ISITISH (worker'dagi `/api/warm/...`)
@@ -3309,397 +3302,233 @@ fn write_full_chunk(dir: &PathBuf, key: &str, index: u64, plain: &[u8]) -> bool 
     true
 }
 
-fn fetch_and_store_chunk(
+/// ── BITTA SO'ROVDA KETMA-KET BO'LAKLARNI OLADI ────────────────
+///
+/// `first..=last` oralig'idagi bo'laklar BITTA uzoq HTTP so'rovda
+/// olinadi va baytlar kelishi bilan bittalab, shifrlanib, atom
+/// ravishda diskka yoziladi. Xotirada bir vaqtda faqat BITTA
+/// bo'lak (1 MiB) turadi — so'rov 64 MiB bo'lsa ham.
+///
+/// Har bir bo'lak diskka tushishi bilan `on_chunk` chaqiriladi:
+/// yo'lak (`Lane`) o'z hisobini shu orqali yuritadi, ya'ni oqim
+/// uzilib qolsa ham keyingi urinish AYNAN to'xtagan joyidan
+/// davom etadi.
+///
+/// Qaytadi:
+///   * `Ok(())`  — tarmoqdan baytlar olindi (hammasi bo'lmasa ham);
+///   * `Err(..)` — bitta ham bayt olinmadi.
+fn fetch_span(
     shared: &Shared,
     key: &str,
     dir: &PathBuf,
     url: &str,
-    index: u64,
-    _start: u64,
-    _end: u64,
-    expected_len: usize,
-    expected_total: u64,
-    prio: FetchPrio,
-    // ── OQIM: BAYTLAR KELISHI BILAN PLEYERGA UZATILADI ─────────
-    //
-    // TUZATILGAN XATO (sekin tarmoqda pleyer qotishi):
-    // ilgari server BUTUN 1 MiB bo'lak yuklanib bo'lgunicha
-    // pleyerga BIRORTA ham bayt bermasdi. Sekin mobil tarmoqda
-    // (masalan 1 Mbit/s) bitta bo'lak 8 soniyagacha kelardi —
-    // ExoPlayer'ning HTTP o'qish chegarasi esa AYNAN 8 soniya.
-    // Ya'ni bo'lak kech kelgan zahoti pleyer ulanishni xato deb
-    // uzardi.
-    //
-    // Endi baytlar tarmoqdan kelishi bilan DARHOL pleyerga
-    // uzatiladi (va bir vaqtda diskka ham yoziladi). Pleyer
-    // uchun oqim hech qachon jim qolmaydi. Telegram ham aynan
-    // shunday ishlaydi: uning ExoPlayer uchun yozgan manbasi
-    // (FileStreamLoadOperation) mavjud baytlarni darhol beradi,
-    // butun bo'lakni kutmaydi.
-    mut sink: Option<&mut dyn FnMut(u64, &[u8]) -> bool>,
-) -> Result<Vec<u8>, String> {
-    let total = expected_total;
+    first: u64,
+    last: u64,
+    total: u64,
+    on_chunk: &mut dyn FnMut(u64),
+) -> Result<(), String> {
     if total == 0 {
         return Err("hajm noma'lum".to_string());
     }
     let chunk_count = total.div_ceil(CHUNK_SIZE);
-    if index >= chunk_count {
-        return Err(format!("bo'lak #{index} fayldan tashqarida"));
+    if first >= chunk_count {
+        return Err(format!("bo'lak #{first} fayldan tashqarida"));
+    }
+    let last = last.min(chunk_count - 1);
+
+    // ── QOLDIQDAN DAVOM ETISH ──────────────────────────────────
+    // Oldingi urinishda birinchi bo'lakning bir qismi olinib,
+    // tarmoq uzilgan bo'lishi mumkin. O'sha qism diskda saqlangan:
+    // uni o'qib, tarmoqdan FAQAT yetishmayotgan dumini so'raymiz.
+    let first_len = chunk_plain_len(first, total) as usize;
+    let prefix = read_part(dir, key, first, first_len).unwrap_or_default();
+    let range_start = first * CHUNK_SIZE + prefix.len() as u64;
+    let range_end = clamp_span(
+        range_start,
+        ((last + 1) * CHUNK_SIZE).saturating_sub(1).min(total - 1),
+    );
+    if range_start > range_end {
+        return Err(format!("bo'lak #{first} uchun so'raladigan oraliq bo'sh"));
     }
 
-    // ── QANCHA OLINADI: PLEYER 1 MiB, YUKLOVCHI GURUH ──────────
-    //
-    // MUHIM QOIDA (foydalanuvchi trafigini tejash):
-    //   * PLEYER (va oldindan yuklash) har safar ATIGI BITTA 1 MiB
-    //     bo'lak oladi. Guruh bilan olinsa, 30 soniyalik bufer
-    //     chegarasi guruh chegarasigacha yaxlitlanib, keragidan
-    //     ko'p yuklanardi: 1 daqiqalik 10 MB'lik videoda pleyer
-    //     hali ishga tushmasidan butun fayl olinib qolardi.
-    //   * YUKLAB OLISH esa baribir butun faylni oladi, shu sabab u
-    //     4 tadan guruh bilan ishlaydi (kamroq so'rov, tezroq).
-    //
-    // Bu B2 xarajatiga TA'SIR QILMAYDI: fayl allaqachon Cloudflare
-    // keshiga isitilgan bo'ladi, ya'ni pleyerning bo'lak-bo'lak
-    // so'rovlari B2'ga umuman bormaydi — chekkadan xizmat qilinadi.
-    let span = if prio == FetchPrio::Download {
-        GROUP_CHUNKS
-    } else {
-        1
-    };
-    let g_first = (index / span) * span;
-    let g_last = (g_first + span - 1).min(chunk_count - 1);
-    // "Uchish" belgisi: bir xil oraliqni ikkita oqim baravar tortib
-    // olmasligi uchun. Kalitga `span` ham kiradi — pleyerning bitta
-    // bo'lagi bilan yuklovchining guruhi bir-birini chalkashtirmasin.
-    let flight_key = format!("{key}#s{span}:{g_first}");
+    // ── OYNANI ISITISH ─────────────────────────────────────────
+    // Odatda oyna `ensure_window_for_download` bilan allaqachon
+    // isitilgan bo'ladi va bu ikki chaqiruv darhol qaytadi. Bu
+    // yerdagisi — himoya: kesh o'chib ketgan bo'lsa ham so'rov
+    // B2'ga emas, baribir keshga boradi.
+    maybe_warm(url, key, range_start);
+    wait_for_warm(key, range_start);
+    if !download_active(key) {
+        return Err("pauza".to_string());
+    }
 
-    // Boshqa ish oqimi bu guruhni bizdan oldin allaqachon yuklab
-    // boshlagan bo'lishi mumkin — bunday holda kerakli bo'lak diskda
-    // paydo bo'lishini kutamiz, ikkinchi marta tarmoqqa chiqmaymiz.
+    log(format!(
+        "Bo'laklar {first}..={last} worker'dan olinmoqda ({range_start}-{range_end})..."
+    ));
+    let resp = shared
+        .agent
+        .get(url)
+        .set("Range", &format!("bytes={range_start}-{range_end}"))
+        .call()
+        .map_err(|e| e.to_string())?;
+    let status = resp.status();
+
+    // ── BUTUNLIK TEKSHIRUVI ────────────────────────────────────
+    // Server so'ralgan ORALIQNI qisqartirdimi — chegarasini eslab
+    // qolamiz (`SERVER_SPAN_MAX` izohiga qarang). Faqat
+    // `Content-Range`ga ishoniladi.
     //
-    // Kutish 6 soniya bilan chegaralangan: shu vaqt ichida bo'lak
-    // paydo bo'lmasa, biz uni O'ZIMIZ olamiz. Ikki marta yuklab olish
-    // — pleyerning qotib qolishidan ming marta yaxshiroq, ustiga
-    // diskka yozish atom (tmp -> rename) bo'lgani uchun xavfsiz.
-    // ── BAND BO'LAKNI KUTISH MUDDATI ──────────────────────────
-    //
-    // PLEYER uchun 6 -> 2 soniya. Sabab: kutish davomida pleyerga
-    // BITTA HAM BAYT bormaydi, ExoPlayer'ning chegarasi esa 8
-    // soniya. 2 soniya tez tarmoqda ikkilanishning oldini olishga
-    // yetadi; undan uzog'ida bo'lakni o'zimiz olganimiz — pleyerni
-    // qotirib qo'yishdan yaxshiroq.
-    let wait_deadline = Instant::now()
-        + if prio == FetchPrio::Player {
-            Duration::from_secs(2)
-        } else {
-            Duration::from_secs(6)
-        };
-    let mut we_own_flight = false;
-    loop {
-        {
-            let mut in_flight = shared.in_flight.lock().unwrap();
-            if !in_flight.contains(&flight_key) {
-                in_flight.insert(flight_key.clone());
-                we_own_flight = true;
-                break;
+    // MUHIM ISTISNO. Worker'da ikkita yo'l bor:
+    //   * ISITILGAN OYNADAN kesib berish (`X-Cache: HIT-WINDOW`) —
+    //     baytlar oqim bilan o'tadi, chegara HAQIQIY va doimiy;
+    //   * xotiraga yig'ib berish — B2'dan (`MISS`) yoki eski mayda
+    //     oraliq keshidan (`HIT-RANGE`). Bu yo'lda oraliq worker
+    //     xotirasini asrash uchun qisqartiriladi va bu uning
+    //     DOIMIY chegarasi EMAS.
+    // Ikkinchi yo'ldan "o'rgansak", keyingi barcha so'rovlar
+    // bekorga mayda bo'lib qolardi.
+    let memory_path = resp
+        .header("X-Cache")
+        .map(|v| {
+            let v = v.trim();
+            v.eq_ignore_ascii_case("MISS") || v.eq_ignore_ascii_case("HIT-RANGE")
+        })
+        .unwrap_or(false);
+    if !memory_path {
+        if let Some(cr) = resp.header("Content-Range") {
+            if let Some((s_str, e_str)) = cr
+                .trim()
+                .strip_prefix("bytes ")
+                .and_then(|r| r.split('/').next())
+                .and_then(|r| r.split_once('-'))
+            {
+                if let (Ok(rs), Ok(re)) =
+                    (s_str.trim().parse::<u64>(), e_str.trim().parse::<u64>())
+                {
+                    if re >= rs {
+                        note_server_span(range_end - range_start + 1, re - rs + 1);
+                    }
+                }
             }
         }
-        if let Some(bytes) = read_cached_chunk(dir, key, index, expected_len) {
-            return Ok(bytes);
+    }
+    // Serverning e'lon qilgan UMUMIY fayl hajmi diskdagi meta.json
+    // bilan mos kelmasa — manbadagi fayl o'zgargan va keshimiz
+    // ESKIRGAN. Eski bo'laklarni saqlash videoni buzib ko'rsatardi.
+    if let Some(cr) = resp.header("Content-Range") {
+        if let Some(server_total_str) = cr.rsplit('/').next() {
+            if let Ok(server_total) = server_total_str.trim().parse::<u64>() {
+                if server_total != total {
+                    log(format!(
+                        "XATO: hajm mos emas! meta.json={total}, serverda={server_total} — kesh tozalanmoqda"
+                    ));
+                    invalidate_cache(dir);
+                    forget_derived(key);
+                    return Err(format!(
+                        "hajm mos emas (meta={total}, server={server_total})"
+                    ));
+                }
+            }
         }
-        // YUKLAB OLISH hech qachon kutmaydi: band guruh chetga
-        // qo'yiladi va oqim darhol keyingi bo'lakka o'tadi.
-        if prio == FetchPrio::Download {
-            return Err(BUSY_ERR.to_string());
-        }
-        if Instant::now() >= wait_deadline {
-            log(format!(
-                "Bo'lak #{index} kutish muddati tugadi — mustaqil yuklab olinadi"
-            ));
+    }
+
+    // Manba Range'ni e'tiborsiz qoldirib TO'LIQ faylni (0-baytdan)
+    // yuborishi mumkin — bunday holda kerakli joygacha bo'lgan
+    // baytlar tashlab yuboriladi.
+    let mut skip = if status == 200 { range_start as usize } else { 0 };
+
+    // ── OQIMNI BO'LAKMA-BO'LAK DISKKA YOZAMIZ ──────────────────
+    let mut cur = first;
+    let mut want = first_len;
+    let mut acc: Vec<u8> = prefix;
+    let mut reader = resp.into_reader();
+    let mut buf = [0u8; 64 * 1024];
+    let mut read_err: Option<String> = None;
+    let mut got_net: u64 = 0;
+
+    'outer: loop {
+        // ── PAUZA: TARMOQ OQIMI DARHOL UZILADI ─────────────────
+        // Bayroq HAR 64 KB da tekshiriladi: pauza bosilsa o'qish
+        // shu yerda to'xtaydi, `reader` tashlanadi va TCP ulanish
+        // uziladi — trafik butunlay to'xtaydi. Yarim olingan bo'lak
+        // qoldiq sifatida diskda qoladi, shu sabab davom
+        // ettirilganda aynan o'sha joydan boshlanadi.
+        if !download_active(key) {
+            read_err = Some("pauza — oqim uzildi".to_string());
             break;
         }
-        thread::sleep(Duration::from_millis(50));
-    }
-
-    let result = (|| -> Result<Vec<u8>, String> {
-        // Boshqa ish oqimi biz kutayotganimizda ulgurgan bo'lishi
-        // mumkin — yana bir bor tekshiramiz.
-        if let Some(bytes) = read_cached_chunk(dir, key, index, expected_len) {
-            return Ok(bytes);
-        }
-
-        // ── Parallel yuklashlar chegarasi (MAX_NET_FETCHES izohiga
-        // qarang). Navbat 8 soniyadan ortiq kutilmaydi — undan keyin
-        // baribir yuklab olinadi, chunki javobsiz qolish eng yomon
-        // holat.
-        let queue_deadline = Instant::now() + Duration::from_secs(8);
-        if prio != FetchPrio::Prefetch {
-            // Pleyer kutyapti yoki foydalanuvchi yuklab olishni
-            // boshlagan — navbatga umuman turmaymiz.
-            NET_FETCHES.fetch_add(1, Ordering::SeqCst);
-        } else {
-            loop {
-                let cur = NET_FETCHES.load(Ordering::SeqCst);
-                if cur < MAX_NET_FETCHES {
-                    if NET_FETCHES
-                        .compare_exchange(cur, cur + 1, Ordering::SeqCst, Ordering::SeqCst)
-                        .is_ok()
-                    {
-                        break;
-                    }
-                    continue;
-                }
-                if Instant::now() >= queue_deadline {
-                    NET_FETCHES.fetch_add(1, Ordering::SeqCst);
-                    break;
-                }
-                if let Some(bytes) = read_cached_chunk(dir, key, index, expected_len) {
-                    return Ok(bytes);
-                }
-                thread::sleep(Duration::from_millis(30));
-            }
-        }
-        // Chegara hisoblagichi bu blok qanday tugashidan qat'i nazar
-        // albatta kamaytiriladi.
-        struct FetchGuard;
-        impl Drop for FetchGuard {
-            fn drop(&mut self) {
-                NET_FETCHES.fetch_sub(1, Ordering::SeqCst);
-            }
-        }
-        let _guard = FetchGuard;
-
-        // ── GURUHNING QAYSI JOYIDAN BOSHLAYMIZ ─────────────────
-        // Guruh boshidagi TAYYOR bo'laklar qayta so'ralmaydi.
-        let mut from = g_first;
-        while from < index && chunk_cached(dir, from, total) {
-            from += 1;
-        }
-        // ── QOLDIQDAN DAVOM ETISH ──────────────────────────────
-        // Oldingi urinishda shu bo'lakning bir qismi olinib, tarmoq
-        // uzilgan bo'lishi mumkin. O'sha qism diskda saqlangan: uni
-        // o'qib, tarmoqdan FAQAT yetishmayotgan dumini so'raymiz.
-        let from_len = chunk_plain_len(from, total) as usize;
-        let prefix = read_part(dir, key, from, from_len).unwrap_or_default();
-        let range_start = from * CHUNK_SIZE + prefix.len() as u64;
-        let range_end = clamp_span(
-            range_start,
-            ((g_last + 1) * CHUNK_SIZE).saturating_sub(1).min(total - 1),
-        );
-        if range_start > range_end {
-            return read_cached_chunk(dir, key, index, expected_len)
-                .ok_or_else(|| format!("bo'lak #{index} topilmadi"));
-        }
-
-        // ── OYNANI ISITISHNI BOSHLAYMIZ ────────────────────────
-        // Aynan shu yerda: demak biz haqiqatan tarmoqqa chiqyapmiz.
-        // Diskda hamma narsa bor bo'lsa bu yergacha yetib kelinmaydi
-        // va worker bekorga bezovta qilinmaydi.
-        maybe_warm(url, key, range_start);
-        // Yuklab olish tugmasi bosilgan bo'lsa — isitish tugashini
-        // kutamiz va keyin hammasini keshdan olamiz (yuqoridagi
-        // `wait_for_warm` izohiga qarang). Pleyer kutmaydi.
-        if prio == FetchPrio::Download {
-            wait_for_warm(key, range_start);
-        }
-
-        log(format!(
-            "Bo'laklar {from}..={g_last} worker'dan olinmoqda ({range_start}-{range_end})..."
-        ));
-        let resp = shared
-            .agent
-            .get(url)
-            .set("Range", &format!("bytes={range_start}-{range_end}"))
-            .call()
-            .map_err(|e| e.to_string())?;
-        let status = resp.status();
-
-        // ── BUTUNLIK TEKSHIRUVI ────────────────────────────────
-        // Serverning e'lon qilgan UMUMIY fayl hajmi diskdagi
-        // meta.json bilan mos kelmasa — manbadagi fayl o'zgargan va
-        // keshimiz ESKIRGAN. Bunday holda eski bo'laklarni saqlash
-        // videoni buzib ko'rsatishga olib kelardi.
-        // Server so'ralgan ORALIQNI qisqartirdimi — chegarasini
-        // eslab qolamiz (yuqoridagi `SERVER_SPAN_MAX` izohiga
-        // qarang). Faqat `Content-Range`ga ishoniladi.
-        //
-        // MUHIM ISTISNO: javob keshdan emas, MANBADAN (B2) kelgan
-        // bo'lsa (`X-Cache: MISS`), server oraliqni o'z xotirasini
-        // asrash uchun qisqartiradi — bu uning DOIMIY chegarasi
-        // EMAS. Bunday javobdan "o'rgansak", keyingi barcha
-        // so'rovlar bekorga mayda bo'lib qolardi.
-        let from_cache = resp
-            .header("X-Cache")
-            .map(|v| !v.trim().eq_ignore_ascii_case("MISS"))
-            .unwrap_or(true);
-        if from_cache {
-            if let Some(cr) = resp.header("Content-Range") {
-                if let Some((s_str, e_str)) = cr
-                    .trim()
-                    .strip_prefix("bytes ")
-                    .and_then(|r| r.split('/').next())
-                    .and_then(|r| r.split_once('-'))
-                {
-                    if let (Ok(rs), Ok(re)) =
-                        (s_str.trim().parse::<u64>(), e_str.trim().parse::<u64>())
-                    {
-                        if re >= rs {
-                            note_server_span(range_end - range_start + 1, re - rs + 1);
-                        }
-                    }
-                }
-            }
-        }
-        if let Some(cr) = resp.header("Content-Range") {
-            if let Some(server_total_str) = cr.rsplit('/').next() {
-                if let Ok(server_total) = server_total_str.trim().parse::<u64>() {
-                    if server_total != total {
-                        log(format!(
-                            "XATO: hajm mos emas! meta.json={total}, serverda={server_total} — kesh tozalanmoqda"
-                        ));
-                        invalidate_cache(dir);
-                        forget_derived(key);
-                        return Err(format!(
-                            "hajm mos emas (meta={total}, server={server_total})"
-                        ));
-                    }
-                }
-            }
-        }
-
-        // Manba Range'ni e'tiborsiz qoldirib TO'LIQ faylni (0-baytdan)
-        // yuborishi mumkin — bunday holda kerakli joygacha bo'lgan
-        // baytlar tashlab yuboriladi.
-        let mut skip = if status == 200 { range_start as usize } else { 0 };
-
-        // ── OQIMNI BO'LAKMA-BO'LAK DISKKA YOZAMIZ ──────────────
-        // Xotirada bir vaqtda faqat BITTA bo'lak (1 MiB) turadi —
-        // guruh 4 MiB bo'lsa ham. To'lgan bo'lak darhol shifrlanib
-        // diskka tushadi, keyingisi noldan yig'iladi.
-        let mut cur = from;
-        let mut want = from_len;
-        let mut acc: Vec<u8> = prefix;
-        let mut wanted_bytes: Option<Vec<u8>> = None;
-        let mut reader = resp.into_reader();
-        let mut buf = [0u8; 64 * 1024];
-        let mut read_err: Option<String> = None;
-        let mut got_net: u64 = 0;
-        // Oqimga uzatilgan baytning MUTLAQ o'rni.
-        let mut abs = range_start;
-
-        'outer: loop {
-            // ── PAUZA: TARMOQ OQIMI DARHOL UZILADI ─────────────
-            //
-            // MUAMMO EDI: pauza bosilganda ish oqimi faqat
-            // NAVBATDAGI bo'lakdan oldin to'xtardi. Havoda qolgan
-            // HTTP javob esa oxirigacha o'qilib bo'linardi — ya'ni
-            // 6 ta oqim x bitta guruh trafigi pauzadan keyin ham
-            // ketaverardi. Guruh 10 MiB bo'lgach bu yanada
-            // sezilarli bo'lardi.
-            //
-            // Endi bayroq HAR 64 KB da tekshiriladi: pauza bosilsa
-            // o'qish shu yerda to'xtaydi, `reader` tashlanadi va
-            // TCP ulanish uziladi — trafik butunlay to'xtaydi.
-            // Yarim olingan bo'lak qoldiq sifatida diskda qoladi,
-            // shu sabab davom ettirilganda aynan o'sha joydan
-            // boshlanadi (bitta bayt ham qayta olinmaydi).
-            if prio == FetchPrio::Download && !download_active(key) {
-                read_err = Some("pauza — oqim uzildi".to_string());
+        let n = match reader.read(&mut buf) {
+            Ok(n) => n,
+            Err(e) => {
+                read_err = Some(e.to_string());
                 break;
             }
-            let n = match reader.read(&mut buf) {
-                Ok(n) => n,
-                Err(e) => {
-                    read_err = Some(e.to_string());
-                    break;
-                }
-            };
-            if n == 0 {
-                break;
-            }
-            let mut piece = &buf[..n];
-            if skip > 0 {
-                let k = skip.min(piece.len());
-                piece = &piece[k..];
-                skip -= k;
-                if piece.is_empty() {
-                    continue;
-                }
-            }
-            got_net += piece.len() as u64;
-            // Baytlar kelishi bilan pleyerga (agar u kutayotgan
-            // bo'lsa) DARHOL uzatiladi.
-            if let Some(sk) = sink.as_deref_mut() {
-                if !sk(abs, piece) {
-                    read_err = Some("pleyer ulanishi uzildi".to_string());
-                    // Olinganini diskka saqlash uchun tsikldan
-                    // odatdagidek chiqamiz.
-                    break;
-                }
-            }
-            abs += piece.len() as u64;
-            while !piece.is_empty() {
-                if want == 0 || acc.len() >= want {
-                    break;
-                }
-                let take = (want - acc.len()).min(piece.len());
-                acc.extend_from_slice(&piece[..take]);
-                piece = &piece[take..];
-                if acc.len() < want {
-                    continue;
-                }
-                // Bo'lak to'ldi — diskka yozamiz.
-                if write_full_chunk(dir, key, cur, &acc) {
-                    stat_note_chunk(key, cur, want as u64);
-                }
-                if cur == index {
-                    wanted_bytes = Some(acc.clone());
-                }
-                if cur >= g_last {
-                    break 'outer;
-                }
-                cur += 1;
-                want = chunk_plain_len(cur, total) as usize;
-                acc = Vec::with_capacity(want);
-            }
-        }
-
-        // Yarim qolgan bo'lak — qoldiq sifatida saqlanadi, keyingi
-        // urinish AYNAN shu joydan davom etadi.
-        if cur <= g_last && !acc.is_empty() && acc.len() < want {
-            write_part(dir, key, cur, &acc);
-            log(format!(
-                "Bo'lak #{cur} to'liq emas ({}/{want}) — qoldiq saqlandi",
-                acc.len()
-            ));
-        }
-
-        // Tarmoqdan olingan baytlarning umumiy hisobi.
-        let total_net = NET_BYTES.fetch_add(got_net, Ordering::Relaxed) + got_net;
-        let file_net = {
-            let mut m = shared.net_by_file.lock().unwrap();
-            let e = m.entry(key.to_string()).or_insert(0);
-            *e += got_net;
-            *e
         };
-        log(format!(
-            "TARMOQDAN >>> fayl='{key}' bo'laklar {from}..={g_last} ({range_start}-{range_end}) {got_net} bayt | shu fayl: {:.2} MB | jami: {:.2} MB",
-            file_net as f64 / (1024.0 * 1024.0),
-            total_net as f64 / (1024.0 * 1024.0)
-        ));
-
-        match wanted_bytes {
-            Some(b) => Ok(b),
-            None => read_cached_chunk(dir, key, index, expected_len).ok_or_else(|| {
-                read_err.unwrap_or_else(|| format!("bo'lak #{index} to'liq olinmadi"))
-            }),
+        if n == 0 {
+            break;
         }
-    })();
-
-    if we_own_flight {
-        shared.in_flight.lock().unwrap().remove(&flight_key);
+        let mut piece = &buf[..n];
+        if skip > 0 {
+            let k = skip.min(piece.len());
+            piece = &piece[k..];
+            skip -= k;
+            if piece.is_empty() {
+                continue;
+            }
+        }
+        got_net += piece.len() as u64;
+        while !piece.is_empty() {
+            if want == 0 || acc.len() >= want {
+                break;
+            }
+            let take = (want - acc.len()).min(piece.len());
+            acc.extend_from_slice(&piece[..take]);
+            piece = &piece[take..];
+            if acc.len() < want {
+                continue;
+            }
+            // Bo'lak to'ldi — diskka yozamiz va yo'lakka xabar
+            // qilamiz.
+            if write_full_chunk(dir, key, cur, &acc) {
+                on_chunk(cur);
+            }
+            if cur >= last {
+                break 'outer;
+            }
+            cur += 1;
+            want = chunk_plain_len(cur, total) as usize;
+            acc = Vec::with_capacity(want);
+        }
     }
-    result
+
+    // Yarim qolgan bo'lak — qoldiq sifatida saqlanadi, keyingi
+    // urinish AYNAN shu joydan davom etadi.
+    if cur <= last && !acc.is_empty() && acc.len() < want {
+        write_part(dir, key, cur, &acc);
+        log(format!(
+            "Bo'lak #{cur} to'liq emas ({}/{want}) — qoldiq saqlandi",
+            acc.len()
+        ));
+    }
+
+    // Tarmoqdan olingan baytlarning umumiy hisobi.
+    let total_net = NET_BYTES.fetch_add(got_net, Ordering::Relaxed) + got_net;
+    let file_net = {
+        let mut m = shared.net_by_file.lock().unwrap();
+        let e = m.entry(key.to_string()).or_insert(0);
+        *e += got_net;
+        *e
+    };
+    log(format!(
+        "TARMOQDAN >>> fayl='{key}' bo'laklar {first}..={last} ({range_start}-{range_end}) {got_net} bayt | shu fayl: {:.2} MB | jami: {:.2} MB",
+        file_net as f64 / (1024.0 * 1024.0),
+        total_net as f64 / (1024.0 * 1024.0)
+    ));
+
+    if got_net == 0 {
+        return Err(read_err.unwrap_or_else(|| format!("bo'lak #{first} uchun bo'sh javob")));
+    }
+    Ok(())
 }
 
 // ── Video uchun "avlod" boshqaruvi (eskirgan so'rovlarni bekor qilish) ─
@@ -4560,20 +4389,22 @@ mod tests {
             .filter(|r| *r != "bytes=0-0")
             .cloned()
             .collect();
-        // Guruh fayl hajmidan katta bo'lsa, so'rov fayl oxirigacha
-        // qisqaradi — sinov fayli 10 MiB, guruh esa 16 MiB.
-        let group_bytes = (GROUP_CHUNKS * CHUNK_SIZE).min(G_TOTAL);
+        // Yuklovchi bo'lakma-bo'lak emas, YO'LAK bilan so'raydi:
+        // 10 MiB'lik fayl 6 ta yo'lakka bo'linadi (2,2,2,2,1,1),
+        // ya'ni bittasi ham 1 MiB'lik so'rov bo'lmasligi kerak.
         assert!(
             d_ranges.iter().any(|r| {
                 let (rs, re) = parse_test_range(r, G_TOTAL);
-                re - rs + 1 == group_bytes
+                re - rs + 1 > CHUNK_SIZE
             }),
-            "yuklovchi guruh bilan so'ramadi: {d_ranges:?}"
+            "yuklovchi bo'lakma-bo'lak so'radi: {d_ranges:?}"
         );
-        // 10 ta bo'lak bitta guruhga sig'adi, ya'ni bitta so'rov
-        // yetadi. Ehtiyot uchun chegara 3 da qoldirilgan.
+        tekshir_qoplama(&d_ranges, G_TOTAL);
+        // 10 ta bo'lak 6 ta yo'lakka bo'linadi (2,2,2,2,1,1),
+        // ya'ni 6 ta so'rov. Ish o'g'irlash bo'lsa bir-ikki ta
+        // ortishi mumkin, undan ko'p emas.
         assert!(
-            d_ranges.len() <= 3,
+            d_ranges.len() <= DOWNLOAD_THREADS + 2,
             "yuklovchi keragidan ko'p so'rov yubordi: {d_ranges:?}"
         );
 
@@ -5413,29 +5244,263 @@ mod tests {
         (port, log)
     }
 
+    /// So'ralgan oraliqlar faylni AYNAN bir marta qoplaydimi:
+    /// bo'shliq ham, takror ham bo'lmasligi kerak.
+    fn tekshir_qoplama(ranges: &[String], total: u64) {
+        let mut spans: Vec<(u64, u64)> = ranges
+            .iter()
+            .map(|r| parse_test_range(r, total))
+            .collect();
+        spans.sort_unstable();
+        let mut pos = 0u64;
+        for (s, e) in &spans {
+            assert_eq!(*s, pos, "oraliqlar uzluksiz emas: {spans:?}");
+            pos = e + 1;
+        }
+        assert_eq!(pos, total, "fayl to'liq qoplanmadi: {spans:?}");
+    }
+
+    /// Manba HAR BIR ULANISHNI bir xil, cheklangan tezlikda xizmat
+    /// qiladi — aynan haqiqiy mobil tarmoqdagidek. Ya'ni UMUMIY
+    /// tezlik faqat PARALLEL ulanishlar soniga bog'liq bo'ladi.
+    ///
+    /// Qaytadi: (port, bir vaqtda kuzatilgan ENG KO'P ulanish).
+    fn start_paced_origin(total: u64) -> (u16, Arc<AtomicUsize>) {
+        /// Har bir qadamda shuncha bayt yuboriladi.
+        const STEP: usize = 64 * 1024;
+        /// Qadamlar orasidagi tanaffus.
+        const STEP_MS: u64 = 20;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let live = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let peak_out = Arc::clone(&peak);
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut st) = stream else { continue };
+                let live = Arc::clone(&live);
+                let peak = Arc::clone(&peak);
+                thread::spawn(move || {
+                    let mut buf = [0u8; 4096];
+                    let n = st.read(&mut buf).unwrap_or(0);
+                    let text = String::from_utf8_lossy(&buf[..n]).to_string();
+                    if text.starts_with("HEAD") {
+                        let _ = st.write_all(
+                            b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        );
+                        return;
+                    }
+                    let mut range = String::new();
+                    for line in text.split("\r\n") {
+                        if let Some(v) = line.strip_prefix("Range: ") {
+                            range = v.trim().to_string();
+                        }
+                    }
+                    let (s, e) = parse_test_range(&range, total);
+                    let len = e - s + 1;
+                    let head = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Type: video/mp4\r\nContent-Length: {len}\r\nContent-Range: bytes {s}-{e}/{total}\r\nConnection: close\r\n\r\n"
+                    );
+                    let _ = st.write_all(head.as_bytes());
+                    // Hajm so'rovi (bytes=0-0) hisobga olinmaydi.
+                    let paced = len > 1;
+                    if paced {
+                        let cur = live.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(cur, Ordering::SeqCst);
+                    }
+                    let body: Vec<u8> = (s..=e).map(|i| (i % 251) as u8).collect();
+                    let mut off = 0usize;
+                    while off < body.len() {
+                        let upto = (off + STEP).min(body.len());
+                        if st.write_all(&body[off..upto]).is_err() {
+                            break;
+                        }
+                        off = upto;
+                        if paced && off < body.len() {
+                            thread::sleep(Duration::from_millis(STEP_MS));
+                        }
+                    }
+                    if paced {
+                        live.fetch_sub(1, Ordering::SeqCst);
+                    }
+                });
+            }
+        });
+        (port, peak_out)
+    }
+
     // ═══════════════════════════════════════════════════════════
-    //  YUKLAB OLISH GURUHLAR BILAN, PARALLEL KETADI
+    //  YUKLAB OLISH OXIRIGACHA BIR XIL TEZLIKDA KETADI
     // ═══════════════════════════════════════════════════════════
     //
-    // TUZATILGAN XATO (foydalanuvchi: "yuklash boshida 5 MB/s,
-    // oxiriga borib 800 KB/s ga tushib qoladi"):
+    // TUZATILGAN XATO (foydalanuvchi: "yuklab olish oxiriga qarab
+    // toshbaqadanham battar sekinlashib, sal kam to'xtab qolyabdi").
     //
-    // Navbatdan BITTA BO'LAK olinar, tarmoqqa esa 16 bo'lakli
-    // GURUH so'ralardi. Natijada oqimlar bir-birining guruhiga
-    // urilib, 15/16 bo'lak "chetga qo'yilganlar" ro'yxatiga
-    // tushardi va oxirida bittalab, kutish bilan yig'ishtirilardi.
+    // Ilgari navbat 16 MiB'lik GURUH birligida yuritilardi va
+    // navbat tugagan oqim BUTUNLAY chiqib ketardi. 24 MiB'lik
+    // faylda guruhlar atigi 2 ta, ya'ni 6 ta oqimdan 2 tasi
+    // ishlardi va oxirgi guruh YOLG'IZ qolardi — tezlik esa
+    // parallel ulanishlar soniga proporsional.
     //
-    // Bu test manbaga ketgan HAR BIR so'rovni tekshiradi: ular
-    // guruh chegarasiga tekislangan va bir-birini takrorlamaydigan
-    // bo'lishi SHART. Bo'lakma-bo'lak (1 MiB) so'rov paydo bo'lsa —
-    // demak eski nuqson qaytgan.
+    // Bu test manbani HAR BIR ULANISH uchun bir xil, cheklangan
+    // tezlikda xizmat qiladigan qilib qo'yadi. Shunda umumiy
+    // tezlik faqat parallellikka bog'liq bo'ladi va sekinlashish
+    // darhol vaqtda ko'rinadi.
     #[test]
-    fn yuklab_olish_guruhlar_bilan_parallel_ketadi() {
+    fn yuklab_olish_oxirigacha_parallel_ketadi() {
         let (_port, root) = ensure_server();
-        // 3 ta to'liq guruh (3 x 16 MiB).
-        let total = 3 * GROUP_CHUNKS * CHUNK_SIZE;
+        // 24 MiB — eski tizimda bu atigi 2 ta guruh edi.
+        let total: u64 = 24 * CHUNK_SIZE;
+        let (o_port, peak) = start_paced_origin(total);
+        let name = "yolaklar.mp4";
+        let url = format!("http://127.0.0.1:{o_port}/{name}");
+        let c_url = std::ffi::CString::new(url.clone()).unwrap();
+        let dir = root.join("video_byte_cache").join(name);
+
+        let t0 = Instant::now();
+        assert_eq!(rust_video_cache_download(c_url.as_ptr()), 1);
+
+        let count = total.div_ceil(CHUNK_SIZE);
+        let mut done = false;
+        for _ in 0..600 {
+            if (0..count).all(|i| chunk_cached(&dir, i, total)) {
+                done = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        let elapsed = t0.elapsed();
+        assert!(done, "yuklab olish tugamadi");
+
+        // 6 ta oqim BARAVAR ishlagan bo'lsa, har biriga 4 MiB
+        // to'g'ri keladi: 64 KiB x 20 ms = ~3.2 MiB/s, ya'ni
+        // ~1.25 soniya. Eski tizimda (2 ta guruh) bu 16 MiB / 3.2
+        // = ~5 soniya edi. Chegara 3 soniya — ikkalasining
+        // o'rtasida, ya'ni nuqson qaytsa test darhol yiqiladi.
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "yuklab olish parallel ketmadi: {elapsed:?} (oqimlar bo'sh turgan)"
+        );
+        // Oqimlarning hammasi haqiqatan bir vaqtda ishladimi.
+        let p = peak.load(Ordering::SeqCst);
+        assert!(
+            p >= DOWNLOAD_THREADS - 1,
+            "bir vaqtda atigi {p} ta ulanish bo'ldi (kutilgani {DOWNLOAD_THREADS} ta)"
+        );
+    }
+
+    /// Manba sarlavhada TO'LIQ uzunlikni e'lon qiladi, tanani esa
+    /// `cut` baytdan keyin JIMGINA uzib qo'yadi.
+    ///
+    /// Bu aynan ishlab chiqarishda o'lchab topilgan holat: worker
+    /// javobni `Transfer-Encoding: chunked` bilan yuborardi va u
+    /// 16 MiB o'rniga ~1 MB da uzilib qolardi (10 urinishdan 5-6
+    /// tasida). Worker tomoni tuzatildi (`fixed_length_stream`),
+    /// lekin ilova bunday javobga BARIBIR bardosh berishi kerak:
+    /// olinganini saqlab, aynan o'sha joydan davom etsin va hech
+    /// qachon cheksiz aylanmasin.
+    fn start_truncating_origin(total: u64, cut: usize) -> (u16, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h2 = Arc::clone(&hits);
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut st) = stream else { continue };
+                let h3 = Arc::clone(&h2);
+                thread::spawn(move || {
+                    let mut buf = [0u8; 4096];
+                    let n = st.read(&mut buf).unwrap_or(0);
+                    let text = String::from_utf8_lossy(&buf[..n]).to_string();
+                    if text.starts_with("HEAD") {
+                        let _ = st.write_all(
+                            b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        );
+                        return;
+                    }
+                    let mut range = String::new();
+                    for line in text.split("\r\n") {
+                        if let Some(v) = line.strip_prefix("Range: ") {
+                            range = v.trim().to_string();
+                        }
+                    }
+                    let (s, e) = parse_test_range(&range, total);
+                    let len = e - s + 1;
+                    let head = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Type: video/mp4\r\nContent-Length: {len}\r\nContent-Range: bytes {s}-{e}/{total}\r\nConnection: close\r\n\r\n"
+                    );
+                    let _ = st.write_all(head.as_bytes());
+                    let body: Vec<u8> = (s..=e).map(|i| (i % 251) as u8).collect();
+                    // Hajm so'rovi (bytes=0-0) to'liq beriladi.
+                    let send = if len > 1 {
+                        h3.fetch_add(1, Ordering::SeqCst);
+                        cut.min(body.len())
+                    } else {
+                        body.len()
+                    };
+                    let _ = st.write_all(&body[..send]);
+                });
+            }
+        });
+        (port, hits)
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  JAVOB YARMIDA UZILSA HAM YUKLASH TUGAYDI
+    // ═══════════════════════════════════════════════════════════
+    #[test]
+    fn javob_yarmida_uzilsa_ham_yuklash_tugaydi() {
+        let (_port, root) = ensure_server();
+        let total: u64 = 12 * CHUNK_SIZE;
+        // Har bir javob 1.5 bo'lakdan keyin uziladi — ya'ni
+        // qoldiq ham, to'liq bo'lak ham sinovdan o'tadi.
+        let cut = (CHUNK_SIZE + CHUNK_SIZE / 2) as usize;
+        let (o_port, hits) = start_truncating_origin(total, cut);
+        let name = "uzilgan.mp4";
+        let url = format!("http://127.0.0.1:{o_port}/{name}");
+        let c_url = std::ffi::CString::new(url.clone()).unwrap();
+        let dir = root.join("video_byte_cache").join(name);
+
+        assert_eq!(rust_video_cache_download(c_url.as_ptr()), 1);
+
+        let count = total.div_ceil(CHUNK_SIZE);
+        let mut done = false;
+        for _ in 0..600 {
+            if (0..count).all(|i| chunk_cached(&dir, i, total)) {
+                done = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(done, "javob uzilganda yuklash tugamadi");
+
+        // Har bir javob ~1.5 bo'lak beradi, ya'ni 12 bo'lak uchun
+        // ~8-10 so'rov yetadi. Cheksiz aylanish bo'lsa bu son
+        // o'nlab barobar oshib ketardi.
+        let n = hits.load(Ordering::SeqCst);
+        assert!(
+            n <= 40,
+            "uzilgan javoblardan keyin so'rovlar cheksiz ko'paydi: {n} ta"
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  YUKLAB OLISH YO'LAKLAR BILAN, TAKRORSIZ KETADI
+    // ═══════════════════════════════════════════════════════════
+    //
+    // Yo'laklar bir-birining ustiga chiqmasligi SHART: aks holda
+    // bir xil bayt ikki marta olinib, foydalanuvchi trafigi
+    // bekorga sarflanardi. Ish o'g'irlash ham (`steal_locked`)
+    // faqat HAVODA BO'LMAGAN qismni oladi — bu test aynan shuni
+    // qo'riqlaydi.
+    #[test]
+    fn yuklab_olish_yolaklar_bilan_takrorsiz_ketadi() {
+        let (_port, root) = ensure_server();
+        // 48 MiB — 6 ta yo'lakka 8 tadan bo'lak.
+        let total: u64 = 48 * CHUNK_SIZE;
         let (o_port, o_log) = start_origin(total);
-        let name = "guruhlar.mp4";
+        let name = "yolak_qoplama.mp4";
         let url = format!("http://127.0.0.1:{o_port}/{name}");
         let c_url = std::ffi::CString::new(url.clone()).unwrap();
         let dir = root.join("video_byte_cache").join(name);
@@ -5461,35 +5526,25 @@ mod tests {
             .cloned()
             .collect();
 
-        let group_bytes = GROUP_CHUNKS * CHUNK_SIZE;
+        // Bitta ham bo'lakma-bo'lak (1 MiB) so'rov bo'lmasligi
+        // kerak — bu eski nuqsonning belgisi edi.
         for r in &ranges {
             let (rs, re) = parse_test_range(r, total);
-            assert_eq!(
-                rs % group_bytes,
-                0,
-                "so'rov guruh chegarasiga tekislanmagan: {r}"
-            );
-            assert_eq!(
-                re - rs + 1,
-                group_bytes,
-                "so'rov guruh o'lchamida emas (bo'lakma-bo'lak so'ralyapti): {r}"
+            assert!(
+                re - rs + 1 > CHUNK_SIZE,
+                "bo'lakma-bo'lak so'rov paydo bo'ldi: {r}"
             );
         }
-
-        // Uchta guruh — uchta so'rov. Qayta urinishlar bo'lmasligi
-        // kerak, shu sabab chegara 3 (ehtiyot uchun 4).
+        // Fayl AYNAN bir marta qoplanadi (bo'shliq ham, takror ham
+        // yo'q).
+        tekshir_qoplama(&ranges, total);
+        // 6 ta yo'lak — 6 ta so'rov. Ish o'g'irlash bo'lsa bir-ikki
+        // ta ortishi mumkin, lekin ko'p emas.
         assert!(
-            ranges.len() <= 4,
-            "guruhlar takroran so'ralgan ({} ta so'rov): {ranges:?}",
+            ranges.len() <= DOWNLOAD_THREADS + 2,
+            "so'rovlar keragidan ko'p ({} ta): {ranges:?}",
             ranges.len()
         );
-        let mut starts: Vec<u64> = ranges
-            .iter()
-            .map(|r| parse_test_range(r, total).0)
-            .collect();
-        starts.sort_unstable();
-        starts.dedup();
-        assert_eq!(starts.len(), 3, "uchala guruh ham olinishi kerak edi");
     }
 
     #[test]

@@ -1227,9 +1227,35 @@ async fn play_from_warm_cache(
         .unwrap_or_else(|| "application/octet-stream".to_string());
     let len = req_end - req_start + 1;
     let is_range = range.is_some();
-    let stream = hit.stream()?;
-    let mut resp =
-        Response::from_stream(stream)?.with_status(if is_range { 206 } else { 200 });
+    // ── JAVOB UZUNLIGI E'LON QILINISHI SHART ──────────────────
+    //
+    // TUZATILGAN XATO (o'lchab topildi: bitta 16 MiB so'rovning
+    // javobi ~10 holatdan 5 tasida 0.6-1.5 MB da JIM UZILIB
+    // qolardi — na xato, na belgi).
+    //
+    // SABABI: `Response::from_stream` javobni `Transfer-Encoding:
+    // chunked` bilan yuboradi, ya'ni uzunlik OLDINDAN e'lon
+    // QILINMAYDI (qo'lda yozilgan `Content-Length`ni runtime
+    // tashlab yuboradi — yuqoridagi `fixed_length_stream` izohiga
+    // qarang). Uzunlik ma'lum bo'lmasa, oqim erta tugasa mijoz
+    // buni "fayl tugadi" deb qabul qiladi: yuklovchi 16 MiB
+    // o'rniga 1 MB olib, qolganini qayta-qayta so'rardi — yuklash
+    // aynan shu sabab sudralib ketardi.
+    //
+    // YECHIM: oqim `FixedLengthStream` orqali o'tkaziladi. Shunda
+    // runtime `Content-Length`ni O'ZI qo'yadi; javob erta uzilsa
+    // mijoz buni DARHOL xato deb ko'radi va o'sha joydan davom
+    // etadi. Xotiraga hech narsa yig'ilmaydi — bu faqat quvur.
+    let src = match hit.body() {
+        ResponseBody::Stream(rs) => rs.clone(),
+        _ => {
+            *reason = "slice-not-stream".into();
+            return Ok(None);
+        }
+    };
+    let readable = fixed_length_stream(&src, len)?;
+    let mut resp = Response::from_body(ResponseBody::Stream(readable))?
+        .with_status(if is_range { 206 } else { 200 });
     set_cors(&mut resp);
     {
         let h = resp.headers_mut();
@@ -1396,16 +1422,27 @@ async fn b2_proxy_range(
 ) -> Result<Response> {
     // ── BIR SO'ROVDA BERILADIGAN ENG KATTA ORALIQ ─────────────
     //
-    // Ilova yuklab olishda 16 MiB'lik GURUH so'raydi (worker'ga va
-    // B2'ga ketadigan so'rovlar sonini kamaytirish uchun —
-    // `GROUP_CHUNKS` izohiga qarang). Kesh oynasi 480 MiB va
-    // `480 / 16 = 30`, ya'ni guruh hech qachon oyna chegarasini
-    // kesib o'tmaydi.
+    // Ilova yuklab olishda 64 MiB'lik oraliq so'raydi (Rust
+    // tomondagi `DL_REQUEST_CHUNKS` bilan aynan bir xil). Kesh
+    // oynasi 480 MiB va `480 / 64 = 7.5` — ya'ni oraliq oyna
+    // chegarasini kesib o'tishi mumkin bo'lardi, lekin ilova uni
+    // O'ZI oyna ichida ushlab turadi (yo'laklar oyna-oyna
+    // taqsimlanadi), shu sabab bu yerda qo'shimcha kesish shart
+    // emas.
     //
-    // Bu chegara ISITILGAN OYNADAN kesib berish uchun: u yerda
-    // baytlar OQIM bilan o'tadi va worker xotirasiga hech narsa
-    // yig'ilmaydi, shu sabab 16 MiB xavfsiz.
-    const RANGE_MAX: u64 = 16 * 1024 * 1024;
+    // NEGA 16 -> 64 MiB: bu chegara ISITILGAN OYNADAN kesib berish
+    // uchun, u yerda baytlar OQIM bilan o'tadi (`Response::
+    // from_stream`) va worker xotirasiga hech narsa yig'ilmaydi —
+    // fayl 166 MB bo'ladimi, 5 GB bo'ladimi, xotira sarfi bir xil.
+    // Ya'ni chegarani ko'tarish xotiraga UMUMAN ta'sir qilmaydi,
+    // lekin so'rovlar sonini keskin kamaytiradi:
+    //
+    //     166 MB'lik qism:  11 ta so'rov  ->  6 ta
+    //     1 GB'lik fayl:    64 ta so'rov  -> 12 ta
+    //
+    // Har bir so'rov B2/Cloudflare hisobida pul bo'lgani uchun bu
+    // to'g'ridan-to'g'ri tejash.
+    const RANGE_MAX: u64 = 64 * 1024 * 1024;
 
     // ── B2'DAN OLINGANDA CHEGARA KICHIKROQ ────────────────────
     //
@@ -1442,13 +1479,13 @@ async fn b2_proxy_range(
     if req_end < win_start + WARM_WINDOW {
         let rel_start = req_start - win_start;
         let rel_end = req_end - win_start;
-        let mut lookup_h = Headers::new();
+        let lookup_h = Headers::new();
         lookup_h.set("Range", &format!("bytes={rel_start}-{rel_end}"))?;
         let lookup = Request::new_with_init(
             &warm_window_url(file_name, widx),
             RequestInit::new().with_method(Method::Get).with_headers(lookup_h),
         )?;
-        if let Some(mut hit) = cache.get(&lookup, false).await? {
+        if let Some(hit) = cache.get(&lookup, false).await? {
             // FAQAT 206 qabul qilinadi: 200 kelsa oraliq kesilmagan
             // va butun oynani mijozga yuborish xato bo'lardi.
             if hit.status_code() == 206 {
@@ -1456,7 +1493,6 @@ async fn b2_proxy_range(
                     .headers()
                     .get("Content-Type")?
                     .unwrap_or_else(|| "application/octet-stream".to_string());
-                let cl = hit.headers().get("Content-Length")?;
                 let total = hit
                     .headers()
                     .get("X-Total-Size")?
@@ -1478,16 +1514,24 @@ async fn b2_proxy_range(
                 } else {
                     (abs_e + 1).to_string()
                 };
-                let stream = hit.stream()?;
-                let mut resp = Response::from_stream(stream)?.with_status(206);
+                // Uzunlik OLDINDAN e'lon qilinadi — yuqoridagi
+                // `play_from_warm_cache` izohiga qarang. Aks holda
+                // javob jimgina uzilib, yuklovchi 16 MiB o'rniga
+                // 1 MB olib qolardi.
+                let slice_len = abs_e - abs_s + 1;
+                let src = match hit.body() {
+                    ResponseBody::Stream(rs) => rs.clone(),
+                    _ => return Err(Error::RustError("kesh oqim bermadi".into())),
+                };
+                let readable = fixed_length_stream(&src, slice_len)?;
+                let mut resp = Response::from_body(ResponseBody::Stream(readable))?
+                    .with_status(206);
                 set_cors(&mut resp);
                 let h = resp.headers_mut();
                 h.set("Content-Type", &ct)?;
                 h.set("Accept-Ranges", "bytes")?;
-                h.set("Cache-Control", "public, max-age=86400")?;
-                if let Some(l) = cl {
-                    h.set("Content-Length", &l)?;
-                }
+                h.set("Cache-Control", "no-store")?;
+                h.set("Content-Length", &slice_len.to_string())?;
                 h.set("Content-Range", &format!("bytes {abs_s}-{abs_e}/{total_str}"))?;
                 h.set("X-Cache", "HIT-WINDOW")?;
                 return Ok(resp);
@@ -1506,7 +1550,7 @@ async fn b2_proxy_range(
     let miss_end = req_end.min(req_start + B2_RANGE_MAX - 1);
     let cache_url = cache_key_url(file_name, &format!("r{req_start}-{miss_end}"));
     let key = Request::new(&cache_url, Method::Get)?;
-    if let Some(mut hit) = cache.get(&key, false).await? {
+    if let Some(hit) = cache.get(&key, false).await? {
         let ct = hit
             .headers()
             .get("Content-Type")?
@@ -1518,22 +1562,37 @@ async fn b2_proxy_range(
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
         // Keshda oraliqning O'ZI yotibdi — kesish kerak emas.
-        let stream = hit.stream()?;
-        let mut resp = Response::from_stream(stream)?.with_status(206);
+        // Bu yozuv HAR DOIM to'liq saqlanadi (3-bosqichga qarang),
+        // ya'ni uzunligi aynan `miss_end - req_start + 1`.
+        let entry_len = cl
+            .as_deref()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(miss_end - req_start + 1);
+        let src = match hit.body() {
+            ResponseBody::Stream(rs) => rs.clone(),
+            _ => return Err(Error::RustError("kesh oqim bermadi".into())),
+        };
+        let readable = fixed_length_stream(&src, entry_len)?;
+        let mut resp = Response::from_body(ResponseBody::Stream(readable))?.with_status(206);
         set_cors(&mut resp);
         let h = resp.headers_mut();
         h.set("Content-Type", &ct)?;
         h.set("Accept-Ranges", "bytes")?;
-        h.set("Cache-Control", "public, max-age=86400")?;
-        if let Some(l) = cl {
-            h.set("Content-Length", &l)?;
-        }
+        h.set("Cache-Control", "no-store")?;
+        h.set("Content-Length", &entry_len.to_string())?;
         let total_str = if total > 0 {
             total.to_string()
         } else {
-            (req_end + 1).to_string()
+            (miss_end + 1).to_string()
         };
-        h.set("Content-Range", &format!("bytes {req_start}-{req_end}/{total_str}"))?;
+        // MUHIM: bu yozuv HAR DOIM `B2_RANGE_MAX` o'lchamida
+        // saqlanadi, ya'ni tana so'ralganidan QISQA bo'lishi
+        // mumkin. Sarlavhada so'ralgan (kattaroq) oraliqni e'lon
+        // qilish mijozni chalg'itardi: u javobni "server shuncha
+        // beradi" deb o'rganib, keyingi so'rovlarni ham
+        // kichraytirib yuborardi. Shu sabab HAQIQIY oraliq
+        // e'lon qilinadi.
+        h.set("Content-Range", &format!("bytes {req_start}-{miss_end}/{total_str}"))?;
         // Diagnostika: javob Cloudflare keshidan keldimi yoki B2'dan.
         h.set("X-Cache", "HIT-RANGE")?;
         return Ok(resp);
@@ -1608,16 +1667,27 @@ async fn b2_proxy_full(env: &Env, file_name: &str) -> Result<Response> {
             .headers()
             .get("Content-Type")?
             .unwrap_or_else(|| "application/octet-stream".to_string());
-        let cl = cached.headers().get("Content-Length")?;
-        let stream = cached.stream()?;
-        let mut resp = Response::from_stream(stream)?.with_status(200);
+        let cl = cached
+            .headers()
+            .get("Content-Length")?
+            .and_then(|v| v.parse::<u64>().ok());
+        // Uzunlik ma'lum bo'lsa — quvur orqali e'lon qilamiz
+        // (`fixed_length_stream` izohiga qarang), aks holda
+        // odatdagidek oqim bilan.
+        let mut resp = match (cl, cached.body()) {
+            (Some(len), ResponseBody::Stream(rs)) => {
+                let readable = fixed_length_stream(&rs.clone(), len)?;
+                Response::from_body(ResponseBody::Stream(readable))?.with_status(200)
+            }
+            _ => Response::from_stream(cached.stream()?)?.with_status(200),
+        };
         set_cors(&mut resp);
         let h = resp.headers_mut();
         h.set("Content-Type", &ct)?;
         h.set("Accept-Ranges", "bytes")?;
         h.set("Cache-Control", "public, max-age=86400")?;
-        if let Some(cl) = cl {
-            h.set("Content-Length", &cl)?;
+        if let Some(len) = cl {
+            h.set("Content-Length", &len.to_string())?;
         }
         return Ok(resp);
     }
@@ -1659,8 +1729,13 @@ async fn b2_proxy_full(env: &Env, file_name: &str) -> Result<Response> {
     // Katta fayl Range'siz so'ralgan — oqim orqali o'tkazamiz.
     let last = total.saturating_sub(1);
     let (mut b2, _) = b2_fetch_range(env, file_name, 0, last).await?;
-    let stream = b2.stream()?;
-    let mut resp = Response::from_stream(stream)?.with_status(200);
+    let mut resp = match (total, b2.body()) {
+        (t, ResponseBody::Stream(rs)) if t > 0 => {
+            let readable = fixed_length_stream(&rs.clone(), t)?;
+            Response::from_body(ResponseBody::Stream(readable))?.with_status(200)
+        }
+        _ => Response::from_stream(b2.stream()?)?.with_status(200),
+    };
     set_cors(&mut resp);
     let h = resp.headers_mut();
     h.set("Content-Type", &ct)?;
