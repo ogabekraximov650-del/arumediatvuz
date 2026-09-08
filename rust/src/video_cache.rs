@@ -1943,53 +1943,47 @@ fn run_download(key: &str, url: &str) -> Result<DlOutcome, String> {
                             Err(_) => false,
                         };
 
-                        match res {
-                            Ok(()) if advanced => {
-                                fails = 0;
-                                done_count.fetch_add(1, Ordering::SeqCst);
-                            }
-                            Ok(()) => {
-                                // Hech narsa siljimadi — cheksiz
-                                // aylanmaslik uchun bir bo'lak
-                                // oldinga suramiz. Yetishmagani
-                                // yakuniy disk tekshiruvida
-                                // ko'rinadi va keyingi bosqichda
-                                // olinadi.
-                                fails = 0;
-                                if let Ok(mut ls) = lanes.lock() {
-                                    ls[me].next = first + 1;
-                                    ls[me].hold = ls[me].next;
+                        if let Err(e) = res {
+                            if let Ok(mut slot) = first_err.lock() {
+                                if slot.is_none() {
+                                    *slot = Some(e);
                                 }
-                            }
-                            Err(e) => {
-                                if let Ok(mut slot) = first_err.lock() {
-                                    if slot.is_none() {
-                                        *slot = Some(e);
-                                    }
-                                }
-                                if advanced {
-                                    // Qisman olindi — bu ilgarilash,
-                                    // xato hisoblanmaydi.
-                                    fails = 0;
-                                    done_count.fetch_add(1, Ordering::SeqCst);
-                                    continue;
-                                }
-                                fails += 1;
-                                if fails >= 3 {
-                                    // Uch marta ketma-ket bo'lmadi —
-                                    // TO'XTAMAYMIZ, oldinga suramiz.
-                                    fails = 0;
-                                    if let Ok(mut ls) = lanes.lock() {
-                                        ls[me].next = first + 1;
-                                        ls[me].hold = ls[me].next;
-                                    }
-                                    continue;
-                                }
-                                // Qisqa tanaffus — tarmoq bir lahzaga
-                                // uzilgan bo'lsa shu yerda tiklanadi.
-                                thread::sleep(Duration::from_millis(300 * fails as u64));
                             }
                         }
+                        if advanced {
+                            // Baytlar keldi va kamida bitta bo'lak
+                            // diskka tushdi — bu ILGARILASH. Javob
+                            // yarmida uzilgan bo'lsa ham xato
+                            // hisoblanmaydi: qolgani shu yerdan
+                            // davom etadi.
+                            fails = 0;
+                            done_count.fetch_add(1, Ordering::SeqCst);
+                            continue;
+                        }
+                        // Hech narsa siljimadi.
+                        fails += 1;
+                        if fails >= 3 {
+                            // Uch marta ketma-ket bo'lmadi —
+                            // TO'XTAMAYMIZ, butun oraliqni
+                            // o'tkazib yuboramiz. Yetishmagani
+                            // bosqich oxiridagi DISK tekshiruvida
+                            // ko'rinadi va vazifa yangi bosqich
+                            // bilan davom etadi (yoki hech qanday
+                            // ilgarilash bo'lmasa — navbat
+                            // darajasidagi kechikish bilan qayta
+                            // uriniladi). Bittalab surilsa, tarmoq
+                            // butunlay yo'q paytda ming marta
+                            // bekorga so'rov ketardi.
+                            fails = 0;
+                            if let Ok(mut ls) = lanes.lock() {
+                                ls[me].next = (last + 1).min(ls[me].end);
+                                ls[me].hold = ls[me].next;
+                            }
+                            continue;
+                        }
+                        // Qisqa tanaffus — tarmoq bir lahzaga
+                        // uzilgan bo'lsa shu yerda tiklanadi.
+                        thread::sleep(Duration::from_millis(300 * fails as u64));
                     }
                 });
             match h {
