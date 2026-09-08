@@ -3937,7 +3937,16 @@ mod tests {
             // qaytgan ma'lumot TO'G'RI joydan ekanini tekshira olamiz.
             let data: Vec<u8> = (0..len).map(|k| ((cs as usize + k) % 251) as u8).collect();
             let (k, iv) = crypto::derive_chunk_key_iv(TEST_NAME, i).unwrap();
-            fs::write(dir.join(chunk_name(i)), crypto::encrypt_chunk(&data, &k, &iv)).unwrap();
+            // ── ATOMIK YOZISH (ilovadagi `write_full_chunk` kabi) ──
+            // Ilgari bu yerda to'g'ridan-to'g'ri `fs::write` ishlatilardi.
+            // Fon'da ketayotgan skaner (`scan_and_clean`) esa YARIM
+            // yozilgan faylni ko'rib, uzunligi noto'g'ri deb uni
+            // O'CHIRIB yuborardi — test ~2-70% holatda shu sababdan
+            // yiqilardi. Ilovaning o'zi hech qachon to'g'ridan-to'g'ri
+            // yozmaydi, shu sabab bu FAQAT sinov nuqsoni edi.
+            let tmp = dir.join(format!("{}.fill.tmp", chunk_name(i)));
+            fs::write(&tmp, crypto::encrypt_chunk(&data, &k, &iv)).unwrap();
+            fs::rename(&tmp, dir.join(chunk_name(i))).unwrap();
         }
     }
 
@@ -4313,10 +4322,27 @@ mod tests {
         // joydan yuklashni davom ettiraveradi.
         fill_cache(&root, Some(5));
         fs::write(dir.join(chunk_name(5)), vec![7u8; 4096]).unwrap();
-        stats().lock().unwrap().remove(TEST_NAME);
-        let parsed = stats_json_ready(c_urls.as_ptr());
+        // ── NEGA HALQA ICHIDA ──────────────────────────────────
+        // Oldingi bosqichdan qolgan FON skaneri hali ishlayotgan
+        // bo'lishi mumkin: u papkani biz fayllarni yozib
+        // bo'lgunimizcha ko'rib, natijasini yozib qo'yadi va
+        // yozuvni "skanerlangan" deb belgilaydi. Shunda
+        // `stats_json_ready` darhol ESKIRGAN sonni qaytarardi
+        // (test ~2% holatda shu sababdan yiqilardi). Endi son
+        // barqarorlashguncha qayta so'raymiz — bu ilova xulqiga
+        // umuman tegmaydi, faqat sinovni aniq qiladi.
+        let mut downloaded = 0u64;
+        for _ in 0..100 {
+            stats().lock().unwrap().remove(TEST_NAME);
+            let parsed = stats_json_ready(c_urls.as_ptr());
+            downloaded = parsed[&test_url]["downloaded"].as_u64().unwrap();
+            if downloaded == TEST_TOTAL - CHUNK_SIZE {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
         assert_eq!(
-            parsed[&test_url]["downloaded"].as_u64().unwrap(),
+            downloaded,
             TEST_TOTAL - CHUNK_SIZE,
             "yarim qolgan bo'lak hisobga qo'shilib ketdi"
         );
