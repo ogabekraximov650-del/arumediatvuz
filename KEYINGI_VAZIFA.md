@@ -176,10 +176,13 @@ javob **kutadi** (B2'ga chiqmaydi).
 - diskdagi bo'lak **1 MiB** (foiz va "to'xtagan joydan davom" shunga
   tayanadi), bitta so'rovdagi eng katta oraliq esa **64 MiB**
   (`DL_REQUEST_CHUNKS`, worker'dagi `RANGE_MAX` bilan bir xil);
-- **oqimlar soni 12** (`DOWNLOAD_THREADS`). O'lchov: bitta ulanish
-  mobil tarmoqda atigi ~0.5 MB/s beradi (yo'l kechikishi sabab), shu
-  sabab umumiy tezlik deyarli TO'G'RIDAN-TO'G'RI oqimlar soniga
-  proporsional: 6 ta oqim = 3 MB/s, 12 ta = ~6 MB/s.
+- **oqimlar soni 16** (`DOWNLOAD_THREADS`). O'lchov: bitta ulanish
+  mobil tarmoqda atigi ~0.4-0.5 MB/s beradi (yo'l kechikishi sabab),
+  shu sabab umumiy tezlik deyarli TO'G'RIDAN-TO'G'RI oqimlar soniga
+  proporsional. Qurilmadagi o'lchov: 6 ta oqim = 3 MB/s (oxiriga
+  borib 0.5), 12 ta = 5 -> 3.5-4 MB/s, 16 ta = ~6.5 MB/s kutiladi.
+  Bundan ko'proq qilish ma'nosiz — kanal (8 MB/s) to'lgach oqim
+  qo'shish faqat xotira va batareya sarflaydi.
 
 ### Ish qanday taqsimlanadi (`Work` + `claim_next`)
 

@@ -1347,24 +1347,30 @@ const DOWNLOAD_WORKERS: usize = 2;
 /// TALAB: "yuklab olish tugmasi bosilsa, fayl hech qanday cheklovsiz,
 /// foydalanuvchi interneti qancha tez bo'lsa shuncha tez olinsin".
 ///
-/// ── NEGA 6 EMAS, 12 (qurilmada o'lchandi) ─────────────────────
+/// ── NEGA 6 EMAS, 16 (qurilmada IKKI MARTA o'lchandi) ──────────
 ///
-/// Foydalanuvchining tarmog'i 8 MB/s, yuklash esa eng yaxshi
-/// holatda 3 MB/s edi — ya'ni BITTA oqim atigi ~0.5 MB/s beryapti.
-/// Bu mobil/uzoq tarmoqlar uchun odatiy: bitta TCP ulanishning
-/// tezligi yo'l kechikishi (RTT) bilan cheklanadi va uni faqat
-/// PARALLEL ulanishlar ko'paytiradi. 6 x 0.5 = 3 MB/s — o'lchov
-/// bilan aynan mos. Kanalni to'ldirish uchun oqimlar soni
-/// ikkilantirildi: 12 x 0.5 = ~6 MB/s.
+/// 1-o'lchov. Foydalanuvchining tarmog'i 8 MB/s, yuklash esa eng
+/// yaxshi holatda 3 MB/s edi — ya'ni BITTA oqim atigi ~0.5 MB/s
+/// beryapti. Bu mobil/uzoq tarmoqlar uchun odatiy: bitta TCP
+/// ulanishning tezligi yo'l kechikishi (RTT) bilan cheklanadi va
+/// uni faqat PARALLEL ulanishlar ko'paytiradi. 6 x 0.5 = 3 MB/s —
+/// o'lchov bilan aynan mos.
+///
+/// 2-o'lchov (12 oqim bilan): 5 MB/s -> 4 -> 3.5-4 MB/s, ya'ni
+/// bitta oqim ~0.4 MB/s. Kanal (8 MB/s) hali to'lmagan, shu sabab
+/// oqimlar soni 16 ga chiqarildi: 16 x 0.4 = ~6.5 MB/s.
+///
+/// Bundan ko'proq qilishning ma'nosi yo'q: kanal to'lgach oqim
+/// qo'shish tezlikni oshirmaydi, faqat xotira va batareya sarflaydi.
 ///
 /// Xotira uchun xavfsiz: bir vaqtda eng ko'pi
-/// DOWNLOAD_THREADS x 1 MiB bufer (12 MiB) bo'ladi, oqim steki esa
+/// DOWNLOAD_THREADS x 1 MiB bufer (16 MiB) bo'ladi, oqim steki esa
 /// 256 KB. Tezlikni esa faqat foydalanuvchining tarmog'i belgilaydi.
 ///
 /// MUHIM: oqimlar ishni UMUMIY KURSORDAN, kichik va moslashuvchan
 /// ulushlar bilan oladi (pastdagi `Work` izohiga qarang) — shu
 /// sabab oxirgi baytgacha hammasi band bo'ladi.
-const DOWNLOAD_THREADS: usize = 12;
+const DOWNLOAD_THREADS: usize = 16;
 
 
 /// ── SERVERNING HAQIQIY ORALIQ CHEGARASI ────────────────────────
@@ -5633,8 +5639,9 @@ mod tests {
     #[test]
     fn yuklab_olish_oxirigacha_parallel_ketadi() {
         let (_port, root) = ensure_server();
-        // 24 MiB — eski tizimda bu atigi 2 ta guruh edi.
-        let total: u64 = 24 * CHUNK_SIZE;
+        // 32 MiB — har bir oqimga 2 tadan bo'lak (16 x 2), ya'ni
+        // hammasi bir vaqtda ishlashi SHART.
+        let total: u64 = 32 * CHUNK_SIZE;
         let (o_port, peak) = start_paced_origin(total);
         let name = "yolaklar.mp4";
         let url = format!("http://127.0.0.1:{o_port}/{name}");
@@ -5656,11 +5663,11 @@ mod tests {
         let elapsed = t0.elapsed();
         assert!(done, "yuklab olish tugamadi");
 
-        // 6 ta oqim BARAVAR ishlagan bo'lsa, har biriga 4 MiB
-        // to'g'ri keladi: 64 KiB x 20 ms = ~3.2 MiB/s, ya'ni
-        // ~1.25 soniya. Eski tizimda (2 ta guruh) bu 16 MiB / 3.2
-        // = ~5 soniya edi. Chegara 3 soniya — ikkalasining
-        // o'rtasida, ya'ni nuqson qaytsa test darhol yiqiladi.
+        // Hamma oqim BARAVAR ishlagan bo'lsa, har biriga 2 MiB
+        // to'g'ri keladi: 64 KiB x 20 ms = ~3.2 MB/s, ya'ni
+        // ~0.7 soniya. Oqimlarning yarmi bo'sh tursa vaqt shunga
+        // yarasha ikki-uch barobar oshadi. Chegara 3 soniya —
+        // nuqson qaytsa test darhol yiqiladi.
         assert!(
             elapsed < Duration::from_secs(3),
             "yuklab olish parallel ketmadi: {elapsed:?} (oqimlar bo'sh turgan)"
