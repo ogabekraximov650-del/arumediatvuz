@@ -28,7 +28,7 @@
 
 ```
 flutter analyze          # 0 muammo bo'lishi kerak
-cd rust && cargo test --lib     # 11/11 o'tishi kerak
+cd rust && cargo test --lib     # 15/15 o'tishi kerak
 cd worker && cargo check --target wasm32-unknown-unknown
 ```
 
@@ -174,24 +174,66 @@ javob **kutadi** (B2'ga chiqmaydi).
 - internet qaytganda kutish darhol bekor qilinadi
   (`DownloadManager._resumeActive`);
 - diskdagi bo'lak **1 MiB** (foiz va "to'xtagan joydan davom" shunga
-  tayanadi), workerga so'rov esa **64 MiB** bilan ketadi
-  (`DL_REQUEST_CHUNKS = 64`, worker'dagi `RANGE_MAX` bilan bir xil).
-  166 MB'lik qism uchun so'rovlar soni 11 -> 6;
-- **ish YO'LAKLARGA bo'linadi** (`Lane`): oynadagi yetishmayotgan
-  bo'laklar 6 ta teng yo'lakka bo'linadi, har bir oqim faqat o'z
-  yo'lagini oladi. Yo'lagi tugagan oqim BO'SH TURMAYDI — eng ko'p
-  ish qolgan yo'lakning orqa yarmini o'ziga oladi (`steal_locked`),
-  va bu chegara hech qachon HOZIR HAVODA turgan so'rovdan berini
-  kesmaydi (`hold`), ya'ni bitta bayt ham ikki marta olinmaydi.
-  Yo'laklar bitta qulf ostida — poyga imkonsiz;
-- **NEGA**: ilgari navbat "guruh" birligida edi va navbat tugagan
-  oqim butunlay chiqib ketardi. 166 MB = 11 guruh, 6 oqim: oxirgi
-  guruh YOLG'IZ qolardi va tezlik 6 barobar tushardi (5 MB/s ->
-  800 KB/s — foydalanuvchi aynan shu raqamlarni aytdi). Endi
-  oxirgi baytgacha 6 oqim ham band. Buni
-  `yuklab_olish_oxirigacha_parallel_ketadi` (tezlik) va
-  `yuklab_olish_yolaklar_bilan_takrorsiz_ketadi` (qoplama) testlari
-  qo'riqlaydi;
+  tayanadi), bitta so'rovdagi eng katta oraliq esa **64 MiB**
+  (`DL_REQUEST_CHUNKS`, worker'dagi `RANGE_MAX` bilan bir xil);
+- **oqimlar soni 12** (`DOWNLOAD_THREADS`). O'lchov: bitta ulanish
+  mobil tarmoqda atigi ~0.5 MB/s beradi (yo'l kechikishi sabab), shu
+  sabab umumiy tezlik deyarli TO'G'RIDAN-TO'G'RI oqimlar soniga
+  proporsional: 6 ta oqim = 3 MB/s, 12 ta = ~6 MB/s.
+
+### Ish qanday taqsimlanadi (`Work` + `claim_next`)
+
+Oynadagi yetishmayotgan bo'laklar **bitta umumiy kursorda** turadi;
+oqimlar ishni **kerak bo'lganda, kichik ulushlar bilan** oladi:
+
+| Qoida | Nima qiladi |
+|---|---|
+| **Adil ulush** | Hech bir oqim qolgan ishning `1/oqimlar` ulushidan ko'pini olmaydi — oxirida bitta oqimda katta ish qolib ketmaydi. |
+| **Vaqtga moslashish** | Ulush oqimning O'Z tezligiga qarab ~`CLAIM_TARGET_SECS` (5 s) lik ish qilib olinadi. Sekin ulanish kichik ulush oladi. |
+| **Pastki chegara** | Ulush `CLAIM_MIN` (4 MiB) dan kichik bo'lmaydi — mayda so'rovlar uchun yo'l vaqti bekorga sarflanmasin. Kichik faylda chegara o'zi kichrayadi. |
+| **Qaytarish** | Javob yarmida uzilsa, ulushning olinmagani navbatga qaytariladi (`return_work`) va uni birinchi bo'sh oqim oladi. |
+
+**NEGA O'ZGARDI (foydalanuvchi: "3 -> 2 -> 1 -> 0.5 MB/s").** Ilgari
+ish `DOWNLOAD_THREADS` ta teng **yo'lakka** (`Lane`) bo'linardi va
+yo'lagi tugagan oqim boshqasining ishini o'g'irlashi mumkin edi —
+lekin faqat HAVODA BO'LMAGAN qismini. 166 MB fayl = 166 bo'lak,
+6 ta yo'lak = ~28 bo'lak, bitta so'rov esa 64 bo'lakkacha: ya'ni
+**har bir oqim o'z yo'lagini bitta so'rovda olib qo'yardi** va
+o'g'irlash uchun hech narsa qolmasdi. Ishi tugagan oqim butunlay
+chiqib ketardi, faol oqimlar soni 6 -> 5 -> ... -> 1 ga tushardi va
+tezlik ham aynan shunga proporsional pasayardi. Yo'lak tuzatishi
+faqat ~400 MB'dan katta fayllarda ishlardi.
+
+Testlar: `yuklab_olish_bitta_sekin_ulanishdan_sudralmaydi` (bitta
+sekin ulanish butun yuklashni sudramaydi + ekrandagi tezlik
+o'lchovi), `yuklab_olish_yolaklar_bilan_takrorsiz_ketadi` (qoplama:
+takror ham, bo'shliq ham yo'q), `yuklab_olish_oxirigacha_parallel_ketadi`.
+
+### Kesh chetiga chiqib ketgan oyna
+
+Worker javobida `X-Cache: MISS` yoki `HIT-RANGE` bo'lsa — javob
+isitilgan oynadan EMAS, ya'ni Cloudflare oyna yozuvini o'chirgan va
+qolgan yuklash sekin yo'ldan ketadi. Endi ilova buni sezib oynani
+**qayta isitadi** (`note_cold_window`), lekin B2 puli uchun QATTIQ
+cheklangan: bitta oyna uchun `REWARM_COOLDOWN` (5 daqiqa) ichida
+eng ko'pi bir marta. Test: `oyna_keshdan_tushsa_qayta_isitiladi`.
+
+### Oyna chegarasi (480 MiB) endi to'xtatmaydi
+
+Oynadagi **oxirgi ulush olingan zahoti** keyingi oyna fon'da
+isitila boshlaydi (`warm_window_bg`). Ilgari chegarada hamma oqim
+to'xtab, 480 MiB B2'dan keshga ko'chguncha kutib turardi. Tanbal
+keshlash qoidasi buzilmaydi: isitish baribir faqat o'sha oynaga
+o'tish oldidan boshlanadi.
+
+### Ekranda tezlik
+
+`rust_video_cache_stats` javobiga `speed` (bayt/soniya) va
+`streams` (faol oqimlar soni) qo'shildi; qism qatorida
+"1080p / 47% / 78 / 166MB · 5.8 MB/s" ko'rinadi. Sabab: ilgari
+ekranda faqat foiz bor edi va "sekinlashdi" degan gapni tekshirib
+bo'lmasdi.
+
 - worker keshdan 64 MiB beradi, B2'dan esa 8 MiB (`B2_RANGE_MAX`) —
   xotira uchun. Xotiradan beriladigan javoblar `X-Cache: MISS` yoki
   `HIT-RANGE` bilan keladi va ilova ulardan chegara "o'rganmaydi";

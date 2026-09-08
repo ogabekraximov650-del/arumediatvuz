@@ -3731,8 +3731,13 @@ class _QualityRow extends StatelessWidget {
         final totalLabel = st.total > 0
             ? '${_mb(st.total)}MB'
             : (info.sizeLabel.isNotEmpty ? info.sizeLabel : '—');
+        // Tezlik FAQAT yuklash ketayotganda ko'rsatiladi —
+        // foydalanuvchi "sekinlashdimi yoki yo'q"ni shu raqamdan
+        // ko'radi (ilgari ekranda faqat foiz bor edi).
+        final speed = st.downloading ? st.speedLabel : '';
         final line =
             '${info.label} / ${st.percent}% / ${_mb(st.downloaded)} / $totalLabel'
+            '${speed.isNotEmpty ? ' · $speed' : ''}'
             '${st.retrying ? ' · qayta urinilmoqda' : ''}';
         return Padding(
           padding: const EdgeInsets.fromLTRB(12, 0, 8, 10),

@@ -61,11 +61,26 @@ class VideoCacheStat {
   /// davom etadi.
   final bool retrying;
 
+  // ── TEZLIK (bayt/soniya) VA FAOL OQIMLAR SONI ──────────────────
+  //
+  // NEGA KERAK: "yuklab olish sekinlashdi" degan gapni tekshirib
+  // bo'lmasdi — ekranda faqat foiz ko'rinardi. Endi tezlik ham
+  // ko'rinadi, ya'ni muammo taxmin emas, RAQAM bo'ladi. Ikkala son
+  // ham Rust yadrosidagi xotira hisobidan keladi (diskka ham,
+  // tarmoqqa ham chiqilmaydi).
+  final int speed;
+
+  /// Hozir shu video uchun nechta yuklash oqimi ishlayapti.
+  /// (Diagnostika uchun: tezlik oqimlar soniga proporsional.)
+  final int streams;
+
   const VideoCacheStat({
     this.total = 0,
     this.downloaded = 0,
     this.downloading = false,
     this.retrying = false,
+    this.speed = 0,
+    this.streams = 0,
   });
 
   static const empty = VideoCacheStat();
@@ -77,16 +92,29 @@ class VideoCacheStat {
 
   bool get complete => total > 0 && downloaded >= total;
 
+  /// Ekran uchun tayyor matn: "3.4 MB/s". Tezlik nol bo'lsa
+  /// (yuklash ketmayapti yoki hozircha bayt kelmadi) — bo'sh satr.
+  String get speedLabel {
+    if (speed <= 0) return '';
+    final mb = speed / (1024 * 1024);
+    if (mb >= 10) return '${mb.toStringAsFixed(0)} MB/s';
+    if (mb >= 1) return '${mb.toStringAsFixed(1)} MB/s';
+    return '${(speed / 1024).toStringAsFixed(0)} KB/s';
+  }
+
   @override
   bool operator ==(Object other) =>
       other is VideoCacheStat &&
       other.total == total &&
       other.downloaded == downloaded &&
       other.downloading == downloading &&
-      other.retrying == retrying;
+      other.retrying == retrying &&
+      other.speed == speed &&
+      other.streams == streams;
 
   @override
-  int get hashCode => Object.hash(total, downloaded, downloading, retrying);
+  int get hashCode =>
+      Object.hash(total, downloaded, downloading, retrying, speed, streams);
 }
 
 class DownloadManager extends ChangeNotifier {
@@ -256,6 +284,8 @@ class DownloadManager extends ChangeNotifier {
         downloaded: (v['downloaded'] as num?)?.toInt() ?? 0,
         downloading: v['downloading'] == true,
         retrying: v['retrying'] == true,
+        speed: (v['speed'] as num?)?.toInt() ?? 0,
+        streams: (v['streams'] as num?)?.toInt() ?? 0,
       );
       if (_stats[entry.key] != stat) {
         _stats[entry.key] = stat;
