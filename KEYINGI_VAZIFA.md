@@ -396,6 +396,21 @@ uchun `users_db.id` bo'yicha yangi jadval (masalan
 bo'ladi. **Admin panel himoyasi ataylab qo'shilmagan** — ilova
 hali sinovda, tayyor bo'lganda panel butunlay olib tashlanadi.
 
+## ILOVA BELGISI (ARU logotipi)
+
+Qora plita, undan **ARU** harflari o'yib olingan. Barcha fayllar va
+ularni qayta chiqarish tartibi: **`branding/README.md`**.
+
+Muhim: `android/` papkasi har build'da `flutter create` bilan qaytadan
+yaratiladi va u bilan birga Flutter'ning standart ko'k belgisi keladi.
+Shu sabab `build-flutter-apk.yml` dagi «Ilova belgisini o'rnatish»
+qadami har safar `branding/android-res/` ni ustiga ko'chiradi. Bu
+qadamni olib tashlamang — belgi darhol standartiga qaytadi.
+
+Belgi CI'da QAYTA CHIZILMAYDI: PNG'lar repoda tayyor yotadi, CI faqat
+ko'chiradi. Logotip o'zgarsa `node branding/build-icons.js` ni
+mahalliy ishga tushirib, natijani commit qilish kerak.
+
 ## Tegilmaydigan joylar
 
 - `rust/src/video_cache.rs` ning bo'lak-keshlash va shifrlash qismi

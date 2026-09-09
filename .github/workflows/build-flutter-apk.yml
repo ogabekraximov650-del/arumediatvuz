@@ -167,6 +167,28 @@ jobs:
               print("✅ yangi <queries> bloki qo'shildi")
           PYEOF
 
+      # ── ILOVA BELGISI (ARU logotipi) ──────────────────────────
+      #
+      # `android/` papkasi har build'da `flutter create` bilan
+      # qaytadan yaratiladi va u BILAN BIRGA Flutter'ning standart
+      # ko'k belgisi keladi. Shu sabab bizning belgimiz har safar
+      # shu yerda ustiga yoziladi.
+      #
+      # Fayllar `branding/android-res/` da tayyor turadi (ular
+      # `node branding/build-icons.js` bilan SVG'dan chiqarilgan),
+      # ya'ni CI'da hech narsa qayta chizilmaydi — faqat ko'chiriladi.
+      - name: Ilova belgisini o'rnatish
+        run: |
+          set -e
+          cp -r branding/android-res/. android/app/src/main/res/
+          echo "── O'rnatilgan belgi fayllari ──"
+          find android/app/src/main/res -name 'ic_launcher*' | sort
+          # Manifest belgiga murojaat qilishiga ishonch hosil qilamiz
+          grep -q 'android:icon="@mipmap/ic_launcher"' \
+            android/app/src/main/AndroidManifest.xml \
+            || { echo "❌ Manifest @mipmap/ic_launcher ga murojaat qilmayapti"; exit 1; }
+          echo "✅ Belgi o'rnatildi"
+
       - name: Kotlin va compileSdk versiyalarini eng yangisiga moslash
         run: |
           if [ -f "android/build.gradle" ]; then
