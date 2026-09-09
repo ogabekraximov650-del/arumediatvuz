@@ -32,6 +32,12 @@ dependencies:
   # EncryptedSharedPreferences (Keystore bilan himoyalangan) ishlatadi,
   # ya'ni kalit qurilmadan chiqmaydi va root'siz o'qib bo'lmaydi.
   flutter_secure_storage: ^9.2.4
+  # ── TELEGRAM ORQALI KIRISH ──────────────────────────────────
+  # Kirish tugmasi bosilganda Telegram ilovasini ochish uchun.
+  url_launcher: ^6.3.0
+  # Sessiyalar jurnalidagi "qaysi qurilma bilan kirgan" ustunini
+  # to'ldirish uchun (brend + model + Android versiyasi).
+  device_info_plus: ^11.1.0
 
 dev_dependencies:
   flutter_test:

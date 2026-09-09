@@ -237,6 +237,67 @@ async fn init_db(env: &Env) {
         )", vec![]),
         ("CREATE INDEX IF NOT EXISTS idx_epizod_season ON epizod_db(anime_id, season_id)", vec![]),
     ]).await;
+
+    // ── TELEGRAM ORQALI KIRISH JADVALLARI ─────────────────────
+    //
+    // Alohida `turso_batch` chaqiruvi: yuqoridagi to'plamda
+    // `ALTER TABLE ... ADD COLUMN` bor va u ustun allaqachon
+    // mavjud bo'lganda xato beradi. Kirish jadvallari o'sha
+    // xatoga bog'lanib qolmasligi uchun ular mustaqil yuboriladi.
+    let _ = turso_batch(env, &[
+        // Foydalanuvchilar. `id` — ILOVADAGI raqam: yangi
+        // foydalanuvchi qo'shilganda oxirgi id'ga +1 qilinadi
+        // (anime_db/epizod_db bilan bir xil tartib).
+        ("CREATE TABLE IF NOT EXISTS users_db (
+            id INTEGER PRIMARY KEY,
+            telegram_id INTEGER UNIQUE,
+            username TEXT, first_name TEXT, last_name TEXT,
+            language_code TEXT,
+            is_premium INTEGER DEFAULT 0,
+            is_banned INTEGER DEFAULT 0,
+            created_at INTEGER,
+            last_login_at INTEGER
+        )", vec![]),
+        ("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_tg ON users_db(telegram_id)", vec![]),
+
+        // Kirish jarayonidagi bir martalik 16 xonali tokenlar.
+        ("CREATE TABLE IF NOT EXISTS login_tokens (
+            token TEXT PRIMARY KEY,
+            status TEXT,
+            user_id INTEGER,
+            session_token TEXT,
+            device TEXT, platform TEXT, app_version TEXT, api_base TEXT,
+            created_at INTEGER,
+            expires_at INTEGER
+        )", vec![]),
+        ("CREATE INDEX IF NOT EXISTS idx_login_exp ON login_tokens(expires_at)", vec![]),
+
+        // Sessiyalar jurnali: hisob ma'lumoti + qaysi API va qaysi
+        // qurilma bilan kirgani. Bitta hisobga eng ko'pi 4 ta
+        // qurilma (create_session ichida qo'llanadi).
+        ("CREATE TABLE IF NOT EXISTS sessions_db (
+            id INTEGER PRIMARY KEY,
+            user_id INTEGER,
+            telegram_id INTEGER,
+            username TEXT,
+            first_name TEXT,
+            session_token TEXT UNIQUE,
+            api_base TEXT,
+            device TEXT,
+            platform TEXT,
+            app_version TEXT,
+            created_at INTEGER,
+            last_seen_at INTEGER
+        )", vec![]),
+        ("CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_token ON sessions_db(session_token)", vec![]),
+        ("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions_db(user_id, last_seen_at)", vec![]),
+
+        // Worker ichki sozlamalari (webhook siri va manzili).
+        ("CREATE TABLE IF NOT EXISTS app_config (
+            cfg_key TEXT PRIMARY KEY,
+            cfg_value TEXT
+        )", vec![]),
+    ]).await;
 }
 
 async fn next_anime_id(env: &Env) -> Result<i64> {
@@ -1904,6 +1965,693 @@ async fn purge_list_cache(path: &str) {
     }
 }
 
+// ══════════════════════════════════════════════════════════════
+//  TELEGRAM ORQALI KIRISH
+// ══════════════════════════════════════════════════════════════
+//
+// OQIM (foydalanuvchi nuqtai nazaridan):
+//
+//   1. Profil sahifasida "Telegram orqali kirish" bosiladi.
+//   2. Ilova POST /api/auth/telegram/start yuboradi va 16 xonali
+//      bir martalik token oladi.
+//   3. Ilova https://t.me/<bot>?start=<token> manzilini ochadi —
+//      Telegram ilovasi ochiladi va START tugmasi ko'rinadi.
+//   4. START bosilganda Telegram BIZNING webhook'imizga xabar
+//      yuboradi. Worker tokenni topadi, foydalanuvchini bazada
+//      yaratadi (yoki topadi) va unga sessiya ochadi.
+//   5. Ilova (fon'da 2 soniyada bir marta, hamda Telegram'dan
+//      qaytgan zahoti) GET /api/auth/telegram/status?token=... ni
+//      so'raydi va sessiya tokenini oladi. Kirish tugadi.
+//
+// XAVFSIZLIK:
+//   • Bot tokeni FAQAT worker ichida (Cloudflare secret). Ilovaga
+//     hech qachon yuborilmaydi — APK'ni ochib olib bo'lmaydi.
+//   • Webhook'ga kelgan har bir so'rov `X-Telegram-Bot-Api-Secret-
+//     Token` sarlavhasi bo'yicha tekshiriladi. Sirni worker o'zi
+//     BIR MARTA yaratadi va app_config jadvalida saqlaydi, ya'ni
+//     qo'lda qo'shiladigan qo'shimcha secret kerak emas.
+//   • Login token bir martalik va 5 daqiqa yashaydi.
+//   • Avatar Telegram'dan WORKER orqali uzatiladi (/api/avatar/:id)
+//     — Telegram'ning fayl manzilida bot tokeni bo'lgani uchun u
+//     manzil hech qachon ilovaga chiqarilmaydi.
+
+const BOT_USERNAME: &str = "aniraxuzloginbot";
+
+/// Login tokeni necha millisekund yashaydi (5 daqiqa).
+const LOGIN_TOKEN_TTL_MS: i64 = 5 * 60 * 1000;
+
+/// Kirish tasdiqlangandan keyin ilova sessiyani olib ketishi uchun
+/// qo'shimcha muhlat (tarmoq uzilib qolsa qayta so'ray oladi).
+const LOGIN_CLAIM_TTL_MS: i64 = 5 * 60 * 1000;
+
+/// BITTA HISOB UCHUN ENG KO'PI 4 TA QURILMA.
+/// 5-chisi qo'shilganda ENG OLDIN onlayn bo'lgan (ya'ni eng uzoq
+/// vaqt oldin ko'rilgan) sessiya hisobdan chiqarib tashlanadi.
+const MAX_SESSIONS_PER_USER: i64 = 4;
+
+/// Avatar chekka keshda necha soniya turadi (1 kun).
+const AVATAR_CACHE_SECONDS: u64 = 24 * 60 * 60;
+
+fn now_ms() -> i64 {
+    Date::now().as_millis() as i64
+}
+
+/// Kriptografik tasodifiy hex satr (`crypto.randomUUID` asosida —
+/// Workers muhitida har doim mavjud).
+fn random_hex(len: usize) -> String {
+    use worker::wasm_bindgen::{JsCast, JsValue};
+
+    let mut out = String::new();
+    let global = js_sys::global();
+    if let Ok(crypto) = js_sys::Reflect::get(&global, &JsValue::from_str("crypto")) {
+        if let Ok(f) = js_sys::Reflect::get(&crypto, &JsValue::from_str("randomUUID")) {
+            if let Ok(f) = f.dyn_into::<js_sys::Function>() {
+                while out.len() < len {
+                    match f.call0(&crypto).ok().and_then(|v| v.as_string()) {
+                        Some(s) => out.push_str(&s.replace('-', "")),
+                        None => break,
+                    }
+                }
+            }
+        }
+    }
+    // Zaxira yo'l — `crypto` topilmasa (amalda bo'lmaydi).
+    while out.len() < len {
+        let r = js_sys::Math::random();
+        out.push_str(&format!("{:08x}", (r * 4_294_967_295.0) as u32));
+    }
+    out.truncate(len);
+    out
+}
+
+// ── app_config: kichik kalit/qiymat ombori ─────────────────────
+
+async fn config_get(env: &Env, key: &str) -> Option<String> {
+    let res = turso_exec(env, "SELECT cfg_value FROM app_config WHERE cfg_key=?",
+        vec![TursoArg::text(key)]).await.ok()?;
+    let cols = res["cols"].as_array().cloned().unwrap_or_default();
+    let rows = res["rows"].as_array().cloned().unwrap_or_default();
+    if rows.is_empty() { return None; }
+    let v = row_to_obj(&cols, rows[0].as_array().unwrap_or(&vec![]))["cfg_value"]
+        .as_str().unwrap_or("").to_string();
+    if v.is_empty() { None } else { Some(v) }
+}
+
+async fn config_put(env: &Env, key: &str, value: &str) {
+    let _ = turso_exec(env,
+        "INSERT INTO app_config (cfg_key,cfg_value) VALUES (?,?)
+         ON CONFLICT(cfg_key) DO UPDATE SET cfg_value=excluded.cfg_value",
+        vec![TursoArg::text(key), TursoArg::text(value)]).await;
+}
+
+// ── Telegram Bot API ───────────────────────────────────────────
+
+async fn tg_api(env: &Env, method: &str, body: Value) -> Result<Value> {
+    let token = env.secret("TELEGRAM_BOT_TOKEN")?.to_string();
+    let h = Headers::new();
+    h.set("Content-Type", "application/json")?;
+    let req = Request::new_with_init(
+        &format!("https://api.telegram.org/bot{token}/{method}"),
+        RequestInit::new().with_method(Method::Post).with_headers(h)
+            .with_body(Some(body.to_string().into())),
+    )?;
+    let mut r = Fetch::Request(req).send().await?;
+    let d: Value = r.json().await?;
+    if d["ok"] != json!(true) {
+        return Err(Error::RustError(format!(
+            "Telegram xatosi ({method}): {}",
+            d["description"].as_str().unwrap_or("noma'lum")
+        )));
+    }
+    Ok(d["result"].clone())
+}
+
+/// Telegram HTML rejimida `< > &` belgilari maxsus. Foydalanuvchi
+/// ismi ularni o'z ichiga olishi mumkin — qalqib chiqmasa, xabar
+/// umuman yuborilmay qolardi.
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+/// Botga xabar yuboradi. Xatolar e'tiborsiz — kirishning o'zi
+/// xabar yuborilmagani uchun buzilmasligi kerak.
+async fn tg_send(env: &Env, chat_id: i64, text: &str) {
+    let _ = tg_api(env, "sendMessage", json!({
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": true,
+    })).await;
+}
+
+/// Webhook SHU IZOLYATDA allaqachon ro'yxatdan o'tkazilganmi.
+static WEBHOOK_READY: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Webhook'ni Telegram'da BIR MARTA ro'yxatdan o'tkazadi.
+///
+/// Qo'lda hech narsa qilish shart emas: worker o'z domenini kelgan
+/// so'rovdan biladi, shu sabab domen o'zgarsa ham o'zi moslashadi.
+/// Sir (`secret_token`) ham shu yerda bir marta yaratilib bazaga
+/// yoziladi.
+async fn ensure_webhook(env: &Env, origin: &str) {
+    use core::sync::atomic::Ordering;
+    if WEBHOOK_READY.load(Ordering::Relaxed) { return; }
+
+    let secret = match config_get(env, "tg_webhook_secret").await {
+        Some(s) => s,
+        None => {
+            let fresh = random_hex(48);
+            // INSERT OR IGNORE — ikki so'rov bir vaqtda kelsa ham
+            // bazada BITTA sir qoladi, keyin uni qayta o'qiymiz.
+            let _ = turso_exec(env,
+                "INSERT OR IGNORE INTO app_config (cfg_key,cfg_value) VALUES (?,?)",
+                vec![TursoArg::text("tg_webhook_secret"), TursoArg::text(&fresh)]).await;
+            config_get(env, "tg_webhook_secret").await.unwrap_or(fresh)
+        }
+    };
+
+    let want = format!("{origin}/api/telegram/webhook");
+    if config_get(env, "tg_webhook_url").await.as_deref() == Some(want.as_str()) {
+        WEBHOOK_READY.store(true, Ordering::Relaxed);
+        return;
+    }
+
+    let res = tg_api(env, "setWebhook", json!({
+        "url": want,
+        "secret_token": secret,
+        "allowed_updates": ["message"],
+        "drop_pending_updates": true,
+    })).await;
+
+    if res.is_ok() {
+        config_put(env, "tg_webhook_url", &want).await;
+        WEBHOOK_READY.store(true, Ordering::Relaxed);
+    }
+}
+
+// ── users_db ───────────────────────────────────────────────────
+
+/// Yangi foydalanuvchi ID'si = oxirgi ID + 1 (anime/epizodlardagi
+/// bilan bir xil tartib).
+async fn next_user_id(env: &Env) -> Result<i64> {
+    let res = turso_exec(env, "SELECT COALESCE(MAX(id), 0) AS max_id FROM users_db", vec![]).await?;
+    let cols = res["cols"].as_array().cloned().unwrap_or_default();
+    let rows = res["rows"].as_array().cloned().unwrap_or_default();
+    if rows.is_empty() { return Ok(1); }
+    Ok(row_to_obj(&cols, rows[0].as_array().unwrap_or(&vec![]))["max_id"].as_i64().unwrap_or(0) + 1)
+}
+
+async fn find_user_by_tg(env: &Env, tg_id: i64) -> Result<Option<Value>> {
+    let res = turso_exec(env, "SELECT * FROM users_db WHERE telegram_id=?",
+        vec![TursoArg::int(tg_id)]).await?;
+    let cols = res["cols"].as_array().cloned().unwrap_or_default();
+    let rows = res["rows"].as_array().cloned().unwrap_or_default();
+    if rows.is_empty() { return Ok(None); }
+    Ok(Some(row_to_obj(&cols, rows[0].as_array().unwrap_or(&vec![]))))
+}
+
+fn first_row(res: &Value) -> Option<Value> {
+    let cols = res["cols"].as_array().cloned().unwrap_or_default();
+    let rows = res["rows"].as_array().cloned().unwrap_or_default();
+    if rows.is_empty() { return None; }
+    Some(row_to_obj(&cols, rows[0].as_array().unwrap_or(&vec![])))
+}
+
+/// Telegram'dan kelgan `from` obyekti bo'yicha foydalanuvchini
+/// topadi yoki yaratadi.
+///
+/// MAX(id)+1 usuli ikki odam AYNAN bir vaqtda ro'yxatdan o'tsa
+/// to'qnashishi mumkin — shu sabab `telegram_id` va `id` UNIQUE
+/// qilingan va bu yerda qayta urinish (retry) bor. Ya'ni bir xil
+/// ID hech qachon ikki kishiga tegmaydi.
+async fn upsert_user(env: &Env, from: &Value) -> Result<Value> {
+    let tg_id = from["id"].as_i64().unwrap_or(0);
+    if tg_id == 0 { return Err(Error::RustError("telegram_id yo'q".into())); }
+
+    let username = from["username"].as_str().unwrap_or("").to_string();
+    let first_name = from["first_name"].as_str().unwrap_or("").to_string();
+    let last_name = from["last_name"].as_str().unwrap_or("").to_string();
+    let lang = from["language_code"].as_str().unwrap_or("").to_string();
+    let is_premium = if from["is_premium"] == json!(true) { 1 } else { 0 };
+    let now = now_ms();
+
+    for _ in 0..4 {
+        if find_user_by_tg(env, tg_id).await?.is_some() {
+            let res = turso_exec(env,
+                "UPDATE users_db SET username=?,first_name=?,last_name=?,language_code=?,
+                 is_premium=?,last_login_at=? WHERE telegram_id=? RETURNING *",
+                vec![
+                    TursoArg::text(&username), TursoArg::text(&first_name),
+                    TursoArg::text(&last_name), TursoArg::text(&lang),
+                    TursoArg::int(is_premium), TursoArg::int(now), TursoArg::int(tg_id),
+                ]).await?;
+            if let Some(u) = first_row(&res) { return Ok(u); }
+            continue;
+        }
+
+        let new_id = next_user_id(env).await?;
+        let res = turso_exec(env,
+            "INSERT INTO users_db (id,telegram_id,username,first_name,last_name,
+             language_code,is_premium,is_banned,created_at,last_login_at)
+             VALUES (?,?,?,?,?,?,?,0,?,?) RETURNING *",
+            vec![
+                TursoArg::int(new_id), TursoArg::int(tg_id), TursoArg::text(&username),
+                TursoArg::text(&first_name), TursoArg::text(&last_name), TursoArg::text(&lang),
+                TursoArg::int(is_premium), TursoArg::int(now), TursoArg::int(now),
+            ]).await;
+
+        match res {
+            Ok(r) => { if let Some(u) = first_row(&r) { return Ok(u); } }
+            // ID yoki telegram_id band bo'lib qoldi — qaytadan urinamiz.
+            Err(_) => continue,
+        }
+    }
+    Err(Error::RustError("Foydalanuvchi yaratib bo'lmadi".into()))
+}
+
+/// Ilovaga BERILADIGAN foydalanuvchi ko'rinishi. Avatar har doim
+/// worker manzili orqali beriladi — Telegram fayl manzilida bot
+/// tokeni bo'lgani uchun u tashqariga chiqarilmaydi.
+fn user_public(origin: &str, u: &Value) -> Value {
+    let id = u["id"].as_i64().unwrap_or(0);
+    json!({
+        "id": id,
+        "telegram_id": u["telegram_id"].as_i64().unwrap_or(0),
+        "username": u["username"].as_str().unwrap_or(""),
+        "first_name": u["first_name"].as_str().unwrap_or(""),
+        "last_name": u["last_name"].as_str().unwrap_or(""),
+        "photo_url": format!("{origin}/api/avatar/{id}"),
+        "created_at": u["created_at"].clone(),
+        "last_login_at": u["last_login_at"].clone(),
+    })
+}
+
+// ── sessions_db ────────────────────────────────────────────────
+
+async fn next_session_id(env: &Env) -> Result<i64> {
+    let res = turso_exec(env, "SELECT COALESCE(MAX(id), 0) AS max_id FROM sessions_db", vec![]).await?;
+    let cols = res["cols"].as_array().cloned().unwrap_or_default();
+    let rows = res["rows"].as_array().cloned().unwrap_or_default();
+    if rows.is_empty() { return Ok(1); }
+    Ok(row_to_obj(&cols, rows[0].as_array().unwrap_or(&vec![]))["max_id"].as_i64().unwrap_or(0) + 1)
+}
+
+/// Yangi sessiya ochadi va 4 ta qurilma chegarasini qo'llaydi.
+///
+/// Jurnalda saqlanadigan ma'lumot (talab bo'yicha):
+///   • hisob ma'lumoti — user_id, telegram_id, username, first_name
+///   • qaysi API orqali kirgan — api_base
+///   • qaysi qurilma bilan kirgan — device, platform, app_version
+async fn create_session(env: &Env, user: &Value, login: &Value) -> Result<String> {
+    let token = format!("{}{}", random_hex(32), random_hex(32));
+    let user_id = user["id"].as_i64().unwrap_or(0);
+    let now = now_ms();
+
+    let device = login["device"].as_str().unwrap_or("").to_string();
+    let platform = login["platform"].as_str().unwrap_or("").to_string();
+    let app_version = login["app_version"].as_str().unwrap_or("").to_string();
+    let api_base = login["api_base"].as_str().unwrap_or("").to_string();
+
+    for _ in 0..4 {
+        let sid = next_session_id(env).await?;
+        let res = turso_exec(env,
+            "INSERT INTO sessions_db (id,user_id,telegram_id,username,first_name,
+             session_token,api_base,device,platform,app_version,created_at,last_seen_at)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            vec![
+                TursoArg::int(sid), TursoArg::int(user_id),
+                TursoArg::int(user["telegram_id"].as_i64().unwrap_or(0)),
+                TursoArg::text(user["username"].as_str().unwrap_or("")),
+                TursoArg::text(user["first_name"].as_str().unwrap_or("")),
+                TursoArg::text(&token), TursoArg::text(&api_base), TursoArg::text(&device),
+                TursoArg::text(&platform), TursoArg::text(&app_version),
+                TursoArg::int(now), TursoArg::int(now),
+            ]).await;
+        if res.is_err() { continue; }
+
+        // ── 4 TA QURILMA CHEGARASI ────────────────────────────
+        // Eng SO'NGGI onlayn bo'lgan 4 tasi qoldiriladi; qolgani —
+        // ya'ni eng oldin onlayn bo'lgani — o'chiriladi va o'sha
+        // qurilma keyingi so'rovda hisobdan chiqib qoladi.
+        let _ = turso_exec(env,
+            "DELETE FROM sessions_db WHERE user_id=? AND id NOT IN (
+                SELECT id FROM sessions_db WHERE user_id=?
+                ORDER BY last_seen_at DESC, id DESC LIMIT ?
+             )",
+            vec![TursoArg::int(user_id), TursoArg::int(user_id),
+                 TursoArg::int(MAX_SESSIONS_PER_USER)]).await;
+
+        return Ok(token);
+    }
+    Err(Error::RustError("Sessiya ochib bo'lmadi".into()))
+}
+
+/// Sessiya tokeni bo'yicha foydalanuvchini topadi va "oxirgi
+/// ko'rilgan" vaqtini yangilaydi (4 ta qurilma tartibi shunga
+/// qarab hisoblanadi).
+async fn session_user(env: &Env, token: &str) -> Result<Option<Value>> {
+    if token.is_empty() { return Ok(None); }
+    let res = turso_exec(env,
+        "SELECT u.* FROM sessions_db s JOIN users_db u ON u.id = s.user_id
+         WHERE s.session_token = ?",
+        vec![TursoArg::text(token)]).await?;
+    let Some(u) = first_row(&res) else { return Ok(None) };
+    if u["is_banned"].as_i64().unwrap_or(0) == 1 { return Ok(None); }
+    let _ = turso_exec(env, "UPDATE sessions_db SET last_seen_at=? WHERE session_token=?",
+        vec![TursoArg::int(now_ms()), TursoArg::text(token)]).await;
+    Ok(Some(u))
+}
+
+fn bearer(req: &Request) -> String {
+    req.headers().get("Authorization").ok().flatten()
+        .and_then(|v| v.strip_prefix("Bearer ").map(|s| s.trim().to_string()))
+        .unwrap_or_default()
+}
+
+/// Kirish javoblari HECH QACHON keshlanmasligi kerak.
+fn ok_nostore(v: Value) -> Result<Response> {
+    let mut resp = Response::from_json(&v)?;
+    set_cors(&mut resp);
+    let _ = resp.headers_mut().set("Cache-Control", "no-store");
+    Ok(resp)
+}
+
+// ── Avatar (Telegram → worker → ilova) ─────────────────────────
+
+async fn tg_avatar(env: &Env, user_id: i64) -> Result<Response> {
+    let cache = Cache::default();
+    let key_url = format!("https://fulutter-chunk-cache.internal/_avatar/{user_id}");
+    if let Ok(k) = Request::new(&key_url, Method::Get) {
+        if let Ok(Some(hit)) = cache.get(&k, false).await { return Ok(hit); }
+    }
+
+    let res = turso_exec(env, "SELECT telegram_id FROM users_db WHERE id=?",
+        vec![TursoArg::int(user_id)]).await?;
+    let Some(u) = first_row(&res) else { return err404("Foydalanuvchi topilmadi") };
+    let tg_id = u["telegram_id"].as_i64().unwrap_or(0);
+    if tg_id == 0 { return err404("Avatar yo'q"); }
+
+    let photos = tg_api(env, "getUserProfilePhotos",
+        json!({"user_id": tg_id, "limit": 1})).await?;
+    // `photos[0]` — bir rasmning turli o'lchamlari; oxirgisi eng kattasi.
+    let file_id = photos["photos"][0].as_array()
+        .and_then(|sizes| sizes.last())
+        .and_then(|f| f["file_id"].as_str())
+        .unwrap_or("").to_string();
+    if file_id.is_empty() { return err404("Avatar yo'q"); }
+
+    let file = tg_api(env, "getFile", json!({"file_id": file_id})).await?;
+    let file_path = file["file_path"].as_str().unwrap_or("").to_string();
+    if file_path.is_empty() { return err404("Avatar yo'q"); }
+
+    // DIQQAT: bu manzilda bot tokeni bor — u faqat worker ichida
+    // qoladi, javobga esa FAQAT rasm baytlari chiqadi.
+    let token = env.secret("TELEGRAM_BOT_TOKEN")?.to_string();
+    let req = Request::new(
+        &format!("https://api.telegram.org/file/bot{token}/{file_path}"), Method::Get)?;
+    let mut r = Fetch::Request(req).send().await?;
+    if r.status_code() != 200 { return err404("Avatar olinmadi"); }
+    let bytes = r.bytes().await?;
+
+    let build = |b: Vec<u8>| -> Result<Response> {
+        let mut resp = Response::from_bytes(b)?;
+        set_cors(&mut resp);
+        let h = resp.headers_mut();
+        h.set("Content-Type", "image/jpeg")?;
+        h.set("Cache-Control", &format!("public, max-age={AVATAR_CACHE_SECONDS}"))?;
+        Ok(resp)
+    };
+
+    if let Ok(k) = Request::new(&key_url, Method::Get) {
+        if let Ok(to_cache) = build(bytes.clone()) {
+            let _ = cache.put(&k, to_cache).await;
+        }
+    }
+    build(bytes)
+}
+
+// ── Webhook ────────────────────────────────────────────────────
+
+async fn handle_tg_webhook(env: &Env, mut req: Request) -> Result<Response> {
+    // Sir mos kelmasa — bu Telegram emas.
+    let got = req.headers().get("X-Telegram-Bot-Api-Secret-Token").ok().flatten()
+        .unwrap_or_default();
+    let want = config_get(env, "tg_webhook_secret").await.unwrap_or_default();
+    if want.is_empty() || got != want {
+        return json_resp(&json!({"error": "forbidden"}), 403);
+    }
+
+    let update: Value = req.json().await.unwrap_or(json!({}));
+    let msg = update["message"].clone();
+    let chat_id = msg["chat"]["id"].as_i64().unwrap_or(0);
+    let text = msg["text"].as_str().unwrap_or("").trim().to_string();
+    if chat_id == 0 {
+        return ok(json!({"ok": true}));
+    }
+
+    // Telegram takroriy urinmasligi uchun bu yerdan keyin HAR DOIM
+    // 200 qaytadi — xatolar foydalanuvchiga xabar sifatida boradi.
+    if !text.starts_with("/start") {
+        tg_send(env, chat_id,
+            "👋 Bu bot faqat <b>Aniraxuz</b> ilovasiga kirish uchun.\n\n\
+             Ilovani oching → <b>Profil</b> → «Telegram orqali kirish» tugmasini bosing.").await;
+        return ok(json!({"ok": true}));
+    }
+
+    // Ba'zi mijozlar buyruqni "/start@botnomi token" ko'rinishida
+    // yuboradi — bot nomini olib tashlaymiz.
+    let mut arg = text.strip_prefix("/start").unwrap_or("").trim().to_string();
+    if arg.starts_with('@') {
+        arg = arg.split_whitespace().skip(1).collect::<Vec<_>>().join(" ");
+    }
+    if arg.is_empty() {
+        tg_send(env, chat_id,
+            "👋 Salom! Bu bot <b>Aniraxuz</b> ilovasiga kirish uchun xizmat qiladi.\n\n\
+             Ilovani oching → <b>Profil</b> → «Telegram orqali kirish» tugmasini bosing.").await;
+        return ok(json!({"ok": true}));
+    }
+
+    let now = now_ms();
+    let res = turso_exec(env, "SELECT * FROM login_tokens WHERE token=?",
+        vec![TursoArg::text(&arg)]).await?;
+    let Some(login) = first_row(&res) else {
+        tg_send(env, chat_id,
+            "⌛️ Bu havola yaroqsiz yoki muddati tugagan.\n\n\
+             Ilovada «Telegram orqali kirish» tugmasini qaytadan bosing.").await;
+        return ok(json!({"ok": true}));
+    };
+
+    if login["expires_at"].as_i64().unwrap_or(0) < now {
+        let _ = turso_exec(env, "DELETE FROM login_tokens WHERE token=?",
+            vec![TursoArg::text(&arg)]).await;
+        tg_send(env, chat_id,
+            "⌛️ Havolaning muddati tugagan (5 daqiqa).\n\n\
+             Ilovada «Telegram orqali kirish» tugmasini qaytadan bosing.").await;
+        return ok(json!({"ok": true}));
+    }
+
+    // Allaqachon tasdiqlangan bo'lsa — takroriy START. Yangi sessiya
+    // ochilmaydi, shunchaki eslatib qo'yamiz.
+    if login["status"].as_str().unwrap_or("") == "approved" {
+        tg_send(env, chat_id, "✅ Siz allaqachon kirdingiz — ilovaga qayting.").await;
+        return ok(json!({"ok": true}));
+    }
+
+    let from = msg["from"].clone();
+    let user = match upsert_user(env, &from).await {
+        Ok(u) => u,
+        Err(e) => {
+            tg_send(env, chat_id, &format!("❌ Xatolik: {}. Birozdan keyin urinib ko'ring.",
+                html_escape(&e.to_string()))).await;
+            return ok(json!({"ok": true}));
+        }
+    };
+
+    let session = match create_session(env, &user, &login).await {
+        Ok(s) => s,
+        Err(e) => {
+            tg_send(env, chat_id, &format!("❌ Xatolik: {}. Birozdan keyin urinib ko'ring.",
+                html_escape(&e.to_string()))).await;
+            return ok(json!({"ok": true}));
+        }
+    };
+
+    let _ = turso_exec(env,
+        "UPDATE login_tokens SET status='approved', user_id=?, session_token=?, expires_at=?
+         WHERE token=?",
+        vec![
+            TursoArg::int(user["id"].as_i64().unwrap_or(0)),
+            TursoArg::text(&session),
+            TursoArg::int(now + LOGIN_CLAIM_TTL_MS),
+            TursoArg::text(&arg),
+        ]).await;
+
+    let raw_name = user["first_name"].as_str().unwrap_or("").trim().to_string();
+    let name = html_escape(if raw_name.is_empty() { "do'stim" } else { &raw_name });
+    tg_send(env, chat_id, &format!(
+        "✅ Xush kelibsiz, <b>{name}</b>!\n\n\
+         Siz ilovaga muvaffaqiyatli kirdingiz. Endi <b>ilovaga qayting</b> — \
+         hisobingiz avtomatik ochiladi.\n\n\
+         🆔 Ilovadagi ID: <b>#{}</b>",
+        user["id"].as_i64().unwrap_or(0)
+    )).await;
+
+    ok(json!({"ok": true}))
+}
+
+/// `/api/auth/...` va `/api/telegram/...` yo'llari.
+///
+/// MUHIM: bu javoblar HECH QACHON keshlanmaydi va yozish
+/// amallaridan keyin ro'yxat keshi ham tozalanmaydi (main() ichida
+/// alohida ajratilgan) — aks holda har bir kirish anime/bo'limlar
+/// keshini behuda kuydirib yuborardi.
+async fn auth_route(req: Request, env: &Env, origin: &str, path: &str, method: Method)
+    -> Result<Response>
+{
+    match (method.clone(), path) {
+
+        // ── 1-QADAM: ilova bir martalik token so'raydi ──────────
+        (Method::Post, "/api/auth/telegram/start") => {
+            // Webhook birinchi so'rovda o'zi ro'yxatdan o'tadi —
+            // qo'lda hech narsa qilish shart emas.
+            ensure_webhook(env, origin).await;
+
+            let mut req = req;
+            let b: Value = req.json().await.unwrap_or(json!({}));
+            let now = now_ms();
+
+            // Eskirgan tokenlarni yo'l-yo'lakay tozalaymiz.
+            let _ = turso_exec(env, "DELETE FROM login_tokens WHERE expires_at < ?",
+                vec![TursoArg::int(now)]).await;
+
+            let token = random_hex(16);
+            turso_exec(env,
+                "INSERT INTO login_tokens (token,status,user_id,session_token,
+                 device,platform,app_version,api_base,created_at,expires_at)
+                 VALUES (?,'pending',0,'',?,?,?,?,?,?)",
+                vec![
+                    TursoArg::text(&token),
+                    TursoArg::text(b["device"].as_str().unwrap_or("")),
+                    TursoArg::text(b["platform"].as_str().unwrap_or("")),
+                    TursoArg::text(b["app_version"].as_str().unwrap_or("")),
+                    TursoArg::text(origin),
+                    TursoArg::int(now),
+                    TursoArg::int(now + LOGIN_TOKEN_TTL_MS),
+                ]).await?;
+
+            ok_nostore(json!({
+                "token": token,
+                "bot": BOT_USERNAME,
+                "deep_link": format!("https://t.me/{BOT_USERNAME}?start={token}"),
+                "expires_in": LOGIN_TOKEN_TTL_MS / 1000,
+            }))
+        }
+
+        // ── 3-QADAM: ilova natijani so'rab turadi ───────────────
+        (Method::Get, "/api/auth/telegram/status") => {
+            let url = req.url()?;
+            let token = url.query_pairs().find(|(k, _)| k == "token")
+                .map(|(_, v)| v.to_string()).unwrap_or_default();
+            if token.is_empty() {
+                return json_resp(&json!({"error": "token ko'rsatilmagan"}), 400);
+            }
+
+            let res = turso_exec(env, "SELECT * FROM login_tokens WHERE token=?",
+                vec![TursoArg::text(&token)]).await?;
+            let Some(row) = first_row(&res) else {
+                return ok_nostore(json!({"status": "expired"}));
+            };
+            if row["expires_at"].as_i64().unwrap_or(0) < now_ms() {
+                let _ = turso_exec(env, "DELETE FROM login_tokens WHERE token=?",
+                    vec![TursoArg::text(&token)]).await;
+                return ok_nostore(json!({"status": "expired"}));
+            }
+            if row["status"].as_str().unwrap_or("") != "approved" {
+                return ok_nostore(json!({"status": "pending"}));
+            }
+
+            let ures = turso_exec(env, "SELECT * FROM users_db WHERE id=?",
+                vec![TursoArg::int(row["user_id"].as_i64().unwrap_or(0))]).await?;
+            let Some(u) = first_row(&ures) else {
+                return ok_nostore(json!({"status": "expired"}));
+            };
+            ok_nostore(json!({
+                "status": "ok",
+                "session": row["session_token"].as_str().unwrap_or(""),
+                "user": user_public(origin, &u),
+            }))
+        }
+
+        // ── 2-QADAM: Telegram START tugmasi bosildi ─────────────
+        (Method::Post, "/api/telegram/webhook") => handle_tg_webhook(env, req).await,
+
+        // ── Ilova ochilganda: sessiya hali kuchdami? ────────────
+        (Method::Get, "/api/auth/me") => {
+            match session_user(env, &bearer(&req)).await? {
+                Some(u) => ok_nostore(json!({"user": user_public(origin, &u)})),
+                // Sessiya o'chirilgan (masalan 5-qurilma kirgani uchun)
+                // — ilova buni ko'rib foydalanuvchini chiqaradi.
+                None => json_resp(&json!({"error": "unauthorized"}), 401),
+            }
+        }
+
+        (Method::Post, "/api/auth/logout") => {
+            let t = bearer(&req);
+            if !t.is_empty() {
+                let _ = turso_exec(env, "DELETE FROM sessions_db WHERE session_token=?",
+                    vec![TursoArg::text(&t)]).await;
+            }
+            ok_nostore(json!({"success": true}))
+        }
+
+        // ── Sessiyalar jurnali: qaysi qurilma, qaysi API ────────
+        (Method::Get, "/api/auth/sessions") => {
+            let t = bearer(&req);
+            let Some(u) = session_user(env, &t).await? else {
+                return json_resp(&json!({"error": "unauthorized"}), 401);
+            };
+            let res = turso_exec(env,
+                "SELECT * FROM sessions_db WHERE user_id=? ORDER BY last_seen_at DESC",
+                vec![TursoArg::int(u["id"].as_i64().unwrap_or(0))]).await?;
+            let cols = res["cols"].as_array().cloned().unwrap_or_default();
+            let rows = res["rows"].as_array().cloned().unwrap_or_default();
+            let items: Vec<Value> = rows.iter().map(|r| {
+                let mut o = row_to_obj(&cols, r.as_array().unwrap_or(&vec![]));
+                if let Some(m) = o.as_object_mut() {
+                    // Sessiya tokeni javobga CHIQMAYDI — faqat "shu
+                    // qurilmami?" belgisiga aylantiriladi.
+                    let is_current = m.get("session_token")
+                        .and_then(|v| v.as_str()).map(|s| s == t).unwrap_or(false);
+                    m.remove("session_token");
+                    m.insert("current".into(), json!(is_current));
+                }
+                o
+            }).collect();
+            ok_nostore(json!({"sessions": items, "max_devices": MAX_SESSIONS_PER_USER}))
+        }
+
+        _ => {
+            // DELETE /api/auth/sessions/:id — o'z qurilmasini chiqarish
+            if method == Method::Delete {
+                if let Some(ids) = path.strip_prefix("/api/auth/sessions/") {
+                    if let Ok(sid) = ids.parse::<i64>() {
+                        let Some(u) = session_user(env, &bearer(&req)).await? else {
+                            return json_resp(&json!({"error": "unauthorized"}), 401);
+                        };
+                        let _ = turso_exec(env,
+                            "DELETE FROM sessions_db WHERE id=? AND user_id=?",
+                            vec![TursoArg::int(sid),
+                                 TursoArg::int(u["id"].as_i64().unwrap_or(0))]).await;
+                        return ok_nostore(json!({"success": true}));
+                    }
+                }
+            }
+            err404("Not found")
+        }
+    }
+}
+
 // ── Router ─────────────────────────────────────────────────────
 
 #[event(fetch)]
@@ -1925,7 +2673,11 @@ async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
         }
     }
 
-    let write = matches!(method, Method::Post | Method::Put | Method::Delete);
+    // Kirish (auth) so'rovlari ro'yxat keshiga umuman aloqador
+    // emas — ular ham keshni tozalayversa, HAR BIR kirish
+    // anime/bo'limlar keshini behuda kuydirib yuborardi.
+    let auth_path = path.starts_with("/api/auth/") || path.starts_with("/api/telegram/");
+    let write = matches!(method, Method::Post | Method::Put | Method::Delete) && !auth_path;
     let mut resp = route(req, env, ctx).await?;
 
     // 2) Yozishdan keyin eskirgan yozuvlar o'chiriladi.
@@ -2009,6 +2761,21 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
     }
 
     ensure_db(&env).await;
+
+    // ── TELEGRAM ORQALI KIRISH ────────────────────────────────
+    if path.starts_with("/api/auth/") || path.starts_with("/api/telegram/") {
+        return auth_route(req, &env, &origin, path, method.clone()).await;
+    }
+    // Avatar: Telegram'dan olinadi, WORKER orqali uzatiladi va
+    // chekkada 1 kun keshlanadi. Telegram fayl manzilida bot
+    // tokeni bo'lgani uchun u manzil ilovaga chiqarilmaydi.
+    if method == Method::Get {
+        if let Some(ids) = path.strip_prefix("/api/avatar/") {
+            if let Ok(uid) = ids.parse::<i64>() {
+                return tg_avatar(&env, uid).await;
+            }
+        }
+    }
 
     match (method.clone(), path) {
 

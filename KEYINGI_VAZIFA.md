@@ -14,7 +14,8 @@
   tushunchalarni oddiy tilda tushuntiring, taxmin qilmang — kodni
   o'qib tasdiqlang.
 - Ishni **alohida branch**da qiling, `main`ga to'g'ridan-to'g'ri push
-  qilmang.
+  qilmang. **Istisno:** foydalanuvchi aniq so'rasa (masalan worker
+  o'zgarishi darhol deploy bo'lishi kerak bo'lsa) — `main`ga.
 - APK build: `.github/workflows/build-flutter-apk.yml` — `main` va
   `claude/**` branchlariga push qilinganda **avtomatik** ishga tushadi.
   Qo'lda `workflow_dispatch` qilmang.
@@ -276,6 +277,111 @@ alohida. Ya'ni bitta epizodni ko'p mamlakatdan ko'rishsa, oyna har
 bir data-markaz uchun B2'dan alohida o'qiladi. Buni butunlay yo'q
 qilish uchun Cache Reserve yoki R2 kerak bo'ladi — bu arxitektura
 o'zgarishi, foydalanuvchi bilan kelishilmagan.
+
+## TELEGRAM ORQALI KIRISH
+
+Foydalanuvchi hisobi **faqat Telegram bot orqali** ochiladi —
+parol, SMS, email yo'q.
+
+### Oqim
+
+```
+Ilova                          Worker                      Telegram
+  │ POST /api/auth/telegram/start
+  ├────────────────────────────>│ 16 xonali token yaratadi
+  │<─── token + deep_link ──────│ login_tokens (pending, 5 daq)
+  │ t.me/aniraxuzloginbot?start=<token>
+  ├─────────────────────────────────────────────────────────>│
+  │                             │<── POST /api/telegram/webhook
+  │                             │  users_db: topadi yoki yaratadi
+  │                             │  sessions_db: yangi sessiya
+  │                             │  login_tokens: approved
+  │ GET /api/auth/telegram/status?token=...   (har 2 sek + resumed)
+  ├────────────────────────────>│
+  │<── session + user ──────────│
+```
+
+### Jadvallar (`init_db` ichida, alohida `turso_batch`)
+
+| Jadval | Vazifasi |
+|---|---|
+| `users_db` | `id` = **oxirgi id + 1** (anime/epizod bilan bir xil tartib), `telegram_id` UNIQUE |
+| `login_tokens` | bir martalik 16 xonali token, 5 daqiqa yashaydi |
+| `sessions_db` | sessiya jurnali: hisob + **qaysi API** (`api_base`) + **qaysi qurilma** (`device`, `platform`, `app_version`) |
+| `app_config` | webhook siri va manzili |
+
+`init_db` ning yuqori qismida `ALTER TABLE ... ADD COLUMN` bor va u
+ustun mavjud bo'lganda xato beradi — shu sabab kirish jadvallari
+**alohida** `turso_batch` chaqiruvida yuboriladi.
+
+### 4 TA QURILMA CHEGARASI
+
+Bitta hisobga eng ko'pi **4 ta** qurilma kira oladi. 5-chisi
+kirganda `create_session` eng **oxirgi onlayn bo'lgan 4 tasini**
+qoldiradi, qolgani (ya'ni eng oldin onlayn bo'lgani) o'chiriladi.
+Tartib `last_seen_at` bo'yicha, u esa har bir `/api/auth/me`
+so'rovida yangilanadi.
+
+Chiqarilgan qurilma keyingi `/api/auth/me` da **401** oladi va
+ilova o'zini avtomatik hisobdan chiqaradi (`AuthService.refresh`).
+**FAQAT 401** hisobni o'chiradi — tarmoq xatosi yoki 500 emas,
+aks holda internet uzilganda foydalanuvchi hisobidan chiqib
+ketardi.
+
+### Xavfsizlik qoidalari — BUZILMASIN
+
+- **Bot tokeni ilovaga hech qachon tushmasligi kerak.** U faqat
+  Cloudflare secret (`TELEGRAM_BOT_TOKEN`). APK ichidagi satrlarni
+  har kim o'qiy oladi.
+- **Telegram fayl manzili** (`api.telegram.org/file/bot<TOKEN>/...`)
+  ichida bot tokeni bor. Shu sabab avatar `/api/avatar/:id` orqali
+  **worker ichidan** uzatiladi va tashqariga faqat rasm baytlari
+  chiqadi. Bu manzilni hech qachon javobga qo'shmang.
+- Webhook `X-Telegram-Bot-Api-Secret-Token` sarlavhasi bo'yicha
+  tekshiriladi. Sirni worker **o'zi** yaratadi (`app_config`) —
+  qo'lda qo'shiladigan qo'shimcha secret yo'q.
+- Sessiya tokeni javoblarda **qaytarilmaydi**:
+  `/api/auth/sessions` uni `current: true/false` belgisiga
+  aylantirib, ustunning o'zini o'chirib tashlaydi.
+
+### Webhook o'zini o'zi ro'yxatdan o'tkazadi
+
+`ensure_webhook` birinchi `/api/auth/telegram/start` so'rovida
+ishlaydi: worker o'z domenini so'rovdan biladi, shu sabab domen
+o'zgarsa ham o'zi qayta ro'yxatdan o'tadi. Qo'lda `setWebhook`
+qilish shart emas.
+
+### Kesh bilan aloqasi
+
+`main()` ichida kirish yo'llari (`/api/auth/`, `/api/telegram/`)
+**yozish keshini tozalash**dan ATAYLAB ajratilgan. Aks holda har
+bir kirish `/api/anime` va `/api/seasons` keshini kuydirib
+yuborardi. Kirish javoblari `Cache-Control: no-store` bilan
+keladi.
+
+### Ilova tomoni
+
+| Fayl | Vazifasi |
+|---|---|
+| `lib/services/auth_service.dart` | sessiya, hisob, qurilma ma'lumoti (`ChangeNotifier`) |
+| `lib/widgets/telegram_logo.dart` | logotip — `CustomPainter`, hech qanday `assets/` yo'q |
+| `lib/screens/telegram_login_screen.dart` | kutish ekrani (2 sek so'rov + `resumed`da darhol) |
+| `lib/screens/sessions_screen.dart` | kirgan qurilmalar ro'yxati |
+| `lib/screens/profile_screen.dart` | kirilmagan: **faqat** logotip + tugma; kirilgan: to'liq profil |
+
+Sessiya tokeni `flutter_secure_storage` da (Android Keystore).
+Hisob ma'lumoti ham keshlanadi — shu sabab **internetsiz** ham
+profil ochiq turadi.
+
+### Keyingi qadam (hozir QILINMAGAN — foydalanuvchi so'ragan)
+
+Ko'rish tarixini (`lib/services/watch_progress.dart`) hisobga
+bog'lash. Hozir progress faqat telefonda saqlanadi; serverga
+bog'langanda telefon almashtirilganda ham tarix qolardi. Buning
+uchun `users_db.id` bo'yicha yangi jadval (masalan
+`watch_progress_db`) va `/api/progress` endpointlari kerak
+bo'ladi. **Admin panel himoyasi ataylab qo'shilmagan** — ilova
+hali sinovda, tayyor bo'lganda panel butunlay olib tashlanadi.
 
 ## Tegilmaydigan joylar
 

@@ -127,6 +127,46 @@ jobs:
             echo "✅ networkSecurityConfig allaqachon bor"
           fi
 
+      # ── TELEGRAM HAVOLASINI OCHISH UCHUN (Android 11+) ────────
+      #
+      # Android 11 dan boshlab ilova boshqa ilovalarni "ko'ra"
+      # olishi uchun manifestda <queries> e'loni bo'lishi kerak.
+      # Usiz `url_launcher` t.me havolasini ochishga urinsa, tizim
+      # mos ilovani topa olmasligi mumkin. Shu sabab bu yerga
+      # https va tg sxemalari qo'shiladi.
+      #
+      # flutter create shabloni allaqachon <queries> blokini
+      # (PROCESS_TEXT uchun) qo'shadi — shu sabab blok bo'lsa
+      # ichiga qo'shamiz, bo'lmasa yangisini yaratamiz.
+      - name: Telegram havolasi uchun <queries> qo'shish
+        run: |
+          python3 - <<'PYEOF'
+          p = 'android/app/src/main/AndroidManifest.xml'
+          s = open(p, encoding='utf-8').read()
+
+          intents = """
+                  <intent>
+                      <action android:name="android.intent.action.VIEW" />
+                      <data android:scheme="https" />
+                  </intent>
+                  <intent>
+                      <action android:name="android.intent.action.VIEW" />
+                      <data android:scheme="tg" />
+                  </intent>"""
+
+          if 'android:scheme="tg"' in s:
+              print("✅ <queries> allaqachon bor")
+          elif '<queries>' in s:
+              s = s.replace('<queries>', '<queries>' + intents, 1)
+              open(p, 'w', encoding='utf-8').write(s)
+              print("✅ intent'lar mavjud <queries> blokiga qo'shildi")
+          else:
+              s = s.replace('</manifest>',
+                            '    <queries>' + intents + '\n    </queries>\n</manifest>', 1)
+              open(p, 'w', encoding='utf-8').write(s)
+              print("✅ yangi <queries> bloki qo'shildi")
+          PYEOF
+
       - name: Kotlin va compileSdk versiyalarini eng yangisiga moslash
         run: |
           if [ -f "android/build.gradle" ]; then

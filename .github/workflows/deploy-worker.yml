@@ -58,6 +58,7 @@ jobs:
           echo "${{ secrets.TURSO_TOKEN }}" | wrangler secret put TURSO_TOKEN --env production
           echo "${{ secrets.B2_KEY_ID }}" | wrangler secret put B2_KEY_ID --env production
           echo "${{ secrets.B2_APPLICATION_KEY }}" | wrangler secret put B2_APPLICATION_KEY --env production
+          echo "${{ secrets.TELEGRAM_BOT_TOKEN }}" | wrangler secret put TELEGRAM_BOT_TOKEN --env production
 
       - name: Deploy to Cloudflare Workers
         working-directory: worker

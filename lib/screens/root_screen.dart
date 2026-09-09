@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import '../services/auth_service.dart';
 import '../theme/app_background.dart';
 import '../widgets/glass.dart';
 import 'home_screen.dart';
@@ -16,7 +17,7 @@ class RootScreen extends StatefulWidget {
 }
 
 class _RootScreenState extends State<RootScreen>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   int _index = 0;
   late final PageController _pageController;
 
@@ -34,6 +35,10 @@ class _RootScreenState extends State<RootScreen>
   @override
   void initState() {
     super.initState();
+    // Ilova fonga chiqib qaytganda hisob holatini tekshirish uchun
+    // (masalan 5-qurilma kirgan bo'lsa, bu qurilma chegaradan
+    // chiqarilgan bo'lishi mumkin).
+    WidgetsBinding.instance.addObserver(this);
     _pageController = PageController()..addListener(_onPageScroll);
     _navAnim = AnimationController(
       vsync: this,
@@ -45,7 +50,17 @@ class _RootScreenState extends State<RootScreen>
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      // Javob kutilmaydi — sessiya bekor qilingan bo'lsa
+      // AuthService o'zi xabar beradi va profil yangilanadi.
+      AuthService.instance.refresh();
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _pageController.removeListener(_onPageScroll);
     _pageController.dispose();
     _navAnim.dispose();

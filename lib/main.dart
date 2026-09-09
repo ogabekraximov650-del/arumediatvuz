@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'screens/root_screen.dart';
 import 'services/app_keys.dart';
+import 'services/auth_service.dart';
 import 'services/rust_bridge.dart';
 import 'services/video_cache_server.dart';
 
@@ -32,6 +33,11 @@ Future<void> main() async {
   // foydalanuvchi videoni umuman ochmasdan ham "yuklab olish"ni bosa
   // oladi — kesh tizimi ilova ochilishi bilan tayyor turadi.
   await VideoCacheServer.instance.ensureStarted();
+
+  // Saqlangan hisobni (agar bo'lsa) tiklaymiz. Xavfsiz ombordan
+  // o'qish tez — tarmoq kutilmaydi: sessiya haqiqiyligi keyin,
+  // fon'da tekshiriladi.
+  await AuthService.instance.restore();
 
   runApp(const FulutterApp());
 }
