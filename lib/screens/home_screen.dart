@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:cached_network_image/cached_network_image.dart';
+import '../widgets/aru_logo.dart';
 import '../widgets/glass.dart';
 import '../services/rust_bridge.dart';
 import 'video_player_screen.dart';
@@ -117,12 +118,12 @@ class _HomeScreenState extends State<HomeScreen> {
                   Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text('Fulutter',
-                          style: TextStyle(
-                              fontSize: 28,
-                              fontWeight: FontWeight.w800,
-                              color: Colors.white,
-                              letterSpacing: -0.5)),
+                      // Ilova nomi endi YOZUV emas, LOGOTIP: shu
+                      // paytgacha bu yerda 'Fulutter' deb turardi va
+                      // ARU logotipi ilovaning hech bir joyida
+                      // ko'rinmasdi.
+                      const AruLogo(height: 30),
+                      const SizedBox(height: 4),
                       Text('Anime dunyosi',
                           style: TextStyle(
                               fontSize: 13,

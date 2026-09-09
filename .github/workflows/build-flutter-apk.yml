@@ -9,6 +9,13 @@ on:
     paths:
       - 'lib/**'
       - 'rust/**'
+      - 'assets/**'
+      # TOPILGAN XATO: `branding/**` bu ro'yxatda YO'Q edi. Shu
+      # sabab logotipni o'zgartirgan commit'lar (masalan "plita
+      # to'liq qora" va "burchagi yumaloq") HECH QANDAY APK
+      # yig'masdi — telefonda esa eski, belgisiz APK turaverardi
+      # va "ARU logotipi ko'rinmayapti" deb tushunilardi.
+      - 'branding/**'
       - 'pubspec.yaml'
       - '.github/workflows/build-flutter-apk.yml'
   workflow_dispatch:
@@ -177,17 +184,46 @@ jobs:
       # Fayllar `branding/android-res/` da tayyor turadi (ular
       # `node branding/build-icons.js` bilan SVG'dan chiqarilgan),
       # ya'ni CI'da hech narsa qayta chizilmaydi — faqat ko'chiriladi.
-      - name: Ilova belgisini o'rnatish
+      - name: Ilova belgisini va ochilish ekranini o'rnatish
         run: |
           set -e
-          cp -r branding/android-res/. android/app/src/main/res/
-          echo "── O'rnatilgan belgi fayllari ──"
-          find android/app/src/main/res -name 'ic_launcher*' | sort
-          # Manifest belgiga murojaat qilishiga ishonch hosil qilamiz
+          RES="android/app/src/main/res"
+
+          # 1) Flutter shabloni qo'ygan BARCHA eski belgi fayllari
+          #    avval O'CHIRILADI. Ilgari faqat ustiga ko'chirilardi:
+          #    shablon boshqa nomdagi yoki boshqa zichlikdagi fayl
+          #    qo'ysa, u joyida qolib ketardi va Android aynan
+          #    o'shani tanlab, ekranda Flutter belgisi ko'rinardi.
+          find "$RES" -name 'ic_launcher*' -delete
+          rm -f "$RES"/mipmap-anydpi-v26/ic_launcher.xml
+
+          # 2) Bizning fayllar joyiga qo'yiladi (belgi + ARU
+          #    logotipli qora ochilish ekrani).
+          cp -r branding/android-res/. "$RES"/
+
+          echo "── O'rnatilgan fayllar ──"
+          find "$RES" \( -name 'ic_launcher*' -o -name 'launch_background.xml' \
+            -o -name 'aru_splash.png' \) | sort
+
+          # 3) Manifest belgiga murojaat qilishiga ishonch hosil qilamiz
           grep -q 'android:icon="@mipmap/ic_launcher"' \
             android/app/src/main/AndroidManifest.xml \
             || { echo "❌ Manifest @mipmap/ic_launcher ga murojaat qilmayapti"; exit 1; }
-          echo "✅ Belgi o'rnatildi"
+          echo "✅ Belgi va ochilish ekrani o'rnatildi"
+
+      # ── ILOVA NOMI ────────────────────────────────────────────
+      #
+      # `flutter create` nomni loyiha papkasidan oladi va manifestga
+      # `android:label="fulutter"` deb yozadi — telefonda belgi
+      # ostida aynan shu yozuv turadi. Ilovaning nomi esa ARU.
+      - name: Ilova nomini ARU ga o'zgartirish
+        run: |
+          set -e
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          sed -i 's/android:label="[^"]*"/android:label="ARU"/' "$MANIFEST"
+          grep -q 'android:label="ARU"' "$MANIFEST" \
+            || { echo "❌ Ilova nomi o'zgarmadi"; exit 1; }
+          echo "✅ Ilova nomi: ARU"
 
       - name: Kotlin va compileSdk versiyalarini eng yangisiga moslash
         run: |
@@ -368,6 +404,141 @@ jobs:
             exit 1
           fi
           echo "✅ APK faqat 32-bit (armeabi-v7a)"
+
+      # ── APK ICHIDA HAQIQATAN ARU BELGISI BORMI ────────────────
+      #
+      # NEGA BU QADAM BOR. Ilgari belgini ko'chirish qadami
+      # "muvaffaqiyatli" tugagani bilan tayyor APK'da belgi
+      # bo'lishiga KAFOLAT yo'q edi: ko'chirishdan keyin nimadir
+      # ustiga yozsa yoki fayl boshqa papkaga tushsa, build baribir
+      # yashil chiqardi va faqat telefonda "Flutter belgisi turibdi"
+      # deb bilinardi.
+      #
+      # NEGA BAYT SOLISHTIRILMAYDI: Android qurish tizimi (aapt2)
+      # PNG'larni QAYTA siqadi (masalan palitrali formatga o'tkazadi),
+      # shu sabab APK ichidagi fayl manbadagidan bayt jihatdan
+      # farq qiladi. Shuning uchun RASMNING O'ZI ochib ko'riladi:
+      #
+      #   * ARU belgisi — faqat qora va oq;
+      #   * Flutter'ning standart belgisi — KO'K (#42A5F5).
+      #
+      # Ya'ni ko'k piksel topilsa, demak belgi almashmagan.
+      - name: APK ichidagi belgi ARU ekanini tasdiqlash
+        run: |
+          set -e
+          APK="build/app/outputs/flutter-apk/app-release.apk"
+          AAPT=$(ls "$ANDROID_HOME"/build-tools/*/aapt2 | sort -V | tail -1)
+
+          # Ilova nomi
+          LABEL=$("$AAPT" dump badging "$APK" | grep -m1 "^application-label:" || true)
+          echo "$LABEL"
+          echo "$LABEL" | grep -q "'ARU'" \
+            || { echo "❌ XATO: ilova nomi ARU emas"; exit 1; }
+
+          # Belgi fayllarining APK ichidagi yo'llari
+          "$AAPT" dump badging "$APK" \
+            | grep -oE "^application-icon-[0-9]+:'[^']+'" \
+            | sed "s/.*:'//;s/'$//" | sort -u > /tmp/icons.txt
+          echo "── Belgi fayllari ──"; cat /tmp/icons.txt
+          [ -s /tmp/icons.txt ] || { echo "❌ XATO: APK'da belgi yo'q"; exit 1; }
+
+          TMP=$(mktemp -d)
+          while read -r f; do unzip -o -q "$APK" -d "$TMP" "$f" || true; done < /tmp/icons.txt
+          # Zaxira yo'l: badging faqat adaptiv belgining XML'ini
+          # ko'rsatishi mumkin — u holda PNG qolmaydi va tekshirish
+          # bekorga yiqilardi. Shu sabab mipmap papkasi ham olinadi.
+          unzip -o -q "$APK" -d "$TMP" 'res/mipmap*' || true
+
+          python3 - "$TMP" <<'PYEOF'
+          import sys, os, zlib, struct
+
+          def decode(path):
+              """Tashqi kutubxonasiz PNG o'qish (zlib bilan)."""
+              d = open(path, 'rb').read()
+              if d[:8] != b'\x89PNG\r\n\x1a\n':
+                  return None
+              i, idat, pal, hdr = 8, b'', b'', None
+              while i < len(d):
+                  ln = struct.unpack('>I', d[i:i+4])[0]
+                  typ = d[i+4:i+8]; body = d[i+8:i+8+ln]
+                  if typ == b'IHDR': hdr = struct.unpack('>IIBBBBB', body)
+                  elif typ == b'PLTE': pal = body
+                  elif typ == b'IDAT': idat += body
+                  elif typ == b'IEND': break
+                  i += 12 + ln
+              w, h, depth, color, _, _, inter = hdr
+              if inter: return None
+              ch = {0:1, 2:3, 3:1, 4:2, 6:4}[color]
+              if depth == 8:
+                  bpp, stride = ch, w * ch
+              elif color == 3 and depth in (1, 2, 4):
+                  bpp, stride = 1, (w * depth + 7) // 8
+              else:
+                  return None
+              raw = zlib.decompress(idat)
+              out, prev, pos = [], bytearray(stride), 0
+              for _y in range(h):
+                  f = raw[pos]; pos += 1
+                  line = bytearray(raw[pos:pos+stride]); pos += stride
+                  for x in range(stride):
+                      a = line[x-bpp] if x >= bpp else 0
+                      b = prev[x]
+                      c = prev[x-bpp] if x >= bpp else 0
+                      if f == 1: line[x] = (line[x] + a) & 255
+                      elif f == 2: line[x] = (line[x] + b) & 255
+                      elif f == 3: line[x] = (line[x] + (a + b) // 2) & 255
+                      elif f == 4:
+                          pa, pb, pc = abs(b-c), abs(a-c), abs(a+b-2*c)
+                          pr = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
+                          line[x] = (line[x] + pr) & 255
+                  out.append(bytes(line)); prev = line
+              px = []
+              for line in out:
+                  if depth == 8:
+                      for x in range(w):
+                          p = line[x*ch:(x+1)*ch]
+                          if color == 3:
+                              k = p[0]*3; px.append((pal[k], pal[k+1], pal[k+2], 255))
+                          elif color == 0: px.append((p[0], p[0], p[0], 255))
+                          elif color == 4: px.append((p[0], p[0], p[0], p[1]))
+                          elif color == 2: px.append((p[0], p[1], p[2], 255))
+                          else: px.append((p[0], p[1], p[2], p[3]))
+                  else:
+                      per = 8 // depth; mask = (1 << depth) - 1
+                      for x in range(w):
+                          byte = line[x // per]
+                          shift = 8 - depth * (x % per + 1)
+                          k = ((byte >> shift) & mask) * 3
+                          px.append((pal[k], pal[k+1], pal[k+2], 255))
+              return px
+
+          root = sys.argv[1]
+          files = [os.path.join(dp, f) for dp, _, fs in os.walk(root)
+                   for f in fs if f.endswith('.png')]
+          if not files:
+              print("❌ XATO: belgi fayli ochilmadi"); sys.exit(1)
+
+          checked = 0
+          for f in files:
+              px = decode(f)
+              if px is None:
+                  print(f"   ⚠️  {f} — o'qib bo'lmadi, o'tkazib yuborildi")
+                  continue
+              checked += 1
+              blue = sum(1 for r, g, b, a in px if a > 40 and b > 90 and b > r + 40 and b > g + 20)
+              total = max(1, sum(1 for _r, _g, _b, a in px if a > 40))
+              share = 100.0 * blue / total
+              print(f"   {os.path.basename(f)}: ko'k piksel {share:.1f}%")
+              if share > 5.0:
+                  print("❌ XATO: belgi KO'K — bu Flutter'ning standart belgisi.")
+                  print("   ARU belgisi APK'ga tushmagan.")
+                  sys.exit(1)
+          if checked == 0:
+              print("❌ XATO: birorta belgi fayli tekshirilmadi"); sys.exit(1)
+          print(f"✅ Belgi ARU (qora/oq) — {checked} ta fayl tekshirildi")
+          PYEOF
+
+          rm -rf "$TMP"
 
       - name: APK hajmini ko'rsatish
         run: |

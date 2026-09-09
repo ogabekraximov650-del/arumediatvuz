@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Ilova ochilayotgandagi (Flutter hali ishga tushmagan) oyna.
+
+     Flutter shabloni bu yerga oq fon qo'yadi — natijada ilova
+     ochilishida bir zumga OQ ekran ko'rinardi, ARU belgisi esa
+     hech qayerda yo'q edi. Endi fon qora va o'rtasida ARU
+     logotipi turadi. -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@android:color/black" />
+    <item>
+        <bitmap
+            android:gravity="center"
+            android:src="@drawable/aru_splash" />
+    </item>
+</layer-list>

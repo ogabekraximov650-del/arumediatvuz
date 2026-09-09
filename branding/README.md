@@ -25,7 +25,8 @@ Burchaksiz, to'la kvadrat zamin kerak bo'lsa —
 | `aru-logo-512.png` | Ilova do'konlari talab qiladigan o'lcham |
 | `aru-telegram-1080.png` | **Telegram kanali avatari** — pastdagi izohga qarang |
 | `aru-logo-square-1080.png` | Burchaksiz, to'la kvadrat nusxa |
-| `android-res/**` | Android ilova belgisi (CI avtomatik ko'chiradi) |
+| `aru-mark.png` | **Oq harflar, shaffof fon** — ilova ICHIDA ishlatiladi (`assets/aru-mark.png` shunga aynan teng). To'q fon uchun. |
+| `android-res/**` | Android ilova belgisi va ochilish ekrani (CI avtomatik ko'chiradi) |
 
 ### Telegram uchun nega alohida fayl?
 

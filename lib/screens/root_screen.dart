@@ -22,11 +22,11 @@ class _RootScreenState extends State<RootScreen>
   late final PageController _pageController;
 
   // ── PASTKI PANELDAGI "SUZUVCHI" TUGMA HOLATI ─────────────────
-  // Avval u to'g'ridan-to'g'ri PageController'ning `page` qiymatiga
-  // bog'langan edi. Endi alohida qiymat: sahifa BARMOQ bilan
-  // surilganda u PageController'ni kuzatadi, tugma bosilganda esa
-  // o'zining silliq animatsiyasi bilan siljiydi (pastdagi izohga
-  // qarang — sahifa o'zi sakrab o'tadi).
+  // Sahifaning O'ZI sakrab almashadi (`jumpToPage` — pastdagi
+  // izohga qarang), harakatlanadigan yagona narsa shu qiymat:
+  // tugma bosilganda u eski o'rindan yangisiga 340 ms ichida
+  // silliq suzib boradi. Pushti tugma ham, belgilar kattalashishi
+  // ham, yozuvlar ochilishi ham aynan shunga bog'langan.
   final ValueNotifier<double> _navPos = ValueNotifier<double>(0);
   late final AnimationController _navAnim;
   Animation<double>? _navTween;
@@ -42,7 +42,9 @@ class _RootScreenState extends State<RootScreen>
     _pageController = PageController()..addListener(_onPageScroll);
     _navAnim = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 280),
+      // 280 -> 340 ms: suzish ko'zga aniq tashlanadi, lekin
+      // kutish hosil qiladigan darajada uzun emas.
+      duration: const Duration(milliseconds: 340),
     )..addListener(() {
         final t = _navTween;
         if (t != null) _navPos.value = t.value;
@@ -119,6 +121,14 @@ class _RootScreenState extends State<RootScreen>
           bottom: false,
           child: PageView(
             controller: _pageController,
+            // ── BARMOQ BILAN SURIB O'TISH O'CHIRILGAN ──────────
+            //
+            // TALAB: sahifalar faqat pastdagi tugma bosilganda
+            // almashsin. Ilgari ekranni chapga/o'ngga surib ham
+            // o'tib ketardi — ro'yxatni gorizontal siljitmoqchi
+            // bo'lganda yoki pleyerdan qaytganda tasodifan boshqa
+            // sahifaga tushib qolinardi.
+            physics: const NeverScrollableScrollPhysics(),
             // Qo'shni sahifa OLDINDAN (ilova bo'sh turganda) quriladi —
             // shu sabab unga o'tilganda quriladigan ish qolmaydi.
             allowImplicitScrolling: true,
@@ -181,7 +191,7 @@ class _BottomNav extends StatelessWidget {
     (icon: Icons.home_rounded, label: 'Bosh sahifa'),
     (icon: Icons.search_rounded, label: 'Qidiruv'),
     (icon: Icons.grid_view_rounded, label: 'Katalog'),
-    (icon: Icons.bookmark_rounded, label: 'Kutubxona'),
+    (icon: Icons.folder_rounded, label: 'Kutubxona'),
     (icon: Icons.person_rounded, label: 'Profil'),
   ];
 
@@ -251,7 +261,7 @@ class _BottomNav extends StatelessWidget {
                       children: List.generate(_items.length, (i) {
                         final distance = (page - i).abs().clamp(0.0, 1.0);
                         final t = 1.0 - distance;
-                        final scale = 1.0 + 0.12 * t;
+                        final scale = 1.0 + 0.22 * t;
                         final color = Color.lerp(
                           Colors.white.withValues(alpha: 0.40),
                           Colors.white,
@@ -272,17 +282,44 @@ class _BottomNav extends StatelessWidget {
                                     child: Icon(_items[i].icon,
                                         size: 22, color: color),
                                   ),
-                                  if (t > 0.5) ...[
-                                    const SizedBox(height: 3),
-                                    Text(
-                                      _items[i].label,
-                                      style: TextStyle(
-                                        fontSize: 9,
-                                        color: color,
-                                        fontWeight: FontWeight.w600,
+                                  // ── YOZUV HAM SILLIQ OCHILADI ──
+                                  //
+                                  // Ilgari yozuv `if (t > 0.5)` bilan
+                                  // BIRDANIGA paydo bo'lib, birdaniga
+                                  // yo'qolardi. Suzuvchi tugma silliq
+                                  // siljib borayotgan bo'lsa ham,
+                                  // ko'zga aynan shu sakrash tashlanar
+                                  // va o'tish "birdaniga" bo'lib
+                                  // tuyulardi.
+                                  //
+                                  // Endi yozuv `t` bilan birga ochiladi:
+                                  // `heightFactor` balandligini, `Opacity`
+                                  // esa ko'rinishini bosqichma-bosqich
+                                  // o'zgartiradi.
+                                  ClipRect(
+                                    child: Align(
+                                      alignment: Alignment.topCenter,
+                                      heightFactor: t,
+                                      child: Opacity(
+                                        opacity: t,
+                                        child: Padding(
+                                          padding:
+                                              const EdgeInsets.only(top: 3),
+                                          child: Text(
+                                            _items[i].label,
+                                            maxLines: 1,
+                                            overflow: TextOverflow.clip,
+                                            softWrap: false,
+                                            style: TextStyle(
+                                              fontSize: 9,
+                                              color: color,
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                          ),
+                                        ),
                                       ),
                                     ),
-                                  ],
+                                  ),
                                 ],
                               ),
                             ),

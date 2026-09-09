@@ -11,7 +11,7 @@ const String kApiBase = 'https://aniraxuzapp.ogabekraximov650.workers.dev';
 
 /// Sessiyalar jurnalida ko'rinadigan ilova versiyasi.
 /// `pubspec.yaml` dagi `version:` bilan bir xil turishi kerak.
-const String kAppVersion = '0.0.5';
+const String kAppVersion = '0.0.6';
 
 /// Ilovaga kirgan foydalanuvchi.
 class AppUser {
@@ -23,6 +23,9 @@ class AppUser {
   final String lastName;
   final String photoUrl;
 
+  /// Hisobdagi mablag' (Turso'dagi `users_db.balance`).
+  final int balance;
+
   const AppUser({
     required this.id,
     required this.telegramId,
@@ -30,6 +33,7 @@ class AppUser {
     required this.firstName,
     required this.lastName,
     required this.photoUrl,
+    this.balance = 0,
   });
 
   String get fullName {
@@ -56,6 +60,7 @@ class AppUser {
         firstName: (j['first_name'] ?? '').toString(),
         lastName: (j['last_name'] ?? '').toString(),
         photoUrl: (j['photo_url'] ?? '').toString(),
+        balance: (j['balance'] as num?)?.toInt() ?? 0,
       );
 
   Map<String, dynamic> toJson() => {
@@ -65,6 +70,7 @@ class AppUser {
         'first_name': firstName,
         'last_name': lastName,
         'photo_url': photoUrl,
+        'balance': balance,
       };
 }
 
@@ -254,6 +260,79 @@ class AuthService extends ChangeNotifier {
           .toList();
     } catch (_) {
       return null;
+    }
+  }
+
+  // ── PROFIL RASMI ─────────────────────────────────────────────
+
+  /// Foydalanuvchi tanlagan rasmni profil rasmi qilib qo'yadi.
+  ///
+  /// Yo'l anime rasmlari bilan BIR XIL: fayl B2'ga to'g'ridan-to'g'ri
+  /// yuklanadi (`/api/upload-token` bergan bir martalik manzil bilan),
+  /// keyin workerga faqat FAYL NOMI aytiladi. Ya'ni rasm baytlari
+  /// worker orqali o'tmaydi.
+  ///
+  /// Eski rasmni B2'dan o'chirishni WORKER bajaradi — u eski fayl
+  /// nomini bazadan biladi va yangisini saqlagandan KEYIN o'chiradi.
+  ///
+  /// Fayl nomi qolipi `avatar_<id>_<vaqt>.jpg` bo'lishi SHART:
+  /// worker aynan shu qolipni tekshiradi (birov o'z profiliga
+  /// begona faylni bog'lab, uni o'chirtira olmasligi uchun).
+  ///
+  /// Qaytaradi: xato matni yoki muvaffaqiyatda `null`.
+  Future<String?> updateAvatar(List<int> jpegBytes) async {
+    final s = _session;
+    final u = _user;
+    if (s == null || s.isEmpty || u == null) return 'Avval hisobga kiring';
+
+    try {
+      final tokenRes = await http
+          .post(Uri.parse('$kApiBase/api/upload-token'))
+          .timeout(const Duration(seconds: 20));
+      if (tokenRes.statusCode != 200) return 'Yuklash manzili olinmadi';
+      final td = jsonDecode(tokenRes.body) as Map<String, dynamic>;
+      final uploadUrl = (td['uploadUrl'] ?? '').toString();
+      final authToken = (td['authorizationToken'] ?? '').toString();
+      if (uploadUrl.isEmpty || authToken.isEmpty) {
+        return 'Yuklash manzili olinmadi';
+      }
+
+      final fileName =
+          'avatar_${u.id}_${DateTime.now().millisecondsSinceEpoch}.jpg';
+
+      final up = await http
+          .post(
+            Uri.parse(uploadUrl),
+            headers: {
+              'Authorization': authToken,
+              'X-Bz-File-Name': fileName,
+              'Content-Type': 'image/jpeg',
+              'X-Bz-Content-Sha1': 'do_not_verify',
+            },
+            body: jpegBytes,
+          )
+          .timeout(const Duration(seconds: 60));
+      if (up.statusCode != 200) return 'Rasm yuklanmadi';
+
+      final save = await http
+          .post(
+            Uri.parse('$kApiBase/api/auth/avatar'),
+            headers: {
+              'Authorization': 'Bearer $s',
+              'Content-Type': 'application/json',
+            },
+            body: jsonEncode({'file': fileName}),
+          )
+          .timeout(const Duration(seconds: 20));
+      if (save.statusCode != 200) return 'Rasm saqlanmadi';
+
+      final nu = AppUser.fromJson(
+          (jsonDecode(save.body) as Map<String, dynamic>)['user']
+              as Map<String, dynamic>);
+      await _save(s, nu);
+      return null;
+    } catch (_) {
+      return 'Tarmoq xatosi — qaytadan urinib ko\'ring';
     }
   }
 

@@ -31,7 +31,7 @@ class LibraryScreen extends StatelessWidget {
                 child: const Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Icon(Icons.bookmark_border_rounded,
+                    Icon(Icons.folder_open_rounded,
                         size: 48, color: Colors.white54),
                     SizedBox(height: 12),
                     Text("Hali saqlangan anime yo'q",

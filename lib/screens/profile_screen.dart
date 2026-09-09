@@ -1,7 +1,9 @@
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 
 import '../services/auth_service.dart';
+import '../widgets/aru_logo.dart';
 import '../widgets/glass.dart';
 import '../widgets/telegram_logo.dart';
 import 'admin_screen.dart';
@@ -89,6 +91,9 @@ class _LoginBody extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            // Kirishdan OLDIN ham ilova o'zini tanitib tursin.
+            const AruLogo(height: 38),
+            const SizedBox(height: 40),
             const TelegramLogo(size: 116),
             const SizedBox(height: 44),
             _TelegramButton(onTap: () => _login(context)),
@@ -210,63 +215,88 @@ class _ProfileBody extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 120),
       child: Column(
         children: [
+          // ── PROFIL KARTASI ────────────────────────────────────
+          //
+          // Karta ENIGA TO'LIQ — pastdagi kartalar bilan bir xil.
+          // Ilgari hamma narsa markazga, ustma-ust terilgan edi va
+          // karta ensiz ko'rinardi.
+          //
+          // Chapda katta rasm, o'ngida esa ustma-ust: ism,
+          // @username, ID va balans.
           Glass(
             borderRadius: 20,
             blur: 16,
-            padding: const EdgeInsets.all(20),
-            child: Column(
+            padding: const EdgeInsets.all(18),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
               children: [
                 _Avatar(user: user),
-                const SizedBox(height: 12),
-                Text(
-                  user.fullName,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 18,
-                      fontWeight: FontWeight.w600),
-                ),
-                if (user.username.isNotEmpty) ...[
-                  const SizedBox(height: 4),
-                  Text('@${user.username}',
-                      style: const TextStyle(
-                          color: Color(0xFF6BC7F0), fontSize: 13.5)),
-                ],
-                const SizedBox(height: 10),
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
-                  decoration: BoxDecoration(
-                    color: Colors.white.withValues(alpha: 0.08),
-                    borderRadius: BorderRadius.circular(10),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        user.fullName,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 18,
+                            fontWeight: FontWeight.w700),
+                      ),
+                      if (user.username.isNotEmpty) ...[
+                        const SizedBox(height: 3),
+                        Text('@${user.username}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                                color: Color(0xFF6BC7F0), fontSize: 13.5)),
+                      ],
+                      const SizedBox(height: 6),
+                      // ID panjarasiz (`#` belgisisiz) va ramkasiz —
+                      // oddiy qator sifatida.
+                      Text('ID: ${user.id}',
+                          style: TextStyle(
+                              color: Colors.white.withValues(alpha: 0.62),
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600)),
+                      const SizedBox(height: 3),
+                      Text('Balans: ${user.balance}',
+                          style: TextStyle(
+                              color: Colors.white.withValues(alpha: 0.62),
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600)),
+                    ],
                   ),
-                  child: Text('ID: #${user.id}',
-                      style: TextStyle(
-                          color: Colors.white.withValues(alpha: 0.65),
-                          fontSize: 12.5,
-                          fontWeight: FontWeight.w600)),
                 ),
               ],
             ),
           ),
           const SizedBox(height: 16),
+          // ── TUGMALAR TARTIBI (foydalanuvchi belgilagan) ───────
+          //   1. Bildirishnoma
+          //   2. Sozlamalar
+          //   3. Qurilmalar
+          //   4. Ilova haqida
           Glass(
             borderRadius: 20,
             blur: 16,
             child: Column(
               children: [
-                _ProfileTile(
-                  icon: Icons.devices_rounded,
-                  label: 'Kirgan qurilmalar',
-                  onTap: () => _open(context, const SessionsScreen()),
-                ),
+                const _ProfileTile(
+                    icon: Icons.notifications_none_rounded,
+                    label: 'Bildirishnoma'),
                 _divider(),
                 const _ProfileTile(
                     icon: Icons.settings_rounded, label: 'Sozlamalar'),
                 _divider(),
-                const _ProfileTile(
-                    icon: Icons.notifications_none_rounded,
-                    label: 'Bildirishnomalar'),
+                _ProfileTile(
+                  icon: Icons.devices_rounded,
+                  label: 'Qurilmalar',
+                  onTap: () => _open(context, const SessionsScreen()),
+                ),
                 _divider(),
                 const _ProfileTile(
                     icon: Icons.info_outline_rounded, label: 'Ilova haqida'),
@@ -327,7 +357,7 @@ class _ProfileBody extends StatelessWidget {
                   ),
                   const SizedBox(width: 14),
                   const Expanded(
-                    child: Text('Chiqish',
+                    child: Text('Accountdan chiqish',
                         style: TextStyle(
                             color: AppColors.accent,
                             fontSize: 16,
@@ -346,35 +376,134 @@ class _ProfileBody extends StatelessWidget {
       Divider(height: 1, color: Colors.white.withValues(alpha: 0.12));
 }
 
-/// Telegram avatari. Rasm worker orqali keladi (`/api/avatar/:id`)
-/// — Telegram fayl manzilida bot tokeni bo'lgani uchun u hech
-/// qachon ilovaga berilmaydi. Rasm bo'lmasa bosh harflar chiqadi.
-class _Avatar extends StatelessWidget {
+/// PROFIL RASMI.
+///
+/// Ikki manbadan keladi (workerdagi `user_public` ga qarang):
+/// foydalanuvchi o'zi tanlagan rasm (B2) yoki Telegram avatari.
+/// Ikkalasi ham worker manzili orqali beriladi — Telegram fayl
+/// manzilida bot tokeni bo'lgani uchun u hech qachon ilovaga
+/// berilmaydi. Rasm bo'lmasa bosh harflar chiqadi.
+///
+/// RASM USTIGA BOSILSA galereya ochiladi va tanlangan rasm yangi
+/// profil rasmi bo'ladi (eskisi B2'dan butunlay o'chiriladi).
+class _Avatar extends StatefulWidget {
   final AppUser user;
   const _Avatar({required this.user});
 
   @override
+  State<_Avatar> createState() => _AvatarState();
+}
+
+class _AvatarState extends State<_Avatar> {
+  static const double _size = 96;
+  bool _busy = false;
+
+  Future<void> _change() async {
+    if (_busy) return;
+
+    final XFile? picked;
+    try {
+      picked = await ImagePicker().pickImage(
+        source: ImageSource.gallery,
+        // Profil rasmi katta bo'lishi shart emas: kichraytirish
+        // yuklashni tezlashtiradi va B2'da joy tejaydi.
+        maxWidth: 720,
+        maxHeight: 720,
+        imageQuality: 88,
+      );
+    } catch (_) {
+      if (mounted) _say('Galereyani ochib bo\'lmadi');
+      return;
+    }
+    if (picked == null || !mounted) return;
+
+    setState(() => _busy = true);
+    final bytes = await picked.readAsBytes();
+    final err = await AuthService.instance.updateAvatar(bytes);
+    if (!mounted) return;
+    setState(() => _busy = false);
+    _say(err ?? 'Profil rasmi yangilandi');
+  }
+
+  void _say(String text) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: AppColors.card,
+        content: Text(text, style: const TextStyle(color: Colors.white)),
+      ),
+    );
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final fallback = CircleAvatar(
-      radius: 38,
-      backgroundColor: Colors.white24,
+    final user = widget.user;
+
+    final fallback = Container(
+      width: _size,
+      height: _size,
+      alignment: Alignment.center,
+      color: Colors.white24,
       child: Text(
         user.initials,
         style: const TextStyle(
-            color: Colors.white, fontSize: 26, fontWeight: FontWeight.w600),
+            color: Colors.white, fontSize: 32, fontWeight: FontWeight.w600),
       ),
     );
 
-    if (user.photoUrl.isEmpty) return fallback;
+    final image = user.photoUrl.isEmpty
+        ? fallback
+        : CachedNetworkImage(
+            imageUrl: user.photoUrl,
+            width: _size,
+            height: _size,
+            fit: BoxFit.cover,
+            placeholder: (_, __) => fallback,
+            errorWidget: (_, __, ___) => fallback,
+          );
 
-    return ClipOval(
-      child: CachedNetworkImage(
-        imageUrl: user.photoUrl,
-        width: 76,
-        height: 76,
-        fit: BoxFit.cover,
-        placeholder: (_, __) => fallback,
-        errorWidget: (_, __, ___) => fallback,
+    return GestureDetector(
+      onTap: _change,
+      child: SizedBox(
+        width: _size,
+        height: _size,
+        child: Stack(
+          children: [
+            ClipOval(child: image),
+            // Yuklanayotganda rasm ustida aylana chiqadi va ikkinchi
+            // marta bosish ta'sir qilmaydi (`_busy`).
+            if (_busy)
+              ClipOval(
+                child: Container(
+                  width: _size,
+                  height: _size,
+                  color: Colors.black54,
+                  alignment: Alignment.center,
+                  child: const SizedBox(
+                    width: 26,
+                    height: 26,
+                    child: CircularProgressIndicator(
+                        strokeWidth: 2.4, color: Colors.white),
+                  ),
+                ),
+              ),
+            // "Bosish mumkin" ekanini ko'rsatuvchi kichik belgi.
+            Positioned(
+              right: 0,
+              bottom: 0,
+              child: Container(
+                padding: const EdgeInsets.all(5),
+                decoration: BoxDecoration(
+                  color: AppColors.accent,
+                  shape: BoxShape.circle,
+                  border: Border.all(color: AppColors.card, width: 2),
+                ),
+                child: const Icon(Icons.photo_camera_rounded,
+                    size: 13, color: Colors.white),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

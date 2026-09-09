@@ -25,6 +25,27 @@
 - Commit qilishdan oldin: `rm -rf rust/target rust/Cargo.lock
   worker/target worker/Cargo.lock`.
 
+## BREND: ARU
+
+Ilova nomi — **ARU** (`fulutter` faqat repo/papka nomi).
+
+| Qayerda | Nima |
+|---|---|
+| Telefondagi belgi | `branding/android-res/mipmap-*` (CI ko'chiradi) |
+| Belgi ostidagi yozuv | CI manifestga `android:label="ARU"` yozadi |
+| Ochilish ekrani | qora fon + ARU logotipi (`drawable*/launch_background.xml`) |
+| Ilova ichida | `lib/widgets/aru_logo.dart` -> `assets/aru-mark.png` |
+
+**TOPILGAN XATO (tuzatildi).** `build-flutter-apk.yml` ning
+`paths:` filtrida `branding/**` yo'q edi — ya'ni logotipni
+o'zgartirgan commit'lar **umuman APK yig'masdi** va telefonda eski,
+belgisiz APK turaverardi.
+
+Endi qo'shimcha himoya ham bor: tayyor APK ochilib, ichidagi belgi
+rasmi **ochib ko'riladi**. Ko'k piksel topilsa (Flutter'ning
+standart belgisi) build ataylab yiqiladi. Bayt solishtirilmaydi,
+chunki `aapt2` PNG'larni qayta siqadi.
+
 ## Tekshiruv (har bir o'zgarishdan keyin)
 
 ```
@@ -103,6 +124,33 @@ FFI: `rust_video_cache_window_seen(url, widx)`.
 - Internet qaytishi bilan video **o'sha nuqtadan avtomatik** davom
   etadi (`_onNetworkBack`), "takroriy xato" hisoblagichi esa nolga
   tushadi — internetning yo'qligi pleyerning nosozligi emas.
+
+## PROFIL RASMI (foydalanuvchi o'zi tanlaydi)
+
+Profildagi rasm ustiga bosilsa galereya ochiladi. Yo'l anime
+rasmlari bilan **bir xil**: ilova faylni B2'ga to'g'ridan-to'g'ri
+yuklaydi (`/api/upload-token`), keyin workerga faqat **fayl nomini**
+aytadi (`POST /api/auth/avatar`). Rasm baytlari worker orqali
+o'tmaydi.
+
+- Fayl nomi qolipi **`avatar_<foydalanuvchi id>_<vaqt>.jpg`** —
+  worker uni `valid_avatar_file` bilan tekshiradi. Busiz kimdir
+  o'z profiliga masalan `anime_17.jpg` ni bog'lab, keyingi
+  almashtirishda worker o'sha anime rasmini B2'dan **o'chirib**
+  yuborardi.
+- Eski rasm B2'dan **butunlay** o'chiriladi — lekin faqat yangisi
+  bazaga saqlangandan **keyin** (saqlash yiqilsa foydalanuvchi
+  rasmsiz qolmasin).
+- Nom har safar yangi (ichida vaqt belgisi bor), shu sabab eski
+  rasm keshda qolib ketmaydi.
+- `users_db.avatar_file` bo'sh bo'lsa — Telegram avatari
+  (`/api/avatar/:id`) ko'rsatiladi.
+
+`users_db` ga ikkita ustun qo'shildi: **`balance`** (profildagi
+"Balans:" qatori) va **`avatar_file`**. Ular `init_db` da
+`ALTER TABLE` bilan, **har biri alohida** yuboriladi: Turso
+to'plamdagi birinchi xatodan keyin qolganini bajarmaydi, ya'ni
+ikkovi bitta to'plamda bo'lsa ikkinchisi hech qachon yaratilmasdi.
 
 ## Qayerda to'xtaganini eslab qolish
 

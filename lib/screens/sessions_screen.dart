@@ -50,18 +50,16 @@ class _SessionsScreenState extends State<SessionsScreen> {
     }
   }
 
-  /// Epoch millisekundni "9-sentabr, 14:05" ko'rinishiga o'giradi.
+  /// Epoch millisekundni `12:36/01/01/2026` ko'rinishiga o'giradi.
+  ///
+  /// Ya'ni: soat:daqiqa / kun / oy / yil. Kun, oy va soat har doim
+  /// ikki xonali (`01`, `09`) — ustunlar bir xil enda turadi.
   String _when(dynamic ms) {
     final v = (ms as num?)?.toInt() ?? 0;
     if (v == 0) return '—';
     final d = DateTime.fromMillisecondsSinceEpoch(v).toLocal();
-    const oy = [
-      'yanvar', 'fevral', 'mart', 'aprel', 'may', 'iyun',
-      'iyul', 'avgust', 'sentabr', 'oktabr', 'noyabr', 'dekabr',
-    ];
-    final hh = d.hour.toString().padLeft(2, '0');
-    final mm = d.minute.toString().padLeft(2, '0');
-    return '${d.day}-${oy[d.month - 1]}, $hh:$mm';
+    String p2(int n) => n.toString().padLeft(2, '0');
+    return '${p2(d.hour)}:${p2(d.minute)}/${p2(d.day)}/${p2(d.month)}/${d.year}';
   }
 
   @override
@@ -132,7 +130,6 @@ class _SessionsScreenState extends State<SessionsScreen> {
     final current = s['current'] == true;
     final device = (s['device'] ?? '').toString();
     final platform = (s['platform'] ?? '').toString();
-    final api = (s['api_base'] ?? '').toString();
     final version = (s['app_version'] ?? '').toString();
 
     return Padding(
@@ -188,7 +185,6 @@ class _SessionsScreenState extends State<SessionsScreen> {
             const SizedBox(height: 10),
             _row('Tizim', platform),
             _row('Ilova', version.isEmpty ? '—' : 'v$version'),
-            _row('API', api.replaceFirst('https://', '')),
             _row('Kirgan', _when(s['created_at'])),
             _row('Oxirgi faollik', _when(s['last_seen_at'])),
           ],

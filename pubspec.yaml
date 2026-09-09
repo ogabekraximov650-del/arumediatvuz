@@ -1,7 +1,7 @@
 name: fulutter
 description: "Anime kontent ko'rish ilovasi"
 publish_to: 'none'
-version: 0.0.5+5
+version: 0.0.6+6
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
@@ -46,3 +46,9 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+
+  assets:
+    # ARU logotipi (oq harflar, shaffof fon) — ilova ichida
+    # ishlatiladi: ochilish ekrani va bosh sahifa sarlavhasi.
+    # Manba: branding/aru-mark.png
+    - assets/aru-mark.png

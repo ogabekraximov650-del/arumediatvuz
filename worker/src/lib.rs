@@ -298,6 +298,22 @@ async fn init_db(env: &Env) {
             cfg_value TEXT
         )", vec![]),
     ]).await;
+
+    // ── KEYIN QO'SHILGAN USTUNLAR ─────────────────────────────
+    //
+    // Har biri ALOHIDA yuboriladi. Sabab: `ALTER TABLE ... ADD
+    // COLUMN` ustun allaqachon bo'lganda xato beradi, Turso esa
+    // to'plamdagi birinchi xatodan keyin qolganini BAJARMAYDI.
+    // Ya'ni ikkovini bitta to'plamga qo'ysak, `balance` bir marta
+    // yaratilgandan keyin `avatar_file` HECH QACHON yaratilmasdi.
+    //
+    //   balance      — foydalanuvchi hisobidagi mablag' (profil
+    //                  kartasida "Balans:" qatori shundan);
+    //   avatar_file  — foydalanuvchi O'ZI tanlagan profil rasmi
+    //                  (B2'dagi bare fayl nomi). Bo'sh bo'lsa
+    //                  Telegram avatari ko'rsatiladi.
+    let _ = turso_exec(env, "ALTER TABLE users_db ADD COLUMN balance INTEGER DEFAULT 0", vec![]).await;
+    let _ = turso_exec(env, "ALTER TABLE users_db ADD COLUMN avatar_file TEXT", vec![]).await;
 }
 
 async fn next_anime_id(env: &Env) -> Result<i64> {
@@ -2230,21 +2246,56 @@ async fn upsert_user(env: &Env, from: &Value) -> Result<Value> {
     Err(Error::RustError("Foydalanuvchi yaratib bo'lmadi".into()))
 }
 
-/// Ilovaga BERILADIGAN foydalanuvchi ko'rinishi. Avatar har doim
-/// worker manzili orqali beriladi — Telegram fayl manzilida bot
-/// tokeni bo'lgani uchun u tashqariga chiqarilmaydi.
+/// Ilovaga BERILADIGAN foydalanuvchi ko'rinishi.
+///
+/// AVATAR IKKI MANBADAN KELADI:
+///
+///   * foydalanuvchi profilda O'ZI rasm tanlagan bo'lsa —
+///     `avatar_file` (B2'dagi fayl nomi) va rasm odatdagi
+///     `/api/image/...` yo'li bilan beriladi. Fayl nomi har
+///     yuklashda yangi (ichida vaqt belgisi bor), shu sabab
+///     eski rasm keshda qolib ketmaydi;
+///   * aks holda Telegram avatari — `/api/avatar/:id`. Telegram
+///     fayl manzilida bot tokeni bo'lgani uchun u tashqariga
+///     hech qachon chiqarilmaydi, worker o'zi uzatib beradi.
 fn user_public(origin: &str, u: &Value) -> Value {
     let id = u["id"].as_i64().unwrap_or(0);
+    let avatar = u["avatar_file"].as_str().unwrap_or("");
+    let photo_url = if avatar.is_empty() {
+        format!("{origin}/api/avatar/{id}")
+    } else {
+        format!("{origin}/api/image/{avatar}")
+    };
     json!({
         "id": id,
         "telegram_id": u["telegram_id"].as_i64().unwrap_or(0),
         "username": u["username"].as_str().unwrap_or(""),
         "first_name": u["first_name"].as_str().unwrap_or(""),
         "last_name": u["last_name"].as_str().unwrap_or(""),
-        "photo_url": format!("{origin}/api/avatar/{id}"),
+        "photo_url": photo_url,
+        "balance": u["balance"].as_i64().unwrap_or(0),
         "created_at": u["created_at"].clone(),
         "last_login_at": u["last_login_at"].clone(),
     })
+}
+
+/// Profil rasmi uchun fayl nomi QABUL QILINADIMI.
+///
+/// NEGA SHART. Ilova rasmni to'g'ridan-to'g'ri B2'ga yuklaydi va
+/// keyin workerga faqat FAYL NOMINI aytadi. Agar nom tekshirilmasa,
+/// foydalanuvchi o'z profiliga masalan `anime_17.jpg` ni yozib
+/// qo'ya olardi — va keyingi safar rasm almashtirganda worker
+/// eskisini "o'ziniki" deb bilib, o'sha anime rasmini B2'dan
+/// O'CHIRIB yuborardi.
+///
+/// Shu sabab nom qat'iy qolipda bo'lishi shart:
+///   `avatar_<foydalanuvchi id>_<raqam>.jpg`
+/// Ya'ni har kim faqat o'z fayllariga tega oladi.
+fn valid_avatar_file(file: &str, user_id: i64) -> bool {
+    let prefix = format!("avatar_{user_id}_");
+    let Some(rest) = file.strip_prefix(&prefix) else { return false };
+    let Some(digits) = rest.strip_suffix(".jpg") else { return false };
+    !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
 }
 
 // ── sessions_db ────────────────────────────────────────────────
@@ -2630,6 +2681,52 @@ async fn auth_route(req: Request, env: &Env, origin: &str, path: &str, method: M
                 // — ilova buni ko'rib foydalanuvchini chiqaradi.
                 None => json_resp(&json!({"error": "unauthorized"}), 401),
             }
+        }
+
+        // ── PROFIL RASMINI ALMASHTIRISH ────────────────────────
+        //
+        // Ilova rasmni B2'ga O'ZI yuklaydi (`/api/upload-token`
+        // bilan, anime rasmlari qanday yuklansa shunday), keyin
+        // shu yerga faqat FAYL NOMINI yuboradi.
+        //
+        // Bu yerda ikki ish bo'ladi:
+        //   1. eski rasm B2'dan BUTUNLAY o'chiriladi — foydalanuvchi
+        //      rasmni necha marta almashtirsa ham ombor to'lib
+        //      ketmaydi;
+        //   2. yangi nom `users_db.avatar_file` ga yoziladi.
+        //
+        // Nom qolipi `valid_avatar_file` bilan tekshiriladi, ya'ni
+        // hech kim boshqa birovning (yoki anime) faylini o'z
+        // profiliga bog'lab, keyin uni o'chirtira olmaydi.
+        (Method::Post, "/api/auth/avatar") => {
+            let Some(u) = session_user(env, &bearer(&req)).await? else {
+                return json_resp(&json!({"error": "unauthorized"}), 401);
+            };
+            let uid = u["id"].as_i64().unwrap_or(0);
+            let mut req = req;
+            let b: Value = req.json().await.unwrap_or(json!({}));
+            let file = b["file"].as_str().unwrap_or("").to_string();
+            if !valid_avatar_file(&file, uid) {
+                return json_resp(&json!({"error": "fayl nomi noto'g'ri"}), 400);
+            }
+
+            // Eskisi — YANGISINI yozishdan oldin olinadi.
+            let old_file = u["avatar_file"].as_str().unwrap_or("").to_string();
+
+            let res = turso_exec(env,
+                "UPDATE users_db SET avatar_file=? WHERE id=? RETURNING *",
+                vec![TursoArg::text(&file), TursoArg::int(uid)]).await?;
+            let Some(nu) = first_row(&res) else {
+                return err500("Rasmni saqlab bo'lmadi");
+            };
+
+            // Eski fayl faqat YANGISI saqlangandan keyin o'chiriladi:
+            // saqlash yiqilsa foydalanuvchi rasmsiz qolib ketmaydi.
+            if !old_file.is_empty() && old_file != file {
+                b2_delete(env, &old_file).await;
+            }
+
+            ok_nostore(json!({"user": user_public(origin, &nu)}))
         }
 
         (Method::Post, "/api/auth/logout") => {
