@@ -6,10 +6,16 @@ qoladi — aynan shu "orollar" harfni o'qitadi.
 
 | Rang | Kod | Nima |
 |---|---|---|
-| Plita | `#101219` | qora oyna |
-| O'yiq | `#E3324F` | harflar ko'rinadigan rang |
+| Plita | `#000000` | to'liq qora |
+| O'yiq | `#FFFFFF` | harflar ko'rinadigan rang |
 
-Burchak radiusi: `114 / 512` = **22.3%** (ilova belgilari uchun odatiy).
+**Plita — to'la kvadrat, burchaklari yumaloqlanmagan.** Shu sabab
+chetlarda oq qolmaydi. Bu ataylab: ilova belgisida burchakni tizimning
+o'zi yumaloqlaydi (Android adaptive icon), Telegram esa avatarni doira
+qilib qirqadi — ikkalasi ham to'la kvadratni kutadi.
+
+Alohida turadigan, burchagi yumaloq nusxa kerak bo'lsa —
+`aru-logo-rounded-1080.png` (radius `114/512` = 22.3%).
 
 ## Qaysi faylni qayerga qo'yish kerak
 
@@ -20,6 +26,7 @@ Burchak radiusi: `114 / 512` = **22.3%** (ilova belgilari uchun odatiy).
 | `aru-logo-1080.png` | Ijtimoiy tarmoqlar, post, banner |
 | `aru-logo-512.png` | Ilova do'konlari talab qiladigan o'lcham |
 | `aru-telegram-1080.png` | **Telegram kanali avatari** — pastdagi izohga qarang |
+| `aru-logo-rounded-1080.png` | Burchagi yumaloq nusxa (alohida turgan belgi uchun) |
 | `android-res/**` | Android ilova belgisi (CI avtomatik ko'chiradi) |
 
 ### Telegram uchun nega alohida fayl?

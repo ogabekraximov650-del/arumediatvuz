@@ -15,6 +15,6 @@
     L 474,0 L 474,219
     A 38,46 0 0 1 398,219 L 398,0 Z"/></g></g>
   </mask></defs>
-  <rect width="512" height="512" rx="114" fill="#E3324F"/>
-  <rect width="512" height="512" rx="114" fill="#101219" mask="url(#cut)"/>
+  <rect width="512" height="512" rx="0" fill="#FFFFFF"/>
+  <rect width="512" height="512" rx="0" fill="#000000" mask="url(#cut)"/>
 </svg>
