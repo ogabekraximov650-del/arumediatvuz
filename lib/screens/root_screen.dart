@@ -308,8 +308,10 @@ class _BottomNav extends StatelessWidget {
                                           child: Text(
                                             _items[i].label,
                                             maxLines: 1,
-                                            overflow: TextOverflow.clip,
-                                            softWrap: false,
+                                            // Ensiz ekranda yozuv
+                                            // qisqartiriladi — chetga
+                                            // chiqib ketmaydi.
+                                            overflow: TextOverflow.ellipsis,
                                             style: TextStyle(
                                               fontSize: 9,
                                               color: color,
