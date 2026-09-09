@@ -19,13 +19,11 @@ const TMP = path.join(__dirname, '.tmp');
 // ── Brend ranglari ────────────────────────────────────────────
 const PLATE = '#000000';   // plita — to'liq qora
 const CUT   = '#FFFFFF';   // o'yiqdan ko'rinadigan rang — oq
-// Plita TO'LA kvadrat: burchaklar yumaloqlanmaydi, shu sabab chetlarda
-// oq qolmaydi. Ilova belgisida burchakni tizimning o'zi yumaloqlaydi,
-// Telegram esa avatarni doira qilib qirqadi — ikkalasi ham to'la
-// kvadratni kutadi.
-const RX    = 0;
-// Alohida kerak bo'lsa — burchagi yumaloq nusxa uchun radius
-const RX_ROUND = 114;
+// Burchak radiusi — 512 lik maydonda 114 (22.3%), ilova belgilari
+// uchun odatiy nisbat.
+const RX    = 114;
+// Alohida kerak bo'lsa — to'la kvadrat nusxa uchun radius
+const RX_SQUARE = 0;
 
 const letters = place({}, 0);   // chetlarga to'liq tiralgan
 
@@ -69,12 +67,12 @@ const fgSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" wid
   </g>
 </svg>`;
 
-// Burchagi yumaloq nusxa — alohida turgan belgi kerak bo'lganda
-const roundSvg = logoSvg.split(`rx="${RX}"`).join(`rx="${RX_ROUND}"`)
-  .split('id="cut"').join('id="cutR"').split('url(#cut)').join('url(#cutR)');
+// To'la kvadrat nusxa — burchaksiz zamin kerak bo'lganda
+const squareSvg = logoSvg.split(`rx="${RX}"`).join(`rx="${RX_SQUARE}"`)
+  .split('id="cut"').join('id="cutS"').split('url(#cut)').join('url(#cutS)');
 
 fs.writeFileSync(path.join(__dirname, 'aru-logo.svg'), logoSvg);
-fs.writeFileSync(path.join(__dirname, 'aru-logo-rounded.svg'), roundSvg);
+fs.writeFileSync(path.join(__dirname, 'aru-logo-square.svg'), squareSvg);
 fs.writeFileSync(path.join(__dirname, 'aru-foreground.svg'), fgSvg);
 fs.writeFileSync(path.join(__dirname, 'aru-telegram.svg'), tgSvg);
 
@@ -160,8 +158,8 @@ for (const s of [2048, 1080, 512]) {
 for (const s of [1080, 512]) {
   renderMaster(tgSvg, path.join(__dirname, `aru-telegram-${s}.png`), false, s);
 }
-// Burchagi yumaloq nusxa
-renderMaster(roundSvg, path.join(__dirname, 'aru-logo-rounded-1080.png'), false, 1080);
+// To'la kvadrat nusxa
+renderMaster(squareSvg, path.join(__dirname, 'aru-logo-square-1080.png'), false, 1080);
 
 for (const [d, s] of Object.entries(LEGACY)) {
   shrink(masterLogo, path.join(OUT, `mipmap-${d}`, 'ic_launcher.png'), s);

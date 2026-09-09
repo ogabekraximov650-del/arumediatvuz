@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
-  <defs><mask id="cutR">
+  <defs><mask id="cutS">
     <rect width="512" height="512" fill="#fff"/>
     <g fill="#000"><g transform="translate(0 106.421) scale(0.981)">
     <path d="M 0,300 L 99,0 L 125,0 L 224,300
@@ -15,6 +15,6 @@
     L 474,0 L 474,219
     A 38,46 0 0 1 398,219 L 398,0 Z"/></g></g>
   </mask></defs>
-  <rect width="512" height="512" rx="114" fill="#FFFFFF"/>
-  <rect width="512" height="512" rx="114" fill="#000000" mask="url(#cutR)"/>
+  <rect width="512" height="512" rx="0" fill="#FFFFFF"/>
+  <rect width="512" height="512" rx="0" fill="#000000" mask="url(#cutS)"/>
 </svg>
