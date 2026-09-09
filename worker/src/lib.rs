@@ -2586,6 +2586,42 @@ async fn auth_route(req: Request, env: &Env, origin: &str, path: &str, method: M
         // ── 2-QADAM: Telegram START tugmasi bosildi ─────────────
         (Method::Post, "/api/telegram/webhook") => handle_tg_webhook(env, req).await,
 
+        // ── Sozlash TO'G'RI ekanini tekshirish ──────────────────
+        //
+        // Kirish ishlamay qolsa BIRINCHI shu manzil ochiladi. U
+        // ikkita savolga javob beradi:
+        //   1. Bot tokeni Cloudflare'ga yuklanganmi va ISHLAYDIMI
+        //      (Telegram'ning `getMe` javobi bilan tasdiqlanadi);
+        //   2. Webhook ro'yxatdan o'tganmi.
+        //
+        // Sir ma'lumot chiqmaydi: bot tokeni ham, webhook siri ham
+        // javobda YO'Q — faqat "bor/yo'q" belgisi va botning ochiq
+        // nomi.
+        (Method::Get, "/api/auth/telegram/health") => {
+            ensure_webhook(env, origin).await;
+
+            let token_ok = env.secret("TELEGRAM_BOT_TOKEN")
+                .map(|t| !t.to_string().is_empty()).unwrap_or(false);
+
+            let (bot_ok, bot_username) = match tg_api(env, "getMe", json!({})).await {
+                Ok(me) => (true, me["username"].as_str().unwrap_or("").to_string()),
+                Err(_) => (false, String::new()),
+            };
+
+            let webhook_url = config_get(env, "tg_webhook_url").await.unwrap_or_default();
+
+            ok_nostore(json!({
+                "bot_token_configured": token_ok,
+                "bot_reachable": bot_ok,
+                "bot_username": bot_username,
+                "expected_bot": BOT_USERNAME,
+                "webhook_registered": !webhook_url.is_empty(),
+                "webhook_url": webhook_url,
+                "max_devices": MAX_SESSIONS_PER_USER,
+                "ok": token_ok && bot_ok && bot_username == BOT_USERNAME,
+            }))
+        }
+
         // ── Ilova ochilganda: sessiya hali kuchdami? ────────────
         (Method::Get, "/api/auth/me") => {
             match session_user(env, &bearer(&req)).await? {

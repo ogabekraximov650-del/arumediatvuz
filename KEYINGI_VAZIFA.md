@@ -344,6 +344,19 @@ ketardi.
   `/api/auth/sessions` uni `current: true/false` belgisiga
   aylantirib, ustunning o'zini o'chirib tashlaydi.
 
+### Sozlash tekshiruvi
+
+Kirish ishlamay qolsa BIRINCHI shu manzil ochiladi:
+
+```
+https://aniraxuzapp.ogabekraximov650.workers.dev/api/auth/telegram/health
+```
+
+`"ok": true` — hammasi joyida. `bot_token_configured: false` bo'lsa
+Cloudflare secret yo'q; `bot_reachable: false` bo'lsa token noto'g'ri
+(BotFather'da tiklangan bo'lishi mumkin). Javobda hech qanday sir
+ma'lumot yo'q.
+
 ### Webhook o'zini o'zi ro'yxatdan o'tkazadi
 
 `ensure_webhook` birinchi `/api/auth/telegram/start` so'rovida
