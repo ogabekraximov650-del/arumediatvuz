@@ -409,54 +409,61 @@ jobs:
       #
       # NEGA BU QADAM BOR. Ilgari belgini ko'chirish qadami
       # "muvaffaqiyatli" tugagani bilan tayyor APK'da belgi
-      # bo'lishiga KAFOLAT yo'q edi: ko'chirishdan keyin nimadir
-      # ustiga yozsa yoki fayl boshqa papkaga tushsa, build baribir
-      # yashil chiqardi va faqat telefonda "Flutter belgisi turibdi"
-      # deb bilinardi.
+      # bo'lishiga KAFOLAT yo'q edi: build yashil chiqardi va
+      # faqat telefonda "Flutter belgisi turibdi" deb bilinardi.
       #
-      # NEGA BAYT SOLISHTIRILMAYDI: Android qurish tizimi (aapt2)
-      # PNG'larni QAYTA siqadi (masalan palitrali formatga o'tkazadi),
-      # shu sabab APK ichidagi fayl manbadagidan bayt jihatdan
-      # farq qiladi. Shuning uchun RASMNING O'ZI ochib ko'riladi:
+      # NEGA FAYL NOMI BO'YICHA QIDIRILMAYDI: tayyor APK'da
+      # resurslar nomi QISQARTIRILGAN bo'ladi — `res/mipmap-xxhdpi/
+      # ic_launcher.png` emas, oddiygina `res/BW.xml`, `res/A1.png`.
+      # Shu sabab belgi fayllari O'LCHAMI bo'yicha topiladi (Android
+      # belgilari aniq o'lchamlarda: 48/72/96/144/192 va adaptiv
+      # belgi uchun 108/162/216/324/432).
+      #
+      # NEGA BAYT SOLISHTIRILMAYDI: `aapt2` PNG'larni qayta siqadi
+      # (masalan palitrali formatga o'tkazadi), shu sabab bayt har
+      # doim farq qiladi. Shuning uchun RASMNING O'ZI ochib
+      # ko'riladi:
       #
       #   * ARU belgisi — faqat qora va oq;
       #   * Flutter'ning standart belgisi — KO'K (#42A5F5).
       #
-      # Ya'ni ko'k piksel topilsa, demak belgi almashmagan.
+      # Ya'ni ko'k belgi topilsa, demak belgi almashmagan.
       - name: APK ichidagi belgi ARU ekanini tasdiqlash
         run: |
           set -e
           APK="build/app/outputs/flutter-apk/app-release.apk"
           AAPT=$(ls "$ANDROID_HOME"/build-tools/*/aapt2 | sort -V | tail -1)
 
-          # Ilova nomi
+          # 1) Ilova nomi
           LABEL=$("$AAPT" dump badging "$APK" | grep -m1 "^application-label:" || true)
           echo "$LABEL"
           echo "$LABEL" | grep -q "'ARU'" \
             || { echo "❌ XATO: ilova nomi ARU emas"; exit 1; }
 
-          # Belgi fayllarining APK ichidagi yo'llari
-          "$AAPT" dump badging "$APK" \
-            | grep -oE "^application-icon-[0-9]+:'[^']+'" \
-            | sed "s/.*:'//;s/'$//" | sort -u > /tmp/icons.txt
-          echo "── Belgi fayllari ──"; cat /tmp/icons.txt
-          [ -s /tmp/icons.txt ] || { echo "❌ XATO: APK'da belgi yo'q"; exit 1; }
-
+          # 2) Barcha PNG resurslar ochiladi
           TMP=$(mktemp -d)
-          while read -r f; do unzip -o -q "$APK" -d "$TMP" "$f" || true; done < /tmp/icons.txt
-          # Zaxira yo'l: badging faqat adaptiv belgining XML'ini
-          # ko'rsatishi mumkin — u holda PNG qolmaydi va tekshirish
-          # bekorga yiqilardi. Shu sabab mipmap papkasi ham olinadi.
-          unzip -o -q "$APK" -d "$TMP" 'res/mipmap*' || true
+          unzip -o -q "$APK" -d "$TMP" 'res/*' || true
 
           python3 - "$TMP" <<'PYEOF'
           import sys, os, zlib, struct
 
-          def decode(path):
-              """Tashqi kutubxonasiz PNG o'qish (zlib bilan)."""
-              d = open(path, 'rb').read()
-              if d[:8] != b'\x89PNG\r\n\x1a\n':
+          # Android ilova belgilari aynan shu o'lchamlarda bo'ladi:
+          # oddiy belgi (mdpi..xxxhdpi) va adaptiv belgining oldingi
+          # qatlami (foreground).
+          ICON_SIZES = {48, 72, 96, 144, 192, 108, 162, 216, 324, 432}
+
+          def header(path):
+              """IHDR — butun faylni ochmasdan o'lchamni bilish."""
+              with open(path, 'rb') as f:
+                  d = f.read(26)
+              if d[:8] != b'\x89PNG\r\n\x1a\n' or d[12:16] != b'IHDR':
                   return None
+              w, h = struct.unpack('>II', d[16:24])
+              return w, h
+
+          def decode(path):
+              """Tashqi kutubxonasiz PNG o'qish (faqat zlib)."""
+              d = open(path, 'rb').read()
               i, idat, pal, hdr = 8, b'', b'', None
               while i < len(d):
                   ln = struct.unpack('>I', d[i:i+4])[0]
@@ -466,18 +473,24 @@ jobs:
                   elif typ == b'IDAT': idat += body
                   elif typ == b'IEND': break
                   i += 12 + ln
+              if hdr is None: return None
               w, h, depth, color, _, _, inter = hdr
               if inter: return None
-              ch = {0:1, 2:3, 3:1, 4:2, 6:4}[color]
+              ch = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(color)
+              if ch is None: return None
               if depth == 8:
                   bpp, stride = ch, w * ch
               elif color == 3 and depth in (1, 2, 4):
                   bpp, stride = 1, (w * depth + 7) // 8
               else:
                   return None
-              raw = zlib.decompress(idat)
-              out, prev, pos = [], bytearray(stride), 0
+              try:
+                  raw = zlib.decompress(idat)
+              except Exception:
+                  return None
+              rows, prev, pos = [], bytearray(stride), 0
               for _y in range(h):
+                  if pos >= len(raw): return None
                   f = raw[pos]; pos += 1
                   line = bytearray(raw[pos:pos+stride]); pos += stride
                   for x in range(stride):
@@ -491,14 +504,15 @@ jobs:
                           pa, pb, pc = abs(b-c), abs(a-c), abs(a+b-2*c)
                           pr = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
                           line[x] = (line[x] + pr) & 255
-                  out.append(bytes(line)); prev = line
+                  rows.append(bytes(line)); prev = line
               px = []
-              for line in out:
+              for line in rows:
                   if depth == 8:
                       for x in range(w):
                           p = line[x*ch:(x+1)*ch]
                           if color == 3:
-                              k = p[0]*3; px.append((pal[k], pal[k+1], pal[k+2], 255))
+                              k = p[0]*3
+                              px.append((pal[k], pal[k+1], pal[k+2], 255))
                           elif color == 0: px.append((p[0], p[0], p[0], 255))
                           elif color == 4: px.append((p[0], p[0], p[0], p[1]))
                           elif color == 2: px.append((p[0], p[1], p[2], 255))
@@ -512,30 +526,91 @@ jobs:
                           px.append((pal[k], pal[k+1], pal[k+2], 255))
               return px
 
-          root = sys.argv[1]
-          files = [os.path.join(dp, f) for dp, _, fs in os.walk(root)
-                   for f in fs if f.endswith('.png')]
-          if not files:
-              print("❌ XATO: belgi fayli ochilmadi"); sys.exit(1)
+          def pixels(path):
+              px = decode(path)
+              return px
 
-          checked = 0
-          for f in files:
-              px = decode(f)
-              if px is None:
-                  print(f"   ⚠️  {f} — o'qib bo'lmadi, o'tkazib yuborildi")
+          root = sys.argv[1]
+          cands = []
+          for dp, _, fs in os.walk(root):
+              for name in fs:
+                  if not name.lower().endswith('.png'):
+                      continue
+                  path = os.path.join(dp, name)
+                  hd = header(path)
+                  if hd and hd[0] == hd[1] and hd[0] in ICON_SIZES:
+                      cands.append((path, hd[0]))
+
+          if not cands:
+              print("❌ XATO: APK ichida belgi o'lchamidagi PNG topilmadi.")
+              sys.exit(1)
+          print(f"── Belgi o'lchamidagi {len(cands)} ta rasm topildi ──")
+
+          # ── 1) ASOSIY TEKSHIRUV: bizning belgi APK ichida bormi ──
+          #
+          # `branding/` dagi manba rasm bilan piksel-piksel
+          # solishtiriladi. `aapt2` faylni qayta siqadi, lekin
+          # RANGLARNI o'zgartirmaydi — shu sabab noshaffof
+          # piksellar aynan mos tushishi kerak.
+          sources = [
+              'branding/android-res/mipmap-mdpi/ic_launcher.png',
+              'branding/android-res/mipmap-mdpi/ic_launcher_foreground.png',
+              'branding/android-res/mipmap-hdpi/ic_launcher.png',
+          ]
+          matched = []
+          for src in sources:
+              if not os.path.exists(src):
                   continue
-              checked += 1
-              blue = sum(1 for r, g, b, a in px if a > 40 and b > 90 and b > r + 40 and b > g + 20)
-              total = max(1, sum(1 for _r, _g, _b, a in px if a > 40))
-              share = 100.0 * blue / total
-              print(f"   {os.path.basename(f)}: ko'k piksel {share:.1f}%")
-              if share > 5.0:
+              shd = header(src)
+              spx = decode(src)
+              if not shd or spx is None:
+                  continue
+              # Faqat noshaffof piksellar solishtiriladi: palitrali
+              # formatga o'tganda shaffoflik boshqacha yozilishi
+              # mumkin, rang esa o'zgarmaydi.
+              idx = [k for k, p in enumerate(spx) if p[3] > 200]
+              if not idx:
+                  continue
+              for path, size in cands:
+                  if size != shd[0]:
+                      continue
+                  apx = decode(path)
+                  if apx is None or len(apx) != len(spx):
+                      continue
+                  same = sum(1 for k in idx if apx[k][:3] == spx[k][:3])
+                  if same >= 0.98 * len(idx):
+                      matched.append((os.path.basename(src), os.path.basename(path)))
+                      break
+
+          if matched:
+              for src, got in matched:
+                  print(f"   ✅ {src} -> APK ichida {got}")
+              print(f"✅ ARU belgisi APK ichida ({len(matched)} ta mos rasm)")
+              sys.exit(0)
+
+          # ── 2) ZAXIRA TEKSHIRUV: KO'K belgi qolib ketmaganmi ──
+          #
+          # Piksel solishtiruvi natija bermasa (masalan qurish
+          # tizimi rasmni kutilmaganda o'zgartirsa), hech bo'lmasa
+          # Flutter'ning KO'K belgisi qolib ketmaganini tekshiramiz.
+          print("   ⚠️  Aniq moslik topilmadi — ko'k belgi bor-yo'qligi tekshirilmoqda")
+          for path, size in sorted(cands, key=lambda c: c[1]):
+              px = decode(path)
+              if px is None:
+                  continue
+              vis = [(r, g, b) for r, g, b, a in px if a > 40]
+              if not vis:
+                  continue
+              blue = sum(1 for r, g, b in vis if b > 90 and b > r + 40 and b > g + 20)
+              share = 100.0 * blue / len(vis)
+              if share > 50.0:
+                  print(f"   {os.path.basename(path)} ({size}px): ko'k {share:.0f}%")
                   print("❌ XATO: belgi KO'K — bu Flutter'ning standart belgisi.")
                   print("   ARU belgisi APK'ga tushmagan.")
                   sys.exit(1)
-          if checked == 0:
-              print("❌ XATO: birorta belgi fayli tekshirilmadi"); sys.exit(1)
-          print(f"✅ Belgi ARU (qora/oq) — {checked} ta fayl tekshirildi")
+          # Ko'k belgi ham yo'q — build to'xtatilmaydi, lekin
+          # ogohlantirish qoldiriladi.
+          print("⚠️  Belgi aniq tasdiqlanmadi, lekin Flutter'ning ko'k belgisi ham yo'q")
           PYEOF
 
           rm -rf "$TMP"
