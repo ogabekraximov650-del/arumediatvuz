@@ -1852,27 +1852,51 @@ async fn b2_proxy_full(env: &Env, file_name: &str) -> Result<Response> {
 
 /// B2'dan bitta faylni o'chirish. Qiymat bare fayl nomi (yangi format)
 /// yoki eski to'liq URL bo'lishi mumkin — ikkalasi ham qo'llab-quvvatlanadi.
+///
+/// Natijaga qaralmaydigan joylar uchun (anime/epizod o'chirilganda).
 async fn b2_delete(env: &Env, value: &str) {
-    if value.is_empty() { return; }
+    let _ = b2_delete_checked(env, value).await;
+}
+
+/// O'shaning O'ZI, lekin NATIJANI QAYTARADI.
+///
+/// `true` — fayl o'chirildi YOKI omborda umuman yo'q edi (ikkalasi
+/// ham "endi yo'q" degani). `false` — B2'ga yetib bo'lmadi yoki u
+/// o'chirishni rad etdi.
+///
+/// NEGA KERAK: hisob o'chirilayotganda profil rasmi B2'da qolib
+/// ketsa, uni endi HECH KIM o'chira olmaydi — bazadagi yagona
+/// havola ham o'chib ketgan bo'ladi. Ya'ni fayl abadiy yotib,
+/// ombor uchun pul yeb turadi. Shu sabab u yerda natija
+/// TEKSHIRILADI.
+async fn b2_delete_checked(env: &Env, value: &str) -> bool {
+    if value.is_empty() { return true; }
     let file_name = match value.find("/api/image/") {
         Some(p) => &value[p + 11..],
         None => value,
     };
-    let auth = match b2_auth(env).await { Ok(a) => a, Err(_) => return };
+    let auth = match b2_auth(env).await { Ok(a) => a, Err(_) => return false };
     let api_url = auth["apiInfo"]["storageApi"]["apiUrl"].as_str().unwrap_or("").to_string();
     let token = auth["authorizationToken"].as_str().unwrap_or("").to_string();
     let acct = auth["accountId"].as_str().unwrap_or("").to_string();
-    let bid = match b2_bucket_id(&api_url, &token, &acct).await { Ok(id) => id, Err(_) => return };
+    let bid = match b2_bucket_id(&api_url, &token, &acct).await {
+        Ok(id) => id,
+        Err(_) => return false,
+    };
 
     let mut h = Headers::new();
     let _ = h.set("Authorization", &token);
     let req = match Request::new_with_init(
         &format!("{api_url}/b2api/v3/b2_list_file_names?bucketId={bid}&prefix={file_name}&maxFileCount=1"),
         RequestInit::new().with_method(Method::Get).with_headers(h),
-    ) { Ok(r) => r, Err(_) => return };
-    let mut r = match Fetch::Request(req).send().await { Ok(r) => r, Err(_) => return };
-    let d: Value = match r.json().await { Ok(d) => d, Err(_) => return };
-    let fid = match d["files"][0]["fileId"].as_str() { Some(id) => id.to_string(), None => return };
+    ) { Ok(r) => r, Err(_) => return false };
+    let mut r = match Fetch::Request(req).send().await { Ok(r) => r, Err(_) => return false };
+    let d: Value = match r.json().await { Ok(d) => d, Err(_) => return false };
+    // Fayl topilmadi — demak allaqachon yo'q. Bu XATO EMAS.
+    let fid = match d["files"][0]["fileId"].as_str() {
+        Some(id) => id.to_string(),
+        None => return true,
+    };
 
     let mut h2 = Headers::new();
     let _ = h2.set("Authorization", &token);
@@ -1881,8 +1905,11 @@ async fn b2_delete(env: &Env, value: &str) {
         &format!("{api_url}/b2api/v3/b2_delete_file_version"),
         RequestInit::new().with_method(Method::Post).with_headers(h2)
             .with_body(Some(json!({"fileName": file_name, "fileId": fid}).to_string().into())),
-    ) { Ok(r) => r, Err(_) => return };
-    let _ = Fetch::Request(req2).send().await;
+    ) { Ok(r) => r, Err(_) => return false };
+    match Fetch::Request(req2).send().await {
+        Ok(resp) => resp.status_code() == 200,
+        Err(_) => false,
+    }
 }
 
 async fn b2_delete_epizod_files(env: &Env, ep: &Value) {
@@ -2858,9 +2885,18 @@ async fn auth_route(req: Request, env: &Env, origin: &str, path: &str, method: M
         // ── HISOBNI BUTUNLAY O'CHIRISH ─────────────────────────
         //
         // Ilovada IKKI MARTA so'ralgandan keyin chaqiriladi.
-        // Tartib muhim: avval fayl, keyin sessiyalar, oxirida
-        // hisobning o'zi — oradagi biror qadam uzilib qolsa ham
-        // "egasiz" ma'lumot qolib ketmasin.
+        //
+        // TARTIB: 1) B2'dagi profil rasmi, 2) sessiyalar,
+        // 3) bir martalik tokenlar, 4) hisobning o'zi.
+        //
+        // NEGA AYNAN SHU TARTIBDA: bazadagi yozuv B2'dagi faylga
+        // yagona havoladir. Avval hisobni o'chirsak va keyin fayl
+        // o'chmay qolsa, uni endi HECH KIM topa olmaydi — fayl
+        // omborda abadiy yotib, pul yeb turadi.
+        //
+        // Shu sabab rasm o'chishi TEKSHIRILADI: o'chmasa hisobga
+        // umuman tegilmaydi va foydalanuvchi qaytadan urinishi
+        // mumkin. (Fayl allaqachon yo'q bo'lsa — bu xato emas.)
         (Method::Post, "/api/auth/delete-account") => {
             let Some(u) = session_user(env, &bearer(&req)).await? else {
                 return json_resp(&json!({"error": "unauthorized"}), 401);
@@ -2871,9 +2907,12 @@ async fn auth_route(req: Request, env: &Env, origin: &str, path: &str, method: M
             }
 
             let avatar = u["avatar_file"].as_str().unwrap_or("").to_string();
-            if !avatar.is_empty() {
-                b2_delete(env, &avatar).await;
+            if !avatar.is_empty() && !b2_delete_checked(env, &avatar).await {
+                return json_resp(&json!({
+                    "error": "Profil rasmini o'chirib bo'lmadi — qaytadan urinib ko'ring"
+                }), 502);
             }
+
             let _ = turso_exec(env, "DELETE FROM sessions_db WHERE user_id=?",
                 vec![TursoArg::int(me)]).await;
             let _ = turso_exec(env, "DELETE FROM login_tokens WHERE user_id=?",

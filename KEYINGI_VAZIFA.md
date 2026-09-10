@@ -247,9 +247,20 @@ hisobga TEGMAYDI, ya'ni uni har safar ishga tushirish xavfsiz.
 
 ## HISOBNI O'CHIRISH
 
-`POST /api/auth/delete-account` — profil rasmi B2'dan, sessiyalar
-va hisobning o'zi Turso'dan o'chiriladi. Ilovada **ikki marta**
-so'raladi: ikkinchi oyna oqibatlarni ro'yxat qilib ko'rsatadi.
+`POST /api/auth/delete-account`. Ilovada **ikki marta** so'raladi:
+ikkinchi oyna oqibatlarni ro'yxat qilib ko'rsatadi.
+
+**TARTIB QAT'IY:** 1) B2'dagi profil rasmi → 2) sessiyalar →
+3) bir martalik tokenlar → 4) hisobning o'zi.
+
+Nega aynan shunday: bazadagi yozuv B2'dagi faylga **yagona
+havola**. Avval hisob o'chsa va keyin fayl o'chmay qolsa, uni endi
+hech kim topa olmaydi — fayl omborda abadiy yotib, pul yeb turadi.
+
+Shu sabab rasm o'chishi **tekshiriladi** (`b2_delete_checked`):
+o'chmasa hisobga umuman tegilmaydi va 502 qaytadi — foydalanuvchi
+qaytadan urinishi mumkin. Fayl allaqachon yo'q bo'lsa, bu xato
+hisoblanmaydi.
 
 ## QAYSI TELEGRAM BILAN KIRISH
 
