@@ -186,6 +186,104 @@ class _ProfileBody extends StatelessWidget {
     if (yes == true) await AuthService.instance.logout();
   }
 
+  /// HISOBNI BUTUNLAY O'CHIRISH — IKKI MARTA SO'RALADI.
+  ///
+  /// Nega ikki marta: bu amalni ORQAGA QAYTARIB BO'LMAYDI —
+  /// serverda foydalanuvchi, uning barcha sessiyalari va profil
+  /// rasmi o'chib ketadi. Bitta tasodifiy bosish shuncha narsani
+  /// yo'q qilmasligi kerak.
+  ///
+  /// Ikkinchi so'roq birinchisining takrori emas: u OQIBATLARNI
+  /// ro'yxat qilib ko'rsatadi va tasdiq tugmasi "Ha, o'chirilsin"
+  /// deb ataladi — ya'ni foydalanuvchi nimaga rozi bo'layotganini
+  /// aniq ko'radi.
+  Future<void> _deleteAccount(BuildContext context) async {
+    final first = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.card,
+        title: const Text('Accountni o\'chirish',
+            style: TextStyle(color: Colors.white)),
+        content: const Text(
+          'Accountingizni butunlay o\'chirmoqchimisiz?',
+          style: TextStyle(color: Colors.white70, height: 1.45),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Bekor qilish'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Davom etish',
+                style: TextStyle(color: AppColors.accent)),
+          ),
+        ],
+      ),
+    );
+    if (first != true || !context.mounted) return;
+
+    final second = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.card,
+        title: const Text('Ishonchingiz komilmi?',
+            style: TextStyle(color: Colors.white)),
+        content: const Text(
+          'Bu amalni orqaga qaytarib bo\'lmaydi.\n\n'
+          '• Hisobingiz o\'chiriladi\n'
+          '• Barcha qurilmalardan chiqarilasiz\n'
+          '• Profil rasmingiz o\'chiriladi\n'
+          '• Balansingiz yo\'qoladi',
+          style: TextStyle(color: Colors.white70, height: 1.5),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Yo\'q, bekor qilish'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Ha, o\'chirilsin',
+                style: TextStyle(color: AppColors.accent)),
+          ),
+        ],
+      ),
+    );
+    if (second != true || !context.mounted) return;
+
+    // O'chirish tarmoq orqali ketadi — kutish belgisi ko'rsatiladi.
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(
+        child: CircularProgressIndicator(color: Colors.white70),
+      ),
+    );
+    final err = await AuthService.instance.deleteAccount();
+    if (!context.mounted) return;
+    Navigator.of(context).pop(); // kutish oynasi
+
+    if (err != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          behavior: SnackBarBehavior.floating,
+          backgroundColor: AppColors.card,
+          content: Text(err, style: const TextStyle(color: Colors.white)),
+        ),
+      );
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: AppColors.card,
+        content: Text('Account o\'chirildi',
+            style: TextStyle(color: Colors.white)),
+      ),
+    );
+  }
+
   void _open(BuildContext context, Widget page) {
     Navigator.of(context).push(
       PageRouteBuilder(
@@ -338,34 +436,16 @@ class _ProfileBody extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 16),
-          GlassTappable(
+          _DangerTile(
+            icon: Icons.delete_forever_rounded,
+            label: 'Accountni o\'chirish',
+            onTap: () => _deleteAccount(context),
+          ),
+          const SizedBox(height: 16),
+          _DangerTile(
+            icon: Icons.logout_rounded,
+            label: 'Accountdan chiqish',
             onTap: () => _logout(context),
-            child: Glass(
-              borderRadius: 20,
-              blur: 16,
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-              child: Row(
-                children: [
-                  Container(
-                    padding: const EdgeInsets.all(8),
-                    decoration: BoxDecoration(
-                      color: AppColors.accent.withValues(alpha: 0.14),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: const Icon(Icons.logout_rounded,
-                        color: AppColors.accent, size: 22),
-                  ),
-                  const SizedBox(width: 14),
-                  const Expanded(
-                    child: Text('Accountdan chiqish',
-                        style: TextStyle(
-                            color: AppColors.accent,
-                            fontSize: 16,
-                            fontWeight: FontWeight.w600)),
-                  ),
-                ],
-              ),
-            ),
           ),
         ],
       ),
@@ -374,6 +454,48 @@ class _ProfileBody extends StatelessWidget {
 
   Widget _divider() =>
       Divider(height: 1, color: Colors.white.withValues(alpha: 0.12));
+}
+
+/// Qizil ("xavfli") amal tugmasi — chiqish va o'chirish uchun
+/// bir xil ko'rinish beradi.
+class _DangerTile extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+  const _DangerTile(
+      {required this.icon, required this.label, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GlassTappable(
+      onTap: onTap,
+      child: Glass(
+        borderRadius: 20,
+        blur: 16,
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+        child: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: AppColors.accent.withValues(alpha: 0.14),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Icon(icon, color: AppColors.accent, size: 22),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Text(label,
+                  style: const TextStyle(
+                      color: AppColors.accent,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 /// ID qatori — yonida nusxalash tugmasi bilan.

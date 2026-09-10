@@ -314,6 +314,32 @@ async fn init_db(env: &Env) {
     //                  Telegram avatari ko'rsatiladi.
     let _ = turso_exec(env, "ALTER TABLE users_db ADD COLUMN balance INTEGER DEFAULT 0", vec![]).await;
     let _ = turso_exec(env, "ALTER TABLE users_db ADD COLUMN avatar_file TEXT", vec![]).await;
+
+    // `profile_done` — foydalanuvchi ism va username'ni KIRITGANMI.
+    // Yangi hisob ochilganda 0 bo'ladi va ilova undan ism/username
+    // so'raydi.
+    let _ = turso_exec(env,
+        "ALTER TABLE users_db ADD COLUMN profile_done INTEGER DEFAULT 0", vec![]).await;
+
+    // ESKI HISOBLARNI BELGILAB QO'YAMIZ. Ular allaqachon ishlatib
+    // yurgan nomlari bilan qolsin — ulardan qaytadan so'ralmasin.
+    //
+    // Shart AYNIQSA MUHIM: `username <> ''`. Yangi hisob bo'sh
+    // username bilan ochiladi, ya'ni bu buyruq unga TEGMAYDI.
+    // Shu sabab uni har safar ishga tushirish xavfsiz — ALTER
+    // muvaffaqiyatiga bog'lab qo'yish shart emas (bog'lansa,
+    // ALTER o'tib to'ldirish uzilib qolgan holatda eski hisoblar
+    // abadiy "to'ldirilmagan" bo'lib qolardi).
+    let _ = turso_exec(env,
+        "UPDATE users_db SET profile_done=1 WHERE username <> '' AND profile_done=0",
+        vec![]).await;
+
+    // Username TAKRORLANMASLIGI kerak. Qiyoslash registrga
+    // BOG'LIQ EMAS (`Ali` va `ali` — bitta nom), bo'sh username'lar
+    // esa indeksga umuman kirmaydi (ular hali tanlanmagan).
+    let _ = turso_exec(env,
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_uname
+         ON users_db(LOWER(username)) WHERE username <> ''", vec![]).await;
 }
 
 async fn next_anime_id(env: &Env) -> Result<i64> {
@@ -2205,9 +2231,14 @@ async fn upsert_user(env: &Env, from: &Value) -> Result<Value> {
     let tg_id = from["id"].as_i64().unwrap_or(0);
     if tg_id == 0 { return Err(Error::RustError("telegram_id yo'q".into())); }
 
-    let username = from["username"].as_str().unwrap_or("").to_string();
-    let first_name = from["first_name"].as_str().unwrap_or("").to_string();
-    let last_name = from["last_name"].as_str().unwrap_or("").to_string();
+    // ── ISM VA USERNAME TELEGRAMDAN OLINMAYDI ─────────────────
+    //
+    // Foydalanuvchi talabi. Telegramdan faqat `telegram_id` (hisobni
+    // tanish uchun), til va premium belgisi olinadi. Ism va username
+    // esa ilovaning O'ZIDA, birinchi kirishda so'raladi
+    // (`/api/auth/profile`) va keyingi kirishlarda USTIGA
+    // YOZILMAYDI — aks holda foydalanuvchi tanlagan nom har safar
+    // Telegramdagisiga qaytib qolardi.
     let lang = from["language_code"].as_str().unwrap_or("").to_string();
     let is_premium = if from["is_premium"] == json!(true) { 1 } else { 0 };
     let now = now_ms();
@@ -2215,25 +2246,26 @@ async fn upsert_user(env: &Env, from: &Value) -> Result<Value> {
     for _ in 0..4 {
         if find_user_by_tg(env, tg_id).await?.is_some() {
             let res = turso_exec(env,
-                "UPDATE users_db SET username=?,first_name=?,last_name=?,language_code=?,
-                 is_premium=?,last_login_at=? WHERE telegram_id=? RETURNING *",
+                "UPDATE users_db SET language_code=?,is_premium=?,last_login_at=?
+                 WHERE telegram_id=? RETURNING *",
                 vec![
-                    TursoArg::text(&username), TursoArg::text(&first_name),
-                    TursoArg::text(&last_name), TursoArg::text(&lang),
-                    TursoArg::int(is_premium), TursoArg::int(now), TursoArg::int(tg_id),
+                    TursoArg::text(&lang), TursoArg::int(is_premium),
+                    TursoArg::int(now), TursoArg::int(tg_id),
                 ]).await?;
             if let Some(u) = first_row(&res) { return Ok(u); }
             continue;
         }
 
         let new_id = next_user_id(env).await?;
+        // Ism va username BO'SH tushadi: ularni foydalanuvchi
+        // o'zi kiritadi. `profile_done=0` — ilova shu belgiga
+        // qarab so'rash oynasini ochadi.
         let res = turso_exec(env,
             "INSERT INTO users_db (id,telegram_id,username,first_name,last_name,
-             language_code,is_premium,is_banned,created_at,last_login_at)
-             VALUES (?,?,?,?,?,?,?,0,?,?) RETURNING *",
+             language_code,is_premium,is_banned,created_at,last_login_at,profile_done)
+             VALUES (?,?,'','','',?,?,0,?,?,0) RETURNING *",
             vec![
-                TursoArg::int(new_id), TursoArg::int(tg_id), TursoArg::text(&username),
-                TursoArg::text(&first_name), TursoArg::text(&last_name), TursoArg::text(&lang),
+                TursoArg::int(new_id), TursoArg::int(tg_id), TursoArg::text(&lang),
                 TursoArg::int(is_premium), TursoArg::int(now), TursoArg::int(now),
             ]).await;
 
@@ -2274,6 +2306,9 @@ fn user_public(origin: &str, u: &Value) -> Value {
         "last_name": u["last_name"].as_str().unwrap_or(""),
         "photo_url": photo_url,
         "balance": u["balance"].as_i64().unwrap_or(0),
+        // Ism/username kiritilganmi. 0 bo'lsa ilova so'rash
+        // oynasini ochadi va uni yopib bo'lmaydi.
+        "profile_done": u["profile_done"].as_i64().unwrap_or(0) == 1,
         "created_at": u["created_at"].clone(),
         "last_login_at": u["last_login_at"].clone(),
     })
@@ -2291,6 +2326,38 @@ fn user_public(origin: &str, u: &Value) -> Value {
 /// Shu sabab nom qat'iy qolipda bo'lishi shart:
 ///   `avatar_<foydalanuvchi id>_<raqam>.jpg`
 /// Ya'ni har kim faqat o'z fayllariga tega oladi.
+/// USERNAME QOIDALARI (ilova bilan AYNAN bir xil).
+///
+///   * 3 dan 15 tagacha belgi. Yuqori chegara foydalanuvchi
+///     talabi; quyi chegara — bir-ikki harfli nomlar amalda
+///     o'qilmaydi va tezda tugab qoladi;
+///   * FAQAT harf (a-z, A-Z), raqam va pastki chiziq `_`.
+///     Belgi, bo'shliq, emoji — taqiqlanadi.
+///
+/// Qaytaradi: xato sababi (ilovaga ko'rsatiladi) yoki `None`.
+fn username_problem(u: &str) -> Option<&'static str> {
+    let n = u.chars().count();
+    if n < 3 {
+        return Some("Username kamida 3 ta belgidan iborat bo'lsin");
+    }
+    if n > 15 {
+        return Some("Username eng ko'pi 15 ta belgi bo'lishi mumkin");
+    }
+    if !u.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Some("Faqat harf, raqam va pastki chiziq (_) ishlatiladi");
+    }
+    None
+}
+
+/// Username band emasmi. `me` — o'zining id'si (o'z nomini
+/// "band" deb hisoblamaslik uchun).
+async fn username_taken(env: &Env, u: &str, me: i64) -> Result<bool> {
+    let res = turso_exec(env,
+        "SELECT id FROM users_db WHERE LOWER(username)=LOWER(?) AND id<>? LIMIT 1",
+        vec![TursoArg::text(u), TursoArg::int(me)]).await?;
+    Ok(res["rows"].as_array().map(|r| !r.is_empty()).unwrap_or(false))
+}
+
 fn valid_avatar_file(file: &str, user_id: i64) -> bool {
     let prefix = format!("avatar_{user_id}_");
     let Some(rest) = file.strip_prefix(&prefix) else { return false };
@@ -2707,6 +2774,114 @@ async fn auth_route(req: Request, env: &Env, origin: &str, path: &str, method: M
                 // — ilova buni ko'rib foydalanuvchini chiqaradi.
                 None => json_resp(&json!({"error": "unauthorized"}), 401),
             }
+        }
+
+        // ── USERNAME BAND EMASMI (yozayotganda tekshiriladi) ───
+        //
+        // Ilova har bir belgi qo'shilganda/olinganda shu manzilga
+        // murojaat qiladi, shu sabab javob YENGIL: bitta indeksli
+        // SELECT. Keshlanmaydi (`ok_nostore`) — aks holda band
+        // bo'lib qolgan nom "bo'sh" bo'lib ko'rinib turardi.
+        (Method::Get, "/api/auth/username-check") => {
+            let Some(u) = session_user(env, &bearer(&req)).await? else {
+                return json_resp(&json!({"error": "unauthorized"}), 401);
+            };
+            let url = req.url()?;
+            let name = url.query_pairs().find(|(k, _)| k == "u")
+                .map(|(_, v)| v.to_string()).unwrap_or_default();
+
+            if let Some(why) = username_problem(&name) {
+                return ok_nostore(json!({"valid": false, "available": false, "reason": why}));
+            }
+            let me = u["id"].as_i64().unwrap_or(0);
+            let taken = username_taken(env, &name, me).await?;
+            ok_nostore(json!({
+                "valid": true,
+                "available": !taken,
+                "reason": if taken { "Bu username band" } else { "" },
+            }))
+        }
+
+        // ── ISM VA USERNAME'NI SAQLASH ─────────────────────────
+        //
+        // Yangi hisob birinchi marta shu yerda to'ldiriladi.
+        // Tekshiruv SERVERDA ham qaytariladi: ilovadagi tekshiruv
+        // faqat qulaylik uchun, ishonch esa shu yerda.
+        (Method::Post, "/api/auth/profile") => {
+            let Some(u) = session_user(env, &bearer(&req)).await? else {
+                return json_resp(&json!({"error": "unauthorized"}), 401);
+            };
+            let me = u["id"].as_i64().unwrap_or(0);
+            let mut req = req;
+            let b: Value = req.json().await.unwrap_or(json!({}));
+
+            let first_name = b["first_name"].as_str().unwrap_or("").trim().to_string();
+            let username = b["username"].as_str().unwrap_or("").trim().to_string();
+
+            if first_name.is_empty() {
+                return json_resp(&json!({"error": "Ism kiritilmadi"}), 400);
+            }
+            if first_name.chars().count() > 32 {
+                return json_resp(&json!({"error": "Ism eng ko'pi 32 ta belgi"}), 400);
+            }
+            if let Some(why) = username_problem(&username) {
+                return json_resp(&json!({"error": why}), 400);
+            }
+            if username_taken(env, &username, me).await? {
+                return json_resp(&json!({"error": "Bu username band"}), 409);
+            }
+
+            let res = turso_exec(env,
+                "UPDATE users_db SET first_name=?,username=?,profile_done=1
+                 WHERE id=? RETURNING *",
+                vec![TursoArg::text(&first_name), TursoArg::text(&username),
+                     TursoArg::int(me)]).await;
+
+            let Ok(res) = res else {
+                // Yagona indeks to'qnashuvi — ayni damda boshqa
+                // kishi shu nomni olib ulgurgan.
+                return json_resp(&json!({"error": "Bu username band"}), 409);
+            };
+            let Some(nu) = first_row(&res) else {
+                return err500("Saqlab bo'lmadi");
+            };
+
+            // Sessiyalar jurnalidagi nusxa ham yangilansin.
+            let _ = turso_exec(env,
+                "UPDATE sessions_db SET username=?,first_name=? WHERE user_id=?",
+                vec![TursoArg::text(&username), TursoArg::text(&first_name),
+                     TursoArg::int(me)]).await;
+
+            ok_nostore(json!({"user": user_public(origin, &nu)}))
+        }
+
+        // ── HISOBNI BUTUNLAY O'CHIRISH ─────────────────────────
+        //
+        // Ilovada IKKI MARTA so'ralgandan keyin chaqiriladi.
+        // Tartib muhim: avval fayl, keyin sessiyalar, oxirida
+        // hisobning o'zi — oradagi biror qadam uzilib qolsa ham
+        // "egasiz" ma'lumot qolib ketmasin.
+        (Method::Post, "/api/auth/delete-account") => {
+            let Some(u) = session_user(env, &bearer(&req)).await? else {
+                return json_resp(&json!({"error": "unauthorized"}), 401);
+            };
+            let me = u["id"].as_i64().unwrap_or(0);
+            if me == 0 {
+                return err500("Hisob aniqlanmadi");
+            }
+
+            let avatar = u["avatar_file"].as_str().unwrap_or("").to_string();
+            if !avatar.is_empty() {
+                b2_delete(env, &avatar).await;
+            }
+            let _ = turso_exec(env, "DELETE FROM sessions_db WHERE user_id=?",
+                vec![TursoArg::int(me)]).await;
+            let _ = turso_exec(env, "DELETE FROM login_tokens WHERE user_id=?",
+                vec![TursoArg::int(me)]).await;
+            let _ = turso_exec(env, "DELETE FROM users_db WHERE id=?",
+                vec![TursoArg::int(me)]).await;
+
+            ok_nostore(json!({"success": true}))
         }
 
         // ── PROFIL RASMINI ALMASHTIRISH ────────────────────────

@@ -62,6 +62,33 @@ rasmi **ochib ko'riladi**. Ko'k piksel topilsa (Flutter'ning
 standart belgisi) build ataylab yiqiladi. Bayt solishtirilmaydi,
 chunki `aapt2` PNG'larni qayta siqadi.
 
+## PASTKI PANEL TIZIM TUGMALARI ORTIDA QOLMASIN
+
+Pleyer to'liq ekranda `immersiveSticky` rejimini yoqadi va o'shanda
+`MediaQuery.padding.bottom` **nolga tushadi**. Pleyerdan
+chiqilganda MIUI yangilangan `padding` ni kechikib yuboradi —
+`SafeArea` esa aynan `padding` ga tayanadi, shu sabab panel tizim
+tugmalari ortida qolib ketardi.
+
+Yechim: `MediaQuery.viewPaddingOf(context).bottom`. `viewPadding`
+tizim paneli yashiringan bo'lsa ham **jismoniy** chekinishni
+ko'rsatib turadi, ya'ni nolga tushmaydi.
+
+## PASTKI TUGMA SUZISHI — QURILMA TEZLIGIGA BOG'LIQ EDI
+
+Foydalanuvchi: "planshetda to'g'ri, ekrani kichik telefonda ko'z
+ilg'amaydi". Sabab ekran o'lchamida emas edi.
+
+`jumpToPage` yangi sahifani BIRINCHI marta quradi va kuchsiz
+telefonda bu 300–500 ms qotishga olib keladi.
+`AnimationController` vaqtni haqiqiy soat bo'yicha o'lchaydi —
+qotish tugagach u darhol o'sha 300–500 ms ga **sakraydi**. Ya'ni
+qisqa suzish butunlay yeb ketilardi.
+
+Endi animatsiya `addPostFrameCallback` bilan, **sahifa qurilgan
+kadrdan keyin** boshlanadi. Yangi kod qo'shayotganda bu tartibni
+buzmang.
+
 ## Tekshiruv (har bir o'zgarishdan keyin)
 
 ```
@@ -178,6 +205,51 @@ tizimi bir xil) uchun eski yozuvni oldindan o'chiradi — bitta
 telefon ro'yxatda HAR DOIM bitta qator egallaydi. Busiz takroriy
 urinishlar 4 ta chegarani to'ldirib, foydalanuvchining BOSHQA
 haqiqiy qurilmalarini chiqarib yuborardi.
+
+## ISM VA USERNAME — TELEGRAMDAN OLINMAYDI
+
+Foydalanuvchi talabi. Telegramdan faqat `telegram_id` (hisobni
+tanish uchun), til va premium belgisi olinadi.
+
+- Yangi hisob **bo'sh** ism/username bilan ochiladi,
+  `profile_done = 0`;
+- ilova shu belgiga qarab `ProfileSetupScreen` ni ochadi va uni
+  **yopib bo'lmaydi** (`PopScope(canPop: false)`) — chiqishning
+  yagona yo'li to'ldirish yoki hisobdan chiqish;
+- keyingi kirishlarda `upsert_user` ism/username ustiga
+  **yozmaydi** — aks holda tanlangan nom har safar Telegramdagiga
+  qaytib qolardi.
+
+### Username qoidalari (IKKI JOYDA bir xil)
+
+`worker/src/lib.rs` → `username_problem` va
+`lib/services/auth_service.dart` → `AuthService.usernameProblem`.
+**Birini o'zgartirsangiz ikkinchisini ham o'zgartiring.**
+
+- 3–15 belgi (yuqori chegara — foydalanuvchi talabi);
+- faqat `A-Z a-z 0-9 _`. Klaviaturada ham boshqa belgi
+  yozilmaydi (`FilteringTextInputFormatter`), ya'ni emoji va
+  bo'shliq umuman kirmaydi;
+- takrorlanmaydi. Qiyoslash registrga bog'liq emas
+  (`LOWER(username)`), bo'sh nomlar indeksga kirmaydi:
+  `CREATE UNIQUE INDEX ... WHERE username <> ''`.
+
+Real vaqtda tekshirish: `GET /api/auth/username-check?u=...`.
+Ilova har bir belgida emas, yozish to'xtaganidan **350 ms** keyin
+so'raydi va kechikib kelgan javobni (nom o'zgargan bo'lsa)
+e'tiborsiz qoldiradi — aks holda 15 harf 15 ta so'rov bo'lardi va
+javoblar tartibsiz kelib natijani chalkashtirardi.
+
+Eski hisoblar `profile_done=1` deb belgilanadi:
+`UPDATE users_db SET profile_done=1 WHERE username <> '' AND
+profile_done=0`. `username <> ''` sharti tufayli bu buyruq yangi
+hisobga TEGMAYDI, ya'ni uni har safar ishga tushirish xavfsiz.
+
+## HISOBNI O'CHIRISH
+
+`POST /api/auth/delete-account` — profil rasmi B2'dan, sessiyalar
+va hisobning o'zi Turso'dan o'chiriladi. Ilovada **ikki marta**
+so'raladi: ikkinchi oyna oqibatlarni ro'yxat qilib ko'rsatadi.
 
 ## QAYSI TELEGRAM BILAN KIRISH
 

@@ -13,7 +13,7 @@ const String kApiBase = 'https://aniraxuzapp.ogabekraximov650.workers.dev';
 
 /// Sessiyalar jurnalida ko'rinadigan ilova versiyasi.
 /// `pubspec.yaml` dagi `version:` bilan bir xil turishi kerak.
-const String kAppVersion = '0.0.8';
+const String kAppVersion = '0.0.9';
 
 /// Ilovaga kirgan foydalanuvchi.
 class AppUser {
@@ -28,6 +28,10 @@ class AppUser {
   /// Hisobdagi mablag' (Turso'dagi `users_db.balance`).
   final int balance;
 
+  /// Ism va username kiritilganmi. `false` bo'lsa ilova
+  /// so'rash oynasini ochadi va uni yopib bo'lmaydi.
+  final bool profileDone;
+
   const AppUser({
     required this.id,
     required this.telegramId,
@@ -36,13 +40,14 @@ class AppUser {
     required this.lastName,
     required this.photoUrl,
     this.balance = 0,
+    this.profileDone = true,
   });
 
   String get fullName {
     final n = '$firstName $lastName'.trim();
     if (n.isNotEmpty) return n;
     if (username.isNotEmpty) return '@$username';
-    return 'Foydalanuvchi #$id';
+    return 'Foydalanuvchi $id';
   }
 
   /// Avatar yuklanmasa ko'rsatiladigan bosh harflar.
@@ -63,6 +68,10 @@ class AppUser {
         lastName: (j['last_name'] ?? '').toString(),
         photoUrl: (j['photo_url'] ?? '').toString(),
         balance: (j['balance'] as num?)?.toInt() ?? 0,
+        // Eski serverdan javob kelsa maydon bo'lmaydi — bunday
+        // holatda so'ramaymiz (`true`), aks holda hamma
+        // foydalanuvchi to'satdan so'roq oynasiga tushib qolardi.
+        profileDone: j['profile_done'] as bool? ?? true,
       );
 
   Map<String, dynamic> toJson() => {
@@ -73,6 +82,7 @@ class AppUser {
         'last_name': lastName,
         'photo_url': photoUrl,
         'balance': balance,
+        'profile_done': profileDone,
       };
 }
 
@@ -367,6 +377,106 @@ class AuthService extends ChangeNotifier {
           .toList();
     } catch (_) {
       return null;
+    }
+  }
+
+  // ── ISM VA USERNAME (yangi hisob uchun) ──────────────────────
+
+  /// USERNAME QOIDALARI — worker'dagi `username_problem` bilan
+  /// AYNAN bir xil. Ikki joyda tekshirilishi ataylab: bu yerdagisi
+  /// tezkor javob uchun (har bir harfda), serverdagisi esa
+  /// ishonch uchun (ilovani chetlab o'tib bo'lmasin).
+  ///
+  /// Qaytaradi: xato matni yoki `null`.
+  static String? usernameProblem(String u) {
+    if (u.length < 3) return 'Username kamida 3 ta belgidan iborat bo\'lsin';
+    if (u.length > 15) return 'Username eng ko\'pi 15 ta belgi bo\'lishi mumkin';
+    if (!RegExp(r'^[A-Za-z0-9_]+$').hasMatch(u)) {
+      return 'Faqat harf, raqam va pastki chiziq (_) ishlatiladi';
+    }
+    return null;
+  }
+
+  /// Username band emasmi — server bazasidan so'raydi.
+  ///
+  /// `null` — javob olinmadi (internet yo'q yoki server jim).
+  /// Bunday holatda ilova "band" ham, "bo'sh" ham demasligi kerak.
+  Future<bool?> usernameAvailable(String u) async {
+    final s = _session;
+    if (s == null || s.isEmpty) return null;
+    try {
+      final r = await http.get(
+        Uri.parse('$kApiBase/api/auth/username-check?u=${Uri.encodeQueryComponent(u)}'),
+        headers: {'Authorization': 'Bearer $s'},
+      ).timeout(const Duration(seconds: 10));
+      if (r.statusCode != 200) return null;
+      final d = jsonDecode(r.body) as Map<String, dynamic>;
+      if (d['valid'] != true) return false;
+      return d['available'] == true;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Ism va username'ni saqlaydi.
+  /// Qaytaradi: xato matni yoki muvaffaqiyatda `null`.
+  Future<String?> saveProfile(String firstName, String username) async {
+    final s = _session;
+    if (s == null || s.isEmpty) return 'Avval hisobga kiring';
+    try {
+      final r = await http
+          .post(
+            Uri.parse('$kApiBase/api/auth/profile'),
+            headers: {
+              'Authorization': 'Bearer $s',
+              'Content-Type': 'application/json',
+            },
+            body: jsonEncode({
+              'first_name': firstName.trim(),
+              'username': username.trim(),
+            }),
+          )
+          .timeout(const Duration(seconds: 20));
+
+      if (r.statusCode == 200) {
+        await _save(
+            s,
+            AppUser.fromJson((jsonDecode(r.body) as Map<String, dynamic>)['user']
+                as Map<String, dynamic>));
+        return null;
+      }
+      try {
+        return ((jsonDecode(r.body) as Map<String, dynamic>)['error'] ?? '')
+                .toString()
+                .isEmpty
+            ? 'Saqlab bo\'lmadi'
+            : (jsonDecode(r.body) as Map<String, dynamic>)['error'].toString();
+      } catch (_) {
+        return 'Saqlab bo\'lmadi';
+      }
+    } catch (_) {
+      return 'Tarmoq xatosi — qaytadan urinib ko\'ring';
+    }
+  }
+
+  /// HISOBNI BUTUNLAY O'CHIRISH. Serverda foydalanuvchi, uning
+  /// barcha sessiyalari va profil rasmi o'chiriladi; qurilmadan
+  /// esa sessiya tozalanadi.
+  ///
+  /// Qaytaradi: xato matni yoki muvaffaqiyatda `null`.
+  Future<String?> deleteAccount() async {
+    final s = _session;
+    if (s == null || s.isEmpty) return 'Avval hisobga kiring';
+    try {
+      final r = await http.post(
+        Uri.parse('$kApiBase/api/auth/delete-account'),
+        headers: {'Authorization': 'Bearer $s'},
+      ).timeout(const Duration(seconds: 25));
+      if (r.statusCode != 200) return 'O\'chirib bo\'lmadi';
+      await _clear();
+      return null;
+    } catch (_) {
+      return 'Tarmoq xatosi — qaytadan urinib ko\'ring';
     }
   }
 
