@@ -74,43 +74,69 @@ Yechim: `MediaQuery.viewPaddingOf(context).bottom`. `viewPadding`
 tizim paneli yashiringan bo'lsa ham **jismoniy** chekinishni
 ko'rsatib turadi, ya'ni nolga tushmaydi.
 
-## PASTKI TUGMA SUZISHI — SAHIFA SUZISH TUGAGACH ALMASHADI
+## PASTKI TUGMA SUZISHI — SAHIFA DARHOL, TUGMA SEKIN
 
-Foydalanuvchi: "planshetda to'g'ri, ekrani kichik telefonda ko'z
-ilg'amaydi / uchib o'tib ketyapti".
+Foydalanuvchi talabi (aynan shunday): "bosishim bilan o'sha
+sahifaga o'tishi kerak, lekin tugmani kattalashtiradigan narsa
+birozgina sekinroq va silliq, ketma-ket tugmalarni
+kattalashtirib o'tishi kerak".
 
-`jumpToPage` yangi sahifani BIRINCHI marta quradi va kuchsiz
-telefonda bu 300–500 ms qotishga olib keladi.
-`AnimationController` vaqtni haqiqiy soat bo'yicha o'lchaydi —
-qotish tugagach u darhol o'sha 300–500 ms ga **sakraydi**. Ya'ni
-qisqa suzish butunlay yeb ketilardi.
+Ya'ni ikkovi BIR-BIRIDAN MUSTAQIL:
 
-Avval animatsiya `addPostFrameCallback` bilan kechiktirilgan edi,
-lekin bu **yetarli emas**: og'ir qurish keyingi kadrlarda davom
-etib, suzishning ustidan chiqardi.
+| Nima | Qanday |
+|---|---|
+| Sahifa | bosilgan **zahoti** (`IndexedStack` indeksi) |
+| Pushti tugma | o'z yo'lini **sekin** bosib o'tadi (~280 ms/oraliq) |
 
-**Hozirgi tartib** (`_onTabTap`, `lib/screens/root_screen.dart`):
+### Ikkita sabab bor edi
 
-1. tugma bosilganda faqat suzish boshlanadi — sahifa TEGILMAYDI;
-2. suzish tugagach `setState` + `jumpToPage` bo'ladi;
-3. `_jumping` qulfi sahifa o'rnashgan kadrdan keyin ochiladi
-   (`jumpToPage` `_onPageScroll` ni uyg'otadi va u `_navPos` ni
-   bosib yubormasin).
+**1. Sahifa aynan suzish paytida qurilardi.** `PageView` +
+`jumpToPage` sahifani BIRINCHI marta o'tilgan damda quradi
+(`initState`, ro'yxatlar, rasm vidjetlari) va kuchsiz telefonda
+bu bir necha kadr qotish beradi.
 
-Sahifalar `_KeepAlivePage` bilan saqlangani uchun bu qurish har
-ekran uchun faqat BIR MARTA bo'ladi.
+Endi **`IndexedStack`**: barcha sahifalar ilova ochilganda bir
+marta quriladi, keyin faqat qaysi biri ko'rinishi almashadi —
+tugma bosilganda quriladigan ish umuman qolmaydi. Bosh
+sahifadan boshqa to'rttasi yengil (hech biri `initState` da
+tarmoqqa chiqmaydi), shu sabab ilova ochilishiga sezilarli
+ta'sir qilmaydi. `sizing: StackFit.expand` SHART — aks holda
+sahifalar butun ekranni egallamaydi.
 
-**Davomiylik**: bitta tugma oralig'iga 240 ms, ustiga ekran
-kengligi bo'yicha ko'paytma (`_speedFactor`): ~360 dp da 1.20,
-600 dp da 1.00, 900 dp va undan katta ekranda 0.90. Kichik
-ekranda tugma bosib o'tadigan masofa kichik — bir xil vaqt u
-yerda "shosha-pisha" ko'rinadi, shu sabab unga biroz ko'proq vaqt
-beriladi. Umumiy davomiylik 300–1100 ms oralig'ida qisiladi.
+**2. Animatsiya vaqtni haqiqiy soat bo'yicha o'lchardi.**
+`AnimationController` shunday ishlaydi: bitta kadr 300 ms
+chizilsa, keyingi kadrda u darhol o'sha 300 ms ga **sakraydi** —
+qisqa suzish esa butunlay yeb ketiladi. Aynan shu sabab kuchsiz
+telefonda suzish umuman ko'rinmasdi.
 
-`_target` maydoni — foydalanuvchi OXIRGI bosgan tugma. `_index`
-sahifa almashgandan keyin yangilangani uchun uni tekshiruvga
-ishlatib bo'lmaydi: suzish o'rtasida boshlang'ich tugma qayta
-bosilsa, `_index` bo'yicha tekshiruv uni noto'g'ri rad etardi.
+Endi `AnimationController` YO'Q. Uning o'rniga oddiy `Ticker`
+(`_onNavTick`) va vaqt QO'LDA qo'shiladi:
+
+```dart
+var dt = (elapsed - last).inMicroseconds / 1000.0;
+if (dt > _maxFrameMs) dt = _maxFrameMs;   // 32 ms
+_navT += dt / _navMs;
+```
+
+Qotish bo'lsa suzish shunchaki cho'ziladi, lekin **hech qachon
+sakramaydi**: tugma har doim oradagi hamma belgini birin-ketin
+kattalashtirib o'tadi. **Bu tartibni buzmang** — `Ticker` ni
+qaytadan `AnimationController` ga almashtirsangiz muammo o'sha
+zahoti qaytadi.
+
+### Tezlik
+
+Bitta tugma oralig'iga **280 ms**, ustiga ekran kengligi
+bo'yicha ko'paytma (`_speedFactor`): ~360 dp da 1.20, 600 dp da
+1.00, 900 dp va undan katta ekranda 0.90 — kichik ekranda tugma
+bosib o'tadigan masofa qisqa, shu sabab bir xil vaqt u yerda
+"shosha-pisha" ko'rinadi. Umumiy davomiylik 320–1400 ms
+oralig'ida qisiladi. Bosh sahifadan profilga (4 oraliq) ~1,1
+soniya.
+
+Egri chiziq — `Curves.easeInOutSine`. `easeInOutCubic` sinab
+ko'rilgan edi: u o'rtasida o'rtacha tezlikdan IKKI BAROBAR tez
+ketardi va aynan shu "uchib o'tdi" hissini bergan.
 
 ## Tekshiruv (har bir o'zgarishdan keyin)
 
