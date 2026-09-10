@@ -1,7 +1,7 @@
 name: fulutter
 description: "Anime kontent ko'rish ilovasi"
 publish_to: 'none'
-version: 0.0.6+6
+version: 0.0.7+7
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
@@ -38,6 +38,13 @@ dependencies:
   # Sessiyalar jurnalidagi "qaysi qurilma bilan kirgan" ustunini
   # to'ldirish uchun (brend + model + Android versiyasi).
   device_info_plus: ^11.1.0
+  # ── QAYSI TELEGRAM BILAN KIRISH ──────────────────────────────
+  # Telefonda bir nechta Telegram bo'lishi mumkin (Telegram,
+  # Telegram X, Plus Messenger...). `url_launcher` havolani
+  # tizimning STANDART ilovasiga beradi — foydalanuvchi tanlay
+  # olmaydi. Bu paket esa havolani ANIQ paketga yubora oladi,
+  # shu sabab ilova o'zi ro'yxat ko'rsatib, tanlashni so'raydi.
+  android_intent_plus: ^6.1.0
 
 dev_dependencies:
   flutter_test:

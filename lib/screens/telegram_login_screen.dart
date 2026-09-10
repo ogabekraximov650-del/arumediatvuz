@@ -1,9 +1,9 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 import '../services/auth_service.dart';
+import '../services/telegram_apps.dart';
 import '../theme/app_background.dart';
 import '../widgets/glass.dart';
 import '../widgets/telegram_logo.dart';
@@ -37,6 +37,10 @@ class _TelegramLoginScreenState extends State<TelegramLoginScreen>
   Timer? _tick;
   int _left = 0;
   bool _checking = false;
+
+  /// Foydalanuvchi shu seansda tanlagan Telegram ilovasi.
+  /// Ilova qayta ochilganda yana so'ralmasligi uchun saqlanadi.
+  TelegramApp? _chosen;
 
   @override
   void initState() {
@@ -101,23 +105,103 @@ class _TelegramLoginScreenState extends State<TelegramLoginScreen>
     await _openTelegram();
   }
 
+  /// TELEGRAMNI OCHISH — QAYSI ILOVA BILAN, FOYDALANUVCHI HAL QILADI.
+  ///
+  /// Ilgari havola shunchaki tizimga berilardi va u STANDART
+  /// ilovaga ketardi. Natijada telefonida Telegram ham, Telegram X
+  /// ham bo'lgan odam o'zi ishlatadigan ilovaga emas, tizim tanlab
+  /// qo'ygan ilovaga tushib qolardi.
+  ///
+  /// Endi:
+  ///   * bitta Telegram bo'lsa — to'g'ridan-to'g'ri o'sha ochiladi;
+  ///   * bir nechta bo'lsa — ro'yxat chiqadi va foydalanuvchi
+  ///     tanlaydi (tanlovi shu seans uchun eslab qolinadi, ya'ni
+  ///     "qayta ochish"da yana so'ralmaydi);
+  ///   * hech biri topilmasa — odatdagi yo'l bilan ochiladi.
   Future<void> _openTelegram() async {
     final link = _req?.deepLink;
     if (link == null) return;
-    try {
-      // `canLaunchUrl` ATAYLAB ishlatilmaydi: Android 11+ da u
-      // manifestda `<queries>` e'lonini talab qiladi va u bo'lmasa
-      // ochilishi mumkin bo'lgan havola uchun ham `false` qaytaradi.
-      // To'g'ridan-to'g'ri ochish esa bunday cheklovga tushmaydi.
-      await launchUrl(Uri.parse(link), mode: LaunchMode.externalApplication);
-    } catch (_) {
+
+    // Bu seansda allaqachon tanlangan bo'lsa — qaytadan so'ramaymiz.
+    final chosen = _chosen;
+    if (chosen != null) {
+      if (await TelegramLauncher.openWith(chosen, link)) return;
+      // Tanlangan ilova ochilmadi — tanlovni bekor qilib, qaytadan
+      // so'raymiz.
+      _chosen = null;
+    }
+
+    final apps = await TelegramLauncher.installed(link);
+    if (!mounted) return;
+
+    if (apps.isEmpty) {
+      if (await TelegramLauncher.openDefault(link)) return;
       if (!mounted) return;
       setState(() {
         _stage = _Stage.error;
         _message = 'Telegram ochilmadi. Telegram ilovasi o\'rnatilganini '
             'tekshiring.';
       });
+      return;
     }
+
+    if (apps.length == 1) {
+      _chosen = apps.first;
+      if (await TelegramLauncher.openWith(apps.first, link)) return;
+      await TelegramLauncher.openDefault(link);
+      return;
+    }
+
+    final picked = await _pickApp(apps);
+    if (picked == null || !mounted) return;
+    _chosen = picked;
+    if (!await TelegramLauncher.openWith(picked, link)) {
+      await TelegramLauncher.openDefault(link);
+    }
+  }
+
+  /// Qaysi Telegram bilan ochish kerakligini so'raydigan ro'yxat.
+  Future<TelegramApp?> _pickApp(List<TelegramApp> apps) {
+    return showModalBottomSheet<TelegramApp>(
+      context: context,
+      backgroundColor: AppColors.card,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 14),
+            Container(
+              width: 38,
+              height: 4,
+              decoration: BoxDecoration(
+                color: Colors.white24,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              'Qaysi ilova bilan ochilsin?',
+              style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 10),
+            for (final a in apps)
+              ListTile(
+                leading: const TelegramGlyph(size: 22),
+                title: Text(a.name,
+                    style: const TextStyle(color: Colors.white, fontSize: 15)),
+                onTap: () => Navigator.of(ctx).pop(a),
+              ),
+            const SizedBox(height: 10),
+          ],
+        ),
+      ),
+    );
   }
 
   Future<void> _check() async {
@@ -227,6 +311,19 @@ class _TelegramLoginScreenState extends State<TelegramLoginScreen>
           const SizedBox(height: 28),
           _button('Telegramni qayta ochish', Icons.open_in_new_rounded,
               _openTelegram),
+          const SizedBox(height: 8),
+          // Tanlangan ilova noto'g'ri bo'lsa — tanlovni qaytadan
+          // so'rash uchun.
+          TextButton(
+            onPressed: () {
+              _chosen = null;
+              _openTelegram();
+            },
+            child: Text('Boshqa ilova bilan ochish',
+                style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.55),
+                    fontSize: 13)),
+          ),
         ];
 
       case _Stage.success:

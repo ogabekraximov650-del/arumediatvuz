@@ -1,5 +1,6 @@
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../services/auth_service.dart';
@@ -231,7 +232,9 @@ class _ProfileBody extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
                 _Avatar(user: user),
-                const SizedBox(width: 16),
+                // Rasm bilan yozuvlar orasi kengaytirildi — yozuvlar
+                // biroz o'ngroqda turadi.
+                const SizedBox(width: 24),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -256,12 +259,9 @@ class _ProfileBody extends StatelessWidget {
                       ],
                       const SizedBox(height: 6),
                       // ID panjarasiz (`#` belgisisiz) va ramkasiz —
-                      // oddiy qator sifatida.
-                      Text('ID: ${user.id}',
-                          style: TextStyle(
-                              color: Colors.white.withValues(alpha: 0.62),
-                              fontSize: 13,
-                              fontWeight: FontWeight.w600)),
+                      // oddiy qator sifatida, yonida nusxalash
+                      // tugmasi bilan.
+                      _IdRow(id: user.id),
                       const SizedBox(height: 3),
                       Text('Balans: ${user.balance}',
                           style: TextStyle(
@@ -374,6 +374,57 @@ class _ProfileBody extends StatelessWidget {
 
   Widget _divider() =>
       Divider(height: 1, color: Colors.white.withValues(alpha: 0.12));
+}
+
+/// ID qatori — yonida nusxalash tugmasi bilan.
+///
+/// Foydalanuvchi ID'sini qo'lda ko'chirib yozishga majbur
+/// bo'lmasin: bosilsa buferga tushadi va "Nusxalandi" deb chiqadi.
+class _IdRow extends StatelessWidget {
+  final int id;
+  const _IdRow({required this.id});
+
+  Future<void> _copy(BuildContext context) async {
+    await Clipboard.setData(ClipboardData(text: '$id'));
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: AppColors.card,
+        duration: const Duration(milliseconds: 1400),
+        content: const Text('Nusxalandi',
+            style: TextStyle(color: Colors.white)),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final style = TextStyle(
+        color: Colors.white.withValues(alpha: 0.62),
+        fontSize: 13,
+        fontWeight: FontWeight.w600);
+
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text('ID: $id', style: style),
+        const SizedBox(width: 6),
+        // `InkWell` emas, `GestureDetector` + kattaroq bosish
+        // maydoni: tugma kichkina ko'rinadi, lekin barmoq bilan
+        // bemalol bosiladi.
+        GestureDetector(
+          onTap: () => _copy(context),
+          behavior: HitTestBehavior.opaque,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+            child: Icon(Icons.copy_rounded,
+                size: 14, color: Colors.white.withValues(alpha: 0.55)),
+          ),
+        ),
+      ],
+    );
+  }
 }
 
 /// PROFIL RASMI.

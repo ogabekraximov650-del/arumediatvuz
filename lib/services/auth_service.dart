@@ -11,7 +11,7 @@ const String kApiBase = 'https://aniraxuzapp.ogabekraximov650.workers.dev';
 
 /// Sessiyalar jurnalida ko'rinadigan ilova versiyasi.
 /// `pubspec.yaml` dagi `version:` bilan bir xil turishi kerak.
-const String kAppVersion = '0.0.6';
+const String kAppVersion = '0.0.7';
 
 /// Ilovaga kirgan foydalanuvchi.
 class AppUser {

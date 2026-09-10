@@ -40,11 +40,12 @@ class _RootScreenState extends State<RootScreen>
     // chiqarilgan bo'lishi mumkin).
     WidgetsBinding.instance.addObserver(this);
     _pageController = PageController()..addListener(_onPageScroll);
+    // Davomiylik HAR SAFAR yo'lning uzunligiga qarab
+    // belgilanadi (`_onTabTap`) — shu sabab bu yerda faqat
+    // boshlang'ich qiymat turadi.
     _navAnim = AnimationController(
       vsync: this,
-      // 280 -> 340 ms: suzish ko'zga aniq tashlanadi, lekin
-      // kutish hosil qiladigan darajada uzun emas.
-      duration: const Duration(milliseconds: 340),
+      duration: const Duration(milliseconds: 300),
     )..addListener(() {
         final t = _navTween;
         if (t != null) _navPos.value = t.value;
@@ -93,17 +94,39 @@ class _RootScreenState extends State<RootScreen>
   // Endi HAR DOIM `jumpToPage`: faqat kerakli ekran quriladi,
   // oradagilar umuman tegilmaydi. Pastdagi suzuvchi tugma esa
   // o'zining 280 ms lik silliq animatsiyasi bilan siljiydi.
+  // ── SUZISH TEZLIGI YO'L UZUNLIGIGA BOG'LANGAN ────────────────
+  //
+  // TOPILGAN NUQSON: davomiylik SOBIT (340 ms) edi. Qo'shni
+  // sahifaga o'tishda bu normal ko'rinardi, lekin bosh sahifadan
+  // profilga (4 ta tugma narida) o'tishda tugma o'sha 340 ms
+  // ichida butun panelni bosib o'tardi — oradagi har bir belgi
+  // atigi ~85 ms kattalashib ulgurardi, ya'ni ko'z ilg'amasdi va
+  // o'tish "birdaniga" bo'lib tuyulardi.
+  //
+  // Endi har bir tugma oralig'iga ~170 ms beriladi: qo'shni
+  // sahifaga o'tish avvalgidek tez, uzoq sahifaga o'tishda esa
+  // tugma o'rtacha tezlikda suzib boradi va oradagi belgilarni
+  // BIRIN-KETIN kattalashtirib o'tadi.
+  static const int _msPerStep = 170;
+
   void _onTabTap(int i) {
     if (i == _index) return;
     final from = _navPos.value;
+    final steps = (i - from).abs();
     setState(() => _index = i);
     _jumping = true;
     _pageController.jumpToPage(i);
     _navTween = Tween<double>(begin: from, end: i.toDouble()).animate(
-      CurvedAnimation(parent: _navAnim, curve: Curves.easeOutCubic),
+      // `easeInOutCubic` (avvalgi `easeOutCubic` o'rniga): harakat
+      // silliq boshlanib, silliq tugaydi — o'rtasida esa deyarli
+      // bir tekis ketadi. Aynan shu "o'rtacha tezlik" hissini
+      // beradi.
+      CurvedAnimation(parent: _navAnim, curve: Curves.easeInOutCubic),
     );
     _navAnim
       ..stop()
+      ..duration = Duration(
+          milliseconds: (steps * _msPerStep).round().clamp(220, 900))
       ..value = 0
       ..forward().whenComplete(() {
         _jumping = false;

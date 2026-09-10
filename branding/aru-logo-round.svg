@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs><mask id="cutTg">
+    <rect width="512" height="512" fill="#fff"/>
+    <g fill="#000"><g transform="translate(34 126.287) scale(0.851)">
+    <path d="M 0,300 L 99,0 L 125,0 L 224,300
+    L 173.454,300 L 151.674,234 L 72.326,234
+    L 50.546,300 Z
+    M 85.526,194 L 112,113.776 L 138.474,194 Z"/><path d="M 198,0 L 264,0
+    A 86,86 0 0 1 264,172 L 198,172 L 198,300
+    L 246,300 L 246,0 Z
+    M 246,40 L 264,40
+    A 38,46 0 0 1 264,132 L 246,132 Z"/><path d="M 276,132 L 324,132
+    L 394,300 L 346,300 Z"/><path d="M 350,0 L 350,219
+    A 86,86 0 0 0 522,219 L 522,0
+    L 474,0 L 474,219
+    A 38,46 0 0 1 398,219 L 398,0 Z"/></g></g>
+  </mask></defs>
+  <clipPath id="circle"><circle cx="256" cy="256" r="256"/></clipPath>
+  <g clip-path="url(#circle)">
+    <rect width="512" height="512" fill="#000000" mask="url(#cutTg)"/>
+  </g>
+</svg>

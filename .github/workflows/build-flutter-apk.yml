@@ -151,6 +151,11 @@ jobs:
           p = 'android/app/src/main/AndroidManifest.xml'
           s = open(p, encoding='utf-8').read()
 
+          # `<package>` e'lonlari: Android 11+ da ilova boshqa
+          # ilovaning BORLIGINI faqat shu ro'yxatdagilar uchun
+          # bilib oladi. Ular bo'lmasa ilova "qaysi Telegram
+          # o'rnatilgan?" degan savolga javob ololmaydi va
+          # foydalanuvchiga tanlash ro'yxatini ko'rsata olmaydi.
           intents = """
                   <intent>
                       <action android:name="android.intent.action.VIEW" />
@@ -159,9 +164,17 @@ jobs:
                   <intent>
                       <action android:name="android.intent.action.VIEW" />
                       <data android:scheme="tg" />
-                  </intent>"""
+                  </intent>
+                  <package android:name="org.telegram.messenger" />
+                  <package android:name="org.telegram.messenger.web" />
+                  <package android:name="org.telegram.messenger.beta" />
+                  <package android:name="org.thunderdog.challegram" />
+                  <package android:name="org.telegram.plus" />
+                  <package android:name="nekox.messenger" />
+                  <package android:name="ir.ilmili.telegraph" />
+                  <package android:name="org.forkgram.messenger" />"""
 
-          if 'android:scheme="tg"' in s:
+          if 'org.thunderdog.challegram' in s:
               print("✅ <queries> allaqachon bor")
           elif '<queries>' in s:
               s = s.replace('<queries>', '<queries>' + intents, 1)
@@ -211,19 +224,38 @@ jobs:
             || { echo "❌ Manifest @mipmap/ic_launcher ga murojaat qilmayapti"; exit 1; }
           echo "✅ Belgi va ochilish ekrani o'rnatildi"
 
-      # ── ILOVA NOMI ────────────────────────────────────────────
+      # ── ILOVA NOMI VA YUMALOQ BELGI ───────────────────────────
       #
-      # `flutter create` nomni loyiha papkasidan oladi va manifestga
-      # `android:label="fulutter"` deb yozadi — telefonda belgi
-      # ostida aynan shu yozuv turadi. Ilovaning nomi esa ARU.
-      - name: Ilova nomini ARU ga o'zgartirish
+      # NOMI: `flutter create` nomni loyiha papkasidan oladi va
+      # manifestga `android:label="fulutter"` deb yozadi — telefonda
+      # belgi ostida aynan shu yozuv turadi. Ilovaning nomi esa
+      # AniRaxUz.
+      #
+      # YUMALOQ BELGI (`android:roundIcon`): Android 7.1 dan beri
+      # qobiqlar (ayniqsa MIUI, Samsung One UI) belgini YUMALOQ
+      # qilib ko'rsatadi va agar ilova alohida yumaloq belgi bersa,
+      # AYNAN SHUNI oladi. Bizda u yo'q edi — qobiq kvadrat belgini
+      # o'zi qirqishga majbur bo'lardi.
+      #
+      # Ustiga bu yangi resurs qobiqning ESKI belgini eslab qolgan
+      # keshini ham chetlab o'tadi: `ic_launcher_round` ilgari
+      # umuman mavjud bo'lmagan, ya'ni uning eski nusxasi ham yo'q.
+      - name: Ilova nomi va yumaloq belgi
         run: |
           set -e
           MANIFEST="android/app/src/main/AndroidManifest.xml"
-          sed -i 's/android:label="[^"]*"/android:label="ARU"/' "$MANIFEST"
-          grep -q 'android:label="ARU"' "$MANIFEST" \
+
+          sed -i 's/android:label="[^"]*"/android:label="AniRaxUz"/' "$MANIFEST"
+          grep -q 'android:label="AniRaxUz"' "$MANIFEST" \
             || { echo "❌ Ilova nomi o'zgarmadi"; exit 1; }
-          echo "✅ Ilova nomi: ARU"
+
+          if ! grep -q 'android:roundIcon' "$MANIFEST"; then
+            sed -i 's|android:icon="@mipmap/ic_launcher"|android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher_round"|' "$MANIFEST"
+          fi
+          grep -q 'android:roundIcon="@mipmap/ic_launcher_round"' "$MANIFEST" \
+            || { echo "❌ roundIcon qo'shilmadi"; exit 1; }
+
+          echo "✅ Ilova nomi: AniRaxUz, yumaloq belgi ulandi"
 
       - name: Kotlin va compileSdk versiyalarini eng yangisiga moslash
         run: |
@@ -437,8 +469,8 @@ jobs:
           # 1) Ilova nomi
           LABEL=$("$AAPT" dump badging "$APK" | grep -m1 "^application-label:" || true)
           echo "$LABEL"
-          echo "$LABEL" | grep -q "'ARU'" \
-            || { echo "❌ XATO: ilova nomi ARU emas"; exit 1; }
+          echo "$LABEL" | grep -q "'AniRaxUz'" \
+            || { echo "❌ XATO: ilova nomi AniRaxUz emas"; exit 1; }
 
           # 2) Barcha PNG resurslar ochiladi
           TMP=$(mktemp -d)
@@ -556,6 +588,7 @@ jobs:
               'branding/android-res/mipmap-mdpi/ic_launcher.png',
               'branding/android-res/mipmap-mdpi/ic_launcher_foreground.png',
               'branding/android-res/mipmap-hdpi/ic_launcher.png',
+              'branding/android-res/mipmap-mdpi/ic_launcher_round.png',
           ]
           matched = []
           for src in sources:

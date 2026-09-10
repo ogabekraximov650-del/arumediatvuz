@@ -25,16 +25,32 @@
 - Commit qilishdan oldin: `rm -rf rust/target rust/Cargo.lock
   worker/target worker/Cargo.lock`.
 
-## BREND: ARU
+## BREND: ARU / AniRaxUz
 
-Ilova nomi — **ARU** (`fulutter` faqat repo/papka nomi).
+Ilova nomi — **AniRaxUz**, logotipi — **ARU**. (`fulutter` faqat
+repo/papka nomi va Android paket nomi: `uz.fulutter.fulutter`.)
 
 | Qayerda | Nima |
 |---|---|
-| Telefondagi belgi | `branding/android-res/mipmap-*` (CI ko'chiradi) |
-| Belgi ostidagi yozuv | CI manifestga `android:label="ARU"` yozadi |
+| Telefondagi belgi | `branding/android-res/mipmap-*/ic_launcher.png` |
+| Yumaloq belgi | `ic_launcher_round.png` — MIUI/One UI aynan shuni oladi |
+| Moslashuvchan belgi | `mipmap-anydpi-v26/ic_launcher.xml` (qora fon + oq harflar) |
+| Belgi ostidagi yozuv | CI manifestga `android:label="AniRaxUz"` yozadi |
 | Ochilish ekrani | qora fon + ARU logotipi (`drawable*/launch_background.xml`) |
 | Ilova ichida | `lib/widgets/aru_logo.dart` -> `assets/aru-mark.png` |
+
+### "Telefonda hali ham Flutter belgisi turibdi"
+
+Build 162 APK'si **ochib tekshirildi**: `android:icon` ->
+`mipmap/ic_launcher`, ichidagi 11 ta rasmning hammasi ARU
+(ko'k piksel 0%), `application-label:'ARU'`. Ya'ni APK to'g'ri
+edi — telefon ESKI belgini keshdan ko'rsatayotgan edi (yorliq
+yangilangan, rasm esa yo'q — bu aynan kesh belgisi).
+
+Shu sabab `ic_launcher_round` qo'shildi: bu resurs ilgari umuman
+mavjud bo'lmagan, ya'ni uning eski keshlangan nusxasi ham yo'q.
+Kesh baribir qolsa — ilovani **butunlay o'chirib**, qaytadan
+o'rnatish kifoya.
 
 **TOPILGAN XATO (tuzatildi).** `build-flutter-apk.yml` ning
 `paths:` filtrida `branding/**` yo'q edi — ya'ni logotipni
@@ -124,6 +140,26 @@ FFI: `rust_video_cache_window_seen(url, widx)`.
 - Internet qaytishi bilan video **o'sha nuqtadan avtomatik** davom
   etadi (`_onNetworkBack`), "takroriy xato" hisoblagichi esa nolga
   tushadi — internetning yo'qligi pleyerning nosozligi emas.
+
+## QAYSI TELEGRAM BILAN KIRISH
+
+Telefonda bir nechta Telegram bo'lishi mumkin (Telegram, Telegram X,
+Plus Messenger...). Ilgari havola `url_launcher` orqali tizimning
+STANDART ilovasiga ketardi — foydalanuvchi tanlay olmasdi.
+
+Endi `lib/services/telegram_apps.dart`:
+
+- `kKnownTelegramApps` — ma'lum paketlar ro'yxati;
+- `installed()` — qaysilari o'rnatilganini bilib oladi;
+- `openWith()` — havolani ANIQ paketga yuboradi.
+
+Bitta bo'lsa to'g'ridan-to'g'ri ochiladi, bir nechta bo'lsa ro'yxat
+chiqadi. Tanlov shu seans uchun eslab qolinadi.
+
+**MUHIM:** Android 11+ da ilova boshqa ilovaning borligini faqat
+manifestdagi `<queries>` ro'yxatidagilar uchun bila oladi. Paketlar
+CI'da (`build-flutter-apk.yml`) `<package>` sifatida qo'shiladi —
+ro'yxatga yangi ilova qo'shsangiz, **o'sha yerga ham qo'shing**.
 
 ## PROFIL RASMI (foydalanuvchi o'zi tanlaydi)
 
