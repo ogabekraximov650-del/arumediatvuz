@@ -8,6 +8,7 @@ import '../widgets/aru_logo.dart';
 import '../widgets/glass.dart';
 import '../widgets/telegram_logo.dart';
 import 'admin_screen.dart';
+import 'profile_edit_screen.dart';
 import 'sessions_screen.dart';
 import 'telegram_login_screen.dart';
 
@@ -326,47 +327,69 @@ class _ProfileBody extends StatelessWidget {
             borderRadius: 20,
             blur: 16,
             padding: const EdgeInsets.all(18),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.center,
+            // `Stack`: asosiy tarkib (rasm + yozuvlar) va uning
+            // O'NG YUQORI burchagidagi tahrirlash tugmasi.
+            child: Stack(
               children: [
-                _Avatar(user: user),
-                // Rasm bilan yozuvlar orasi kengaytirildi — yozuvlar
-                // biroz o'ngroqda turadi.
-                const SizedBox(width: 24),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        user.fullName,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 18,
-                            fontWeight: FontWeight.w700),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    _Avatar(user: user),
+                    // Rasm bilan yozuvlar orasi yana kengaytirildi —
+                    // yozuvlar biroz o'ngroqda turadi.
+                    const SizedBox(width: 30),
+                    Expanded(
+                      // O'ng tomonda tahrirlash tugmasi turibdi —
+                      // uzun ism uning tagiga kirib ketmasin.
+                      child: Padding(
+                        padding: const EdgeInsets.only(right: 34),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              user.fullName,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 21,
+                                  fontWeight: FontWeight.w700),
+                            ),
+                            if (user.username.isNotEmpty) ...[
+                              const SizedBox(height: 4),
+                              Text('@${user.username}',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                      color: Color(0xFF6BC7F0), fontSize: 15)),
+                            ],
+                            const SizedBox(height: 8),
+                            // ID cho'zinchoq aylana ichida — uning
+                            // ISTALGAN joyiga bosilsa nusxalanadi.
+                            _IdPill(id: user.id),
+                            const SizedBox(height: 6),
+                            Text('Balans: ${user.balance}',
+                                style: TextStyle(
+                                    color: Colors.white.withValues(alpha: 0.62),
+                                    fontSize: 14.5,
+                                    fontWeight: FontWeight.w600)),
+                          ],
+                        ),
                       ),
-                      if (user.username.isNotEmpty) ...[
-                        const SizedBox(height: 3),
-                        Text('@${user.username}',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                                color: Color(0xFF6BC7F0), fontSize: 13.5)),
-                      ],
-                      const SizedBox(height: 6),
-                      // ID panjarasiz (`#` belgisisiz) va ramkasiz —
-                      // oddiy qator sifatida, yonida nusxalash
-                      // tugmasi bilan.
-                      _IdRow(id: user.id),
-                      const SizedBox(height: 3),
-                      Text('Balans: ${user.balance}',
-                          style: TextStyle(
-                              color: Colors.white.withValues(alpha: 0.62),
-                              fontSize: 13,
-                              fontWeight: FontWeight.w600)),
-                    ],
+                    ),
+                  ],
+                ),
+                // ── TAHRIRLASH TUGMASI ────────────────────────
+                //
+                // Ism va username endi yangi hisobga AVTOMATIK
+                // beriladi (`User 7` / `user_7`), ya'ni ularni
+                // o'zgartirish yo'li ko'rinib turishi shart.
+                Positioned(
+                  top: 0,
+                  right: 0,
+                  child: _EditButton(
+                    onTap: () => _open(context, const ProfileEditScreen()),
                   ),
                 ),
               ],
@@ -498,13 +521,19 @@ class _DangerTile extends StatelessWidget {
   }
 }
 
-/// ID qatori — yonida nusxalash tugmasi bilan.
+/// ID — CHO'ZINCHOQ AYLANA ICHIDA.
 ///
-/// Foydalanuvchi ID'sini qo'lda ko'chirib yozishga majbur
-/// bo'lmasin: bosilsa buferga tushadi va "Nusxalandi" deb chiqadi.
-class _IdRow extends StatelessWidget {
+/// TALAB: ID raqami va nusxalash belgisi eniga cho'zilgan aylana
+/// (kapsula) bilan o'ralsin va o'sha aylananing ISTALGAN joyiga
+/// bosilsa ID nusxalansin.
+///
+/// NEGA MUHIM: ilgari faqat kichkina nusxalash belgisiga bosish
+/// kerak edi — u 14 nuqta kattalikda bo'lgani uchun barmoq bilan
+/// urib bo'lmasdi va odam ID'ni qo'lda ko'chirib yozardi. Endi
+/// bosish maydoni butun kapsula: ~150x32 nuqta.
+class _IdPill extends StatelessWidget {
   final int id;
-  const _IdRow({required this.id});
+  const _IdPill({required this.id});
 
   Future<void> _copy(BuildContext context) async {
     await Clipboard.setData(ClipboardData(text: '$id'));
@@ -514,37 +543,69 @@ class _IdRow extends StatelessWidget {
         behavior: SnackBarBehavior.floating,
         backgroundColor: AppColors.card,
         duration: const Duration(milliseconds: 1400),
-        content: const Text('Nusxalandi',
-            style: TextStyle(color: Colors.white)),
+        content: Text('ID nusxalandi: $id',
+            style: const TextStyle(color: Colors.white)),
       ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    final style = TextStyle(
-        color: Colors.white.withValues(alpha: 0.62),
-        fontSize: 13,
-        fontWeight: FontWeight.w600);
-
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Text('ID: $id', style: style),
-        const SizedBox(width: 6),
-        // `InkWell` emas, `GestureDetector` + kattaroq bosish
-        // maydoni: tugma kichkina ko'rinadi, lekin barmoq bilan
-        // bemalol bosiladi.
-        GestureDetector(
-          onTap: () => _copy(context),
-          behavior: HitTestBehavior.opaque,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-            child: Icon(Icons.copy_rounded,
-                size: 14, color: Colors.white.withValues(alpha: 0.55)),
-          ),
+    return GestureDetector(
+      onTap: () => _copy(context),
+      // `opaque` — kapsulaning ichidagi bo'sh joyga bosilsa ham
+      // bosish hisobga olinadi (aks holda faqat yozuv va belgi
+      // ustidagi bosish o'tardi).
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.08),
+          // Kapsula shakli: radius balandlikdan katta bo'lsa,
+          // chetlari to'liq yarim doira bo'lib qoladi.
+          borderRadius: BorderRadius.circular(100),
+          border: Border.all(color: Colors.white.withValues(alpha: 0.20)),
         ),
-      ],
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              'ID: $id',
+              style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.78),
+                  fontSize: 14.5,
+                  fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(width: 9),
+            Icon(Icons.copy_rounded,
+                size: 16, color: Colors.white.withValues(alpha: 0.6)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Profil kartasining o'ng yuqori burchagidagi tahrirlash tugmasi.
+class _EditButton extends StatelessWidget {
+  final VoidCallback onTap;
+  const _EditButton({required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        padding: const EdgeInsets.all(8),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.10),
+          shape: BoxShape.circle,
+          border: Border.all(color: Colors.white.withValues(alpha: 0.18)),
+        ),
+        child: Icon(Icons.edit_rounded,
+            size: 17, color: Colors.white.withValues(alpha: 0.85)),
+      ),
     );
   }
 }
@@ -685,6 +746,14 @@ class _AvatarState extends State<_Avatar> {
 class _ProfileTile extends StatelessWidget {
   final IconData icon;
   final String label;
+
+  /// `null` bo'lsa bo'lim hali tayyor emas — bosilganda shu haqda
+  /// aytiladi.
+  ///
+  /// NEGA: ilgari tayyor bo'lmagan tugmalar bosilganda MUTLAQO
+  /// hech narsa bo'lmasdi (`onTap ?? () {}`). Foydalanuvchi uchun
+  /// bu "ilova buzuq" degani — u tugmani qayta-qayta bosib
+  /// ko'radi. Endi ilova ochiq javob beradi.
   final VoidCallback? onTap;
   const _ProfileTile({required this.icon, required this.label, this.onTap});
 
@@ -694,7 +763,18 @@ class _ProfileTile extends StatelessWidget {
       leading: Icon(icon, color: Colors.white70),
       title: Text(label, style: const TextStyle(color: Colors.white)),
       trailing: const Icon(Icons.chevron_right_rounded, color: Colors.white38),
-      onTap: onTap ?? () {},
+      onTap: onTap ??
+          () {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                behavior: SnackBarBehavior.floating,
+                backgroundColor: AppColors.card,
+                duration: const Duration(milliseconds: 1600),
+                content: Text('«$label» bo\'limi tez orada qo\'shiladi',
+                    style: const TextStyle(color: Colors.white)),
+              ),
+            );
+          },
     );
   }
 }

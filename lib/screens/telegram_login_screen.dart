@@ -90,7 +90,19 @@ class _TelegramLoginScreenState extends State<TelegramLoginScreen>
     });
 
     _poll?.cancel();
-    _poll = Timer.periodic(const Duration(seconds: 2), (_) => _check());
+    // ── SERVERDAN 0,8 SONIYADA BIR SO'RALADI ────────────────
+    //
+    // Ilgari 2 soniyada bir so'ralardi. Telegramda START bosilib,
+    // server hisobni ochib bo'lgan bo'lsa ham ilova o'rtacha
+    // BIR SONIYA shundoq kutib turardi — foydalanuvchi buni
+    // "bot sekin" deb sezardi.
+    //
+    // 0,8 soniya kutishni sezilarli qisqartiradi, serverga esa
+    // og'irlik solmaydi: bu so'rov bitta kichkina qatorni
+    // o'qiydi va faqat kirish oynasi ochiq turganda (eng ko'pi
+    // 5 daqiqa) yuboriladi.
+    _poll = Timer.periodic(
+        const Duration(milliseconds: 800), (_) => _check());
     _tick?.cancel();
     _tick = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;

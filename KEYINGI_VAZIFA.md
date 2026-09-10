@@ -74,10 +74,10 @@ Yechim: `MediaQuery.viewPaddingOf(context).bottom`. `viewPadding`
 tizim paneli yashiringan bo'lsa ham **jismoniy** chekinishni
 ko'rsatib turadi, ya'ni nolga tushmaydi.
 
-## PASTKI TUGMA SUZISHI — QURILMA TEZLIGIGA BOG'LIQ EDI
+## PASTKI TUGMA SUZISHI — SAHIFA SUZISH TUGAGACH ALMASHADI
 
 Foydalanuvchi: "planshetda to'g'ri, ekrani kichik telefonda ko'z
-ilg'amaydi". Sabab ekran o'lchamida emas edi.
+ilg'amaydi / uchib o'tib ketyapti".
 
 `jumpToPage` yangi sahifani BIRINCHI marta quradi va kuchsiz
 telefonda bu 300–500 ms qotishga olib keladi.
@@ -85,14 +85,38 @@ telefonda bu 300–500 ms qotishga olib keladi.
 qotish tugagach u darhol o'sha 300–500 ms ga **sakraydi**. Ya'ni
 qisqa suzish butunlay yeb ketilardi.
 
-Endi animatsiya `addPostFrameCallback` bilan, **sahifa qurilgan
-kadrdan keyin** boshlanadi. Yangi kod qo'shayotganda bu tartibni
-buzmang.
+Avval animatsiya `addPostFrameCallback` bilan kechiktirilgan edi,
+lekin bu **yetarli emas**: og'ir qurish keyingi kadrlarda davom
+etib, suzishning ustidan chiqardi.
+
+**Hozirgi tartib** (`_onTabTap`, `lib/screens/root_screen.dart`):
+
+1. tugma bosilganda faqat suzish boshlanadi — sahifa TEGILMAYDI;
+2. suzish tugagach `setState` + `jumpToPage` bo'ladi;
+3. `_jumping` qulfi sahifa o'rnashgan kadrdan keyin ochiladi
+   (`jumpToPage` `_onPageScroll` ni uyg'otadi va u `_navPos` ni
+   bosib yubormasin).
+
+Sahifalar `_KeepAlivePage` bilan saqlangani uchun bu qurish har
+ekran uchun faqat BIR MARTA bo'ladi.
+
+**Davomiylik**: bitta tugma oralig'iga 240 ms, ustiga ekran
+kengligi bo'yicha ko'paytma (`_speedFactor`): ~360 dp da 1.20,
+600 dp da 1.00, 900 dp va undan katta ekranda 0.90. Kichik
+ekranda tugma bosib o'tadigan masofa kichik — bir xil vaqt u
+yerda "shosha-pisha" ko'rinadi, shu sabab unga biroz ko'proq vaqt
+beriladi. Umumiy davomiylik 300–1100 ms oralig'ida qisiladi.
+
+`_target` maydoni — foydalanuvchi OXIRGI bosgan tugma. `_index`
+sahifa almashgandan keyin yangilangani uchun uni tekshiruvga
+ishlatib bo'lmaydi: suzish o'rtasida boshlang'ich tugma qayta
+bosilsa, `_index` bo'yicha tekshiruv uni noto'g'ri rad etardi.
 
 ## Tekshiruv (har bir o'zgarishdan keyin)
 
 ```
 flutter analyze          # 0 muammo bo'lishi kerak
+flutter test             # test/ — ism va username qoidalari
 cd rust && cargo test --lib     # 15/15 o'tishi kerak
 cd worker && cargo check --target wasm32-unknown-unknown
 ```
@@ -206,19 +230,37 @@ telefon ro'yxatda HAR DOIM bitta qator egallaydi. Busiz takroriy
 urinishlar 4 ta chegarani to'ldirib, foydalanuvchining BOSHQA
 haqiqiy qurilmalarini chiqarib yuborardi.
 
-## ISM VA USERNAME — TELEGRAMDAN OLINMAYDI
+## ISM VA USERNAME — AVTOMATIK BERILADI, HECH NARSA SO'RALMAYDI
 
-Foydalanuvchi talabi. Telegramdan faqat `telegram_id` (hisobni
-tanish uchun), til va premium belgisi olinadi.
+Telegramdan faqat `telegram_id` (hisobni tanish uchun), til va
+premium belgisi olinadi. **Ism va username Telegramdan
+OLINMAYDI.**
 
-- Yangi hisob **bo'sh** ism/username bilan ochiladi,
-  `profile_done = 0`;
-- ilova shu belgiga qarab `ProfileSetupScreen` ni ochadi va uni
-  **yopib bo'lmaydi** (`PopScope(canPop: false)`) — chiqishning
-  yagona yo'li to'ldirish yoki hisobdan chiqish;
+- Yangi hisobga nomni **server o'zi qo'yadi**: bazada band
+  bo'lmagan **eng kichik** raqamdan `User 7` (ism) va `user_7`
+  (username), `profile_done = 1`. Ya'ni foydalanuvchi START
+  bosgan zahoti ilovaga kiradi — hech qanday oyna chiqmaydi;
+- bo'sh raqamni `next_user_slot` bitta SQL so'rovida topadi
+  (`worker/src/lib.rs`). Hisob ID'sining o'zi ishlatilmaydi:
+  hisob o'chirilsa ID bo'shaydi va o'chirilgan odamning nomi
+  yangi odamga tushib qolardi;
+- nomsiz qolgan **eski** hisoblarga `init_db` bir marta
+  `UPDATE OR IGNORE ... username='user_'||id` bilan nom beradi;
+- foydalanuvchi ikkovini ham profil kartasining **o'ng yuqori
+  burchagidagi tahrirlash tugmasi** orqali o'zgartiradi
+  (`lib/screens/profile_edit_screen.dart`);
 - keyingi kirishlarda `upsert_user` ism/username ustiga
-  **yozmaydi** — aks holda tanlangan nom har safar Telegramdagiga
-  qaytib qolardi.
+  **yozmaydi** — aks holda tanlangan nom har safar qaytib
+  qolardi.
+
+### Ism qoidasi
+
+- eng ko'pi **20 ta belgi**; emoji va istalgan belgi mumkin;
+- 20 tani **ilova** sanaydi (`AuthService.nameProblem`, `characters`
+  paketi — bitta emoji bitta belgi). Serverdagi chegara faqat
+  suiiste'molga qarshi (160 ta Unicode kodi): Rustning `chars()`
+  emojini bir necha kod deb sanaydi, ya'ni u yerda 20 deb
+  qo'ysak, 4 ta emojili ism ham rad etilardi.
 
 ### Username qoidalari (IKKI JOYDA bir xil)
 
@@ -240,10 +282,9 @@ so'raydi va kechikib kelgan javobni (nom o'zgargan bo'lsa)
 e'tiborsiz qoldiradi — aks holda 15 harf 15 ta so'rov bo'lardi va
 javoblar tartibsiz kelib natijani chalkashtirardi.
 
-Eski hisoblar `profile_done=1` deb belgilanadi:
-`UPDATE users_db SET profile_done=1 WHERE username <> '' AND
-profile_done=0`. `username <> ''` sharti tufayli bu buyruq yangi
-hisobga TEGMAYDI, ya'ni uni har safar ishga tushirish xavfsiz.
+`profile_done` endi hamma hisobda 1 — maydon eski ilova
+versiyalari bilan moslik uchun qoldirilgan, unga qarab hech
+qanday oyna ochilmaydi.
 
 ## HISOBNI O'CHIRISH
 
@@ -499,12 +540,52 @@ Ilova                          Worker                      Telegram
   ├─────────────────────────────────────────────────────────>│
   │                             │<── POST /api/telegram/webhook
   │                             │  users_db: topadi yoki yaratadi
-  │                             │  sessions_db: yangi sessiya
-  │                             │  login_tokens: approved
-  │ GET /api/auth/telegram/status?token=...   (har 2 sek + resumed)
+  │                             │  sessions_db + login_tokens:
+  │                             │    BITTA to'plam so'rovida
+  │ GET /api/auth/telegram/status?token=...  (har 0,8 sek + resumed)
   ├────────────────────────────>│
   │<── session + user ──────────│
 ```
+
+### BOT TEZLIGI — BAZAGA NECHA MARTA BORILADI
+
+Botning "sekinligi" Telegramda emas, **bazaga ketma-ket
+borishlarda** edi. Cloudflare chekkasidan Turso'ga har borish
+~100 ms, START bosilgandan keyin esa ular ketma-ket ketardi:
+
+| Ilgari | Hozir |
+|---|---|
+| `SELECT` login_tokens | o'sha-o'sha (1) |
+| `SELECT` users_db + `UPDATE` users_db | bitta `UPDATE ... RETURNING *` (1) |
+| `SELECT MAX(id)` sessions_db | yo'q — ID `INSERT` ichida hisoblanadi |
+| `DELETE` eski qurilma | hammasi bitta `turso_batch` (1) |
+| `INSERT` sessiya | ⤷ o'sha to'plamda |
+| `DELETE` chegaradan ortig'i | ⤷ o'sha to'plamda |
+| `UPDATE` login_tokens approved | ⤷ o'sha to'plamda |
+| **~8 borish** | **3 borish** |
+
+Ikkita qoida:
+
+1. `turso_batch` endi **har bir buyruq natijasini tekshiradi** va
+   xatoda `Err` qaytaradi. Ilgari javob umuman o'qilmasdi —
+   sessiya yozilmagan bo'lsa ham kirish tokeni "tasdiqlangan"
+   bo'lib qolishi mumkin edi. Turso to'plamdagi **birinchi
+   xatodan keyin qolganini bajarmaydi**, ya'ni tartib muhim:
+   sessiya `INSERT` i tasdiqlashdan OLDIN turadi.
+2. Ilova natijani **0,8 soniyada** bir so'raydi (ilgari 2 sek).
+
+### BOTDAGI YOZUVLAR
+
+Foydalanuvchi botdan **texnik atama ko'rmasligi kerak**. Har bir
+xabar ikki narsani aytadi: NIMA bo'ldi va ENDI NIMA QILISH kerak.
+Matnlar bitta joyda — `MSG_HELP`, `MSG_BAD_LINK`, `MSG_EXPIRED`,
+`MSG_ALREADY`, `MSG_TRY_LATER` (`worker/src/lib.rs`). Ilgari
+xatolik matni to'g'ridan-to'g'ri chiqarilardi
+(`❌ Xatolik: Telegram xatosi (sendMessage): ...`) — bu
+foydalanuvchiga hech narsa tushuntirmaydi, faqat qo'rqitadi.
+
+Kirish muvaffaqiyatli bo'lganda xabar **ID va username** ni ham
+ko'rsatadi va ularni qayerdan o'zgartirishni aytadi.
 
 ### Jadvallar (`init_db` ichida, alohida `turso_batch`)
 

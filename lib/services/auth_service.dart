@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:characters/characters.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -14,6 +15,11 @@ const String kApiBase = 'https://aniraxuzapp.ogabekraximov650.workers.dev';
 /// Sessiyalar jurnalida ko'rinadigan ilova versiyasi.
 /// `pubspec.yaml` dagi `version:` bilan bir xil turishi kerak.
 const String kAppVersion = '0.0.9';
+
+/// Ism eng ko'pi shuncha belgidan iborat bo'lishi mumkin.
+/// `TextField` ning `maxLength` i ham, tekshiruv ham shu qiymatga
+/// tayanadi — ikki joyda ikki xil son turmasin.
+const int kNameMaxLength = 20;
 
 /// Ilovaga kirgan foydalanuvchi.
 class AppUser {
@@ -28,8 +34,12 @@ class AppUser {
   /// Hisobdagi mablag' (Turso'dagi `users_db.balance`).
   final int balance;
 
-  /// Ism va username kiritilganmi. `false` bo'lsa ilova
-  /// so'rash oynasini ochadi va uni yopib bo'lmaydi.
+  /// Ism va username to'ldirilganmi.
+  ///
+  /// Yangi hisobga nomni server O'ZI qo'yadi (`User 7` /
+  /// `user_7`), ya'ni bu belgi endi hamma hisobda `true`.
+  /// Maydon eski serverlar bilan moslik uchun qoldirilgan —
+  /// unga qarab hech qanday oyna ochilmaydi.
   final bool profileDone;
 
   const AppUser({
@@ -68,9 +78,7 @@ class AppUser {
         lastName: (j['last_name'] ?? '').toString(),
         photoUrl: (j['photo_url'] ?? '').toString(),
         balance: (j['balance'] as num?)?.toInt() ?? 0,
-        // Eski serverdan javob kelsa maydon bo'lmaydi — bunday
-        // holatda so'ramaymiz (`true`), aks holda hamma
-        // foydalanuvchi to'satdan so'roq oynasiga tushib qolardi.
+        // Eski serverdan javob kelsa maydon bo'lmaydi — `true`.
         profileDone: j['profile_done'] as bool? ?? true,
       );
 
@@ -381,6 +389,29 @@ class AuthService extends ChangeNotifier {
   }
 
   // ── ISM VA USERNAME (yangi hisob uchun) ──────────────────────
+
+  /// ISM QOIDALARI.
+  ///
+  /// TALAB: ismga emoji ham, istalgan belgi ham qo'yish mumkin;
+  /// uzunligi esa eng ko'pi 20 ta belgi.
+  ///
+  /// NEGA `characters` ISHLATILADI: `String.length` Dart'da
+  /// UTF-16 birliklarini sanaydi, ya'ni bitta emoji 2 ta (ba'zan
+  /// 7 ta) bo'lib hisoblanadi. Foydalanuvchi esa ko'zi bilan
+  /// BITTA belgini ko'radi. `characters` aynan ko'zga ko'ringan
+  /// belgilarni sanaydi — `TextField` ning `maxLength` i ham
+  /// xuddi shu tarzda sanaydi, ya'ni ikkovi bir xil ishlaydi va
+  /// "yozib bo'ldim, lekin xato chiqyapti" holati bo'lmaydi.
+  ///
+  /// Qaytaradi: xato matni yoki `null`.
+  static String? nameProblem(String s) {
+    final n = s.trim();
+    if (n.isEmpty) return 'Ism bo\'sh bo\'lmasin';
+    if (n.characters.length > kNameMaxLength) {
+      return 'Ism eng ko\'pi $kNameMaxLength ta belgi bo\'lishi mumkin';
+    }
+    return null;
+  }
 
   /// USERNAME QOIDALARI — worker'dagi `username_problem` bilan
   /// AYNAN bir xil. Ikki joyda tekshirilishi ataylab: bu yerdagisi

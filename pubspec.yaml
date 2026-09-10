@@ -10,6 +10,10 @@ dependencies:
   flutter:
     sdk: flutter
   cupertino_icons: ^1.0.6
+  # Ismdagi belgilarni KO'ZGA KO'RINGANI bo'yicha sanash uchun
+  # (bitta emoji = bitta belgi). `String.length` buni uddalay
+  # olmaydi: u UTF-16 birliklarini sanaydi.
+  characters: ^1.3.0
   http: ^1.2.0
   image_picker: ^1.1.2
   connectivity_plus: ^7.3.1

@@ -8,7 +8,6 @@ import 'search_screen.dart';
 import 'catalog_screen.dart';
 import 'library_screen.dart';
 import 'profile_screen.dart';
-import 'profile_setup_screen.dart';
 
 class RootScreen extends StatefulWidget {
   const RootScreen({super.key});
@@ -50,9 +49,6 @@ class _RootScreenState extends State<RootScreen>
     // (masalan 5-qurilma kirgan bo'lsa, bu qurilma chegaradan
     // chiqarilgan bo'lishi mumkin).
     WidgetsBinding.instance.addObserver(this);
-    // Yangi hisob to'ldirilmagan bo'lsa so'rash oynasini ochish
-    // uchun hisob holati kuzatiladi.
-    AuthService.instance.addListener(_onAuthChanged);
     _pageController = PageController()..addListener(_onPageScroll);
     // Davomiylik HAR SAFAR yo'lning uzunligiga qarab
     // belgilanadi (`_onTabTap`) — shu sabab bu yerda faqat
@@ -64,11 +60,6 @@ class _RootScreenState extends State<RootScreen>
         final t = _navTween;
         if (t != null) _navPos.value = t.value;
       });
-
-    // Hisob ilova ishga tushishida (runApp'dan OLDIN) tiklanadi,
-    // ya'ni yuqoridagi kuzatuvchi hali ulanmagan bo'ladi. Shu
-    // sabab bir marta qo'lda ham tekshiriladi.
-    _onAuthChanged();
   }
 
   @override
@@ -84,43 +75,21 @@ class _RootScreenState extends State<RootScreen>
     AuthService.instance.resumePendingLogin();
   }
 
-  // ── YANGI HISOB: ISM VA USERNAME SO'RALADI ───────────────────
+  // ── YANGI HISOBDA ENDI HECH NARSA SO'RALMAYDI ────────────────
   //
-  // Telegram orqali BIRINCHI marta kirgan foydalanuvchida
-  // `profileDone == false` bo'ladi. Oyna aynan shu yerdan
-  // ochiladi (profil ekranidan emas): foydalanuvchi kirishdan
-  // keyin qaysi sahifada turgan bo'lsa ham so'raladi.
+  // Ilgari birinchi kirishda majburiy oyna ochilar va u ism bilan
+  // username kiritilmaguncha yopilmasdi.
   //
-  // `_askingProfile` — oyna IKKI MARTA ochilib qolmasligi uchun:
-  // `AuthService` bir necha marta xabar berishi mumkin
-  // (saqlangan hisob, keyin serverdan yangilangani).
-  bool _askingProfile = false;
-
-  void _onAuthChanged() {
-    if (!mounted || _askingProfile) return;
-    final u = AuthService.instance.user;
-    if (u == null || u.profileDone) return;
-    _askingProfile = true;
-    // Xabar `build` o'rtasida kelishi mumkin — navigatsiya
-    // kadr tugagandan keyin qilinadi.
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
-      if (!mounted) {
-        _askingProfile = false;
-        return;
-      }
-      await Navigator.of(context).push(
-        MaterialPageRoute<bool>(
-          fullscreenDialog: true,
-          builder: (_) => const ProfileSetupScreen(),
-        ),
-      );
-      _askingProfile = false;
-    });
-  }
+  // TALAB O'ZGARDI: yangi hisobga nomni SERVER o'zi qo'yadi —
+  // bazada band bo'lmagan eng kichik raqamdan `User 7` (ism) va
+  // `user_7` (username). Ya'ni foydalanuvchi START bosgan zahoti
+  // ilovaga kiradi, hech narsa to'ldirmaydi.
+  //
+  // Nomni o'zgartirmoqchi bo'lsa — profil kartasidagi tahrirlash
+  // tugmasi (`ProfileEditScreen`).
 
   @override
   void dispose() {
-    AuthService.instance.removeListener(_onAuthChanged);
     WidgetsBinding.instance.removeObserver(this);
     _pageController.removeListener(_onPageScroll);
     _pageController.dispose();
@@ -136,46 +105,87 @@ class _RootScreenState extends State<RootScreen>
     if (p != null) _navPos.value = p;
   }
 
-  // ── SAHIFA "SUZMAYDI", DARHOL ALMASHADI ──────────────────────
+  // ═══════════════════════════════════════════════════════════
+  //  PASTKI TUGMANING SUZISHI
+  // ═══════════════════════════════════════════════════════════
   //
-  // TALAB: qaysi sahifaga o'tilsa ham to'g'ridan-to'g'ri o'tsin —
-  // suzish (slayd) effektisiz. Harakatlanadigan yagona narsa —
-  // pastdagi pushti tugma.
+  // TALAB: pastdagi pushti tugma bir sahifadan ikkinchisiga
+  // SILLIQ va o'rtacha tezlikda suzib o'tsin — oradagi belgilarni
+  // birin-ketin kattalashtirib. Sahifaning o'zi suzmaydi
+  // (slayd effekti yo'q), harakatlanadigan yagona narsa — tugma.
   //
-  // Shu bilan birga bu ENG TEZ yo'l ham. Avval qo'shni sahifaga
-  // `animateToPage` ishlatilardi: u sahifalarni BIRMA-BIR aylanib
-  // o'tadi va yo'l-yo'lakay oradagi ekranlarni ham QURIB chiqishga
-  // majbur bo'ladi — hammasi 320 ms ichida. Har bir ekran birinchi
-  // marta qurilayotgani uchun (initState, ro'yxatlar, rasm vidjetlari)
-  // bu ish bitta kadrga sig'may, ilova bir zumga qotib qolardi.
+  // ── NEGA TELEFONDA "UCHIB O'TIB" KETARDI ───────────────────
   //
-  // Endi HAR DOIM `jumpToPage`: faqat kerakli ekran quriladi,
-  // oradagilar umuman tegilmaydi. Pastdagi suzuvchi tugma esa
-  // o'zining 280 ms lik silliq animatsiyasi bilan siljiydi.
-  // ── SUZISH TEZLIGI YO'L UZUNLIGIGA BOG'LANGAN ────────────────
+  // Foydalanuvchi: "kichik ekranli telefonda uchib o'tib
+  // ketyapti, planshetda esa silliq suzyapti".
   //
-  // TOPILGAN NUQSON: davomiylik SOBIT (340 ms) edi. Qo'shni
-  // sahifaga o'tishda bu normal ko'rinardi, lekin bosh sahifadan
-  // profilga (4 ta tugma narida) o'tishda tugma o'sha 340 ms
-  // ichida butun panelni bosib o'tardi — oradagi har bir belgi
-  // atigi ~85 ms kattalashib ulgurardi, ya'ni ko'z ilg'amasdi va
-  // o'tish "birdaniga" bo'lib tuyulardi.
+  // SABAB: `jumpToPage` yangi sahifani BIRINCHI marta quradi —
+  // `initState`, ro'yxatlar, rasm vidjetlari. Kuchsiz telefonda
+  // bu ish bir necha kadrga cho'ziladi va oqim 300-500 ms qotib
+  // qoladi. `AnimationController` esa vaqtni HAQIQIY soat
+  // bo'yicha o'lchaydi: qotish tugagach u darhol o'sha 300-500 ms
+  // ga "sakraydi", ya'ni suzishning yarmi ko'rinmay yo'qoladi.
+  // Planshet sahifani tez qurgani uchun u yerda hammasi joyida
+  // ko'rinardi.
   //
-  // Endi har bir tugma oralig'iga ~240 ms beriladi: bosh sahifadan
-  // profilga o'tish ~1 soniya, ya'ni tugma o'rtacha tezlikda suzib
-  // boradi va oradagi belgilarni BIRIN-KETIN kattalashtirib o'tadi.
+  // Ilgari animatsiya `addPostFrameCallback` bilan kechiktirilgan
+  // edi, lekin bu yetarli emas: og'ir qurish KEYINGI kadrlarda
+  // davom etardi va suzishning ustidan chiqardi.
   //
-  // 170 ms sinab ko'rilgan edi — foydalanuvchi baribir "uchib
-  // o'tyapti" dedi, shu sabab sekinlashtirildi.
+  // YECHIM: sahifa endi suzish TUGAGANDAN KEYIN almashtiriladi.
+  // Suzish paytida eski sahifa turaveradi va og'ir ish umuman
+  // boshlanmaydi — ya'ni animatsiya har qanday telefonda to'liq
+  // ko'rinadi. Sahifalar `_KeepAlivePage` bilan saqlanadi, ya'ni
+  // bu qurish faqat BIR MARTA bo'ladi.
+  //
+  // ── EKRAN O'LCHAMIGA MOSLASHISH ────────────────────────────
+  //
+  // Bitta tugma oralig'iga ~240 ms beriladi, ya'ni bosh
+  // sahifadan profilga o'tish (4 oraliq) ~1 soniya — tugma
+  // shoshilmay suzib boradi.
+  //
+  // Ustiga ekran kengligiga qarab tuzatish qo'shiladi: kichik
+  // ekranda tugma bosib o'tadigan MASOFA kichik, shu sabab bir
+  // xil vaqt ko'zga "shosha-pisha" ko'rinadi. Kichik ekranga
+  // biroz ko'proq, katta ekranga biroz kamroq vaqt beriladi —
+  // natijada ikkalasida ham harakat bir xil tezlikda tuyuladi.
   static const int _msPerStep = 240;
 
+  /// Ekran kengligi bo'yicha davomiylik ko'paytmasi.
+  ///   ~360 dp (kichik telefon) -> 1.20 (sekinroq, silliqroq)
+  ///   ~600 dp (katta telefon)  -> 1.00
+  ///   ~900 dp (planshet)       -> 0.90
+  double _speedFactor(double width) {
+    if (width <= 0) return 1.0;
+    final f = 600 / width;
+    if (f < 0.90) return 0.90;
+    if (f > 1.20) return 1.20;
+    return f;
+  }
+
+  /// Foydalanuvchi OXIRGI bo'lib bosgan tugma.
+  ///
+  /// `_index` yaramaydi: u sahifa almashgandan KEYIN yangilanadi,
+  /// ya'ni suzish davomida hali eskiligicha turadi. Suzish
+  /// o'rtasida boshlang'ich tugma qayta bosilsa, `_index` bo'yicha
+  /// tekshiruv uni "o'sha joyda turibmiz" deb rad etardi va suzish
+  /// noto'g'ri manzilga davom etardi.
+  int _target = 0;
+
   void _onTabTap(int i) {
-    if (i == _index) return;
+    if (i == _target) return;
+    _target = i;
+
     final from = _navPos.value;
     final steps = (i - from).abs();
-    setState(() => _index = i);
+    if (steps <= 0) return;
+
+    final width = MediaQuery.sizeOf(context).width;
+    final ms = (steps * _msPerStep * _speedFactor(width))
+        .round()
+        .clamp(300, 1100);
+
     _jumping = true;
-    _pageController.jumpToPage(i);
     _navTween = Tween<double>(begin: from, end: i.toDouble()).animate(
       // `easeInOutSine`: harakat silliq boshlanib, silliq tugaydi,
       // lekin O'RTASIDA tezlashib ketmaydi.
@@ -187,37 +197,26 @@ class _RootScreenState extends State<RootScreen>
       // atigi ~1.6 barobar, ya'ni harakat bir tekis ko'rinadi.
       CurvedAnimation(parent: _navAnim, curve: Curves.easeInOutSine),
     );
+
     final run = ++_navRun;
     _navAnim
       ..stop()
-      ..duration = Duration(
-          milliseconds: (steps * _msPerStep).round().clamp(300, 1100))
+      ..duration = Duration(milliseconds: ms)
       ..value = 0;
 
-    // ── SUZISH YANGI SAHIFA QURILGANDAN KEYIN BOSHLANADI ──────
-    //
-    // TOPILGAN SABAB (foydalanuvchi: "planshetda to'g'ri, ekrani
-    // kichik telefonda ko'z ilg'amaydi"). Bu ekran o'lchamiga
-    // emas, QURILMA TEZLIGIGA bog'liq edi.
-    //
-    // `jumpToPage` yangi sahifani BIRINCHI MARTA quradi — ro'yxat,
-    // rasm vidjetlari, `initState`. Kuchsiz telefonda bu ish bitta
-    // kadrga sig'maydi va oqim 300-500 ms qotib qoladi.
-    // `AnimationController` esa vaqtni HAQIQIY soat bo'yicha
-    // o'lchaydi: qotish tugagach u darhol o'sha 300-500 ms ga
-    // "sakraydi". Ya'ni qisqa suzish butunlay, uzunrog'i yarmigacha
-    // yeb ketilardi — ekranda esa "uchib o'tdi" bo'lib ko'rinardi.
-    // Planshet tez qurgani uchun u yerda hammasi joyida edi.
-    //
-    // Endi animatsiya SAHIFA QURILGAN KADRDAN KEYIN boshlanadi:
-    // og'ir ish allaqachon tugagan bo'ladi va suzish to'liq
-    // ko'rinadi.
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || run != _navRun) return;
-      _navAnim.forward().whenComplete(() {
-        if (run != _navRun) return; // bu suzish bekor qilingan
-        _jumping = false;
-        _navPos.value = i.toDouble();
+    _navAnim.forward().whenComplete(() {
+      // Bu suzish bekor qilingan (foydalanuvchi boshqa tugmani
+      // bosdi) — sahifani almashtirmaymiz, yangi suzish o'zi
+      // hal qiladi.
+      if (run != _navRun || !mounted) return;
+      _navPos.value = i.toDouble();
+      setState(() => _index = i);
+      _pageController.jumpToPage(i);
+      // `jumpToPage` `_onPageScroll` ni ham uyg'otadi — u
+      // `_navPos` ni bosib yubormasligi uchun qulf sahifa
+      // o'rnashgan kadrdan keyin ochiladi.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (run == _navRun) _jumping = false;
       });
     });
   }
@@ -243,7 +242,10 @@ class _RootScreenState extends State<RootScreen>
             // Qo'shni sahifa OLDINDAN (ilova bo'sh turganda) quriladi —
             // shu sabab unga o'tilganda quriladigan ish qolmaydi.
             allowImplicitScrolling: true,
-            onPageChanged: (i) => setState(() => _index = i),
+            onPageChanged: (i) => setState(() {
+              _index = i;
+              _target = i;
+            }),
             children: const [
               _KeepAlivePage(child: HomeScreen()),
               _KeepAlivePage(child: SearchScreen()),

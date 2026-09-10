@@ -167,7 +167,26 @@ async fn turso_batch(env: &Env, stmts: &[(&str, Vec<TursoArg>)]) -> Result<()> {
         RequestInit::new().with_method(Method::Post).with_headers(h)
             .with_body(Some(json!({"requests": reqs}).to_string().into())),
     )?;
-    Fetch::Request(req).send().await?;
+    let mut r = Fetch::Request(req).send().await?;
+
+    // ── HAR BIR BUYRUQ NATIJASI TEKSHIRILADI ──────────────────
+    //
+    // Turso "pipeline" HTTP darajasida 200 qaytaradi, lekin
+    // ichidagi buyruqlardan biri yiqilgan bo'lishi mumkin. Ilgari
+    // javob umuman o'qilmasdi — ya'ni INSERT yiqilsa ham chaqiruvchi
+    // "hammasi joyida" deb o'ylardi. Kirish jarayonida bu eng
+    // yomon xatoni berardi: sessiya YOZILMAGAN bo'lsa ham kirish
+    // tokeni "tasdiqlangan" deb belgilanardi va foydalanuvchi
+    // ilovaga kira olmay qolardi.
+    let d: Value = r.json().await.unwrap_or(json!({}));
+    if let Some(list) = d["results"].as_array() {
+        for item in list {
+            if item["type"] == json!("error") {
+                let why = item["error"]["message"].as_str().unwrap_or("noma'lum");
+                return Err(Error::RustError(format!("baza xatosi: {why}")));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -332,6 +351,29 @@ async fn init_db(env: &Env) {
     // abadiy "to'ldirilmagan" bo'lib qolardi).
     let _ = turso_exec(env,
         "UPDATE users_db SET profile_done=1 WHERE username <> '' AND profile_done=0",
+        vec![]).await;
+
+    // ── NOMSIZ QOLGAN ESKI HISOBLARGA NOM BERILADI ────────────
+    //
+    // Eski tartibda yangi hisob BO'SH ism va username bilan
+    // ochilar, ularni foydalanuvchi majburiy oynada o'zi
+    // to'ldirardi. O'sha oynani yopmasdan chiqib ketgan odamlarda
+    // hisob nomsiz qolgan: profilda "Foydalanuvchi 12" ko'rinadi
+    // va ularni hech kim topa olmaydi.
+    //
+    // Endi nom AVTOMATIK beriladi, shu sabab nomsiz qolganlarga
+    // ham shu yerda bir marta nom qo'yiladi: `User 12` /
+    // `user_12` (raqam — hisobning o'z ID'si).
+    //
+    // `UPDATE OR IGNORE`: agar kimdir `user_12` nomini allaqachon
+    // qo'lda olgan bo'lsa, unikal indeks shu QATORNI o'tkazib
+    // yuboradi va qolganlari baribir to'ldiriladi. Bunday hisob
+    // nomsiz qolaveradi — egasi uni profildagi tahrirlash tugmasi
+    // orqali o'zi qo'yadi.
+    let _ = turso_exec(env,
+        "UPDATE OR IGNORE users_db
+            SET username='user_'||id, first_name='User '||id, profile_done=1
+          WHERE username IS NULL OR username=''",
         vec![]).await;
 
     // Username TAKRORLANMASLIGI kerak. Qiyoslash registrga
@@ -2221,23 +2263,45 @@ async fn ensure_webhook(env: &Env, origin: &str) {
 
 // ── users_db ───────────────────────────────────────────────────
 
-/// Yangi foydalanuvchi ID'si = oxirgi ID + 1 (anime/epizodlardagi
-/// bilan bir xil tartib).
-async fn next_user_id(env: &Env) -> Result<i64> {
-    let res = turso_exec(env, "SELECT COALESCE(MAX(id), 0) AS max_id FROM users_db", vec![]).await?;
-    let cols = res["cols"].as_array().cloned().unwrap_or_default();
-    let rows = res["rows"].as_array().cloned().unwrap_or_default();
-    if rows.is_empty() { return Ok(1); }
-    Ok(row_to_obj(&cols, rows[0].as_array().unwrap_or(&vec![]))["max_id"].as_i64().unwrap_or(0) + 1)
-}
-
-async fn find_user_by_tg(env: &Env, tg_id: i64) -> Result<Option<Value>> {
-    let res = turso_exec(env, "SELECT * FROM users_db WHERE telegram_id=?",
-        vec![TursoArg::int(tg_id)]).await?;
-    let cols = res["cols"].as_array().cloned().unwrap_or_default();
-    let rows = res["rows"].as_array().cloned().unwrap_or_default();
-    if rows.is_empty() { return Ok(None); }
-    Ok(Some(row_to_obj(&cols, rows[0].as_array().unwrap_or(&vec![]))))
+/// Yangi hisob uchun ID va BO'SH TURGAN ENG KICHIK raqam.
+///
+/// Qaytaradi: `(id, n)`. `id` — hisob raqami (oxirgi ID + 1,
+/// anime/epizodlardagi bilan bir xil tartib). `n` — bazada hali
+/// egallanmagan eng kichik son: undan `User n` (ism) va `user_n`
+/// (username) yasaladi.
+///
+/// NEGA `n` alohida hisoblanadi (ID ning o'zi yetmaydimi?):
+/// hisob o'chirilganda uning ID'si bo'shab qoladi va keyingi
+/// odamga o'sha ID tegishi mumkin. Agar nom ID'dan yasalsa,
+/// o'chirilgan odamning nomi yangi odamga tushib qolardi. Bu yerda
+/// esa NOMLAR ro'yxati bo'yicha qidiriladi: `user_1` band bo'lsa
+/// `user_2`, u ham band bo'lsa `user_3` va hokazo.
+///
+/// HAMMASI BITTA SO'ROVDA: bazaga ikki marta borish shart emas.
+async fn next_user_slot(env: &Env) -> Result<(i64, i64)> {
+    // `used` — allaqachon olingan `user_<raqam>` nomlaridagi raqamlar.
+    // Faqat TO'LIQ raqamli quyruq hisobga olinadi (`user_7` — ha,
+    // `user_7a` — yo'q), registr esa ahamiyatsiz: unikal indeks
+    // `LOWER(username)` bo'yicha qurilgan, ya'ni `User_7` ham
+    // `user_7` ni band qiladi.
+    let res = turso_exec(env,
+        "WITH used(n) AS (
+             SELECT CAST(SUBSTR(username,6) AS INTEGER) FROM users_db
+              WHERE LOWER(SUBSTR(username,1,5))='user_'
+                AND LENGTH(username) > 5
+                AND SUBSTR(username,6) NOT GLOB '*[^0-9]*'
+         )
+         SELECT
+           (SELECT COALESCE(MAX(id),0)+1 FROM users_db) AS new_id,
+           (SELECT COALESCE(MIN(c.n),1) FROM
+                (SELECT 1 AS n UNION ALL SELECT n+1 FROM used) c
+             WHERE c.n NOT IN (SELECT n FROM used)) AS free_n",
+        vec![]).await?;
+    let Some(row) = first_row(&res) else { return Ok((1, 1)) };
+    Ok((
+        row["new_id"].as_i64().unwrap_or(1).max(1),
+        row["free_n"].as_i64().unwrap_or(1).max(1),
+    ))
 }
 
 fn first_row(res: &Value) -> Option<Value> {
@@ -2262,43 +2326,64 @@ async fn upsert_user(env: &Env, from: &Value) -> Result<Value> {
     //
     // Foydalanuvchi talabi. Telegramdan faqat `telegram_id` (hisobni
     // tanish uchun), til va premium belgisi olinadi. Ism va username
-    // esa ilovaning O'ZIDA, birinchi kirishda so'raladi
-    // (`/api/auth/profile`) va keyingi kirishlarda USTIGA
-    // YOZILMAYDI — aks holda foydalanuvchi tanlagan nom har safar
-    // Telegramdagisiga qaytib qolardi.
+    // esa ILOVANING O'ZIDA hosil qilinadi va keyingi kirishlarda
+    // USTIGA YOZILMAYDI — aks holda foydalanuvchi tanlagan nom har
+    // safar Telegramdagisiga qaytib qolardi.
     let lang = from["language_code"].as_str().unwrap_or("").to_string();
     let is_premium = if from["is_premium"] == json!(true) { 1 } else { 0 };
     let now = now_ms();
 
-    for _ in 0..4 {
-        if find_user_by_tg(env, tg_id).await?.is_some() {
-            let res = turso_exec(env,
-                "UPDATE users_db SET language_code=?,is_premium=?,last_login_at=?
-                 WHERE telegram_id=? RETURNING *",
-                vec![
-                    TursoArg::text(&lang), TursoArg::int(is_premium),
-                    TursoArg::int(now), TursoArg::int(tg_id),
-                ]).await?;
-            if let Some(u) = first_row(&res) { return Ok(u); }
-            continue;
-        }
+    // ── MAVJUD HISOB: BITTA SO'ROV ────────────────────────────
+    //
+    // Ilgari avval `find_user_by_tg` (SELECT), keyin UPDATE
+    // qilinardi — ya'ni bazaga IKKI marta borilardi. Bazaga har
+    // borish chekkadan ~100 ms olib ketadi va kirish jarayonida
+    // bunday ortiqcha borishlar yig'ilib, bot "sekin" bo'lib
+    // ko'rinardi. `RETURNING *` ikkovini bitta so'rovga jamlaydi:
+    // qator o'zgargan bo'lsa o'zi qaytadi, bo'lmasa bo'sh keladi.
+    let res = turso_exec(env,
+        "UPDATE users_db SET language_code=?,is_premium=?,last_login_at=?
+         WHERE telegram_id=? RETURNING *",
+        vec![
+            TursoArg::text(&lang), TursoArg::int(is_premium),
+            TursoArg::int(now), TursoArg::int(tg_id),
+        ]).await?;
+    if let Some(u) = first_row(&res) { return Ok(u); }
 
-        let new_id = next_user_id(env).await?;
-        // Ism va username BO'SH tushadi: ularni foydalanuvchi
-        // o'zi kiritadi. `profile_done=0` — ilova shu belgiga
-        // qarab so'rash oynasini ochadi.
+    // ── YANGI HISOB: ISM VA USERNAME AVTOMATIK ────────────────
+    //
+    // TALAB: foydalanuvchidan hech narsa so'ralmasin — ilova o'zi
+    // bazada BAND BO'LMAGAN ENG KICHIK raqamni topib, undan
+    // `User 1` (ism) va `user_1` (username) yasasin. Keyin
+    // foydalanuvchi profil sahifasidagi tahrirlash tugmasi orqali
+    // ikkovini ham o'zgartira oladi.
+    //
+    // `profile_done=1` — ya'ni majburiy "ism/username kiriting"
+    // oynasi endi UMUMAN ochilmaydi.
+    //
+    // Qayta urinish: ayni damda boshqa odam ham ro'yxatdan o'tib,
+    // o'sha raqamni olib ulgurishi mumkin. Bunday holda unikal
+    // indeks INSERT'ni yiqitadi va biz KEYINGI bo'sh raqamni
+    // qidiramiz.
+    for _ in 0..5 {
+        let (new_id, n) = next_user_slot(env).await?;
+        let username = format!("user_{n}");
+        let first_name = format!("User {n}");
         let res = turso_exec(env,
             "INSERT INTO users_db (id,telegram_id,username,first_name,last_name,
              language_code,is_premium,is_banned,created_at,last_login_at,profile_done)
-             VALUES (?,?,'','','',?,?,0,?,?,0) RETURNING *",
+             VALUES (?,?,?,?,'',?,?,0,?,?,1) RETURNING *",
             vec![
-                TursoArg::int(new_id), TursoArg::int(tg_id), TursoArg::text(&lang),
+                TursoArg::int(new_id), TursoArg::int(tg_id),
+                TursoArg::text(&username), TursoArg::text(&first_name),
+                TursoArg::text(&lang),
                 TursoArg::int(is_premium), TursoArg::int(now), TursoArg::int(now),
             ]).await;
 
         match res {
             Ok(r) => { if let Some(u) = first_row(&r) { return Ok(u); } }
-            // ID yoki telegram_id band bo'lib qoldi — qaytadan urinamiz.
+            // ID, telegram_id yoki username band bo'lib qoldi —
+            // qaytadan urinamiz (bo'sh raqam qaytadan qidiriladi).
             Err(_) => continue,
         }
     }
@@ -2333,8 +2418,9 @@ fn user_public(origin: &str, u: &Value) -> Value {
         "last_name": u["last_name"].as_str().unwrap_or(""),
         "photo_url": photo_url,
         "balance": u["balance"].as_i64().unwrap_or(0),
-        // Ism/username kiritilganmi. 0 bo'lsa ilova so'rash
-        // oynasini ochadi va uni yopib bo'lmaydi.
+        // Ism/username to'ldirilganmi. Yangi hisobga nom
+        // AVTOMATIK berilgani uchun bu endi doim 1 — maydon
+        // eski ilova versiyalari bilan moslik uchun qoldirilgan.
         "profile_done": u["profile_done"].as_i64().unwrap_or(0) == 1,
         "created_at": u["created_at"].clone(),
         "last_login_at": u["last_login_at"].clone(),
@@ -2394,22 +2480,39 @@ fn valid_avatar_file(file: &str, user_id: i64) -> bool {
 
 // ── sessions_db ────────────────────────────────────────────────
 
-async fn next_session_id(env: &Env) -> Result<i64> {
-    let res = turso_exec(env, "SELECT COALESCE(MAX(id), 0) AS max_id FROM sessions_db", vec![]).await?;
-    let cols = res["cols"].as_array().cloned().unwrap_or_default();
-    let rows = res["rows"].as_array().cloned().unwrap_or_default();
-    if rows.is_empty() { return Ok(1); }
-    Ok(row_to_obj(&cols, rows[0].as_array().unwrap_or(&vec![]))["max_id"].as_i64().unwrap_or(0) + 1)
-}
-
-/// Yangi sessiya ochadi va 4 ta qurilma chegarasini qo'llaydi.
+/// Yangi sessiya ochadi, 4 ta qurilma chegarasini qo'llaydi VA
+/// kirish tokenini "tasdiqlangan" holatiga o'tkazadi.
 ///
 /// Jurnalda saqlanadigan ma'lumot (talab bo'yicha):
 ///   • hisob ma'lumoti — user_id, telegram_id, username, first_name
 ///   • qaysi API orqali kirgan — api_base
 ///   • qaysi qurilma bilan kirgan — device, platform, app_version
-async fn create_session(env: &Env, user: &Value, login: &Value) -> Result<String> {
-    let token = format!("{}{}", random_hex(32), random_hex(32));
+///
+/// ═══════════════════════════════════════════════════════════════
+///  NEGA HAMMASI BITTA SO'ROVDA
+/// ═══════════════════════════════════════════════════════════════
+///
+/// Ilgari bu ish bazaga BESH marta alohida borardi: eski sessiyani
+/// o'chirish, keyingi ID'ni so'rash, sessiyani yozish, chegarani
+/// qo'llash va kirish tokenini tasdiqlash. Cloudflare chekkasidan
+/// Turso'ga har borish ~100 ms, ya'ni faqat shu yerda yarim
+/// soniyagacha behuda ketardi va foydalanuvchi "bot sekin" deb
+/// sezardi.
+///
+/// Endi hammasi bitta "pipeline" so'rovi. Turso to'plamdagi
+/// BIRINCHI XATODAN keyin qolganini bajarmaydi — bu bizning
+/// foydamizga: sessiya yozilmasa, kirish tokeni ham tasdiqlanmaydi,
+/// ya'ni "kirdingiz" deb yolg'on aytilmaydi.
+///
+/// Sessiya ID'si ham SQL ichida hisoblanadi
+/// (`SELECT MAX(id)+1`) — shu sabab uni alohida so'rashga hojat
+/// qolmadi.
+async fn create_session(
+    env: &Env,
+    user: &Value,
+    login: &Value,
+    login_token: &str,
+) -> Result<String> {
     let user_id = user["id"].as_i64().unwrap_or(0);
     let now = now_ms();
 
@@ -2418,62 +2521,87 @@ async fn create_session(env: &Env, user: &Value, login: &Value) -> Result<String
     let app_version = login["app_version"].as_str().unwrap_or("").to_string();
     let api_base = login["api_base"].as_str().unwrap_or("").to_string();
 
-    // ── SHU QURILMANING ESKI SESSIYASI O'CHIRILADI ────────────
-    //
-    // TOPILGAN MUAMMO: foydalanuvchi bir necha marta kirishga
-    // urinsa (masalan ilova Telegramga o'tganda yopilib ketgani
-    // uchun), HAR BIR urinish yangi sessiya ochardi. Natijada
-    // bitta telefondan 4 ta "qurilma" paydo bo'lardi, chegara
-    // to'lib qolardi va foydalanuvchining BOSHQA haqiqiy
-    // qurilmalari o'rinsiz chiqarib yuborilardi.
-    //
-    // Endi ayni shu qurilma (nomi + tizimi bir xil) uchun eski
-    // yozuv oldindan o'chiriladi: bitta telefon ro'yxatda HAR
-    // DOIM bitta qator egallaydi.
-    //
-    // Qurilma nomi bo'sh bo'lsa hech narsa o'chirilmaydi — aks
-    // holda nomi aniqlanmagan turli qurilmalar bir-birini
-    // chiqarib yuborardi.
-    if !device.is_empty() {
-        let _ = turso_exec(env,
-            "DELETE FROM sessions_db WHERE user_id=? AND device=? AND platform=?",
-            vec![
-                TursoArg::int(user_id),
-                TursoArg::text(&device),
-                TursoArg::text(&platform),
-            ]).await;
-    }
+    // Qayta urinish: sessiya ID'si yoki tokeni ayni damda boshqa
+    // kirish tomonidan band qilingan bo'lishi mumkin. Har urinishda
+    // token YANGIDAN yasaladi — yarim yozilib qolgan qator keyingi
+    // urinishga xalaqit qilmasin.
+    for _ in 0..3 {
+        let token = format!("{}{}", random_hex(32), random_hex(32));
+        let mut stmts: Vec<(&str, Vec<TursoArg>)> = Vec::new();
 
-    for _ in 0..4 {
-        let sid = next_session_id(env).await?;
-        let res = turso_exec(env,
+        // ── SHU QURILMANING ESKI SESSIYASI O'CHIRILADI ────────
+        //
+        // TOPILGAN MUAMMO: foydalanuvchi bir necha marta kirishga
+        // urinsa (masalan ilova Telegramga o'tganda yopilib ketgani
+        // uchun), HAR BIR urinish yangi sessiya ochardi. Natijada
+        // bitta telefondan 4 ta "qurilma" paydo bo'lardi, chegara
+        // to'lib qolardi va foydalanuvchining BOSHQA haqiqiy
+        // qurilmalari o'rinsiz chiqarib yuborilardi.
+        //
+        // Endi ayni shu qurilma (nomi + tizimi bir xil) uchun eski
+        // yozuv oldindan o'chiriladi: bitta telefon ro'yxatda HAR
+        // DOIM bitta qator egallaydi.
+        //
+        // Qurilma nomi bo'sh bo'lsa hech narsa o'chirilmaydi — aks
+        // holda nomi aniqlanmagan turli qurilmalar bir-birini
+        // chiqarib yuborardi.
+        if !device.is_empty() {
+            stmts.push((
+                "DELETE FROM sessions_db WHERE user_id=? AND device=? AND platform=?",
+                vec![
+                    TursoArg::int(user_id),
+                    TursoArg::text(&device),
+                    TursoArg::text(&platform),
+                ],
+            ));
+        }
+
+        stmts.push((
             "INSERT INTO sessions_db (id,user_id,telegram_id,username,first_name,
              session_token,api_base,device,platform,app_version,created_at,last_seen_at)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+             VALUES ((SELECT COALESCE(MAX(id),0)+1 FROM sessions_db),
+                     ?,?,?,?,?,?,?,?,?,?,?)",
             vec![
-                TursoArg::int(sid), TursoArg::int(user_id),
+                TursoArg::int(user_id),
                 TursoArg::int(user["telegram_id"].as_i64().unwrap_or(0)),
                 TursoArg::text(user["username"].as_str().unwrap_or("")),
                 TursoArg::text(user["first_name"].as_str().unwrap_or("")),
                 TursoArg::text(&token), TursoArg::text(&api_base), TursoArg::text(&device),
                 TursoArg::text(&platform), TursoArg::text(&app_version),
                 TursoArg::int(now), TursoArg::int(now),
-            ]).await;
-        if res.is_err() { continue; }
+            ],
+        ));
 
         // ── 4 TA QURILMA CHEGARASI ────────────────────────────
         // Eng SO'NGGI onlayn bo'lgan 4 tasi qoldiriladi; qolgani —
         // ya'ni eng oldin onlayn bo'lgani — o'chiriladi va o'sha
         // qurilma keyingi so'rovda hisobdan chiqib qoladi.
-        let _ = turso_exec(env,
+        stmts.push((
             "DELETE FROM sessions_db WHERE user_id=? AND id NOT IN (
                 SELECT id FROM sessions_db WHERE user_id=?
                 ORDER BY last_seen_at DESC, id DESC LIMIT ?
              )",
             vec![TursoArg::int(user_id), TursoArg::int(user_id),
-                 TursoArg::int(MAX_SESSIONS_PER_USER)]).await;
+                 TursoArg::int(MAX_SESSIONS_PER_USER)],
+        ));
 
-        return Ok(token);
+        // ── KIRISH TOKENI TASDIQLANADI ────────────────────────
+        // Ilova aynan shu belgini kutib turadi: u "approved"
+        // bo'lishi bilan hisob ilovada ochiladi.
+        stmts.push((
+            "UPDATE login_tokens SET status='approved', user_id=?, session_token=?,
+             expires_at=? WHERE token=?",
+            vec![
+                TursoArg::int(user_id),
+                TursoArg::text(&token),
+                TursoArg::int(now + LOGIN_CLAIM_TTL_MS),
+                TursoArg::text(login_token),
+            ],
+        ));
+
+        if turso_batch(env, &stmts).await.is_ok() {
+            return Ok(token);
+        }
     }
     Err(Error::RustError("Sessiya ochib bo'lmadi".into()))
 }
@@ -2564,6 +2692,36 @@ async fn tg_avatar(env: &Env, user_id: i64) -> Result<Response> {
 
 // ── Webhook ────────────────────────────────────────────────────
 
+/// ═══════════════════════════════════════════════════════════════
+///  BOTDAGI YOZUVLAR
+/// ═══════════════════════════════════════════════════════════════
+///
+/// QOIDA: foydalanuvchi botdan texnik atama ko'rmasligi kerak.
+/// Har bir xabar ikki narsani aytadi — NIMA bo'ldi va ENDI NIMA
+/// QILISH kerak. "Xatolik: Telegram xatosi (sendMessage)" kabi
+/// ichki matnlar hech qachon tashqariga chiqmaydi: ular
+/// foydalanuvchiga hech narsa tushuntirmaydi, faqat qo'rqitadi.
+const MSG_HELP: &str = "\u{1F44B} Salom! Men \u{2014} <b>AniRaxUz</b> ilovasining kirish yordamchisiman.\n\n\
+     Kirish uchun: ilovani oching \u{2192} pastdagi <b>Profil</b> bo'limi \u{2192} \u{AB}Telegram orqali kirish\u{BB} tugmasi.\n\n\
+     O'sha tugma meni o'zi ochadi \u{2014} bu yerda hech narsa yozishingiz shart emas.";
+
+/// Havola yaroqsiz (bazada topilmadi yoki allaqachon ishlatilgan).
+const MSG_BAD_LINK: &str = "\u{231B} Bu havola ishlamaydi \u{2014} u eskirgan yoki allaqachon ishlatilgan.\n\n\
+     Ilovaga qayting va \u{AB}Telegram orqali kirish\u{BB} tugmasini yana bosing \u{2014} yangi havola hosil bo'ladi.";
+
+/// Havolaning 5 daqiqalik muddati tugagan.
+const MSG_EXPIRED: &str = "\u{231B} Havolaning muddati tugadi.\n\n\
+     Havola atigi 5 daqiqa amal qiladi. Ilovaga qayting va \u{AB}Telegram orqali kirish\u{BB} tugmasini yana bosing.";
+
+/// Shu havola bilan allaqachon kirilgan.
+const MSG_ALREADY: &str = "\u{2705} Siz allaqachon kirgansiz.\n\n\
+     Ilovaga qayting \u{2014} hisobingiz o'zi ochiladi.";
+
+/// Serverda vaqtinchalik muammo. Sabab AYTILMAYDI: foydalanuvchi
+/// uni baribir tuzata olmaydi, unga faqat "nima qilay" kerak.
+const MSG_TRY_LATER: &str = "\u{1F614} Hozir kirishning iloji bo'lmadi.\n\n\
+     Bir daqiqadan keyin ilovadagi \u{AB}Telegram orqali kirish\u{BB} tugmasini yana bosing.";
+
 async fn handle_tg_webhook(env: &Env, mut req: Request) -> Result<Response> {
     // Sir mos kelmasa — bu Telegram emas.
     let got = req.headers().get("X-Telegram-Bot-Api-Secret-Token").ok().flatten()
@@ -2584,9 +2742,7 @@ async fn handle_tg_webhook(env: &Env, mut req: Request) -> Result<Response> {
     // Telegram takroriy urinmasligi uchun bu yerdan keyin HAR DOIM
     // 200 qaytadi — xatolar foydalanuvchiga xabar sifatida boradi.
     if !text.starts_with("/start") {
-        tg_send(env, chat_id,
-            "👋 Bu bot faqat <b>Aniraxuz</b> ilovasiga kirish uchun.\n\n\
-             Ilovani oching → <b>Profil</b> → «Telegram orqali kirish» tugmasini bosing.").await;
+        tg_send(env, chat_id, MSG_HELP).await;
         return ok(json!({"ok": true}));
     }
 
@@ -2597,9 +2753,7 @@ async fn handle_tg_webhook(env: &Env, mut req: Request) -> Result<Response> {
         arg = arg.split_whitespace().skip(1).collect::<Vec<_>>().join(" ");
     }
     if arg.is_empty() {
-        tg_send(env, chat_id,
-            "👋 Salom! Bu bot <b>Aniraxuz</b> ilovasiga kirish uchun xizmat qiladi.\n\n\
-             Ilovani oching → <b>Profil</b> → «Telegram orqali kirish» tugmasini bosing.").await;
+        tg_send(env, chat_id, MSG_HELP).await;
         return ok(json!({"ok": true}));
     }
 
@@ -2607,64 +2761,54 @@ async fn handle_tg_webhook(env: &Env, mut req: Request) -> Result<Response> {
     let res = turso_exec(env, "SELECT * FROM login_tokens WHERE token=?",
         vec![TursoArg::text(&arg)]).await?;
     let Some(login) = first_row(&res) else {
-        tg_send(env, chat_id,
-            "⌛️ Bu havola yaroqsiz yoki muddati tugagan.\n\n\
-             Ilovada «Telegram orqali kirish» tugmasini qaytadan bosing.").await;
+        tg_send(env, chat_id, MSG_BAD_LINK).await;
         return ok(json!({"ok": true}));
     };
 
     if login["expires_at"].as_i64().unwrap_or(0) < now {
         let _ = turso_exec(env, "DELETE FROM login_tokens WHERE token=?",
             vec![TursoArg::text(&arg)]).await;
-        tg_send(env, chat_id,
-            "⌛️ Havolaning muddati tugagan (5 daqiqa).\n\n\
-             Ilovada «Telegram orqali kirish» tugmasini qaytadan bosing.").await;
+        tg_send(env, chat_id, MSG_EXPIRED).await;
         return ok(json!({"ok": true}));
     }
 
     // Allaqachon tasdiqlangan bo'lsa — takroriy START. Yangi sessiya
     // ochilmaydi, shunchaki eslatib qo'yamiz.
     if login["status"].as_str().unwrap_or("") == "approved" {
-        tg_send(env, chat_id, "✅ Siz allaqachon kirdingiz — ilovaga qayting.").await;
+        tg_send(env, chat_id, MSG_ALREADY).await;
         return ok(json!({"ok": true}));
     }
 
     let from = msg["from"].clone();
-    let user = match upsert_user(env, &from).await {
-        Ok(u) => u,
-        Err(e) => {
-            tg_send(env, chat_id, &format!("❌ Xatolik: {}. Birozdan keyin urinib ko'ring.",
-                html_escape(&e.to_string()))).await;
-            return ok(json!({"ok": true}));
-        }
+    let Ok(user) = upsert_user(env, &from).await else {
+        tg_send(env, chat_id, MSG_TRY_LATER).await;
+        return ok(json!({"ok": true}));
     };
 
-    let session = match create_session(env, &user, &login).await {
-        Ok(s) => s,
-        Err(e) => {
-            tg_send(env, chat_id, &format!("❌ Xatolik: {}. Birozdan keyin urinib ko'ring.",
-                html_escape(&e.to_string()))).await;
-            return ok(json!({"ok": true}));
-        }
-    };
+    // Sessiya ochish VA kirish tokenini tasdiqlash bitta so'rovda
+    // ketadi (`create_session` izohiga qarang) — ilova shu daqiqada
+    // hisobni ochadi.
+    if create_session(env, &user, &login, &arg).await.is_err() {
+        tg_send(env, chat_id, MSG_TRY_LATER).await;
+        return ok(json!({"ok": true}));
+    }
 
-    let _ = turso_exec(env,
-        "UPDATE login_tokens SET status='approved', user_id=?, session_token=?, expires_at=?
-         WHERE token=?",
-        vec![
-            TursoArg::int(user["id"].as_i64().unwrap_or(0)),
-            TursoArg::text(&session),
-            TursoArg::int(now + LOGIN_CLAIM_TTL_MS),
-            TursoArg::text(&arg),
-        ]).await;
-
+    // ── XUSH KELIBSIZ XABARI ──────────────────────────────────
+    //
+    // Ism va username endi ilova tomonidan AVTOMATIK beriladi
+    // (`upsert_user` izohiga qarang), shu sabab ikkovi ham shu
+    // yerda ko'rsatiladi: foydalanuvchi o'zining nomini darhol
+    // biladi va uni qayerdan o'zgartirishni ham biladi.
     let raw_name = user["first_name"].as_str().unwrap_or("").trim().to_string();
     let name = html_escape(if raw_name.is_empty() { "do'stim" } else { &raw_name });
+    let uname = html_escape(user["username"].as_str().unwrap_or(""));
     tg_send(env, chat_id, &format!(
-        "✅ Xush kelibsiz, <b>{name}</b>!\n\n\
-         Siz ilovaga muvaffaqiyatli kirdingiz. Endi <b>ilovaga qayting</b> — \
-         hisobingiz avtomatik ochiladi.\n\n\
-         🆔 Ilovadagi ID: <b>#{}</b>",
+        "\u{2705} Tayyor, <b>{name}</b>!\n\n\
+         Endi <b>ilovaga qayting</b> \u{2014} hisobingiz o'zi ochiladi.\n\n\
+         \u{1F194} ID raqamingiz: <b>{}</b>\n\
+         \u{1F464} Username: <b>@{uname}</b>\n\n\
+         Ism va username'ni ilovaning <b>Profil</b> bo'limidagi tahrirlash \
+         tugmasi orqali istagan vaqtda o'zgartira olasiz.",
         user["id"].as_i64().unwrap_or(0)
     )).await;
 
@@ -2848,8 +2992,26 @@ async fn auth_route(req: Request, env: &Env, origin: &str, path: &str, method: M
             if first_name.is_empty() {
                 return json_resp(&json!({"error": "Ism kiritilmadi"}), 400);
             }
-            if first_name.chars().count() > 32 {
-                return json_resp(&json!({"error": "Ism eng ko'pi 32 ta belgi"}), 400);
+            // ── ISM: 20 TA BELGI, ICHIDA ISTALGAN NARSA ───────
+            //
+            // TALAB: ismga emoji ham, istalgan belgi ham qo'yish
+            // mumkin; uzunligi esa eng ko'pi 20 ta belgi.
+            //
+            // 20 TA BELGINI ILOVA SANAYDI, server emas. Sabab:
+            // "belgi" degani ko'zga BITTA ko'ringan narsa, lekin
+            // bitta emoji ichida bir nechta Unicode kodi bo'lishi
+            // mumkin (masalan oila emojisi \u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467} — beshta).
+            // Rustning `chars()` aynan Unicode kodlarini sanaydi,
+            // ya'ni u yerda 20 deb chegaralasak, foydalanuvchi
+            // ilovada 4 ta emoji yozganda ham "uzun" degan xato
+            // chiqib qolardi.
+            //
+            // Shu sabab bu yerdagi chegara — faqat SUIISTE'MOLGA
+            // qarshi keng chegara (bir necha kilobaytlik ism
+            // bazaga tushmasin), haqiqiy 20 ta belgi qoidasi esa
+            // ilovada (`AuthService.nameProblem`) qo'llanadi.
+            if first_name.chars().count() > 160 {
+                return json_resp(&json!({"error": "Ism juda uzun"}), 400);
             }
             if let Some(why) = username_problem(&username) {
                 return json_resp(&json!({"error": why}), 400);
