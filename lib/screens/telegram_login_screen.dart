@@ -98,9 +98,20 @@ class _TelegramLoginScreenState extends State<TelegramLoginScreen>
       if (_left == 0) {
         _poll?.cancel();
         _tick?.cancel();
+        AuthService.instance.clearPending();
         setState(() => _stage = _Stage.expired);
       }
     });
+
+    // TELEGRAMNI OCHISHDAN OLDIN BIR MARTA SO'RAYMIZ.
+    //
+    // Token diskda saqlanadi, ya'ni bu ekran ilova yopilib
+    // qaytgandan keyin ham AVVALGI token bilan ochilishi mumkin.
+    // Foydalanuvchi Telegramda START'ni allaqachon bosgan bo'lsa,
+    // uni yana Telegramga uzatishning hojati yo'q — darhol
+    // kirgizamiz.
+    await _check();
+    if (!mounted || _stage != _Stage.waiting) return;
 
     await _openTelegram();
   }

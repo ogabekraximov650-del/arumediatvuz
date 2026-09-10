@@ -7,11 +7,13 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 
+import 'rust_bridge.dart';
+
 const String kApiBase = 'https://aniraxuzapp.ogabekraximov650.workers.dev';
 
 /// Sessiyalar jurnalida ko'rinadigan ilova versiyasi.
 /// `pubspec.yaml` dagi `version:` bilan bir xil turishi kerak.
-const String kAppVersion = '0.0.7';
+const String kAppVersion = '0.0.8';
 
 /// Ilovaga kirgan foydalanuvchi.
 class AppUser {
@@ -144,7 +146,28 @@ class AuthService extends ChangeNotifier {
     if (_session != null && _session!.isNotEmpty) {
       // Javobni kutmaymiz: ilova ochilishi sekinlashmasin.
       unawaited(refresh());
+      return;
     }
+
+    // ── UZILIB QOLGAN KIRISHNI DAVOM ETTIRISH ─────────────────
+    //
+    // Ilova Telegramga o'tganda yopilib ketgan bo'lishi mumkin.
+    // Foydalanuvchi u yerda START bosgan bo'lsa, sessiya serverda
+    // ALLAQACHON ochilgan — faqat ilova buni bilmaydi. Saqlangan
+    // token bilan bir marta so'raymiz va hisob o'zi ochiladi.
+    //
+    // Kutilmaydi: internet sekin bo'lsa ilova ochilishi
+    // sekinlashmasin.
+    unawaited(resumePendingLogin());
+  }
+
+  /// Saqlangan token bo'yicha kirish tugallanganini tekshiradi.
+  /// Kirilgan bo'lsa hisob ochiladi va `true` qaytadi.
+  Future<bool> resumePendingLogin() async {
+    if (isLoggedIn) return false;
+    final pending = await pendingLogin();
+    if (pending == null) return false;
+    return await check(pending.token) == LoginStatus.ok;
   }
 
   /// Sessiya hali kuchdami? Faqat 401 kelganda hisobdan chiqariladi
@@ -178,7 +201,14 @@ class AuthService extends ChangeNotifier {
 
   /// 1-qadam: serverdan bir martalik token va Telegram havolasini
   /// oladi.
+  ///
+  /// AVVAL SAQLANGANI QARALADI. Muddati tugamagan token bo'lsa
+  /// serverdan YANGISI SO'RALMAYDI — o'sha qaytariladi. Sabab
+  /// `pendingLogin()` izohida.
   Future<TelegramLoginRequest?> start() async {
+    final saved = await pendingLogin();
+    if (saved != null) return saved;
+
     try {
       final r = await http
           .post(
@@ -192,11 +222,85 @@ class AuthService extends ChangeNotifier {
       final token = (d['token'] ?? '').toString();
       final link = (d['deep_link'] ?? '').toString();
       if (token.isEmpty || link.isEmpty) return null;
-      return TelegramLoginRequest(
-          token, link, (d['expires_in'] as num?)?.toInt() ?? 300);
+      final expires = (d['expires_in'] as num?)?.toInt() ?? 300;
+      await _savePending(token, link, expires);
+      return TelegramLoginRequest(token, link, expires);
     } catch (_) {
       return null;
     }
+  }
+
+  // ── KUTILAYOTGAN KIRISH (diskda, AES-256-GCM bilan) ──────────
+  //
+  // MUAMMO. Kirish tokeni faqat XOTIRADA turardi. Foydalanuvchi
+  // Telegramga o'tganda xotirasi kam telefonlarda Android ilovani
+  // BUTUNLAY yopib qo'yishi mumkin — token yo'qolardi va qaytib
+  // kelgan odam kira olmasdi. U qaytadan urinardi, ilova esa HAR
+  // SAFAR serverdan YANGI token so'rardi va har bir START serverda
+  // YANGI SESSIYA ochardi. Natija: foydalanuvchi bir marta ham
+  // kira olmagani holda "Qurilmalar" ro'yxatida 4 ta sessiya.
+  //
+  // YECHIM. Token diskka AES-256-GCM bilan MUHRLANGAN faylga
+  // yoziladi (Rust yadrosi, kalit Android Keystore'dan). Ilova
+  // qaytadan ochilganda:
+  //   * `restore()` shu tokenni ko'rib holatni tekshiradi — START
+  //     bosilgan bo'lsa foydalanuvchi O'ZI kirgan bo'lib chiqadi;
+  //   * `start()` esa muddati tugamagan tokenni QAYTA ISHLATADI,
+  //     ya'ni ortiqcha sessiya umuman ochilmaydi.
+  //
+  // Fayl 5 daqiqadan keyin (token muddati) o'zi yaroqsiz bo'ladi.
+
+  static const _pendingFile = 'pending_login.bin';
+  static const _pendingLabel = 'pending_login_v1';
+
+  String? get _pendingPath {
+    final dir = RustCore.instance.dataDirPath;
+    return dir == null ? null : '$dir/$_pendingFile';
+  }
+
+  Future<void> _savePending(String token, String link, int expiresIn) async {
+    final path = _pendingPath;
+    if (path == null) return;
+    RustCore.instance.secureSave(
+      path,
+      _pendingLabel,
+      jsonEncode({
+        'token': token,
+        'deep_link': link,
+        'expires_at': DateTime.now().millisecondsSinceEpoch + expiresIn * 1000,
+      }),
+    );
+  }
+
+  /// Saqlangan, muddati TUGAMAGAN kirish urinishi (bo'lmasa `null`).
+  /// Muddati tugagan bo'lsa fayl yo'l-yo'lakay o'chiriladi.
+  Future<TelegramLoginRequest?> pendingLogin() async {
+    final path = _pendingPath;
+    if (path == null) return null;
+    final raw = RustCore.instance.secureLoad(path, _pendingLabel);
+    if (raw.isEmpty) return null;
+    try {
+      final d = jsonDecode(raw) as Map<String, dynamic>;
+      final token = (d['token'] ?? '').toString();
+      final link = (d['deep_link'] ?? '').toString();
+      final endsAt = (d['expires_at'] as num?)?.toInt() ?? 0;
+      final leftMs = endsAt - DateTime.now().millisecondsSinceEpoch;
+      // 10 soniyadan kam qolgan bo'lsa yangisini olgan ma'qul.
+      if (token.isEmpty || link.isEmpty || leftMs < 10000) {
+        clearPending();
+        return null;
+      }
+      return TelegramLoginRequest(token, link, leftMs ~/ 1000);
+    } catch (_) {
+      clearPending();
+      return null;
+    }
+  }
+
+  /// Kutilayotgan kirishni o'chiradi (kirilgach yoki muddati tugagach).
+  void clearPending() {
+    final path = _pendingPath;
+    if (path != null) RustCore.instance.secureClear(path);
   }
 
   /// 2-qadam: foydalanuvchi Telegramda START bosdimi?
@@ -214,8 +318,11 @@ class AuthService extends ChangeNotifier {
           await _save(
               session,
               AppUser.fromJson(d['user'] as Map<String, dynamic>));
+          // Kirildi — saqlangan token endi keraksiz.
+          clearPending();
           return LoginStatus.ok;
         case 'expired':
+          clearPending();
           return LoginStatus.expired;
         default:
           return LoginStatus.pending;

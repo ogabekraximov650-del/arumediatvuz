@@ -32,6 +32,16 @@ class _RootScreenState extends State<RootScreen>
   Animation<double>? _navTween;
   bool _jumping = false;
 
+  /// Nechanchi suzish ketyapti.
+  ///
+  /// NEGA KERAK: `forward()` qaytargan `TickerFuture` ning
+  /// `whenComplete` chaqirig'i animatsiya BEKOR QILINGANDA ham
+  /// ishlaydi. Foydalanuvchi ketma-ket ikki tugmani bossa,
+  /// eskisining `whenComplete`'i `stop()` sababli darhol ishga
+  /// tushib, tugmani ESKI manzilga sakratib yuborardi. Endi har
+  /// bir suzishning o'z raqami bor va faqat oxirgisi yakunlaydi.
+  int _navRun = 0;
+
   @override
   void initState() {
     super.initState();
@@ -54,11 +64,15 @@ class _RootScreenState extends State<RootScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
-      // Javob kutilmaydi — sessiya bekor qilingan bo'lsa
-      // AuthService o'zi xabar beradi va profil yangilanadi.
-      AuthService.instance.refresh();
-    }
+    if (state != AppLifecycleState.resumed) return;
+    // Javob kutilmaydi — sessiya bekor qilingan bo'lsa
+    // AuthService o'zi xabar beradi va profil yangilanadi.
+    AuthService.instance.refresh();
+    // Telegramdan qaytdi. Foydalanuvchi u yerda START bosgan
+    // bo'lsa, sessiya serverda allaqachon ochilgan — saqlangan
+    // token bilan bir marta so'rasak, hisob o'zi ochiladi.
+    // Kirish ekrani ochiq bo'lmasa ham ishlaydi.
+    AuthService.instance.resumePendingLogin();
   }
 
   @override
@@ -103,11 +117,13 @@ class _RootScreenState extends State<RootScreen>
   // atigi ~85 ms kattalashib ulgurardi, ya'ni ko'z ilg'amasdi va
   // o'tish "birdaniga" bo'lib tuyulardi.
   //
-  // Endi har bir tugma oralig'iga ~170 ms beriladi: qo'shni
-  // sahifaga o'tish avvalgidek tez, uzoq sahifaga o'tishda esa
-  // tugma o'rtacha tezlikda suzib boradi va oradagi belgilarni
-  // BIRIN-KETIN kattalashtirib o'tadi.
-  static const int _msPerStep = 170;
+  // Endi har bir tugma oralig'iga ~240 ms beriladi: bosh sahifadan
+  // profilga o'tish ~1 soniya, ya'ni tugma o'rtacha tezlikda suzib
+  // boradi va oradagi belgilarni BIRIN-KETIN kattalashtirib o'tadi.
+  //
+  // 170 ms sinab ko'rilgan edi — foydalanuvchi baribir "uchib
+  // o'tyapti" dedi, shu sabab sekinlashtirildi.
+  static const int _msPerStep = 240;
 
   void _onTabTap(int i) {
     if (i == _index) return;
@@ -117,18 +133,24 @@ class _RootScreenState extends State<RootScreen>
     _jumping = true;
     _pageController.jumpToPage(i);
     _navTween = Tween<double>(begin: from, end: i.toDouble()).animate(
-      // `easeInOutCubic` (avvalgi `easeOutCubic` o'rniga): harakat
-      // silliq boshlanib, silliq tugaydi — o'rtasida esa deyarli
-      // bir tekis ketadi. Aynan shu "o'rtacha tezlik" hissini
-      // beradi.
-      CurvedAnimation(parent: _navAnim, curve: Curves.easeInOutCubic),
+      // `easeInOutSine`: harakat silliq boshlanib, silliq tugaydi,
+      // lekin O'RTASIDA tezlashib ketmaydi.
+      //
+      // `easeInOutCubic` sinab ko'rilgan edi va u o'rtasida o'rtacha
+      // tezlikdan IKKI BAROBAR tez ketardi — chetlarida sekin,
+      // o'rtasida "otilib" o'tardi. Aynan shu "uchib o'tdi" degan
+      // hissni bergan. Sinusda esa eng yuqori tezlik o'rtachadan
+      // atigi ~1.6 barobar, ya'ni harakat bir tekis ko'rinadi.
+      CurvedAnimation(parent: _navAnim, curve: Curves.easeInOutSine),
     );
+    final run = ++_navRun;
     _navAnim
       ..stop()
       ..duration = Duration(
-          milliseconds: (steps * _msPerStep).round().clamp(220, 900))
+          milliseconds: (steps * _msPerStep).round().clamp(300, 1100))
       ..value = 0
       ..forward().whenComplete(() {
+        if (run != _navRun) return; // bu suzish bekor qilingan
         _jumping = false;
         _navPos.value = i.toDouble();
       });

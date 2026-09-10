@@ -2324,6 +2324,32 @@ async fn create_session(env: &Env, user: &Value, login: &Value) -> Result<String
     let app_version = login["app_version"].as_str().unwrap_or("").to_string();
     let api_base = login["api_base"].as_str().unwrap_or("").to_string();
 
+    // ── SHU QURILMANING ESKI SESSIYASI O'CHIRILADI ────────────
+    //
+    // TOPILGAN MUAMMO: foydalanuvchi bir necha marta kirishga
+    // urinsa (masalan ilova Telegramga o'tganda yopilib ketgani
+    // uchun), HAR BIR urinish yangi sessiya ochardi. Natijada
+    // bitta telefondan 4 ta "qurilma" paydo bo'lardi, chegara
+    // to'lib qolardi va foydalanuvchining BOSHQA haqiqiy
+    // qurilmalari o'rinsiz chiqarib yuborilardi.
+    //
+    // Endi ayni shu qurilma (nomi + tizimi bir xil) uchun eski
+    // yozuv oldindan o'chiriladi: bitta telefon ro'yxatda HAR
+    // DOIM bitta qator egallaydi.
+    //
+    // Qurilma nomi bo'sh bo'lsa hech narsa o'chirilmaydi — aks
+    // holda nomi aniqlanmagan turli qurilmalar bir-birini
+    // chiqarib yuborardi.
+    if !device.is_empty() {
+        let _ = turso_exec(env,
+            "DELETE FROM sessions_db WHERE user_id=? AND device=? AND platform=?",
+            vec![
+                TursoArg::int(user_id),
+                TursoArg::text(&device),
+                TursoArg::text(&platform),
+            ]).await;
+    }
+
     for _ in 0..4 {
         let sid = next_session_id(env).await?;
         let res = turso_exec(env,

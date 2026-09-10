@@ -141,6 +141,44 @@ FFI: `rust_video_cache_window_seen(url, widx)`.
   etadi (`_onNetworkBack`), "takroriy xato" hisoblagichi esa nolga
   tushadi — internetning yo'qligi pleyerning nosozligi emas.
 
+## KIRISH TOKENI DISKDA (AES-256-GCM)
+
+**TOPILGAN MUAMMO.** Kirish tokeni faqat XOTIRADA turardi.
+Foydalanuvchi Telegramga o'tganda xotirasi kam telefonlarda Android
+ilovani BUTUNLAY yopib qo'yishi mumkin — token yo'qolardi va qaytib
+kelgan odam kira olmasdi. U qaytadan urinardi, ilova esa HAR SAFAR
+serverdan YANGI token so'rardi, har bir START esa serverda YANGI
+SESSIYA ochardi. Natija: foydalanuvchi bir marta ham kira olmagani
+holda "Qurilmalar" ro'yxatida **4 ta sessiya**.
+
+**YECHIM — ikki tomondan.**
+
+*Ilova tomonda.* Token diskka AES-256-GCM bilan MUHRLANGAN faylga
+yoziladi (`pending_login.bin`). Kalit asosiy kalitdan (Android
+Keystore) HKDF orqali olinadi, ya'ni fayl boshqa qurilmada ham,
+ilovadan tashqarida ham ochilmaydi.
+
+- `rust_secure_save` / `_load` / `_clear` — `rust/src/crypto.rs`;
+- `AuthService.start()` muddati tugamagan tokenni **qayta
+  ishlatadi** — ortiqcha sessiya umuman ochilmaydi;
+- `AuthService.restore()` va ilovaga qaytishda
+  (`RootScreen.didChangeAppLifecycleState`) `resumePendingLogin()`
+  chaqiriladi: START bosilgan bo'lsa hisob **o'zi** ochiladi;
+- kirilgach yoki 5 daqiqa o'tgach fayl o'chiriladi.
+
+**QOIDA:** shifrlash o'chiq bo'lsa (asosiy kalit hali o'rnatilmagan)
+fayl **umuman yozilmaydi**. Sessiya tokenini ochiq matnda diskka
+yozgandan ko'ra, kutilayotgan kirishni yo'qotgan yaxshi.
+
+Test: `cargo test --lib maxfiy_fayl` — diskdagi faylda token ochiq
+matnda YO'Qligi ham tekshiriladi.
+
+*Worker tomonda.* `create_session` endi ayni shu qurilma (nomi +
+tizimi bir xil) uchun eski yozuvni oldindan o'chiradi — bitta
+telefon ro'yxatda HAR DOIM bitta qator egallaydi. Busiz takroriy
+urinishlar 4 ta chegarani to'ldirib, foydalanuvchining BOSHQA
+haqiqiy qurilmalarini chiqarib yuborardi.
+
 ## QAYSI TELEGRAM BILAN KIRISH
 
 Telefonda bir nechta Telegram bo'lishi mumkin (Telegram, Telegram X,

@@ -92,6 +92,15 @@ typedef _CryptoGenKeyDart = Pointer<Utf8> Function();
 typedef _CryptoSetKeyC = Int32 Function(Pointer<Utf8>);
 typedef _CryptoSetKeyDart = int Function(Pointer<Utf8>);
 
+typedef _SecureSaveC = Int32 Function(
+    Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>);
+typedef _SecureSaveDart = int Function(
+    Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>);
+typedef _SecureLoadC = Pointer<Utf8> Function(Pointer<Utf8>, Pointer<Utf8>);
+typedef _SecureLoadDart = Pointer<Utf8> Function(Pointer<Utf8>, Pointer<Utf8>);
+typedef _SecureClearC = Int32 Function(Pointer<Utf8>);
+typedef _SecureClearDart = int Function(Pointer<Utf8>);
+
 class RustCore {
   RustCore._();
   static final RustCore instance = RustCore._();
@@ -125,6 +134,9 @@ class RustCore {
   late final _VideoWindowSizeDart _videoWindowSize;
   late final _CryptoGenKeyDart _cryptoGenKey;
   late final _CryptoSetKeyDart _cryptoSetKey;
+  late final _SecureSaveDart _secureSave;
+  late final _SecureLoadDart _secureLoad;
+  late final _SecureClearDart _secureClear;
 
   bool _loaded = false;
   String? _cacheFilePath;
@@ -202,6 +214,12 @@ class RustCore {
         'rust_crypto_generate_key');
     _cryptoSetKey = _lib.lookupFunction<_CryptoSetKeyC, _CryptoSetKeyDart>(
         'rust_crypto_set_key');
+    _secureSave = _lib.lookupFunction<_SecureSaveC, _SecureSaveDart>(
+        'rust_secure_save');
+    _secureLoad = _lib.lookupFunction<_SecureLoadC, _SecureLoadDart>(
+        'rust_secure_load');
+    _secureClear = _lib.lookupFunction<_SecureClearC, _SecureClearDart>(
+        'rust_secure_clear');
 
     final dir = await getApplicationDocumentsDirectory();
     _cacheDirPath = dir.path;
@@ -460,6 +478,68 @@ class RustCore {
       malloc.free(ptr);
     }
   }
+
+  // ── MAXFIY KICHIK FAYL (AES-256-GCM) ───────────────────────
+  //
+  // Kichik, lekin maxfiy matnni diskda MUHRLANGAN holda saqlash
+  // uchun. Hozir bitta joyda ishlatiladi: Telegram orqali kirishda
+  // olingan bir martalik token (`auth_service.dart`).
+  //
+  // Kalit har bir `label` uchun asosiy kalitdan alohida hosil
+  // qilinadi, ya'ni bitta faylning kaliti boshqasini ochmaydi.
+  // Shifrlash o'chiq bo'lsa (asosiy kalit hali o'rnatilmagan)
+  // saqlash ATAYLAB muvaffaqiyatsiz bo'ladi — token hech qachon
+  // ochiq matnda diskka tushmaydi.
+
+  /// Matnni shifrlab faylga yozadi. `true` — muvaffaqiyat.
+  bool secureSave(String path, String label, String text) {
+    if (!_loaded) return false;
+    final p = path.toNativeUtf8();
+    final l = label.toNativeUtf8();
+    final t = text.toNativeUtf8();
+    try {
+      return _secureSave(p, l, t) == 1;
+    } catch (_) {
+      return false;
+    } finally {
+      malloc.free(p);
+      malloc.free(l);
+      malloc.free(t);
+    }
+  }
+
+  /// Shifrlangan fayldan matnni o'qiydi. Fayl yo'q, buzilgan yoki
+  /// boshqa kalit bilan yozilgan bo'lsa — bo'sh satr.
+  String secureLoad(String path, String label) {
+    if (!_loaded) return '';
+    final p = path.toNativeUtf8();
+    final l = label.toNativeUtf8();
+    try {
+      return _readAndFree(_secureLoad(p, l)) ?? '';
+    } catch (_) {
+      return '';
+    } finally {
+      malloc.free(p);
+      malloc.free(l);
+    }
+  }
+
+  /// Faylni o'chiradi (yo'q bo'lsa ham `true`).
+  bool secureClear(String path) {
+    if (!_loaded) return false;
+    final p = path.toNativeUtf8();
+    try {
+      return _secureClear(p) == 1;
+    } catch (_) {
+      return false;
+    } finally {
+      malloc.free(p);
+    }
+  }
+
+  /// Ilova ma'lumotlari saqlanadigan papka (Rust kesh fayli shu
+  /// yerda). `init()` chaqirilmagan bo'lsa `null`.
+  String? get dataDirPath => _cacheDirPath;
 
   /// Pleyerga MAHALLIY (127.0.0.1) ulanish orqali uzatilgan umumiy
   /// bayt hajmi. Telefon status-satridagi "KB/s" hisoblagichi ko'p

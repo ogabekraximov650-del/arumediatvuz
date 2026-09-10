@@ -225,6 +225,61 @@ mod tests {
         assert!(!set_master_key_hex("bu hex emas"));
     }
 
+    /// Kutilayotgan kirish tokeni diskda MUHRLANGAN holda yotadi va
+    /// qaytib o'qilganda aynan o'zi chiqadi.
+    ///
+    /// Nega muhim: ilova Telegramga o'tganda Android uni yopib
+    /// qo'yishi mumkin. Token faqat xotirada bo'lsa kirish uzilib
+    /// qoladi va har bir yangi urinish serverda YANGI sessiya
+    /// ochadi. Bu test o'sha yo'lni qo'riqlaydi.
+    #[test]
+    fn maxfiy_fayl_yoziladi_va_qaytib_ochiladi() {
+        use std::ffi::CString;
+        with_key();
+
+        let dir = std::env::temp_dir().join(format!("aru_secure_{}", now_test_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pending_login.bin");
+        let p = CString::new(path.to_string_lossy().to_string()).unwrap();
+        let label = CString::new("pending_login").unwrap();
+        let text = CString::new(r#"{"token":"abc123","deep_link":"https://t.me/bot?start=abc123"}"#).unwrap();
+
+        assert_eq!(rust_secure_save(p.as_ptr(), label.as_ptr(), text.as_ptr()), 1);
+
+        // Diskdagi fayl OCHIQ MATN bo'lmasligi shart.
+        let raw = std::fs::read(&path).unwrap();
+        assert!(
+            !String::from_utf8_lossy(&raw).contains("abc123"),
+            "token diskda ochiq matnda yotibdi"
+        );
+
+        // O'qib qaytarsak — aynan o'sha matn.
+        let got = unsafe { CString::from_raw(rust_secure_load(p.as_ptr(), label.as_ptr())) };
+        assert_eq!(got.to_str().unwrap(), text.to_str().unwrap());
+
+        // Boshqa yorliq bilan ochilmasligi kerak (kalit har bir
+        // fayl uchun alohida hosil qilinadi).
+        let other = CString::new("boshqa_yorliq").unwrap();
+        let bad = unsafe { CString::from_raw(rust_secure_load(p.as_ptr(), other.as_ptr())) };
+        assert_eq!(bad.to_str().unwrap(), "");
+
+        // O'chirish, keyin yo'q faylni o'chirish ham xato emas.
+        assert_eq!(rust_secure_clear(p.as_ptr()), 1);
+        assert_eq!(rust_secure_clear(p.as_ptr()), 1);
+        let gone = unsafe { CString::from_raw(rust_secure_load(p.as_ptr(), label.as_ptr())) };
+        assert_eq!(gone.to_str().unwrap(), "");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Testlar parallel ishlaydi — har biriga o'z papkasi kerak.
+    fn now_test_id() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    }
+
     #[test]
     fn har_bir_fayl_uchun_alohida_kalit() {
         with_key();
@@ -317,4 +372,99 @@ pub extern "C" fn rust_crypto_set_key(hex_ptr: *const c_char) -> i32 {
 #[no_mangle]
 pub extern "C" fn rust_crypto_is_enabled() -> i32 {
     if is_enabled() { 1 } else { 0 }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  MAXFIY KICHIK FAYL (AES-256-GCM)
+// ═══════════════════════════════════════════════════════════════════
+//
+// NIMA UCHUN. Telegram orqali kirishda ilova serverdan bir martalik
+// token oladi va foydalanuvchi Telegramga o'tadi. Xotirasi kam
+// telefonlarda Android bu paytda ilovani BUTUNLAY yopib qo'yishi
+// mumkin — token esa faqat xotirada edi va yo'qolardi. Foydalanuvchi
+// qaytganda kirish tugamagan bo'lardi, u qaytadan urinardi va HAR BIR
+// urinish serverda YANGI sessiya ochardi (foydalanuvchi bir marta ham
+// kira olmagani holda "Qurilmalar" ro'yxatida 4 ta sessiya paydo
+// bo'lgani shundan).
+//
+// Endi token diskka — AES-256-GCM bilan MUHRLANGAN faylga yoziladi.
+// Kalit `crypto` modulining asosiy kalitidan (Android Keystore bilan
+// himoyalangan) HKDF orqali olinadi, ya'ni fayl boshqa qurilmada ham,
+// ilovadan tashqarida ham ochilmaydi.
+//
+// GCM tanlangani sabab: fayl har doim BUTUNLAY o'qiladi va GCM
+// maxfiylikdan tashqari BUTUNLIK tekshiruvini ham beradi — buzilgan
+// yoki almashtirilgan fayl darhol "yaroqsiz" deb qaraladi.
+//
+// MUHIM QOIDA: shifrlash o'chiq bo'lsa (asosiy kalit hali
+// o'rnatilmagan) fayl UMUMAN YOZILMAYDI. Sessiya tokenini ochiq
+// matnda diskka yozgandan ko'ra, kutilayotgan kirishni yo'qotgan
+// yaxshi.
+
+/// Maxfiy matnni AES-256-GCM bilan muhrlab faylga yozadi.
+/// 1 — muvaffaqiyat, 0 — xato (jumladan shifrlash o'chiq bo'lsa).
+#[no_mangle]
+pub extern "C" fn rust_secure_save(
+    path_ptr: *const c_char,
+    label_ptr: *const c_char,
+    text_ptr: *const c_char,
+) -> i32 {
+    let (Some(path), Some(label), Some(text)) = (
+        unsafe { cstr_to_str(path_ptr) },
+        unsafe { cstr_to_str(label_ptr) },
+        unsafe { cstr_to_str(text_ptr) },
+    ) else {
+        return 0;
+    };
+    let Some(sealed) = seal_blob(label, text.as_bytes()) else {
+        return 0;
+    };
+    // Avval vaqtinchalik faylga, keyin almashtirish (atom amal) —
+    // yozish yarmida uzilsa yarim fayl qolib ketmasin.
+    let tmp = format!("{path}.tmp");
+    if std::fs::write(&tmp, &sealed).is_err() {
+        return 0;
+    }
+    match std::fs::rename(&tmp, path) {
+        Ok(_) => 1,
+        Err(_) => {
+            let _ = std::fs::remove_file(&tmp);
+            0
+        }
+    }
+}
+
+/// Muhrlangan fayldan matnni o'qiydi. Fayl yo'q, buzilgan yoki
+/// boshqa kalit bilan yozilgan bo'lsa — bo'sh satr qaytadi.
+#[no_mangle]
+pub extern "C" fn rust_secure_load(
+    path_ptr: *const c_char,
+    label_ptr: *const c_char,
+) -> *mut c_char {
+    let (Some(path), Some(label)) = (
+        unsafe { cstr_to_str(path_ptr) },
+        unsafe { cstr_to_str(label_ptr) },
+    ) else {
+        return string_to_cptr(String::new());
+    };
+    let text = std::fs::read(path)
+        .ok()
+        .and_then(|raw| open_blob(label, &raw))
+        .and_then(|plain| String::from_utf8(plain).ok())
+        .unwrap_or_default();
+    string_to_cptr(text)
+}
+
+/// Faylni o'chiradi. Fayl allaqachon yo'q bo'lsa ham 1 qaytadi.
+#[no_mangle]
+pub extern "C" fn rust_secure_clear(path_ptr: *const c_char) -> i32 {
+    let Some(path) = (unsafe { cstr_to_str(path_ptr) }) else {
+        return 0;
+    };
+    let _ = std::fs::remove_file(format!("{path}.tmp"));
+    match std::fs::remove_file(path) {
+        Ok(_) => 1,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => 1,
+        Err(_) => 0,
+    }
 }
