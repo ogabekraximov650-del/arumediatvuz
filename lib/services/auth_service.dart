@@ -133,6 +133,16 @@ class AuthService extends ChangeNotifier {
   AppUser? get user => _user;
   bool get isLoggedIn => _user != null;
 
+  /// Joriy sessiya tokeni — boshqa xizmatlar (masalan tomosha
+  /// tarixi) server bilan gaplashishi uchun.
+  ///
+  /// Token bu yerdan FAQAT o'qiladi: uni saqlash, yangilash va
+  /// o'chirish mas'uliyati shu klassda qoladi.
+  String? get sessionToken {
+    final s = _session;
+    return (s == null || s.isEmpty) ? null : s;
+  }
+
   /// Ilova ishga tushganda saqlangan hisob o'qib bo'lindimi.
   /// Toki `false` ekan, profil sahifasi hech narsa ko'rsatmaydi —
   /// aks holda kirgan foydalanuvchiga bir zumga "kirish" ekrani

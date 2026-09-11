@@ -487,6 +487,33 @@ fn handle_connection(mut stream: TcpStream) -> std::io::Result<()> {
         return Ok(());
     }
 
+    // ── TOMOSHA TARIXI UCHUN KADR ─────────────────────────────
+    //
+    // "/thumb?u=<url>&ms=<vaqt>" — bitta kadrlik MP4 qaytaradi
+    // (`serve_thumb` izohiga qarang). Oddiy "/v" yo'lidan
+    // BUTUNLAY ajratilgan: "/v" hech qachon tarmoqqa chiqmaydi,
+    // bu esa chiqishi MUMKIN, lekin faqat bir necha yuz kilobayt
+    // oladi va hech narsani diskka yozmaydi.
+    let path_only = parsed
+        .path_and_query
+        .split('?')
+        .next()
+        .unwrap_or("/")
+        .to_string();
+    if path_only == "/thumb" {
+        let ms: u64 = query
+            .split('&')
+            .find_map(|pair| pair.strip_prefix("ms="))
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        log(format!("Kadr so'raldi (#{req_id}): ms={ms}"));
+        if let Err(e) = serve_thumb(&mut stream, &original_url, ms, parsed.range_header.as_deref())
+        {
+            log(format!("XATO (thumb #{req_id}): {e}"));
+        }
+        return Ok(());
+    }
+
     log(format!(
         "So'rov keldi (#{req_id}): Range={}",
         parsed.range_header.as_deref().unwrap_or("(hammasi)")
@@ -609,6 +636,88 @@ fn hash_url(url: &str) -> String {
 // bo'lak doimiy ravishda o'z holicha (mustaqil shifrlangan) saqlanadi
 // — sek qilinganda ham, ketma-ket ijroda ham xizmat aynan shu bo'lak
 // fayllaridan ko'rsatiladi.
+
+// ═══════════════════════════════════════════════════════════════════
+//  KICHIK XIZMAT FAYLLARI HAM SHIFRLANADI
+// ═══════════════════════════════════════════════════════════════════
+//
+// TALAB: ilovaga tegishli BARCHA fayllar shifrlanadi — video
+// bo'laklari allaqachon shifrlangan edi, lekin ular yonidagi kichik
+// xizmat fayllari ochiq yotardi:
+//
+//   * `meta.json`          — qaysi fayl, qanchalik katta, qaysi
+//                            sifatda. Ya'ni foydalanuvchi NIMA
+//                            ko'rganini oshkor qiladi;
+//   * `download_queue.json` — yuklab olinayotgan qismlar ro'yxati;
+//   * `w<N>.warm`          — qaysi oyna qachon isitilgani.
+//
+// Bularning hammasi kichik va HAR DOIM BUTUNLAY o'qiladi, shu sabab
+// video bo'laklaridagi CBC emas, `crypto::seal_blob` (AES-256-GCM)
+// ishlatiladi: u maxfiylikdan tashqari fayl BUZILGANINI ham
+// aniqlaydi.
+//
+// YORLIQ (kalit undan hosil bo'ladi) har bir fayl uchun ALOHIDA va
+// QAT'IY belgilanadi — fayl yo'lidan olinmaydi, chunki papka yo'li
+// ilova yangilanganda o'zgarishi mumkin va o'shanda kalit ham
+// o'zgarib, eski fayllar o'qilmay qolardi.
+//
+// MIGRATSIYA: shifrlashdan OLDIN yozilgan ochiq fayllar ham
+// o'qilaveradi (avval shifr ochishga urinamiz, bo'lmasa oddiy
+// ma'lumot deb qaraymiz). Keyingi yozishda ular o'zi shifrlangan
+// holatga o'tadi — ya'ni yangilanishdan keyin yuklash navbati ham,
+// kesh ham yo'qolmaydi.
+
+/// Shifrlangan (yoki eski — ochiq) kichik faylni o'qiydi.
+fn read_sealed(path: &PathBuf, label: &str) -> Option<Vec<u8>> {
+    let raw = fs::read(path).ok()?;
+    if crypto::is_enabled() {
+        if let Some(plain) = crypto::open_blob(label, &raw) {
+            return Some(plain);
+        }
+    }
+    Some(raw)
+}
+
+/// Kichik faylni shifrlab yozadi (vaqtinchalik fayl + rename, ya'ni
+/// yarim yozilgan fayl hech qachon qolmaydi).
+fn write_sealed(path: &PathBuf, label: &str, plain: &[u8]) -> bool {
+    let bytes: Vec<u8> = if crypto::is_enabled() {
+        match crypto::seal_blob(label, plain) {
+            Some(b) => b,
+            None => return false,
+        }
+    } else {
+        plain.to_vec()
+    };
+    let tmp = path.with_extension("writing");
+    if fs::write(&tmp, &bytes).is_err() {
+        return false;
+    }
+    fs::rename(&tmp, path).is_ok()
+}
+
+/// `meta.json` yorlig'i — papka nomi (ya'ni kesh kaliti) bilan
+/// bog'lanadi, shu sabab har bir videoning meta fayli o'z kaliti
+/// bilan shifrlanadi.
+fn meta_label(dir: &PathBuf) -> String {
+    let key = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    format!("meta:{key}")
+}
+
+fn read_meta(dir: &PathBuf) -> Option<CacheMeta> {
+    let raw = read_sealed(&dir.join("meta.json"), &meta_label(dir))?;
+    serde_json::from_slice::<CacheMeta>(&raw).ok()
+}
+
+fn write_meta(dir: &PathBuf, meta: &CacheMeta) -> bool {
+    let Ok(json) = serde_json::to_string(meta) else {
+        return false;
+    };
+    write_sealed(&dir.join("meta.json"), &meta_label(dir), json.as_bytes())
+}
 
 fn chunk_name(index: u64) -> String {
     format!("chunk_{index:07}.bin")
@@ -801,20 +910,17 @@ struct CacheMeta {
 }
 
 fn ensure_meta(shared: &Shared, dir: &PathBuf, url: &str) -> Result<CacheMeta, String> {
-    let meta_path = dir.join("meta.json");
-    if let Ok(raw) = fs::read_to_string(&meta_path) {
-        if let Ok(meta) = serde_json::from_str::<CacheMeta>(&raw) {
-            if meta.total_size > 0 && meta.chunk_size == CHUNK_SIZE {
-                log(format!("meta.json diskdan o'qildi: hajm={}", meta.total_size));
-                return Ok(meta);
-            }
-            if meta.total_size > 0 {
-                log(format!(
-                    "Kesh eskirgan (bo'lak o'lchami {} != {CHUNK_SIZE}) — tozalanmoqda",
-                    meta.chunk_size
-                ));
-                invalidate_cache(dir);
-            }
+    if let Some(meta) = read_meta(dir) {
+        if meta.total_size > 0 && meta.chunk_size == CHUNK_SIZE {
+            log(format!("meta.json diskdan o'qildi: hajm={}", meta.total_size));
+            return Ok(meta);
+        }
+        if meta.total_size > 0 {
+            log(format!(
+                "Kesh eskirgan (bo'lak o'lchami {} != {CHUNK_SIZE}) — tozalanmoqda",
+                meta.chunk_size
+            ));
+            invalidate_cache(dir);
         }
     }
 
@@ -886,9 +992,7 @@ fn ensure_meta(shared: &Shared, dir: &PathBuf, url: &str) -> Result<CacheMeta, S
         duration_secs: 0.0,
         chunk_start_ms: Vec::new(),
     };
-    if let Ok(json) = serde_json::to_string(&meta) {
-        let _ = fs::write(&meta_path, json);
-    }
+    write_meta(dir, &meta);
     Ok(meta)
 }
 
@@ -1065,11 +1169,8 @@ fn chunk_plain_len(index: u64, total: u64) -> u64 {
 }
 
 fn meta_total_from_disk(dir: &PathBuf) -> u64 {
-    let Ok(raw) = fs::read_to_string(dir.join("meta.json")) else {
-        return 0;
-    };
-    match serde_json::from_str::<CacheMeta>(&raw) {
-        Ok(m) if m.chunk_size == CHUNK_SIZE => m.total_size,
+    match read_meta(dir) {
+        Some(m) if m.chunk_size == CHUNK_SIZE => m.total_size,
         _ => 0,
     }
 }
@@ -1546,24 +1647,18 @@ fn save_queue_locked(map: &HashMap<String, DownloadState>) {
         .filter(|s| s.wanted)
         .map(|s| s.url.as_str())
         .collect();
-    match serde_json::to_string(&urls) {
-        Ok(json) => {
-            let tmp = path.with_extension("tmp");
-            if fs::write(&tmp, json).is_ok() {
-                let _ = fs::rename(&tmp, &path);
-            }
-        }
-        Err(_) => {}
+    if let Ok(json) = serde_json::to_string(&urls) {
+        write_sealed(&path, "download-queue", json.as_bytes());
     }
 }
 
 /// Diskdagi navbatni o'qib, yuklashlarni qaytadan boshlaydi.
 fn restore_queue() {
     let Some(path) = queue_path() else { return };
-    let Ok(text) = fs::read_to_string(&path) else {
+    let Some(raw) = read_sealed(&path, "download-queue") else {
         return;
     };
-    let Ok(urls) = serde_json::from_str::<Vec<String>>(&text) else {
+    let Ok(urls) = serde_json::from_slice::<Vec<String>>(&raw) else {
         return;
     };
     if urls.is_empty() {
@@ -2935,7 +3030,12 @@ fn write_warm_marker(key: &str, widx: u64) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let _ = fs::write(&path, unix_now().to_string());
+    write_sealed(&path, &warm_label(key, widx), unix_now().to_string().as_bytes());
+}
+
+/// Isitish belgisining shifrlash yorlig'i.
+fn warm_label(key: &str, widx: u64) -> String {
+    format!("warm:{key}:{widx}")
 }
 
 /// Belgi bor va hali eskirmaganmi.
@@ -2943,10 +3043,10 @@ fn warm_marker_fresh(key: &str, widx: u64) -> bool {
     let Some(path) = warm_marker_path(key, widx) else {
         return false;
     };
-    let Ok(text) = fs::read_to_string(&path) else {
+    let Some(raw) = read_sealed(&path, &warm_label(key, widx)) else {
         return false;
     };
-    let Ok(at) = text.trim().parse::<u64>() else {
+    let Ok(at) = String::from_utf8_lossy(&raw).trim().parse::<u64>() else {
         return false;
     };
     let now = unix_now();
@@ -3079,9 +3179,7 @@ fn start_prepare(url: &str) -> bool {
                     duration_secs: 0.0,
                     chunk_start_ms: Vec::new(),
                 };
-                if let Ok(json) = serde_json::to_string(&meta) {
-                    let _ = fs::write(dir.join("meta.json"), json);
-                }
+                write_meta(&dir, &meta);
                 log(format!("Tayyorlash: hajm aniqlandi — {total} bayt"));
             }
 
@@ -3347,9 +3445,7 @@ fn warm_window_bg(url: &str, widx: u64) -> bool {
                             duration_secs: 0.0,
                             chunk_start_ms: Vec::new(),
                         };
-                        if let Ok(json) = serde_json::to_string(&meta) {
-                            let _ = fs::write(dir.join("meta.json"), json);
-                        }
+                        write_meta(&dir, &meta);
                     }
                 }
             }
@@ -3914,6 +4010,317 @@ pub extern "C" fn rust_video_cache_set_position(
     1
 }
 
+// ═══════════════════════════════════════════════════════════════════
+//  TOMOSHA TARIXI UCHUN KADR ("/thumb")
+// ═══════════════════════════════════════════════════════════════════
+//
+// Tarixdagi har bir qism foydalanuvchi TO'XTAGAN JOYDAGI kadr bilan
+// ko'rsatiladi. Butun epizodni (100-500 MB) shuning uchun yuklab
+// olish mantiqsiz, shu sabab bu yo'l:
+//
+//   1. `moov` atomini o'qiydi (ichida "qaysi soniya qaysi baytda"
+//      jadvali bor) — odatda 0,2-0,8 MB;
+//   2. kerakli soniyadan oldingi KALIT KADRni topadi va faqat
+//      o'shani oladi — 50-300 KB;
+//   3. shu kadrdan bitta kadrlik, to'la haqiqiy MP4 yasaydi
+//      (`mp4::build_single_frame_mp4`) va shuni qaytaradi.
+//
+// Dart tomoni bu manzilni Android'ning kadr ajratuvchisiga beradi va
+// undan JPEG oladi. Yasalgan MP4 DISKKA UMUMAN YOZILMAYDI — u
+// xotirada turadi va qisqa muddatdan keyin o'zi o'chadi.
+//
+// ── "/v" DAN FARQI ────────────────────────────────────────────────
+//
+// Mahalliy server (`serve`) TARMOQQA UMUMAN CHIQMAYDI — bu loyihaning
+// asosiy qoidasi: "videoni ko'rish" hech qachon "yuklab olish"ga
+// aylanmasligi kerak. Bu yo'l esa ATAYLAB alohida: u tarmoqqa
+// chiqishi mumkin, lekin FAQAT bir necha yuz kilobayt oladi va
+// bo'laklarni diskka yozmaydi. Ikkovini bir joyga qo'shmang.
+
+/// Tarmoqdan olingan baytlarni umumiy hisobga qo'shadi.
+///
+/// Kadr olish ham shu hisobga kiradi — foydalanuvchi trafigi
+/// SHAFFOF bo'lishi kerak, "qayerdandir yo'qolgan MB" bo'lmasin.
+fn note_net_bytes(key: &str, bytes: u64) {
+    if bytes == 0 {
+        return;
+    }
+    NET_BYTES.fetch_add(bytes, Ordering::Relaxed);
+    if let Some(shared) = SHARED.get() {
+        if let Ok(mut m) = shared.net_by_file.lock() {
+            *m.entry(key.to_string()).or_insert(0) += bytes;
+        }
+    }
+}
+
+/// Kadr uchun baytlarni o'qish: avval diskdan, bo'lmasa tarmoqdan.
+struct ThumbReader<'a> {
+    shared: &'a Shared,
+    dir: PathBuf,
+    key: String,
+    url: String,
+    total: u64,
+}
+
+impl ThumbReader<'_> {
+    fn read(&self, start: u64, len: u64) -> Option<Vec<u8>> {
+        if len == 0 || start >= self.total {
+            return None;
+        }
+        let len = len.min(self.total - start);
+        if let Some(v) = self.read_from_disk(start, len) {
+            return Some(v);
+        }
+        self.read_from_net(start, len)
+    }
+
+    /// Kerakli baytlar TO'LIQ keshda bo'lsa — tarmoqqa umuman
+    /// chiqilmaydi (yuklab olingan qismlarda thumbnail bepul).
+    fn read_from_disk(&self, start: u64, len: u64) -> Option<Vec<u8>> {
+        let first = start / CHUNK_SIZE;
+        let last = (start + len - 1) / CHUNK_SIZE;
+        let mut out = Vec::with_capacity(len as usize);
+        for i in first..=last {
+            let plain_len = chunk_plain_len(i, self.total);
+            if plain_len == 0 {
+                return None;
+            }
+            let chunk = read_cached_chunk(&self.dir, &self.key, i, plain_len as usize)?;
+            let chunk_start = i * CHUNK_SIZE;
+            let chunk_end = chunk_start + plain_len;
+            let from = start.max(chunk_start) - chunk_start;
+            let to = (start + len).min(chunk_end) - chunk_start;
+            if from >= to || to > chunk.len() as u64 {
+                return None;
+            }
+            out.extend_from_slice(&chunk[from as usize..to as usize]);
+        }
+        if out.len() as u64 == len {
+            Some(out)
+        } else {
+            None
+        }
+    }
+
+    fn read_from_net(&self, start: u64, len: u64) -> Option<Vec<u8>> {
+        let end = start + len - 1;
+        let resp = self
+            .shared
+            .agent
+            .get(&self.url)
+            .set("Range", &format!("bytes={start}-{end}"))
+            .call()
+            .ok()?;
+        // Manba Range'ni e'tiborsiz qoldirib BUTUN faylni
+        // yuborayotgan bo'lsa (status 200), boshidan boshqa hech
+        // qayerni o'qib bo'lmaydi — bunday javobni qabul qilmaymiz,
+        // aks holda noto'g'ri baytdan "kadr" yasab qo'yardik.
+        if resp.status() != 206 && start != 0 {
+            return None;
+        }
+        let mut buf = Vec::with_capacity(len as usize);
+        resp.into_reader()
+            .take(len)
+            .read_to_end(&mut buf)
+            .ok()?;
+        note_net_bytes(&self.key, buf.len() as u64);
+        if buf.len() as u64 == len {
+            Some(buf)
+        } else {
+            None
+        }
+    }
+}
+
+/// Faylning yuqori darajadagi atomlarini kezib `moov` ni topadi.
+///
+/// Faqat 16 baytlik SARLAVHALAR o'qiladi, ya'ni `mdat` (butun video)
+/// ustidan sakrab o'tiladi va uning birorta bayti ham olinmaydi.
+/// Shu sabab `moov` faylning oxirida turgan taqdirda ham (faststart
+/// qilinmagan fayllar) bu yo'l ishlaydi.
+fn find_moov(reader: &ThumbReader) -> Option<Vec<u8>> {
+    /// Himoya: buzilgan faylda cheksiz aylanib qolmaslik uchun.
+    const MAX_BOXES: usize = 64;
+    /// `moov` odatda 1 MB atrofida; 32 MB dan kattasi shubhali.
+    const MAX_MOOV: u64 = 32 * 1024 * 1024;
+
+    let mut at: u64 = 0;
+    for _ in 0..MAX_BOXES {
+        if at + 8 > reader.total {
+            return None;
+        }
+        let head = reader.read(at, 16.min(reader.total - at))?;
+        let (body_in_head, raw_len, kind) = crate::mp4::box_header(&head, 0)?;
+        let body_start = at + body_in_head as u64;
+        if body_start > reader.total {
+            return None;
+        }
+        let body_len = if raw_len == u64::MAX {
+            reader.total - body_start
+        } else {
+            raw_len
+        };
+        if &kind == b"moov" {
+            if body_len == 0 || body_len > MAX_MOOV {
+                return None;
+            }
+            return reader.read(body_start, body_len);
+        }
+        let next = body_start.checked_add(body_len)?;
+        if next <= at {
+            return None;
+        }
+        at = next;
+    }
+    None
+}
+
+/// Oxirgi yasalgan kadr — xotirada, qisqa muddatga.
+///
+/// NEGA KERAK: Android'ning kadr ajratuvchisi bitta manzilni bir
+/// necha marta ochishi mumkin (avval metadata, keyin kadrning o'zi).
+/// Saqlanmasa, har safar `moov` qaytadan yuklanardi. Bitta yozuv
+/// yetarli — ro'yxat qatorlari birin-ketin so'raydi.
+static LAST_THUMB: Mutex<Option<(String, Vec<u8>, Instant)>> = Mutex::new(None);
+const THUMB_MEMO_SECS: u64 = 60;
+
+fn thumb_from_memo(tag: &str) -> Option<Vec<u8>> {
+    let guard = LAST_THUMB.lock().ok()?;
+    let (saved_tag, bytes, at) = guard.as_ref()?;
+    if saved_tag == tag && at.elapsed().as_secs() <= THUMB_MEMO_SECS {
+        return Some(bytes.clone());
+    }
+    None
+}
+
+fn thumb_to_memo(tag: &str, bytes: &[u8]) {
+    if let Ok(mut guard) = LAST_THUMB.lock() {
+        *guard = Some((tag.to_string(), bytes.to_vec(), Instant::now()));
+    }
+}
+
+fn serve_thumb(
+    stream: &mut TcpStream,
+    url: &str,
+    ms: u64,
+    range_header: Option<&str>,
+) -> std::io::Result<()> {
+    let not_found = |stream: &mut TcpStream| -> std::io::Result<()> {
+        write_status_and_headers(stream, 404, "Not Found", &[])
+    };
+
+    let Some(shared) = SHARED.get() else {
+        return not_found(stream);
+    };
+    let key = cache_key(url);
+    let tag = format!("{key}|{ms}");
+
+    let body = match thumb_from_memo(&tag) {
+        Some(cached) => cached,
+        None => {
+            let dir = shared.cache_root.join(&key);
+            let _ = fs::create_dir_all(&dir);
+
+            // Hajm: avval diskdan, bo'lmasa bitta kichik so'rov bilan.
+            let mut total = meta_total_from_disk(&dir);
+            if total == 0 {
+                total = ensure_meta(shared, &dir, url)
+                    .map(|m| m.total_size)
+                    .unwrap_or(0);
+            }
+            if total == 0 {
+                log("Kadr: hajm aniqlanmadi".to_string());
+                return not_found(stream);
+            }
+
+            let reader = ThumbReader {
+                shared,
+                dir,
+                key: key.clone(),
+                url: url.to_string(),
+                total,
+            };
+
+            // Har bir qadamda "bo'lmasa 404" — foydalanuvchi
+            // posterni ko'radi, ilova esa hech qachon yiqilmaydi.
+            let Some(moov) = find_moov(&reader) else {
+                log("Kadr: moov topilmadi".to_string());
+                return not_found(stream);
+            };
+            let Some(track) = crate::mp4::parse_moov(&moov) else {
+                log("Kadr: video yo'lakcha o'qilmadi".to_string());
+                return not_found(stream);
+            };
+            let sample = track.sync_at_or_before(track.sample_at_ms(ms));
+            let Some(loc) = track.locate(sample) else {
+                log("Kadr: namuna o'rni topilmadi".to_string());
+                return not_found(stream);
+            };
+            // Bitta kadr 32 MB bo'lishi mumkin emas — bunday son
+            // faqat buzilgan jadvaldan chiqadi.
+            if loc.size == 0 || loc.size as u64 > 32 * 1024 * 1024 {
+                return not_found(stream);
+            }
+            let Some(data) = reader.read(loc.offset, loc.size as u64) else {
+                log("Kadr: baytlar olinmadi".to_string());
+                return not_found(stream);
+            };
+            let Some(built) = crate::mp4::build_single_frame_mp4(&track, sample, &data) else {
+                return not_found(stream);
+            };
+            log(format!(
+                "Kadr tayyor: namuna #{sample}, {} bayt",
+                built.len()
+            ));
+            thumb_to_memo(&tag, &built);
+            built
+        }
+    };
+
+    // Kadr ajratuvchi ko'pincha Range bilan so'raydi — qo'llab
+    // quvvatlaymiz (javob baribir xotirada, kesish arzon).
+    let total = body.len() as u64;
+    let (start, end, is_range) = match range_header {
+        Some(h) if h.starts_with("bytes=") => {
+            let spec = &h[6..];
+            let (s_str, e_str) = spec.split_once('-').unwrap_or((spec, ""));
+            let s: u64 = s_str.parse().unwrap_or(0);
+            let e: u64 = if e_str.is_empty() {
+                total - 1
+            } else {
+                e_str.parse().unwrap_or(total - 1)
+            };
+            (s, e.min(total - 1), true)
+        }
+        _ => (0, total.saturating_sub(1), false),
+    };
+    if start > end || start >= total {
+        return write_status_and_headers(
+            stream,
+            416,
+            "Range Not Satisfiable",
+            &[("Content-Range", format!("bytes */{total}"))],
+        );
+    }
+
+    let slice = &body[start as usize..=end as usize];
+    let mut headers: Vec<(&str, String)> = vec![
+        ("Content-Type", "video/mp4".to_string()),
+        ("Content-Length", slice.len().to_string()),
+        ("Accept-Ranges", "bytes".to_string()),
+    ];
+    if is_range {
+        headers.push(("Content-Range", format!("bytes {start}-{end}/{total}")));
+    }
+    write_status_and_headers(
+        stream,
+        if is_range { 206 } else { 200 },
+        if is_range { "Partial Content" } else { "OK" },
+        &headers,
+    )?;
+    stream.write_all(slice)
+}
+
 // ── Asosiy servis funksiyasi: Range'ni tahlil qilib, javobni yozadi ──
 
 fn serve(stream: &mut TcpStream, url: &str, range_header: Option<&str>) -> std::io::Result<()> {
@@ -4179,6 +4586,67 @@ mod tests {
         assert!(crypto::set_master_key_hex(
             "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
         ));
+    }
+
+    /// XIZMAT FAYLLARI DISKDA OCHIQ YOTMASLIGI KERAK.
+    ///
+    /// `meta.json` foydalanuvchi NIMA ko'rganini oshkor qiladi
+    /// (fayl nomida sifat va epizod raqami bor), shu sabab u ham
+    /// shifrlanadi. Bu test ikki narsani qo'riqlaydi:
+    ///
+    ///   1) diskdagi baytlarda ochiq matn (`total_size`) YO'Q;
+    ///   2) yozilgan ma'lumot qaytib o'qilganda aynan o'zi chiqadi.
+    ///
+    /// Ustiga migratsiya ham tekshiriladi: shifrlashdan OLDIN
+    /// yozilgan ochiq fayl ham o'qilishi kerak — aks holda
+    /// yangilanishdan keyin foydalanuvchining keshi yo'qolardi.
+    #[test]
+    fn xizmat_fayllari_shifrlangan_holda_yoziladi() {
+        enable_crypto();
+        let dir = std::env::temp_dir().join(format!(
+            "aru_meta_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+
+        let meta = CacheMeta {
+            total_size: 123_456_789,
+            content_type: "video/mp4".to_string(),
+            chunk_size: CHUNK_SIZE,
+            duration_secs: 0.0,
+            chunk_start_ms: Vec::new(),
+        };
+        assert!(write_meta(&dir, &meta), "meta yozilmadi");
+
+        let raw = fs::read(dir.join("meta.json")).unwrap();
+        assert!(
+            !raw.windows(10).any(|w| w == b"total_size"),
+            "meta.json diskda OCHIQ yotibdi"
+        );
+        assert!(
+            !raw.windows(9).any(|w| w == b"123456789"),
+            "hajm diskda ochiq ko'rinib turibdi"
+        );
+
+        let back = read_meta(&dir).expect("meta o'qilmadi");
+        assert_eq!(back.total_size, 123_456_789);
+        assert_eq!(back.chunk_size, CHUNK_SIZE);
+        assert_eq!(meta_total_from_disk(&dir), 123_456_789);
+
+        // Migratsiya: eski (ochiq) fayl ham o'qilaveradi.
+        fs::write(
+            dir.join("meta.json"),
+            format!(
+                "{{\"total_size\":777,\"content_type\":\"video/mp4\",\"chunk_size\":{CHUNK_SIZE}}}"
+            ),
+        )
+        .unwrap();
+        assert_eq!(meta_total_from_disk(&dir), 777, "eski ochiq fayl o'qilmadi");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     fn fill_cache(root: &PathBuf, skip: Option<u64>) {

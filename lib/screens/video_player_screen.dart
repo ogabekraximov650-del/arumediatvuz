@@ -118,6 +118,7 @@ import 'package:video_player/video_player.dart';
 import '../services/download_manager.dart';
 import '../services/rust_bridge.dart';
 import '../services/video_cache_server.dart';
+import '../services/watch_history.dart';
 import '../services/watch_progress.dart';
 import '../theme/app_background.dart';
 import '../widgets/glass.dart';
@@ -302,6 +303,10 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    // Tarixga BITTA so'rov aynan shu yerda ketadi. Javob
+    // kutilmaydi: ekran allaqachon yopilyapti, yozuv esa
+    // yuborilmasa navbatga tushadi va keyin o'zi yuboriladi.
+    unawaited(WatchHistory.instance.flush());
     _connSub?.cancel();
     // Surish o'rtasida ekran yopilsa, to'xtatish osilib qolmasin.
     _releaseDownloadUpdates();
@@ -332,6 +337,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive) {
       _controller?.pause();
+      // Ilova fonda o'chib ketishi mumkin — tarix yozuvi
+      // yo'qolmasin.
+      unawaited(WatchHistory.instance.flush());
     }
   }
 
@@ -637,6 +645,21 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // controllerini o'chirib yuborib, "epizod almashtirganda ekran
     // qora bo'lib qoldi" holatini keltirib chiqarardi).
     final myToken = ++_playToken;
+
+    // ── TOMOSHA TARIXI ────────────────────────────────────────
+    //
+    // Bu yerda serverga HECH NARSA yuborilmaydi — faqat "hozir shu
+    // qism ochildi" deb xotirada belgilanadi. Serverga bitta so'rov
+    // pleyerdan chiqilganda (yoki qism almashganda) ketadi:
+    // `WatchHistory.flush()`.
+    WatchHistory.instance.startEpisode(
+      animeId: int.tryParse(widget.season['anime_id']?.toString() ?? '') ?? 0,
+      seasonId: int.tryParse(widget.season['season_id']?.toString() ?? '') ?? 0,
+      epizodNumber:
+          int.tryParse(ep['epizod_number']?.toString() ?? '') ?? 0,
+      videoUrl: url,
+    );
+
     setState(() {
       _currentEp = ep;
       _currentUrl = url;
@@ -1429,6 +1452,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       if (DateTime.now().difference(_lastProgressSave).inMilliseconds >= 1000) {
         _lastProgressSave = DateTime.now();
         WatchProgress.instance.save(_currentUrl, v.position, v.duration);
+        // Tarix uchun ham eslab qo'yiladi — bu ham faqat XOTIRAGA,
+        // serverga emas.
+        WatchHistory.instance.note(v.position, v.duration);
       }
 
       // ── ERTA UZILGAN OQIM: QAYTA OCHISHNI TAKRORLASH ─────────

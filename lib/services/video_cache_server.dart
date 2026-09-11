@@ -77,6 +77,22 @@ class VideoCacheServer {
         'http://127.0.0.1:$port/v?u=${Uri.encodeQueryComponent(originalUrl)}');
   }
 
+  /// TOMOSHA TARIXI UCHUN KADR MANZILI.
+  ///
+  /// Rust yadrosi bu manzilda faylning faqat KERAKLI baytlarini
+  /// (`moov` + bitta kalit kadr) olib, bitta kadrlik MP4 yasab
+  /// beradi. Android'ning kadr ajratuvchisi shundan JPEG chiqaradi.
+  ///
+  /// Oddiy ijro manzilidan (`/v`) BUTUNLAY alohida: `/v` hech
+  /// qachon tarmoqqa chiqmaydi, bu esa chiqishi mumkin — lekin
+  /// atigi bir necha yuz kilobayt oladi va hech narsani diskka
+  /// yozmaydi.
+  Future<Uri> thumbUri(String originalUrl, int positionMs) async {
+    final port = await _ensureStarted().timeout(const Duration(seconds: 5));
+    final u = Uri.encodeQueryComponent(originalUrl);
+    return Uri.parse('http://127.0.0.1:$port/thumb?u=$u&ms=$positionMs');
+  }
+
   Future<int> _ensureStarted() {
     if (_port != null) return Future.value(_port);
     if (_starting != null) return _starting!;

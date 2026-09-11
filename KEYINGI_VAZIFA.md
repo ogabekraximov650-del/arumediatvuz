@@ -138,6 +138,119 @@ Egri chiziq — `Curves.easeInOutSine`. `easeInOutCubic` sinab
 ko'rilgan edi: u o'rtasida o'rtacha tezlikdan IKKI BAROBAR tez
 ketardi va aynan shu "uchib o'tdi" hissini bergan.
 
+## HAMMA FAYL SHIFRLANADI
+
+Talab: ilovaga tegishli **barcha** fayllar shifrlangan bo'lsin.
+Rasm keshi (`cached_network_image`) bundan mustasno — foydalanuvchi
+uni shart emas dedi.
+
+| Fayl | Usul |
+|---|---|
+| Video bo'laklari | AES-128-CBC (bo'lak darajasida) |
+| Ro'yxat keshi, kirish tokeni | AES-256-GCM |
+| `meta.json` | AES-256-GCM (`read_meta` / `write_meta`) |
+| `download_queue.json` | AES-256-GCM (`read_sealed` / `write_sealed`) |
+| `w<N>.warm` belgilari | AES-256-GCM |
+| Tarix kadrlari (JPEG) | AES-256-GCM (`secureSave`, base64) |
+
+Yangi kichik fayl qo'shsangiz — `read_sealed` / `write_sealed` dan
+foydalaning, `fs::write` ni to'g'ridan-to'g'ri ishlatmang.
+
+**Yorliq (label) qat'iy belgilanadi**, fayl yo'lidan olinmaydi:
+papka yo'li ilova yangilanganda o'zgarishi mumkin va o'shanda kalit
+ham o'zgarib, eski fayllar o'qilmay qolardi.
+
+**Migratsiya**: shifrlashdan oldin yozilgan ochiq fayllar ham
+o'qilaveradi (avval shifr ochishga urinamiz, bo'lmasa oddiy
+ma'lumot deb qaraymiz). Keyingi yozishda ular o'zi shifrlangan
+holatga o'tadi.
+
+## TOMOSHA TARIXI
+
+### Qayerda saqlanadi
+
+**Asosiy manba — Turso.** Mahalliy nusxa FAQAT oflayn uchun
+(foydalanuvchi talabi: "to'g'ridan-to'g'ri Turso bilan ishlasin,
+iloji boricha kamroq so'rov bilan").
+
+Jadval `watch_history_db`: `user_id + anime_id + season_id +
+epizod_number` birlamchi kalit, ya'ni bitta qism uchun HAR DOIM
+bitta qator. `(user_id, updated_at DESC)` indeksi — ro'yxat aynan
+shu tartibda so'raladi.
+
+### So'rovlar soni — buzmang
+
+| Qachon | Nechta so'rov |
+|---|---|
+| Pleyerdan chiqilganda / qism almashganda / ilova fonga ketganda | **1 ta** `POST /api/history` |
+| Kutubxona tugmasi bosilganda | **1 ta** `GET /api/history` |
+
+To'xtagan joy har soniya eslab qolinadi, lekin u FAQAT telefon
+xotirasiga yoziladi (`WatchProgress`) — serverga emas.
+
+`GET` javobi ro'yxat uchun kerak bo'lgan hamma narsani bir yo'la
+beradi (anime nomi, posteri, bo'lim raqami), ya'ni qo'shimcha
+so'rov yo'q. Ro'yxat **60 soniya** xotirada "yangi" hisoblanadi.
+
+**Yuklash `HistoryTab` ning `initState` ida EMAS**: Kutubxona
+sahifasi ilova ochilganda birga quriladi (`IndexedStack`), shu
+sabab u yerda yuklasak foydalanuvchi kutubxonani ochmasa ham
+so'rov ketardi. Yuklash `RootScreen._onTabTap` da — tugma
+bosilganda.
+
+**Oflayn**: yuborib bo'lmagan yozuv shifrlangan navbatga
+(`watch_history_outbox_<user>`) tushadi va keyingi yuklashda
+yuboriladi. O'qib bo'lmasa — oxirgi olingan ro'yxat ko'rsatiladi.
+Kalitlar HAR BIR HISOB UCHUN ALOHIDA: bitta telefondan ikki kishi
+kirsa, biri ikkinchisining tarixini ko'rmaydi.
+
+### To'xtagan joydagi kadr
+
+`rust/src/mp4.rs` — MP4 konteyneridan BITTA kadr ajratib oladi;
+`video_cache.rs` dagi `/thumb?u=<url>&ms=<vaqt>` yo'li uni xizmat
+qiladi:
+
+1. yuqori darajadagi atomlar kezilib `moov` topiladi — faqat
+   16 baytlik sarlavhalar o'qiladi, ya'ni `mdat` (butun video)
+   ustidan sakrab o'tiladi;
+2. `stts`/`stss`/`stsc`/`stsz`/`stco` jadvallaridan kerakli
+   soniyaning KALIT KADRI topiladi;
+3. faqat o'sha kadr olinadi (diskdan — bepul, yoki tarmoqdan —
+   50-300 KB);
+4. `build_single_frame_mp4` bitta kadrlik to'la haqiqiy MP4
+   yasaydi (`stsd` asl fayldan AYNAN ko'chiriladi — busiz dekoder
+   kadrni ocholmaydi);
+5. natija xotirada 60 soniya turadi va o'zi o'chadi — diskka
+   YOZILMAYDI.
+
+Dart tomoni (`WatchHistory.thumbnail`) bu manzilni
+`video_thumbnail` paketiga beradi, u telefonning APPARAT dekoderi
+bilan JPEG chiqaradi. JPEG shifrlangan holda saqlanadi va qism
+oldinga surilsa eskisi o'chiriladi.
+
+**Kadrni Rust dekodlamaydi va dekodlamasin**: H.264/H.265
+dekoderi sof Rust'da yo'q, C kutubxonasi esa APK'ni bir necha MB
+kattalashtiradi va loyihaning "faqat sof Rust" qoidasini buzadi.
+
+**`/thumb` va `/v` ni bir joyga qo'shmang**: `/v` (ijro) tarmoqqa
+UMUMAN chiqmaydi — bu loyihaning asosiy qoidasi. `/thumb` esa
+chiqishi mumkin, lekin faqat bir necha yuz kilobayt oladi va
+bo'laklarni diskka yozmaydi.
+
+Har bir qadamda xato bo'lsa 404 qaytadi va ilova posterni
+ko'rsatadi — hech qachon yiqilmaydi.
+
+### Kutubxona sahifasi
+
+Uchta oyna: **Tarix** (ishlaydi), **Sevimlilar** va
+**Yuklanmalar** (hozircha bo'sh — keyingi vazifa).
+
+Tarix ichida "Anime bo'yicha" va "Qism bo'yicha". Qism qatori —
+16:9 kadr, pastida progress chizig'i, o'ng tomonda kichik
+yozuvlar. **Kadr ustiga qorayish (scrim) TUSHMAYDI** — foydalanuvchi
+rasm tiniq ko'rinishini so'ragan; o'qilishi yozuvning O'Z qora
+soyasi bilan ta'minlanadi.
+
 ## Tekshiruv (har bir o'zgarishdan keyin)
 
 ```

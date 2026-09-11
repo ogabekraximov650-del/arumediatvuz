@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import '../services/auth_service.dart';
+import '../services/watch_history.dart';
 import '../theme/app_background.dart';
 import '../widgets/glass.dart';
 import 'home_screen.dart';
@@ -187,11 +188,26 @@ class _RootScreenState extends State<RootScreen>
     _navPos.value = _navFrom + (_navTo - _navFrom) * e;
   }
 
+  /// Kutubxona nechanchi tugma (tomosha tarixi shu yerda).
+  static const int _libraryTab = 3;
+
   void _onTabTap(int i) {
     if (i == _index) return;
 
     // ── 1. SAHIFA DARHOL ALMASHADI ──────────────────────────
     setState(() => _index = i);
+
+    // ── TOMOSHA TARIXI AYNAN SHU YERDA YUKLANADI ────────────
+    //
+    // Kutubxona sahifasi ilova ochilganda birga quriladi, shu
+    // sabab uning o'zida yuklab bo'lmaydi — foydalanuvchi
+    // kutubxonani ochmasa ham serverga so'rov ketardi. Bu yerda
+    // esa so'rov faqat tugma BOSILGANDA ketadi va ro'yxat 60
+    // soniya "yangi" hisoblangani uchun ketma-ket ochishlarda
+    // takrorlanmaydi.
+    if (i == _libraryTab) {
+      WatchHistory.instance.load();
+    }
 
     // ── 2. TUGMA ESA SEKIN SUZIB BORADI ─────────────────────
     //

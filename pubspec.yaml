@@ -42,6 +42,13 @@ dependencies:
   # Sessiyalar jurnalidagi "qaysi qurilma bilan kirgan" ustunini
   # to'ldirish uchun (brend + model + Android versiyasi).
   device_info_plus: ^11.1.0
+  # ── TOMOSHA TARIXI UCHUN KADR ────────────────────────────────
+  # Videodan kadr olishni Flutter uddalay olmaydi (rasm GPU
+  # qatlamida chiziladi), bu paket esa telefonning O'Z apparat
+  # dekoderiga murojaat qiladi. Unga butun fayl kerak emas: Rust
+  # yadrosi "/thumb" yo'lida bitta kadrlik kichkina MP4 yasab
+  # beradi (rust/src/mp4.rs) va paket shundan JPEG chiqaradi.
+  video_thumbnail: ^0.5.3
   # ── QAYSI TELEGRAM BILAN KIRISH ──────────────────────────────
   # Telefonda bir nechta Telegram bo'lishi mumkin (Telegram,
   # Telegram X, Plus Messenger...). `url_launcher` havolani

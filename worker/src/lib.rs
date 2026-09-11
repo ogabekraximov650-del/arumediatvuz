@@ -311,6 +311,30 @@ async fn init_db(env: &Env) {
         ("CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_token ON sessions_db(session_token)", vec![]),
         ("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions_db(user_id, last_seen_at)", vec![]),
 
+        // ── TOMOSHA TARIXI ────────────────────────────────
+        //
+        // Har bir foydalanuvchi uchun "qaysi qismni qayerda
+        // to'xtatgan" yozuvi. Kalit — foydalanuvchi + anime +
+        // bo'lim + qism, ya'ni bitta qism uchun HAR DOIM bitta
+        // qator bo'ladi va qayta ko'rilganda o'sha qator
+        // yangilanadi (yangi qator qo'shilmaydi).
+        //
+        // `updated_at` bo'yicha indeks — ro'yxat aynan shu tartibda
+        // (oxirgi ko'rilgani birinchi) so'raladi.
+        ("CREATE TABLE IF NOT EXISTS watch_history_db (
+            user_id INTEGER,
+            anime_id INTEGER,
+            season_id INTEGER,
+            epizod_number INTEGER,
+            video_url TEXT,
+            position_ms INTEGER,
+            duration_ms INTEGER,
+            updated_at INTEGER,
+            PRIMARY KEY (user_id, anime_id, season_id, epizod_number)
+        )", vec![]),
+        ("CREATE INDEX IF NOT EXISTS idx_history_user
+            ON watch_history_db(user_id, updated_at DESC)", vec![]),
+
         // Worker ichki sozlamalari (webhook siri va manzili).
         ("CREATE TABLE IF NOT EXISTS app_config (
             cfg_key TEXT PRIMARY KEY,
@@ -2815,6 +2839,132 @@ async fn handle_tg_webhook(env: &Env, mut req: Request) -> Result<Response> {
     ok(json!({"ok": true}))
 }
 
+// ═══════════════════════════════════════════════════════════════
+//  TOMOSHA TARIXI
+// ═══════════════════════════════════════════════════════════════
+//
+// ── NEGA SO'ROVLAR SHUNCHALIK KAM ─────────────────────────────
+//
+// Pleyer to'xtagan joyni HAR SONIYA eslab qoladi, lekin bu faqat
+// telefon xotirasiga yoziladi. Serverga esa atigi IKKI holatda
+// murojaat qilinadi:
+//
+//   * qism ko'rib bo'lingach yoki pleyerdan chiqilganda —
+//     BITTA `POST` (bir marta ko'rish = bitta yozuv);
+//   * tarix sahifasi ochilganda — BITTA `GET`.
+//
+// Ya'ni bir soatlik tomosha ham bazaga bir necha yozuvdan ortiq
+// yuk bermaydi.
+//
+// `GET` javobi ro'yxat uchun kerak bo'lgan HAMMA narsani bir
+// yo'la qaytaradi (anime nomi, posteri, bo'lim raqami) — ilova
+// qo'shimcha so'rov qilmaydi.
+async fn history_route(
+    req: Request,
+    env: &Env,
+    path: &str,
+    method: Method,
+) -> Result<Response> {
+    let Some(u) = session_user(env, &bearer(&req)).await? else {
+        return json_resp(&json!({"error": "unauthorized"}), 401);
+    };
+    let me = u["id"].as_i64().unwrap_or(0);
+
+    match (method, path) {
+        // ── RO'YXAT ────────────────────────────────────────────
+        (Method::Get, "/api/history") => {
+            let res = turso_exec(env,
+                "SELECT h.anime_id, h.season_id, h.epizod_number, h.video_url,
+                        h.position_ms, h.duration_ms, h.updated_at,
+                        a.name AS anime_name, a.photo_url AS anime_photo,
+                        s.bolim_id AS bolim_id, s.nomi AS season_name,
+                        s.photo_url AS season_photo
+                   FROM watch_history_db h
+                   LEFT JOIN anime_db a ON a.id = h.anime_id
+                   LEFT JOIN season_db s
+                          ON s.anime_id = h.anime_id AND s.season_id = h.season_id
+                  WHERE h.user_id = ?
+                  ORDER BY h.updated_at DESC
+                  LIMIT 300",
+                vec![TursoArg::int(me)]).await?;
+
+            let cols = res["cols"].as_array().cloned().unwrap_or_default();
+            let rows = res["rows"].as_array().cloned().unwrap_or_default();
+            let items: Vec<Value> = rows
+                .iter()
+                .map(|r| row_to_obj(&cols, r.as_array().unwrap_or(&vec![])))
+                .collect();
+            // Rasm manzillari ilovaga to'liq ko'rinishda beriladi.
+            let items = resolve_list(&origin_of(&req), items, &["anime_photo", "season_photo"]);
+            ok_nostore(json!({"items": items}))
+        }
+
+        // ── BITTA QISM YOZILADI (yoki yangilanadi) ─────────────
+        (Method::Post, "/api/history") => {
+            let mut req = req;
+            let b: Value = req.json().await.unwrap_or(json!({}));
+
+            let anime_id = b["anime_id"].as_i64().unwrap_or(0);
+            let season_id = b["season_id"].as_i64().unwrap_or(0);
+            let epizod = b["epizod_number"].as_i64().unwrap_or(0);
+            let video_url = b["video_url"].as_str().unwrap_or("").trim().to_string();
+            let position = b["position_ms"].as_i64().unwrap_or(0).max(0);
+            let duration = b["duration_ms"].as_i64().unwrap_or(0).max(0);
+
+            if anime_id <= 0 || epizod <= 0 || duration <= 0 {
+                return json_resp(&json!({"error": "to'liq bo'lmagan yozuv"}), 400);
+            }
+
+            // `ON CONFLICT` — bitta qism uchun ikkinchi qator hech
+            // qachon paydo bo'lmaydi.
+            turso_exec(env,
+                "INSERT INTO watch_history_db
+                    (user_id,anime_id,season_id,epizod_number,video_url,
+                     position_ms,duration_ms,updated_at)
+                 VALUES (?,?,?,?,?,?,?,?)
+                 ON CONFLICT(user_id,anime_id,season_id,epizod_number) DO UPDATE SET
+                    video_url=excluded.video_url,
+                    position_ms=excluded.position_ms,
+                    duration_ms=excluded.duration_ms,
+                    updated_at=excluded.updated_at",
+                vec![
+                    TursoArg::int(me), TursoArg::int(anime_id), TursoArg::int(season_id),
+                    TursoArg::int(epizod), TursoArg::text(&video_url),
+                    TursoArg::int(position), TursoArg::int(duration),
+                    TursoArg::int(now_ms()),
+                ]).await?;
+
+            ok_nostore(json!({"ok": true}))
+        }
+
+        // ── BITTA YOZUVNI O'CHIRISH ────────────────────────────
+        (Method::Delete, "/api/history") => {
+            let mut req = req;
+            let b: Value = req.json().await.unwrap_or(json!({}));
+            turso_exec(env,
+                "DELETE FROM watch_history_db
+                  WHERE user_id=? AND anime_id=? AND season_id=? AND epizod_number=?",
+                vec![
+                    TursoArg::int(me),
+                    TursoArg::int(b["anime_id"].as_i64().unwrap_or(0)),
+                    TursoArg::int(b["season_id"].as_i64().unwrap_or(0)),
+                    TursoArg::int(b["epizod_number"].as_i64().unwrap_or(0)),
+                ]).await?;
+            ok_nostore(json!({"ok": true}))
+        }
+
+        _ => err404("yo'l topilmadi"),
+    }
+}
+
+/// So'rov kelgan domen — rasm manzillarini to'liq qilish uchun.
+fn origin_of(req: &Request) -> String {
+    match req.url() {
+        Ok(u) => format!("{}://{}", u.scheme(), u.host_str().unwrap_or("")),
+        Err(_) => String::new(),
+    }
+}
+
 /// `/api/auth/...` va `/api/telegram/...` yo'llari.
 ///
 /// MUHIM: bu javoblar HECH QACHON keshlanmaydi va yozish
@@ -3211,7 +3361,13 @@ async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
     // Kirish (auth) so'rovlari ro'yxat keshiga umuman aloqador
     // emas — ular ham keshni tozalayversa, HAR BIR kirish
     // anime/bo'limlar keshini behuda kuydirib yuborardi.
-    let auth_path = path.starts_with("/api/auth/") || path.starts_with("/api/telegram/");
+    // `/api/history` ham shu ro'yxatga kiradi: u foydalanuvchining
+    // SHAXSIY yozuvi, anime/bo'limlar ro'yxatiga umuman aloqasi
+    // yo'q. Aks holda har bir ko'rilgan qism butun katalog keshini
+    // behuda kuydirib yuborardi.
+    let auth_path = path.starts_with("/api/auth/")
+        || path.starts_with("/api/telegram/")
+        || path.starts_with("/api/history");
     let write = matches!(method, Method::Post | Method::Put | Method::Delete) && !auth_path;
     let mut resp = route(req, env, ctx).await?;
 
@@ -3298,6 +3454,10 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
     ensure_db(&env).await;
 
     // ── TELEGRAM ORQALI KIRISH ────────────────────────────────
+    if path.starts_with("/api/history") {
+        return history_route(req, &env, path, method.clone()).await;
+    }
+
     if path.starts_with("/api/auth/") || path.starts_with("/api/telegram/") {
         return auth_route(req, &env, &origin, path, method.clone()).await;
     }
