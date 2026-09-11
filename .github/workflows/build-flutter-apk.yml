@@ -16,6 +16,7 @@ on:
       # yig'masdi — telefonda esa eski, belgisiz APK turaverardi
       # va "ARU logotipi ko'rinmayapti" deb tushunilardi.
       - 'branding/**'
+      - 'android-template/**'
       - 'pubspec.yaml'
       - '.github/workflows/build-flutter-apk.yml'
   workflow_dispatch:
@@ -256,6 +257,31 @@ jobs:
             || { echo "❌ roundIcon qo'shilmadi"; exit 1; }
 
           echo "✅ Ilova nomi: AniRaxUz, yumaloq belgi ulandi"
+
+      # ── TOMOSHA TARIXI UCHUN KADR AJRATUVCHI ──────────────────
+      #
+      # `android/` papkasi `.gitignore` da va CI uni har safar
+      # `flutter create` bilan qaytadan yaratadi. Shu sabab
+      # `MainActivity.kt` shablon sifatida repoda turadi
+      # (`android-template/`) va shu yerda o'rniga ko'chiriladi.
+      #
+      # Paket nomi yaratilgan fayldan O'QIB OLINADI — qo'lda
+      # yozilsa, `--org` o'zgargan kuni jimgina buzilardi.
+      - name: Kadr ajratuvchini (MediaMetadataRetriever) joylashtirish
+        run: |
+          MA=$(find android/app/src/main -name "MainActivity.kt" | head -1)
+          if [ -z "$MA" ]; then
+            echo "❌ MainActivity.kt topilmadi"
+            exit 1
+          fi
+          PKG=$(grep -m1 '^package ' "$MA" | sed 's/^package //' | tr -d '\r;')
+          if [ -z "$PKG" ]; then
+            echo "❌ paket nomi aniqlanmadi"
+            exit 1
+          fi
+          sed "s/__PKG__/$PKG/" android-template/MainActivity.kt > "$MA"
+          echo "✅ Kadr ajratuvchi joylashtirildi (paket: $PKG)"
+          grep -n "aru/thumb" "$MA"
 
       - name: Kotlin va compileSdk versiyalarini eng yangisiga moslash
         run: |

@@ -35,8 +35,8 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
-import 'package:video_thumbnail/video_thumbnail.dart';
 
 import 'auth_service.dart';
 import 'rust_bridge.dart';
@@ -426,6 +426,23 @@ class WatchHistory extends ChangeNotifier {
   // rasmlar uchun ham amal qiladi. JPEG ikkilik ma'lumot bo'lgani
   // uchun base64 bilan matnga o'giriladi: yangi FFI qo'shishdan
   // ko'ra arzonroq va 20 KB rasm uchun farqi sezilmaydi.
+  //
+  // ── NEGA TASHQI PAKET EMAS ────────────────────────────────
+  //
+  // Avval `video_thumbnail` paketi ishlatilgan edi va u build'ni
+  // YIQITDI: paket 2023-yildan beri yangilanmagan, uning Gradle
+  // faylida allaqachon yopilgan `jcenter()` ombori va eski DSL
+  // turibdi. Uni "tuzatib" ishlatish — har bir Flutter/Gradle
+  // yangilanishida qaytadan sinadigan qarz.
+  //
+  // Kerak bo'lgan ish esa atigi bir necha qator: Android'ning
+  // `MediaMetadataRetriever` iga manzilni berish va JPEG olish.
+  // Shu sabab u ILOVANING O'ZIDA yozilgan (`MainActivity.kt`,
+  // CI tomonidan joylashtiriladi) va bu yerda oddiy kanal orqali
+  // chaqiriladi. Tashqi bog'liqlik yo'q, Gradle xavfi yo'q.
+
+  /// Kadr ajratuvchi bilan aloqa kanali (`MainActivity.kt`).
+  static const MethodChannel _thumbChannel = MethodChannel('aru/thumb');
 
   final Map<String, Uint8List> _thumbMemory = {};
   final Map<String, Future<Uint8List?>> _thumbWork = {};
@@ -494,12 +511,11 @@ class WatchHistory extends ChangeNotifier {
     try {
       final uri = await VideoCacheServer.instance
           .thumbUri(item.videoUrl, item.positionMs);
-      final data = await VideoThumbnail.thumbnailData(
-        video: uri.toString(),
-        imageFormat: ImageFormat.JPEG,
-        maxWidth: 640,
-        quality: 72,
-      ).timeout(const Duration(seconds: 25));
+      final data = await _thumbChannel.invokeMethod<Uint8List>('grab', {
+        'url': uri.toString(),
+        'maxWidth': 640,
+        'quality': 72,
+      }).timeout(const Duration(seconds: 25));
       if (data == null || data.isEmpty) return null;
 
       _rememberThumb(key, data);
