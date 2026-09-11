@@ -3,6 +3,7 @@ import 'package:image_picker/image_picker.dart';
 import 'dart:io';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
+import '../services/ui_state.dart';
 import '../theme/app_background.dart';
 import '../widgets/glass.dart';
 
@@ -69,10 +70,14 @@ class _AddAnimeScreenState extends State<AddAnimeScreen> {
 
   Future<void> _pickImage() async {
     final picker = ImagePicker();
+    // Tizim ilovani shu paytda yopib qo'yishi mumkin — qaytganda
+    // admin paneli tiklanishi uchun belgi qo'yamiz.
+    UiState.setAdminPicking(true);
     final pickedFile = await picker.pickImage(
       source: ImageSource.gallery,
       imageQuality: 85,
     );
+    UiState.setAdminPicking(false);
     // Rasm tanlash oynasi ochiq turganda ekran yopilgan bo'lishi
     // mumkin — `setState` o'shanda istisno tashlaydi.
     if (!mounted) return;

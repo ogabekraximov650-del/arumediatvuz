@@ -118,6 +118,7 @@ import 'package:video_player/video_player.dart';
 import '../services/download_manager.dart';
 import '../services/rust_bridge.dart';
 import '../services/video_cache_server.dart';
+import '../services/auth_service.dart';
 import '../services/format.dart';
 import '../services/season_info.dart';
 import '../services/watch_history.dart';
@@ -1347,8 +1348,16 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // aralashmaydi, quvvat sarfi kam va SurfaceTexture bilan
     // bog'liq muammolar (Impeller) umuman tegmaydi. YouTube va
     // ExoPlayer asosidagi ilovalar shu yo'ldan boradi.
+    // ── TRAFIK KIMGA YOZILADI ────────────────────────────────
+    //
+    // `X-U` — kirgan hisob raqami. Worker javobda HAQIQATAN
+    // yuborilgan baytlarni sanaydi va aynan shu hisobga yozadi
+    // (profil sahifasidagi "Trafik"). Sarlavha manzilni
+    // o'zgartirmaydi, ya'ni kesh kalitlariga tegmaydi.
+    final uid = AuthService.instance.user?.id ?? 0;
     final ctrl = VideoPlayerController.networkUrl(
       uri,
+      httpHeaders: uid > 0 ? {'X-U': '$uid'} : const {},
       viewType: VideoViewType.platformView,
       videoPlayerOptions: VideoPlayerOptions(
         // Ilova fonga ketganda ExoPlayer ijroni to'xtatadi va
@@ -2495,6 +2504,10 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                   child: PageView(
                     controller: _tabPages,
                     physics: const BouncingScrollPhysics(),
+                    // Qo'shni oyna OLDINDAN quriladi — surish
+                    // paytida qurish ishi qolmaydi (kuchsiz
+                    // telefondagi qotish aynan shundan edi).
+                    allowImplicitScrolling: true,
                     onPageChanged: (i) {
                       if (_tabCtrl.index != i) _tabCtrl.animateTo(i);
                       // "Qismlar" oynasi birinchi marta ochilganda
@@ -2542,39 +2555,38 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     final watchMs = (ep['watch_ms_total'] as num?)?.toInt() ?? 0;
     final added = (ep['created_at'] as num?)?.toInt() ?? 0;
 
+    // Karta BUTUN ENNI EGALLAMAYDI — kontent qancha bo'lsa
+    // shuncha joy oladi (foydalanuvchi talabi: "eniga cho'zilgan,
+    // kichikroq bo'lsin").
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-      child: Glass(
-        borderRadius: 14,
-        blur: 12,
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              '${bolim > 0 ? bolim : 1}-bo\'lim · ${num_}-qism',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 13.5,
-                fontWeight: FontWeight.w700,
+      padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: Glass(
+          borderRadius: 11,
+          blur: 12,
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+          child: Wrap(
+            spacing: 10,
+            runSpacing: 2,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              Text(
+                '${bolim > 0 ? bolim : 1}-bo\'lim · ${num_}-qism',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w700,
+                ),
               ),
-            ),
-            const SizedBox(height: 5),
-            Wrap(
-              spacing: 14,
-              runSpacing: 4,
-              children: [
-                _nowStat(Icons.visibility_outlined,
-                    '${formatCount(views)} marta ko\'rilgan'),
-                _nowStat(Icons.schedule_rounded, '${formatHours(watchMs)} soat'),
-                if (added > 0)
-                  _nowStat(Icons.event_available_rounded, formatMoment(added)),
-              ],
-            ),
-          ],
+              _nowStat(Icons.visibility_outlined, formatCount(views)),
+              _nowStat(Icons.schedule_rounded, formatHours(watchMs)),
+              if (added > 0)
+                _nowStat(Icons.event_available_rounded, formatMoment(added)),
+            ],
+          ),
         ),
       ),
     );
@@ -2584,13 +2596,13 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Icon(icon, size: 13, color: Colors.white.withValues(alpha: 0.45)),
-        const SizedBox(width: 4),
+        Icon(icon, size: 11.5, color: Colors.white.withValues(alpha: 0.45)),
+        const SizedBox(width: 3),
         Text(
           text,
           style: TextStyle(
             color: Colors.white.withValues(alpha: 0.62),
-            fontSize: 11.5,
+            fontSize: 10.5,
           ),
         ),
       ],
@@ -3987,6 +3999,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     });
 
     final count = await SeasonService.setFavorite(aid, sid, want);
+    // Kutubxonadagi "Sevimlilar" ro'yxati endi eskirdi.
+    FavoritesService.instance.markChanged();
     if (!mounted) return;
     if (count == null) {
       // Saqlanmadi — holatni qaytaramiz.
@@ -4905,24 +4919,28 @@ class _ActionTile extends StatelessWidget {
     return GestureDetector(
       onTap: onTap,
       behavior: HitTestBehavior.opaque,
+      // Belgi va yozuv YONMA-YON — tugma bo'yiga ikki barobar
+      // kichrayadi (foydalanuvchi talabi).
       child: Glass(
-        borderRadius: 16,
+        borderRadius: 13,
         blur: 12,
-        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
-        child: Column(
+        padding: const EdgeInsets.symmetric(vertical: 9, horizontal: 10),
+        child: Row(
           mainAxisSize: MainAxisSize.min,
+          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(icon, size: 26, color: color),
-            const SizedBox(height: 6),
-            Text(
-              label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                color: Colors.white.withValues(alpha: 0.85),
-                fontSize: 12,
-                fontWeight: FontWeight.w600,
+            Icon(icon, size: 19, color: color),
+            const SizedBox(width: 7),
+            Flexible(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.85),
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
             ),
           ],
@@ -4942,8 +4960,8 @@ class _RatingSheet extends StatefulWidget {
 }
 
 class _RatingSheetState extends State<_RatingSheet> {
-  /// Barmoq ustida turgan yulduz (bosilgunga qadar ko'rsatish
-  /// uchun) — bosilmaguncha hech narsa saqlanmaydi.
+  /// Tanlangan yulduzlar soni. "Baholash" bosilmaguncha hech
+  /// narsa saqlanmaydi.
   int _hover = 0;
 
   @override
@@ -4982,15 +5000,15 @@ class _RatingSheetState extends State<_RatingSheet> {
               ),
               const SizedBox(height: 14),
               // Kichik ekranda ham sig'sin: 10 ta yulduz teng
-              // bo'linadi va keraklisi bosiladi.
+              // bo'linadi. Bosilgani FAQAT tanlanadi — saqlash
+              // uchun "Baholash" bosiladi (foydalanuvchi talabi).
               Row(
                 children: List.generate(10, (i) {
                   final star = i + 1;
                   return Expanded(
                     child: GestureDetector(
                       behavior: HitTestBehavior.opaque,
-                      onTapDown: (_) => setState(() => _hover = star),
-                      onTap: () => Navigator.of(context).pop(star),
+                      onTap: () => setState(() => _hover = star),
                       child: Padding(
                         padding: const EdgeInsets.symmetric(vertical: 6),
                         child: Icon(
@@ -5007,11 +5025,25 @@ class _RatingSheetState extends State<_RatingSheet> {
                   );
                 }),
               ),
-              const SizedBox(height: 8),
-              TextButton(
-                onPressed: () => Navigator.of(context).pop(),
-                child: const Text('Bekor qilish',
-                    style: TextStyle(color: Colors.white54)),
+              const SizedBox(height: 14),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: () => Navigator.of(context).pop(),
+                      child: const Text('Bekor qilish'),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: FilledButton(
+                      onPressed: _hover > 0
+                          ? () => Navigator.of(context).pop(_hover)
+                          : null,
+                      child: const Text('Baholash'),
+                    ),
+                  ),
+                ],
               ),
             ],
           ),

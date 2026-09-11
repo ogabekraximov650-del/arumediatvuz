@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import '../data/janrlar.dart';
+import '../services/ui_state.dart';
 import '../theme/app_background.dart';
 import '../widgets/glass.dart';
 
@@ -102,8 +103,10 @@ class _AddSeasonScreenState extends State<AddSeasonScreen> {
 
   Future<void> _pickImage() async {
     final picker = ImagePicker();
+    UiState.setAdminPicking(true);
     final pickedFile =
         await picker.pickImage(source: ImageSource.gallery, imageQuality: 85);
+    UiState.setAdminPicking(false);
     // Rasm tanlash oynasi ochiq turganda ekran yopilgan bo'lishi
     // mumkin — `setState` o'shanda istisno tashlaydi.
     if (!mounted) return;

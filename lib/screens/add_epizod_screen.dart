@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:dio/dio.dart';
+import '../services/ui_state.dart';
 import '../theme/app_background.dart';
 import '../widgets/glass.dart';
 
@@ -102,7 +103,12 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
   // ── Fayl tanlash va B2'ga yuklash (Dio — real progress) ─────────
   Future<void> _pickAndUpload(_QualityState q) async {
     final picker = ImagePicker();
+    // Video tanlash eng "og'ir" holat: galereya ochilganda tizim
+    // ilovani yopib qo'yishi mumkin. Belgi qo'yamiz — qaytganda
+    // admin paneli tiklanadi.
+    UiState.setAdminPicking(true);
     final picked = await picker.pickVideo(source: ImageSource.gallery);
+    UiState.setAdminPicking(false);
     if (picked == null) return;
 
     final file = File(picked.path);

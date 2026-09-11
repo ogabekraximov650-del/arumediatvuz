@@ -3,7 +3,8 @@
 // Uchta oyna:
 //
 //   1. Tomoshalar tarixi — ishlaydi (`HistoryTab`);
-//   2. Sevimlilar       — keyingi vazifa, hozircha bo'sh;
+//   2. Sevimlilar       — ishlaydi (`FavoritesTab`): pleyerda
+//      yurakcha bosilgan bo'limlar shu yerda turadi;
 //   3. Yuklanmalar      — keyingi vazifa, hozircha bo'sh.
 //
 // Oynalar `IndexedStack` bilan almashadi: bosilgan zahoti o'tadi va
@@ -13,6 +14,7 @@
 import 'package:flutter/material.dart';
 
 import '../widgets/glass.dart';
+import 'favorites_screen.dart';
 import 'history_screen.dart';
 
 class LibraryScreen extends StatefulWidget {
@@ -66,7 +68,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
             sizing: StackFit.expand,
             children: const [
               HistoryTab(),
-              _SoonTab(label: 'Sevimlilar', icon: Icons.favorite_border_rounded),
+              FavoritesTab(),
               _SoonTab(label: 'Yuklanmalar', icon: Icons.download_rounded),
             ],
           ),

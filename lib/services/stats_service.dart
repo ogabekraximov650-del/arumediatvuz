@@ -24,18 +24,18 @@ import 'auth_service.dart';
 import 'rust_bridge.dart';
 
 /// Bitta ko'rsatkichning davrlar bo'yicha qiymati.
+/// YILLIK ko'rsatkich ATAYLAB YO'Q (foydalanuvchi talabi):
+/// kunlik, haftalik, oylik va umumiy yetarli.
 class StatBlock {
   final int daily;
   final int weekly;
   final int monthly;
-  final int yearly;
   final int total;
 
   const StatBlock({
     this.daily = 0,
     this.weekly = 0,
     this.monthly = 0,
-    this.yearly = 0,
     this.total = 0,
   });
 
@@ -45,7 +45,6 @@ class StatBlock {
       daily: v('daily'),
       weekly: v('weekly'),
       monthly: v('monthly'),
-      yearly: v('yearly'),
       total: v('total'),
     );
   }
@@ -54,7 +53,6 @@ class StatBlock {
         'daily': daily,
         'weekly': weekly,
         'monthly': monthly,
-        'yearly': yearly,
         'total': total,
       };
 }
@@ -149,6 +147,102 @@ class StatsService extends ChangeNotifier {
       }
     } catch (_) {
       // Internet yo'q — diskdagi (yoki oldingi) raqamlar qoladi.
+    }
+    _loading = false;
+    notifyListeners();
+  }
+}
+
+/// ═══════════════════════════════════════════════════════════════
+///  PROFIL SAHIFASIDAGI SHAXSIY STATISTIKA
+/// ═══════════════════════════════════════════════════════════════
+///
+/// To'rtta raqam, BITTA so'rovda (`GET /api/me/stats`):
+/// nechta anime, nechta qism, necha soat va qancha trafik.
+class MyStats {
+  final int animes;
+  final int episodes;
+  final int watchMs;
+  final int traffic;
+
+  const MyStats({
+    this.animes = 0,
+    this.episodes = 0,
+    this.watchMs = 0,
+    this.traffic = 0,
+  });
+
+  factory MyStats.fromJson(Map<String, dynamic> j) {
+    int v(String k) => (j[k] as num?)?.toInt() ?? 0;
+    return MyStats(
+      animes: v('animes'),
+      episodes: v('episodes'),
+      watchMs: v('watch_ms'),
+      traffic: v('traffic'),
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'animes': animes,
+        'episodes': episodes,
+        'watch_ms': watchMs,
+        'traffic': traffic,
+      };
+}
+
+class MyStatsService extends ChangeNotifier {
+  MyStatsService._();
+  static final MyStatsService instance = MyStatsService._();
+
+  static const String _cacheKey = 'my_stats';
+
+  /// Profil sahifasi tez-tez ochiladi — 2 daqiqa yetarli.
+  static const Duration _freshFor = Duration(minutes: 2);
+
+  MyStats _stats = const MyStats();
+  DateTime? _loadedAt;
+  bool _loading = false;
+
+  MyStats get stats => _stats;
+  bool get isLoading => _loading;
+
+  void loadFromDisk() {
+    try {
+      final rows = RustCore.instance.getCachedList(_cacheKey);
+      if (rows == null || rows.isEmpty) return;
+      _stats = MyStats.fromJson(rows.first);
+      notifyListeners();
+    } catch (_) {}
+  }
+
+  Future<void> load({bool force = false}) async {
+    if (_loading) return;
+    final at = _loadedAt;
+    if (!force && at != null && DateTime.now().difference(at) < _freshFor) {
+      return;
+    }
+    final token = AuthService.instance.sessionToken;
+    if (token == null) {
+      _stats = const MyStats();
+      notifyListeners();
+      return;
+    }
+    _loading = true;
+    notifyListeners();
+    try {
+      final r = await http.get(
+        Uri.parse('$kApiBase/api/me/stats'),
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 15));
+      if (r.statusCode == 200) {
+        _stats = MyStats.fromJson(jsonDecode(r.body) as Map<String, dynamic>);
+        _loadedAt = DateTime.now();
+        try {
+          RustCore.instance.saveListCache(_cacheKey, [_stats.toJson()]);
+        } catch (_) {}
+      }
+    } catch (_) {
+      // Internet yo'q — oxirgi ma'lum raqamlar qoladi.
     }
     _loading = false;
     notifyListeners();

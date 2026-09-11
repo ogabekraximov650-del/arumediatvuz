@@ -2,9 +2,12 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import '../services/auth_service.dart';
+import '../services/season_info.dart';
+import '../services/ui_state.dart';
 import '../services/watch_history.dart';
 import '../theme/app_background.dart';
 import '../widgets/glass.dart';
+import 'admin_screen.dart';
 import 'home_screen.dart';
 import 'search_screen.dart';
 import 'catalog_screen.dart';
@@ -65,6 +68,19 @@ class _RootScreenState extends State<RootScreen>
     // chiqarilgan bo'lishi mumkin).
     WidgetsBinding.instance.addObserver(this);
     _navTicker = createTicker(_onNavTick);
+
+    // ── ADMIN PANELIGA QAYTISH ───────────────────────────────
+    //
+    // Rasm yoki video tanlash paytida tizim ilovani yopib qo'ygan
+    // bo'lsa, foydalanuvchi qaytganda O'SHA joyda turishi kerak
+    // (foydalanuvchi talabi). Belgi diskda turadi —
+    // `UiState` izohiga qarang.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !UiState.takeAdminRestore()) return;
+      Navigator.of(context).push(
+        MaterialPageRoute<void>(builder: (_) => const AdminScreen()),
+      );
+    });
   }
 
   @override
@@ -207,6 +223,9 @@ class _RootScreenState extends State<RootScreen>
     // takrorlanmaydi.
     if (i == _libraryTab) {
       WatchHistory.instance.load();
+      // Sevimlilar ro'yxati ham shu yerda — oyna ochilganda emas,
+      // aynan tugma bosilganda (ortiqcha so'rov ketmasin).
+      FavoritesService.instance.load();
     }
 
     // ── 2. TUGMA ESA SEKIN SUZIB BORADI ─────────────────────

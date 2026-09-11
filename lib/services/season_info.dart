@@ -10,9 +10,11 @@
 
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import 'auth_service.dart';
+import 'rust_bridge.dart';
 
 class SeasonInfo {
   final Map<String, dynamic> season;
@@ -136,5 +138,81 @@ class SeasonService {
     } catch (_) {
       return null;
     }
+  }
+}
+
+/// Foydalanuvchining SEVIMLI bo'limlari.
+///
+/// Javob bo'lim qatorlarining o'zi — Kutubxonadagi "Sevimlilar"
+/// oynasi kartochkani darhol chizadi va pleyer ham shu ma'lumot
+/// bilan ochiladi (qo'shimcha so'rovsiz).
+class FavoritesService extends ChangeNotifier {
+  FavoritesService._();
+  static final FavoritesService instance = FavoritesService._();
+
+  static const String _cacheKey = 'favorites';
+
+  /// Ro'yxat shu muddat ichida qayta so'ralmaydi.
+  static const Duration _freshFor = Duration(seconds: 60);
+
+  List<Map<String, dynamic>> _items = [];
+  DateTime? _loadedAt;
+  bool _loading = false;
+
+  List<Map<String, dynamic>> get items => List.unmodifiable(_items);
+  bool get isLoading => _loading;
+
+  /// Diskdagi nusxa — TARMOQSIZ (oflaynda ham ko'rinadi).
+  void loadFromDisk() {
+    if (_items.isNotEmpty) return;
+    try {
+      final rows = RustCore.instance.getCachedList(_cacheKey);
+      if (rows == null || rows.isEmpty) return;
+      _items = rows;
+      notifyListeners();
+    } catch (_) {}
+  }
+
+  Future<void> load({bool force = false}) async {
+    if (_loading) return;
+    final at = _loadedAt;
+    if (!force && at != null && DateTime.now().difference(at) < _freshFor) {
+      return;
+    }
+    final token = AuthService.instance.sessionToken;
+    if (token == null) {
+      if (_items.isNotEmpty) {
+        _items = [];
+        notifyListeners();
+      }
+      return;
+    }
+    _loading = true;
+    notifyListeners();
+    try {
+      final r = await http.get(
+        Uri.parse('$kApiBase/api/favorites'),
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 15));
+      if (r.statusCode == 200) {
+        final data = jsonDecode(r.body) as Map<String, dynamic>;
+        _items = ((data['items'] as List?) ?? [])
+            .cast<Map<String, dynamic>>()
+            .toList();
+        _loadedAt = DateTime.now();
+        try {
+          RustCore.instance.saveListCache(_cacheKey, _items);
+        } catch (_) {}
+      }
+    } catch (_) {
+      // Internet yo'q — diskdagi nusxa qoladi.
+    }
+    _loading = false;
+    notifyListeners();
+  }
+
+  /// Pleyerda yurakcha bosilganda ro'yxat DARHOL yangilansin.
+  void markChanged() {
+    _loadedAt = null;
   }
 }

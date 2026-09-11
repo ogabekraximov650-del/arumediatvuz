@@ -269,6 +269,7 @@ async fn ensure_db(env: &Env) {
     }
     init_db(env).await;
     migrate_db(env).await;
+    reset_stats_once(env).await;
     DB_READY.store(true, Ordering::Relaxed);
 }
 
@@ -317,6 +318,9 @@ async fn migrate_db(env: &Env) {
         "ALTER TABLE watch_history_db ADD COLUMN view_count INTEGER DEFAULT 0",
         "ALTER TABLE watch_history_db ADD COLUMN deleted_at INTEGER DEFAULT 0",
         "ALTER TABLE watch_history_db ADD COLUMN created_at INTEGER",
+        // Foydalanuvchi sarflagan trafik (profil sahifasidagi
+        // shaxsiy statistika uchun).
+        "ALTER TABLE users_db ADD COLUMN traffic_bytes INTEGER DEFAULT 0",
         // Eski, endi keraksiz indekslar (birlamchi kalit o'zi
         // qoplaydigan yoki umuman ishlatilmaydigan).
         "DROP INDEX IF EXISTS idx_name",
@@ -337,6 +341,30 @@ async fn migrate_db(env: &Env) {
     ] {
         let _ = turso_exec(env, sql, vec![]).await;
     }
+}
+
+/// Statistikani BIR MARTA nolga tushiradi.
+///
+/// Foydalanuvchi talabi (2026-09): "eski va soxta statistikani
+/// tozalab tashla". Belgisi `app_config` da turadi, ya'ni ish
+/// FAQAT BIR MARTA bajariladi va keyingi deploylarda takrorlanmaydi.
+///
+/// Tomosha tarixining o'zi (qaysi qismni qayerda to'xtatgan)
+/// SAQLANIB QOLADI — faqat hisoblagichlar nolga tushadi.
+async fn reset_stats_once(env: &Env) {
+    const MARK: &str = "stats_reset_v2";
+    if config_get(env, MARK).await.is_some() {
+        return;
+    }
+    let _ = turso_batch(env, &[
+        ("DELETE FROM stats_hourly", vec![]),
+        ("DELETE FROM stats_daily", vec![]),
+        ("UPDATE season_db SET views_total=0, watch_ms_total=0", vec![]),
+        ("UPDATE epizod_db SET views_total=0, watch_ms_total=0", vec![]),
+        ("UPDATE watch_history_db SET view_count=0, watched_ms=0", vec![]),
+        ("UPDATE users_db SET traffic_bytes=0", vec![]),
+    ]).await;
+    config_put(env, MARK, "done").await;
 }
 
 async fn init_db(env: &Env) {
@@ -430,6 +458,7 @@ async fn init_db(env: &Env) {
             balance INTEGER DEFAULT 0,
             avatar_file TEXT,
             profile_done INTEGER DEFAULT 1,
+            traffic_bytes INTEGER DEFAULT 0,
             created_at INTEGER,
             last_login_at INTEGER
         )", vec![]),
@@ -528,7 +557,7 @@ async fn init_db(env: &Env) {
         // bo'lardi) — faqat yig'indilar:
         //
         //   stats_hourly — "oxirgi 24 soat" uchun (24 ta qator);
-        //   stats_daily  — hafta/oy/yil/jami uchun (yiliga ~365).
+        //   stats_daily  — hafta/oy/jami uchun (yiliga ~365).
         //
         // `metric`: 'views' | 'traffic' | 'watch_ms'.
         ("CREATE TABLE IF NOT EXISTS stats_hourly (
@@ -3207,8 +3236,7 @@ async fn history_route(
                 .and_then(|r| r["watched_ms"].as_i64()).unwrap_or(0).max(0);
             let old_views = old_row.as_ref()
                 .and_then(|r| r["view_count"].as_i64()).unwrap_or(0).max(0);
-            let old_updated = old_row.as_ref()
-                .and_then(|r| r["updated_at"].as_i64()).unwrap_or(0);
+
             let created_at = old_row.as_ref()
                 .and_then(|r| r["created_at"].as_i64()).filter(|v| *v > 0).unwrap_or(now);
 
@@ -3220,11 +3248,18 @@ async fn history_route(
             let capped = watched.min(duration).max(old_watched);
             let delta = (capped - old_watched).max(0);
 
-            // Yangi ko'rish: ilova shunday deb belgilagan bo'lsa va
-            // oxirgi yozuvdan kamida 30 soniya o'tgan bo'lsa. Bu
-            // takroriy yuborishdan (masalan ilova fonga chiqib
-            // qaytganda) himoya qiladi.
-            let counts_view = new_view && (old_row.is_none() || now - old_updated > 30_000);
+            // ── KO'RISH — ODAM BOSHIGA BITTA ────────────────
+            //
+            // TALAB (foydalanuvchi): "bitta odam bitta videoni 50
+            // marta qayta ko'rsa ham ko'rishlar soni 1 tadan
+            // oshmasligi kerak" — tomosha tarixida ham shu qism
+            // bitta qator bo'lib turgani kabi.
+            //
+            // Shu sabab umumiy hisob FAQAT shu odam shu qismni
+            // BIRINCHI marta ko'rganda oshadi. `view_count` esa
+            // shaxsiy hisob sifatida o'sib boraveradi.
+            let first_time = old_row.is_none() || old_views == 0;
+            let counts_view = new_view && first_time;
             let view_inc = if counts_view { 1 } else { 0 };
 
             let day = day_key(now);
@@ -3325,21 +3360,182 @@ fn stat_args(bucket: &str, metric: &str, value: i64) -> Vec<TursoArg> {
     vec![TursoArg::text(bucket), TursoArg::text(metric), TursoArg::int(value)]
 }
 
-/// Javobdagi baytlarni trafik hisobiga qo'shadi.
+/// Har shuncha baytdan keyin hisob bazaga yoziladi.
 ///
-/// Javob YUBORILGANDAN KEYIN, fon'da (`wait_until`) bajariladi —
-/// foydalanuvchi buni kutmaydi.
-fn note_response_traffic(env: &Env, ctx: &Context, resp: &Response) {
-    let bytes = resp
+/// Kichik qilib bo'lmaydi: har bir yozuv — bitta baza so'rovi.
+/// Kattaroq qilinsa esa, mijoz oqimni yarmida uzganda ko'proq
+/// bayt hisobga tushmay qoladi. 8 MiB — shu ikkovining o'rtasi.
+const TRAFFIC_REPORT_EVERY: u64 = 8 * 1024 * 1024;
+
+/// Javob tanasini SANOVCHI quvurdan o'tkazadi.
+///
+/// ═══════════════════════════════════════════════════════════════
+///  NEGA `Content-Length` NI SANAB BO'LMAYDI (TOPILGAN XATO)
+/// ═══════════════════════════════════════════════════════════════
+///
+/// Pleyer (ExoPlayer) videoni ochganda `Range: bytes=0-` deb, ya'ni
+/// FAYL OXIRIGACHA so'raydi. Worker javobda butun qolgan hajmni
+/// e'lon qiladi (masalan 166 MB), pleyer esa bir necha megabayt
+/// bufer yig'ib ULANISHNI UZADI va keyingi joydan qayta so'raydi.
+///
+/// Ilgari shu E'LON QILINGAN uzunlik sanalardi — natijada 166 MB
+/// lik video va 3 daqiqalik tomosha "1,14 GB" bo'lib ko'rinardi.
+///
+/// Endi tana `TransformStream` orqali o'tkaziladi va HAQIQATAN
+/// yuborilgan baytlar sanaladi. Hisob har 8 MiB da bazaga
+/// yoziladi, ya'ni oqim yarmida uzilsa ham deyarli hammasi
+/// hisobga tushadi.
+///
+/// ── XAVFSIZLIK TO'RI ──────────────────────────────────────────
+///
+/// Bu ijro yo'li — loyihaning eng nozik joyi. Shu sabab o'rash
+/// biror sababga ko'ra ishlamasa (tana oqim emas, uzunlik
+/// noma'lum, `TransformStream` topilmadi), javob HECH
+/// O'ZGARMASDAN qaytariladi. Ya'ni eng yomon holatda trafik
+/// sanalmaydi, lekin video HAR DOIM ishlaydi.
+///
+/// Oxirida yana `FixedLengthStream` turadi — busiz runtime
+/// javobni "chunked" qilib yuboradi va uzunligi noma'lum javob
+/// erta uzilganda mijoz uni "fayl tugadi" deb qabul qilardi
+/// (`fixed_length_stream` izohiga qarang).
+fn counted_response(resp: Response, env: &Env, user: i64) -> Response {
+    let src = match resp.body() {
+        ResponseBody::Stream(rs) => rs.clone(),
+        _ => return resp,
+    };
+    let Some(len) = resp
         .headers()
         .get("Content-Length")
         .ok()
         .flatten()
-        .and_then(|v| v.parse::<i64>().ok())
-        .unwrap_or(0);
-    if bytes <= 0 { return; }
-    let env = env.clone();
-    ctx.wait_until(async move { note_traffic(&env, bytes).await });
+        .and_then(|v| v.parse::<u64>().ok())
+    else {
+        return resp;
+    };
+    if len == 0 {
+        return resp;
+    }
+    let Ok(counted) = counting_stream(&src, env.clone(), user) else {
+        return resp;
+    };
+    let Ok(fixed) = fixed_length_stream(&counted, len) else {
+        return resp;
+    };
+    let status = resp.status_code();
+    let headers = resp.headers().clone();
+    match Response::from_body(ResponseBody::Stream(fixed)) {
+        Ok(out) => out.with_status(status).with_headers(headers),
+        Err(_) => resp,
+    }
+}
+
+/// Baytlarni sanab, o'zgartirmasdan o'tkazib yuboradigan oqim.
+fn counting_stream(
+    src: &web_sys::ReadableStream,
+    env: Env,
+    user: i64,
+) -> Result<web_sys::ReadableStream> {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use worker::wasm_bindgen::closure::Closure;
+    use worker::wasm_bindgen::{JsCast, JsValue};
+
+    let pending = Rc::new(Cell::new(0u64));
+
+    // Har bir bo'lak: sanaymiz va O'ZGARTIRMASDAN uzatamiz.
+    let count_env = env.clone();
+    let count_pending = pending.clone();
+    let transform = Closure::wrap(Box::new(move |chunk: JsValue, controller: JsValue| {
+        let size = js_sys::Reflect::get(&chunk, &JsValue::from_str("byteLength"))
+            .ok()
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0) as u64;
+        // Avval uzatamiz — hisob ijroga to'sqinlik qilmasin.
+        if let Ok(f) = js_sys::Reflect::get(&controller, &JsValue::from_str("enqueue")) {
+            if let Ok(f) = f.dyn_into::<js_sys::Function>() {
+                let _ = f.call1(&controller, &chunk);
+            }
+        }
+        let total = count_pending.get() + size;
+        if total >= TRAFFIC_REPORT_EVERY {
+            count_pending.set(0);
+            let env = count_env.clone();
+            worker::wasm_bindgen_futures::spawn_local(async move {
+                note_traffic(&env, total as i64, user).await;
+            });
+        } else {
+            count_pending.set(total);
+        }
+    }) as Box<dyn FnMut(JsValue, JsValue)>);
+
+    // Oqim tugadi — qolganini yozamiz.
+    let flush_env = env;
+    let flush_pending = pending;
+    let flush = Closure::wrap(Box::new(move |_controller: JsValue| {
+        let left = flush_pending.replace(0);
+        if left > 0 {
+            let env = flush_env.clone();
+            worker::wasm_bindgen_futures::spawn_local(async move {
+                note_traffic(&env, left as i64, user).await;
+            });
+        }
+    }) as Box<dyn FnMut(JsValue)>);
+
+    let transformer = js_sys::Object::new();
+    js_sys::Reflect::set(
+        &transformer,
+        &JsValue::from_str("transform"),
+        transform.as_ref().unchecked_ref(),
+    )
+    .map_err(|_| Error::RustError("transform o'rnatilmadi".into()))?;
+    js_sys::Reflect::set(
+        &transformer,
+        &JsValue::from_str("flush"),
+        flush.as_ref().unchecked_ref(),
+    )
+    .map_err(|_| Error::RustError("flush o'rnatilmadi".into()))?;
+    // Yopilmalar oqim umri davomida yashashi kerak.
+    transform.forget();
+    flush.forget();
+
+    let global = js_sys::global();
+    let ctor = js_sys::Reflect::get(&global, &JsValue::from_str("TransformStream"))
+        .map_err(|_| Error::RustError("TransformStream topilmadi".into()))?;
+    let ctor: js_sys::Function = ctor
+        .dyn_into()
+        .map_err(|_| Error::RustError("TransformStream funksiya emas".into()))?;
+    let args = js_sys::Array::new();
+    args.push(&transformer);
+    let ts = js_sys::Reflect::construct(&ctor, &args)
+        .map_err(|_| Error::RustError("TransformStream yaratilmadi".into()))?;
+
+    let pipe_through = js_sys::Reflect::get(src, &JsValue::from_str("pipeThrough"))
+        .map_err(|_| Error::RustError("pipeThrough yo'q".into()))?;
+    let pipe_through: js_sys::Function = pipe_through
+        .dyn_into()
+        .map_err(|_| Error::RustError("pipeThrough funksiya emas".into()))?;
+    let readable = pipe_through
+        .call1(src, &ts)
+        .map_err(|_| Error::RustError("pipeThrough ishlamadi".into()))?;
+    readable
+        .dyn_into::<web_sys::ReadableStream>()
+        .map_err(|_| Error::RustError("natija ReadableStream emas".into()))
+}
+
+/// So'rovdagi foydalanuvchi belgisi (`X-U` sarlavhasi).
+///
+/// Ilova pleyer va yuklab olish so'rovlarida shu sarlavhani
+/// yuboradi — sarlavha MANZILNI o'zgartirmaydi, ya'ni na
+/// Cloudflare keshiga, na telefondagi kesh kalitiga ta'sir
+/// qilmaydi (manzil kalit sifatida ishlatiladi).
+fn traffic_user(req: &Request) -> i64 {
+    req.headers()
+        .get("X-U")
+        .ok()
+        .flatten()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(0)
 }
 
 /// Trafikni hisobga qo'shadi (javob yuborilgandan keyin, fon'da).
@@ -3347,16 +3543,25 @@ fn note_response_traffic(env: &Env, ctx: &Context, resp: &Response) {
 /// O'lchov — javobda E'LON QILINGAN uzunlik. Mijoz oqimni yarmida
 /// uzsa haqiqiy raqam biroz kichikroq bo'ladi; buning evaziga ijro
 /// yo'liga (loyihaning eng nozik qismiga) umuman tegilmaydi.
-async fn note_traffic(env: &Env, bytes: i64) {
+async fn note_traffic(env: &Env, bytes: i64, user: i64) {
     if bytes <= 0 { return; }
     // Ijro yo'li bazaga umuman tegmaydi, ya'ni jadvallar hali
     // tekshirilmagan bo'lishi mumkin.
     ensure_db(env).await;
     let now = now_ms();
-    let _ = turso_batch(env, &[
+    let mut stmts: Vec<(&str, Vec<TursoArg>)> = vec![
         (STAT_HOUR_SQL, stat_args(&hour_key(now), "traffic", bytes)),
         (STAT_DAY_SQL, stat_args(&day_key(now), "traffic", bytes)),
-    ]).await;
+    ];
+    // Kim sarflagani ma'lum bo'lsa — profil sahifasidagi shaxsiy
+    // hisobga ham qo'shiladi.
+    if user > 0 {
+        stmts.push((
+            "UPDATE users_db SET traffic_bytes=COALESCE(traffic_bytes,0)+? WHERE id=?",
+            vec![TursoArg::int(bytes), TursoArg::int(user)],
+        ));
+    }
+    let _ = turso_batch(env, &stmts).await;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -3374,19 +3579,19 @@ async fn stats_route(env: &Env) -> Result<Response> {
     let h24 = hour_key(now - 23 * 3_600_000);
     let d7 = day_key(now - 6 * day_ms);
     let d30 = day_key(now - 29 * day_ms);
-    let d365 = day_key(now - 364 * day_ms);
 
     let res = turso_many(env, &[
         // Foydalanuvchilar: jami + davr bo'yicha yangi hisoblar.
+        //
+        // YILLIK ko'rsatkich ATAYLAB YO'Q (foydalanuvchi talabi):
+        // kunlik, haftalik, oylik va umumiy yetarli.
         ("SELECT COUNT(*),
-                 SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END),
                  SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END),
                  SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END)
             FROM users_db",
          vec![
             TursoArg::int(now - 7 * day_ms),
             TursoArg::int(now - 30 * day_ms),
-            TursoArg::int(now - 365 * day_ms),
          ]),
         // Kunlik: oxirgi 24 soatda onlayn bo'lganlar.
         ("SELECT COUNT(DISTINCT user_id) FROM sessions_db WHERE last_seen_at >= ?",
@@ -3394,14 +3599,13 @@ async fn stats_route(env: &Env) -> Result<Response> {
         // Oxirgi 24 soat — soatlik chelaklar.
         ("SELECT metric, SUM(value) FROM stats_hourly WHERE hour >= ? GROUP BY metric",
          vec![TursoArg::text(&h24)]),
-        // Hafta / oy / yil / jami — kunlik chelaklar.
+        // Hafta / oy / jami — kunlik chelaklar.
         ("SELECT metric,
-                 SUM(CASE WHEN day >= ? THEN value ELSE 0 END),
                  SUM(CASE WHEN day >= ? THEN value ELSE 0 END),
                  SUM(CASE WHEN day >= ? THEN value ELSE 0 END),
                  SUM(value)
             FROM stats_daily GROUP BY metric",
-         vec![TursoArg::text(&d7), TursoArg::text(&d30), TursoArg::text(&d365)]),
+         vec![TursoArg::text(&d7), TursoArg::text(&d30)]),
         // Eski soatlik chelaklar kerak emas (3 kundan oshgani).
         ("DELETE FROM stats_hourly WHERE hour < ?",
          vec![TursoArg::text(&day_key(now - 3 * day_ms))]),
@@ -3417,7 +3621,6 @@ async fn stats_route(env: &Env) -> Result<Response> {
         "daily": scalar(&res[1]),
         "weekly": cell(urow, 1),
         "monthly": cell(urow, 2),
-        "yearly": cell(urow, 3),
         "total": cell(urow, 0),
     }));
 
@@ -3429,19 +3632,19 @@ async fn stats_route(env: &Env) -> Result<Response> {
             daily.insert(m, cell(r, 1));
         }
     }
-    let mut periods: std::collections::HashMap<String, (i64, i64, i64, i64)> =
+    let mut periods: std::collections::HashMap<String, (i64, i64, i64)> =
         std::collections::HashMap::new();
     if let Some(rows) = res[3]["rows"].as_array() {
         for r in rows {
             let m = r[0]["value"].as_str().unwrap_or("").to_string();
-            periods.insert(m, (cell(r, 1), cell(r, 2), cell(r, 3), cell(r, 4)));
+            periods.insert(m, (cell(r, 1), cell(r, 2), cell(r, 3)));
         }
     }
     for (metric, key) in [("views", "views"), ("traffic", "traffic"), ("watch_ms", "watch")] {
-        let (w, m, y, t) = periods.get(metric).copied().unwrap_or((0, 0, 0, 0));
+        let (w, m, t) = periods.get(metric).copied().unwrap_or((0, 0, 0));
         out.insert(key.into(), json!({
             "daily": daily.get(metric).copied().unwrap_or(0),
-            "weekly": w, "monthly": m, "yearly": y, "total": t,
+            "weekly": w, "monthly": m, "total": t,
         }));
     }
     out.insert("tz".into(), json!("UTC+5"));
@@ -3452,23 +3655,16 @@ async fn stats_route(env: &Env) -> Result<Response> {
 //  BO'LIM SAHIFASI: MA'LUMOT, BAHO, SEVIMLILAR
 // ═══════════════════════════════════════════════════════════════
 
-/// Eng kam baho soni — IMDb uslubidagi VAZNLI o'rtacha uchun.
+/// Reyting — ODDIY O'RTACHA, ikki kasr xonagacha.
 ///
-/// Busiz bitta odam 10 qo'yishi bilan reyting 10.00 bo'lib qolardi.
-const RATING_MIN_VOTES: f64 = 5.0;
-
-/// Vaznli o'rtacha: (n/(n+m))*R + (m/(n+m))*C.
-fn weighted_rating(sum: i64, count: i64, global_sum: i64, global_count: i64) -> f64 {
+/// TALAB (foydalanuvchi): "birinchi odam 10 baho bersa reyting ham
+/// 10 bo'lishi kerak, iloji boricha ANIQ bo'lsin".
+///
+/// Shu sabab IMDb uslubidagi vaznli (bayes) o'rtacha OLIB
+/// TASHLANDI: u bitta baho bo'lganda 10 ni 8.5 ga tushirardi.
+fn average_rating(sum: i64, count: i64) -> f64 {
     if count <= 0 { return 0.0; }
-    let n = count as f64;
-    let r = sum as f64 / n;
-    let c = if global_count > 0 {
-        global_sum as f64 / global_count as f64
-    } else {
-        r
-    };
-    let m = RATING_MIN_VOTES;
-    ((n / (n + m)) * r + (m / (n + m)) * c * 100.0).round() / 100.0
+    ((sum as f64 / count as f64) * 100.0).round() / 100.0
 }
 
 async fn season_detail(env: &Env, origin: &str, req: &Request, aid: i64, sid: i64) -> Result<Response> {
@@ -3479,7 +3675,6 @@ async fn season_detail(env: &Env, origin: &str, req: &Request, aid: i64, sid: i6
     let res = turso_many(env, &[
         ("SELECT * FROM season_db WHERE anime_id=? AND season_id=?",
          vec![TursoArg::int(aid), TursoArg::int(sid)]),
-        ("SELECT COALESCE(SUM(rating_sum),0), COALESCE(SUM(rating_count),0) FROM season_db", vec![]),
         ("SELECT stars FROM ratings_db WHERE user_id=? AND anime_id=? AND season_id=?",
          vec![TursoArg::int(me), TursoArg::int(aid), TursoArg::int(sid)]),
         ("SELECT 1 FROM favorites_db WHERE user_id=? AND anime_id=? AND season_id=?",
@@ -3487,17 +3682,12 @@ async fn season_detail(env: &Env, origin: &str, req: &Request, aid: i64, sid: i6
     ]).await?;
 
     let Some(row) = first_row(&res[0]) else { return err404("Bo'lim topilmadi") };
-    let grow = &res[1]["rows"][0];
-    let gnum = |i: usize| -> i64 {
-        grow[i]["value"].as_str().and_then(|v| v.parse::<i64>().ok()).unwrap_or(0)
-    };
-    let my_stars = first_row(&res[2]).and_then(|r| r["stars"].as_i64()).unwrap_or(0);
-    let is_fav = res[3]["rows"].as_array().map(|r| !r.is_empty()).unwrap_or(false);
+    let my_stars = first_row(&res[1]).and_then(|r| r["stars"].as_i64()).unwrap_or(0);
+    let is_fav = res[2]["rows"].as_array().map(|r| !r.is_empty()).unwrap_or(false);
 
-    let rating = weighted_rating(
+    let rating = average_rating(
         row["rating_sum"].as_i64().unwrap_or(0),
         row["rating_count"].as_i64().unwrap_or(0),
-        gnum(0), gnum(1),
     );
 
     ok_nostore(json!({
@@ -3506,6 +3696,67 @@ async fn season_detail(env: &Env, origin: &str, req: &Request, aid: i64, sid: i6
         "my_stars": my_stars,
         "is_fav": is_fav,
     }))
+}
+
+/// GET /api/me/stats — PROFIL SAHIFASIDAGI SHAXSIY STATISTIKA.
+///
+/// To'rtta raqam, BITTA so'rovda:
+///
+///   * nechta ANIME ko'rgan (bo'lim emas — `anime_id` bo'yicha
+///     noyob);
+///   * nechta qism ko'rgan;
+///   * necha soat ko'rgan (1x tezlikdagi haqiqiy vaqt);
+///   * qancha trafik sarflagan.
+///
+/// Tarixdan yashirilgan (`deleted_at`) yozuvlar ham hisobga
+/// kiradi: ular O'CHIRILMAGAN, faqat ro'yxatda ko'rinmaydi.
+async fn me_stats_route(req: Request, env: &Env) -> Result<Response> {
+    let Some(u) = session_user(env, &bearer(&req)).await? else {
+        return json_resp(&json!({"error": "unauthorized"}), 401);
+    };
+    let me = u["id"].as_i64().unwrap_or(0);
+    let res = turso_exec(env,
+        "SELECT COUNT(DISTINCT anime_id), COUNT(*), COALESCE(SUM(watched_ms),0)
+           FROM watch_history_db WHERE user_id=?",
+        vec![TursoArg::int(me)]).await?;
+    let row = &res["rows"][0];
+    let cell = |i: usize| -> i64 {
+        row[i]["value"].as_str().and_then(|v| v.parse::<i64>().ok()).unwrap_or(0)
+    };
+    ok_nostore(json!({
+        "animes": cell(0),
+        "episodes": cell(1),
+        "watch_ms": cell(2),
+        "traffic": u["traffic_bytes"].as_i64().unwrap_or(0),
+    }))
+}
+
+/// GET /api/favorites — foydalanuvchining sevimli BO'LIMLARI.
+///
+/// Javob bo'lim qatorlarining O'ZI bo'ladi, ya'ni Kutubxonadagi
+/// "Sevimlilar" oynasi kartochkani darhol chiza oladi va pleyer
+/// ham shu ma'lumot bilan ochiladi — qo'shimcha so'rov yo'q.
+async fn favorites_route(req: Request, env: &Env, origin: &str) -> Result<Response> {
+    let Some(u) = session_user(env, &bearer(&req)).await? else {
+        return json_resp(&json!({"error": "unauthorized"}), 401);
+    };
+    let me = u["id"].as_i64().unwrap_or(0);
+    let res = turso_exec(env,
+        "SELECT s.*, f.created_at AS fav_at
+           FROM favorites_db f
+           JOIN season_db s
+             ON s.anime_id = f.anime_id AND s.season_id = f.season_id
+          WHERE f.user_id = ?
+          ORDER BY f.created_at DESC
+          LIMIT 300",
+        vec![TursoArg::int(me)]).await?;
+    let cols = res["cols"].as_array().cloned().unwrap_or_default();
+    let rows = res["rows"].as_array().cloned().unwrap_or_default();
+    let items: Vec<Value> = rows
+        .iter()
+        .map(|r| row_to_obj(&cols, r.as_array().unwrap_or(&vec![])))
+        .collect();
+    ok_nostore(json!({"items": resolve_list(origin, items, SEASON_URL_KEYS)}))
 }
 
 /// POST /api/rating — bitta bo'limga bitta baho (1..10).
@@ -3528,7 +3779,6 @@ async fn rating_route(mut req: Request, env: &Env) -> Result<Response> {
          vec![TursoArg::int(me), TursoArg::int(aid), TursoArg::int(sid)]),
         ("SELECT rating_sum, rating_count FROM season_db WHERE anime_id=? AND season_id=?",
          vec![TursoArg::int(aid), TursoArg::int(sid)]),
-        ("SELECT COALESCE(SUM(rating_sum),0), COALESCE(SUM(rating_count),0) FROM season_db", vec![]),
     ]).await?;
     let old = first_row(&pre[0]).and_then(|r| r["stars"].as_i64());
     let Some(srow) = first_row(&pre[1]) else { return err404("Bo'lim topilmadi") };
@@ -3551,14 +3801,10 @@ async fn rating_route(mut req: Request, env: &Env) -> Result<Response> {
          ]),
     ]).await?;
 
-    let grow = &pre[2]["rows"][0];
-    let gnum = |i: usize| -> i64 {
-        grow[i]["value"].as_str().and_then(|v| v.parse::<i64>().ok()).unwrap_or(0)
-    };
     ok_nostore(json!({
         "ok": true,
         "my_stars": stars,
-        "rating": weighted_rating(sum, count, gnum(0), gnum(1)),
+        "rating": average_rating(sum, count),
         "rating_count": count,
     }))
 }
@@ -4019,7 +4265,9 @@ async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
         || path.starts_with("/api/telegram/")
         || path.starts_with("/api/history")
         || path == "/api/rating"
-        || path == "/api/favorite";
+        || path == "/api/favorite"
+        || path == "/api/favorites"
+        || path == "/api/me/stats";
     let write = matches!(method, Method::Post | Method::Put | Method::Delete) && !auth_path;
     let mut resp = route(req, env, ctx).await?;
 
@@ -4079,8 +4327,7 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
     if method == Method::Get {
         if let Some(fname) = path.strip_prefix("/api/image/") {
             let resp = b2_proxy(&env, &ctx, fname, range_header).await?;
-            note_response_traffic(&env, &ctx, &resp);
-            return Ok(resp);
+            return Ok(counted_response(resp, &env, traffic_user(&req)));
         }
         // Pleyer SHU manzildan oqim oladi (b2_play izohiga qarang).
         // Farqi: javob hech qachon sun'iy kesilmaydi va bo'laklab
@@ -4088,8 +4335,7 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
         // faqat o'zi so'ragan baytni oladi.
         if let Some(fname) = path.strip_prefix("/api/play/") {
             let resp = b2_play(&env, &ctx, fname, range_header).await?;
-            note_response_traffic(&env, &ctx, &resp);
-            return Ok(resp);
+            return Ok(counted_response(resp, &env, traffic_user(&req)));
         }
         // Oynani keshga isitish — ilova video ochilganda BIR MARTA
         // chaqiradi va so'rov tugaguncha ulanib turadi (b2_warm
@@ -4121,6 +4367,14 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
     // ── SHAFFOF STATISTIKA ────────────────────────────────────
     if path == "/api/stats" && method == Method::Get {
         return stats_route(&env).await;
+    }
+
+    // ── SHAXSIY STATISTIKA VA SEVIMLILAR RO'YXATI ─────────────
+    if path == "/api/me/stats" && method == Method::Get {
+        return me_stats_route(req, &env).await;
+    }
+    if path == "/api/favorites" && method == Method::Get {
+        return favorites_route(req, &env, &origin).await;
     }
 
     // ── BAHO VA SEVIMLILAR ────────────────────────────────────

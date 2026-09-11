@@ -93,25 +93,49 @@ keshlanadi (`cache_seconds`), ilovada yana 10 daqiqa
 (`StatsService`). Raqamlar diskka ham yoziladi — oflaynda oxirgi
 ma'lum holat ko'rinadi.
 
-| Ko'rsatkich | Kunlik | Hafta / oy / yil | Umumiy |
+| Ko'rsatkich | Kunlik | Hafta / oy | Umumiy |
 |---|---|---|---|
 | Foydalanuvchilar | oxirgi 24 soatda onlayn (`sessions_db.last_seen_at`) | `users_db.created_at` | hamma hisob |
 | Ko'rishlar | oxirgi 24 soat | kunlik chelaklar | jami |
 | Trafik | oxirgi 24 soat | kunlik chelaklar | jami |
 | Tomosha vaqti | oxirgi 24 soat | kunlik chelaklar | jami |
 
+**YILLIK ko'rsatkich ATAYLAB YO'Q** (foydalanuvchi talabi):
+kunlik, haftalik, oylik va umumiy yetarli.
+
 **Hodisalar ro'yxati saqlanmaydi** (u millionlab qator bo'lardi) —
 faqat yig'indilar: `stats_hourly` (oxirgi 24 soat uchun, 3 kundan
-eskisi o'chiriladi) va `stats_daily` (hafta/oy/yil/jami).
+eskisi o'chiriladi) va `stats_daily` (hafta/oy/jami).
 
-**Trafik** `/api/play` va `/api/image` javoblarining e'lon
-qilingan uzunligidan olinadi va `wait_until` bilan fon'da
-yoziladi — ijro yo'liga (loyihaning eng nozik qismiga) umuman
-tegilmaydi.
+**Trafik — HAQIQATAN YUBORILGAN BAYTLAR.**
 
-**Ko'rish** = qism ochilib, chegaradan oshib ko'rilgani. Bitta
-ochilish = BITTA ko'rish: ilova `new_view` bayrog'ini yuboradi,
-server esa oxirgi yozuvdan 30 soniya o'tmagan bo'lsa sanamaydi.
+TOPILGAN XATO: ilgari javobning E'LON QILINGAN uzunligi
+(`Content-Length`) sanalardi. Pleyer esa videoni ochganda
+`Range: bytes=0-` deb butun fayl oxirigacha so'raydi, bir necha
+megabayt bufer yig'ib ulanishni uzadi va keyingi joydan qayta
+so'raydi — natijada 166 MB lik video "1,14 GB" bo'lib
+ko'rinardi.
+
+Endi javob tanasi SANOVCHI quvurdan (`TransformStream`)
+o'tkaziladi va faqat haqiqatan o'tgan baytlar sanaladi; hisob
+har 8 MiB da bazaga yoziladi. O'rash biror sababga ko'ra
+ishlamasa, javob HECH O'ZGARMASDAN qaytariladi — ya'ni eng
+yomon holatda trafik sanalmaydi, lekin video har doim ishlaydi.
+Oxirida yana `FixedLengthStream` turadi (busiz javob "chunked"
+bo'lib, erta uzilganda mijoz uni "fayl tugadi" deb qabul
+qilardi).
+
+**Trafik KIMGA yoziladi:** ilova pleyer va yuklab olish
+so'rovlariga `X-U: <hisob raqami>` sarlavhasini qo'yadi
+(yadroda `rust_set_user_id`). Sarlavha MANZILGA tegmaydi — na
+Cloudflare keshi, na telefondagi kesh kaliti o'zgaradi. Profil
+sahifasidagi "Trafik" aynan shundan chiqadi.
+
+**Ko'rish — ODAM BOSHIGA BITTA.** Foydalanuvchi talabi: "bitta
+odam bitta videoni 50 marta ko'rsa ham ko'rishlar soni 1 tadan
+oshmasin". Shu sabab umumiy hisob faqat shu odam shu qismni
+BIRINCHI marta ko'rganda oshadi (`view_count = 0` bo'lganda);
+shaxsiy `view_count` esa o'sib boraveradi.
 
 ## TOMOSHA VAQTI
 
@@ -131,10 +155,15 @@ oshmasin".
 
 Ikkovi ham **BO'LIM** darajasida (`ratings_db`, `favorites_db`).
 
-Reyting — **vaznli o'rtacha**:
-`(n/(n+m))*R + (m/(n+m))*C`, `m = 5` ta baho, `C` — saytdagi
-umumiy o'rtacha. Busiz bitta odam 10 qo'yishi bilan reyting
-`10.00` bo'lib qolardi.
+Reyting — **oddiy o'rtacha** (`sum / count`, ikki kasr xona).
+Foydalanuvchi talabi: "birinchi odam 10 baho bersa reyting ham
+10 bo'lsin, iloji boricha ANIQ bo'lsin". IMDb uslubidagi vaznli
+(bayes) o'rtacha sinab ko'rilgan edi — u bitta baho bo'lganda
+10 ni 8.5 ga tushirardi va shu sabab OLIB TASHLANDI.
+
+Baho qo'yish oynasida yulduz bosilganda faqat TANLANADI;
+saqlash uchun "Baholash" tugmasi bosiladi ("Bekor qilish" ham
+bor).
 
 Tezlik uchun `season_db` da hisoblangan ustunlar turadi:
 `views_total`, `watch_ms_total`, `fav_count`, `rating_sum`,
@@ -319,7 +348,33 @@ Kirilmagan bo'lsa pleyer OCHILMAYDI — o'rniga oyna chiqadi:
 "Iltimos anime ko'rish uchun avval profil sahifasiga o'tib
 accountingizga kiring yoki yangi accaunt oching".
 
-### BOSH SAHIFADAGI KARTA
+### SEVIMLILAR VA SHAXSIY STATISTIKA
+
+Pleyerdagi yurakcha bosilgan bo'limlar Kutubxonadagi
+**Sevimlilar** oynasida ko'rinadi (`GET /api/favorites` — javobda
+bo'lim qatorlarining O'ZI keladi, ya'ni kartochka darhol
+chiziladi va pleyer qo'shimcha so'rovsiz ochiladi). Ro'yxat
+Kutubxona tugmasi bosilganda yangilanadi va diskka yoziladi.
+
+Profil sahifasida rasm/balans tagida **2x2 shaxsiy statistika**:
+nechta ANIME (bo'lim emas — `anime_id` bo'yicha noyob), nechta
+qism, necha soat va qancha trafik. Bitta so'rov:
+`GET /api/me/stats`.
+
+## ADMIN PANELIDAN "OTILIB CHIQISH"
+
+Rasm/video tanlashda Android galereyani oldinga chiqaradi va
+xotirasi kam telefonda ILOVANI BUTUNLAY YOPADI — foydalanuvchi
+qaytganda ilova noldan ochilardi.
+
+Buni `Navigator` bilan hal qilib bo'lmaydi (jarayonning o'zi
+o'ladi). Shu sabab `lib/services/ui_state.dart`: fayl tanlashdan
+OLDIN diskka belgi qo'yiladi, tanlash tugashi bilan olib
+tashlanadi. Ilova ochilganda `RootScreen` o'sha belgini ko'rsa —
+admin panelini qaytadan ochadi. Foydalanuvchi orqaga qaytsa yoki
+ilovani o'zi yopsa, belgi allaqachon tozalangan bo'ladi.
+
+## BOSH SAHIFADAGI KARTA
 
 Karta = bitta BO'LIM (`season_db` qatori). Nomning ustida
 `N-bo'lim` yozuvi turadi (`bolim_id`), nomga ajratiladigan joy

@@ -9,6 +9,8 @@ crate-type = ["cdylib"]
 [dependencies]
 # Cloudflare Workers Rust SDK — worker-build talab qiladigan versiya
 worker = "0.8.5"
+# Oqim ichida (sanovchi quvurda) fon vazifasini boshlash uchun
+wasm-bindgen-futures = "0.4"
 # JSON serialize/deserialize
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -162,6 +162,7 @@ class AuthService extends ChangeNotifier {
       final cached = await _storage.read(key: _userKey);
       if (cached != null && cached.isNotEmpty) {
         _user = AppUser.fromJson(jsonDecode(cached) as Map<String, dynamic>);
+        RustCore.instance.setUserId(_user?.id ?? 0);
       }
     } catch (_) {
       // Xavfsiz ombor ishlamadi — mehmon sifatida davom etamiz.
@@ -614,6 +615,9 @@ class AuthService extends ChangeNotifier {
   Future<void> _save(String session, AppUser u) async {
     _session = session;
     _user = u;
+    // Yadro yuklab olish so'rovlariga `X-U` sarlavhasini qo'yadi —
+    // sarflangan trafik AYNAN shu hisobga yoziladi.
+    RustCore.instance.setUserId(u.id);
     try {
       await _storage.write(key: _sessionKey, value: session);
       await _storage.write(key: _userKey, value: jsonEncode(u.toJson()));
@@ -626,6 +630,7 @@ class AuthService extends ChangeNotifier {
   Future<void> _clear() async {
     _session = null;
     _user = null;
+    RustCore.instance.setUserId(0);
     try {
       await _storage.delete(key: _sessionKey);
       await _storage.delete(key: _userKey);

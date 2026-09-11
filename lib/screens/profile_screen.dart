@@ -4,6 +4,8 @@ import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../services/auth_service.dart';
+import '../services/format.dart';
+import '../services/stats_service.dart';
 import '../widgets/aru_logo.dart';
 import '../widgets/glass.dart';
 import '../widgets/telegram_logo.dart';
@@ -396,6 +398,13 @@ class _ProfileBody extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 16),
+          // ── SHAXSIY STATISTIKA (2x2) ─────────────────────────
+          //
+          // Rasm va balans TAGIDA: nechta anime ko'rgan (bo'lim
+          // emas — asosiy anime bo'yicha), nechta qism, necha soat
+          // va qancha trafik sarflagan.
+          const _MyStatsGrid(),
+          const SizedBox(height: 16),
           // ── TUGMALAR TARTIBI (foydalanuvchi belgilagan) ───────
           //   1. Bildirishnoma
           //   2. Sozlamalar
@@ -481,6 +490,132 @@ class _ProfileBody extends StatelessWidget {
 
 /// Qizil ("xavfli") amal tugmasi — chiqish va o'chirish uchun
 /// bir xil ko'rinish beradi.
+/// Foydalanuvchining O'Z statistikasi — 2x2 katak.
+class _MyStatsGrid extends StatefulWidget {
+  const _MyStatsGrid();
+
+  @override
+  State<_MyStatsGrid> createState() => _MyStatsGridState();
+}
+
+class _MyStatsGridState extends State<_MyStatsGrid> {
+  @override
+  void initState() {
+    super.initState();
+    // Avval diskdagi nusxa (darhol ko'rinadi), keyin yangilanadi.
+    MyStatsService.instance.loadFromDisk();
+    MyStatsService.instance.load();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: MyStatsService.instance,
+      builder: (context, _) {
+        final s = MyStatsService.instance.stats;
+        return Column(
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: _StatBox(
+                    icon: Icons.movie_filter_rounded,
+                    label: 'Anime',
+                    value: formatCount(s.animes),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: _StatBox(
+                    icon: Icons.play_circle_outline_rounded,
+                    label: 'Qism',
+                    value: formatCount(s.episodes),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: _StatBox(
+                    icon: Icons.schedule_rounded,
+                    label: 'Tomosha vaqti',
+                    value: '${formatHours(s.watchMs)} soat',
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: _StatBox(
+                    icon: Icons.cloud_download_rounded,
+                    label: 'Trafik',
+                    value: formatBytes(s.traffic),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _StatBox extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final String value;
+
+  const _StatBox({
+    required this.icon,
+    required this.label,
+    required this.value,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Glass(
+      borderRadius: 18,
+      blur: 14,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              Icon(icon, size: 16, color: AppColors.accent),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.55),
+                    fontSize: 12,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            value,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 17,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _DangerTile extends StatelessWidget {
   final IconData icon;
   final String label;

@@ -217,6 +217,9 @@ class _HistoryTabState extends State<HistoryTab> {
           child: PageView(
             controller: _pages,
             physics: const BouncingScrollPhysics(),
+            // Qo'shni oyna OLDINDAN quriladi — surish paytida
+            // qurish ishi qolmaydi.
+            allowImplicitScrolling: true,
             onPageChanged: (i) => setState(() => _page = i),
             children: const [
               _HistoryList(byAnime: true),

@@ -5,8 +5,9 @@
 //   Foydalanuvchilar → Tomosha qilingan qismlar → Trafik sarfi →
 //   Tomosha vaqti
 //
-// Har birida bir xil tartib: Kunlik / Haftalik / Oylik / Yillik /
-// Umumiy. Raqamlar uch xonadan ajratiladi (`1.000`).
+// Har birida bir xil tartib: Kunlik / Haftalik / Oylik / Umumiy.
+// Raqamlar uch xonadan ajratiladi (`1.000`). Yillik ko'rsatkich
+// ATAYLAB yo'q — foydalanuvchi talabi.
 //
 // Kunlik ko'rsatkich — OXIRGI 24 SOAT (foydalanuvchi talabi),
 // qolganlari esa Toshkent (UTC+5) kunlari bo'yicha.
@@ -189,7 +190,6 @@ class _StatCard extends StatelessWidget {
           _row('Kunlik', block.daily),
           _row('Haftalik', block.weekly),
           _row('Oylik', block.monthly),
-          _row('Yillik', block.yearly),
           _row('Umumiy', block.total, strong: true),
           const SizedBox(height: 8),
           Text(

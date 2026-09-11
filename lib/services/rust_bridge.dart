@@ -87,6 +87,11 @@ typedef _VideoTotalDart = int Function(Pointer<Utf8>);
 typedef _VideoWindowSizeC = Uint64 Function();
 typedef _VideoWindowSizeDart = int Function();
 
+// Trafikni KIM sarflaganini bildirish uchun (yuklab olish
+// so'rovlariga `X-U` sarlavhasi qo'yiladi).
+typedef _SetUserIdC = Void Function(Int64);
+typedef _SetUserIdDart = void Function(int);
+
 typedef _CryptoGenKeyC = Pointer<Utf8> Function();
 typedef _CryptoGenKeyDart = Pointer<Utf8> Function();
 typedef _CryptoSetKeyC = Int32 Function(Pointer<Utf8>);
@@ -132,6 +137,7 @@ class RustCore {
   late final _VideoWindowDart _videoWindowSeen;
   late final _VideoTotalDart _videoTotal;
   late final _VideoWindowSizeDart _videoWindowSize;
+  late final _SetUserIdDart _setUserId;
   late final _CryptoGenKeyDart _cryptoGenKey;
   late final _CryptoSetKeyDart _cryptoSetKey;
   late final _SecureSaveDart _secureSave;
@@ -210,6 +216,8 @@ class RustCore {
     _videoWindowSize =
         _lib.lookupFunction<_VideoWindowSizeC, _VideoWindowSizeDart>(
             'rust_video_cache_window_size');
+    _setUserId =
+        _lib.lookupFunction<_SetUserIdC, _SetUserIdDart>('rust_set_user_id');
     _cryptoGenKey = _lib.lookupFunction<_CryptoGenKeyC, _CryptoGenKeyDart>(
         'rust_crypto_generate_key');
     _cryptoSetKey = _lib.lookupFunction<_CryptoSetKeyC, _CryptoSetKeyDart>(
@@ -540,6 +548,21 @@ class RustCore {
   /// Ilova ma'lumotlari saqlanadigan papka (Rust kesh fayli shu
   /// yerda). `init()` chaqirilmagan bo'lsa `null`.
   String? get dataDirPath => _cacheDirPath;
+
+  /// Kirgan hisob raqamini yadroga bildiradi (chiqilganda 0).
+  ///
+  /// Yadro undan keyin yuklab olish so'rovlariga `X-U` sarlavhasini
+  /// qo'yadi — worker esa sarflangan trafikni AYNAN shu hisobga
+  /// yozadi (profil sahifasidagi "Trafik" shundan chiqadi).
+  void setUserId(int id) {
+    if (!_loaded) return;
+    try {
+      _setUserId(id);
+    } catch (_) {
+      // Eski kutubxona (yangilanmagan .so) — trafik shunchaki
+      // shaxsiy hisobga yozilmaydi, boshqa hech narsa buzilmaydi.
+    }
+  }
 
   /// Pleyerga MAHALLIY (127.0.0.1) ulanish orqali uzatilgan umumiy
   /// bayt hajmi. Telefon status-satridagi "KB/s" hisoblagichi ko'p

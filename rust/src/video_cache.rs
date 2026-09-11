@@ -30,7 +30,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::raw::c_char;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -3542,6 +3542,33 @@ pub extern "C" fn rust_video_cache_window_size() -> u64 {
     WARM_WINDOW
 }
 
+// ═══════════════════════════════════════════════════════════════
+//  TRAFIKNI KIM SARFLAGANI
+// ═══════════════════════════════════════════════════════════════
+//
+// Worker har bir javobda HAQIQATAN yuborilgan baytlarni sanaydi va
+// `X-U` sarlavhasidagi hisob raqamiga yozadi (profil sahifasidagi
+// "qancha trafik ishlatgani" shundan chiqadi).
+//
+// NEGA SARLAVHA, MANZIL EMAS: manzil ham Cloudflare keshida, ham
+// telefondagi keshda KALIT sifatida ishlatiladi. Unga `?u=...`
+// qo'shilsa, har bir foydalanuvchi uchun alohida kesh paydo
+// bo'lardi va yuklab olingan fayllar "yo'qolardi". Sarlavha esa
+// hech qanday kalitga tegmaydi.
+static TRAFFIC_USER: AtomicI64 = AtomicI64::new(0);
+
+/// Ilova kirgan hisob raqamini bildiradi (chiqilganda 0).
+#[no_mangle]
+pub extern "C" fn rust_set_user_id(id: i64) {
+    TRAFFIC_USER.store(id.max(0), Ordering::Relaxed);
+}
+
+/// `X-U` sarlavhasi uchun qiymat (hisob yo'q bo'lsa — bo'sh).
+fn traffic_user_header() -> Option<String> {
+    let id = TRAFFIC_USER.load(Ordering::Relaxed);
+    if id > 0 { Some(id.to_string()) } else { None }
+}
+
 /// ── YUKLAB OLISH ISITISHNI KUTADI ─────────────────────────────
 ///
 /// Foydalanuvchi "yuklab olish"ni bosganda eng tejamkor va eng tez
@@ -3706,12 +3733,14 @@ fn fetch_span(
     log(format!(
         "Bo'laklar {first}..={last} worker'dan olinmoqda ({range_start}-{range_end})..."
     ));
-    let resp = shared
+    let mut req = shared
         .agent
         .get(url)
-        .set("Range", &format!("bytes={range_start}-{range_end}"))
-        .call()
-        .map_err(|e| e.to_string())?;
+        .set("Range", &format!("bytes={range_start}-{range_end}"));
+    if let Some(uid) = traffic_user_header() {
+        req = req.set("X-U", &uid);
+    }
+    let resp = req.call().map_err(|e| e.to_string())?;
     let status = resp.status();
 
     // ── BUTUNLIK TEKSHIRUVI ────────────────────────────────────
@@ -4104,13 +4133,15 @@ impl ThumbReader<'_> {
 
     fn read_from_net(&self, start: u64, len: u64) -> Option<Vec<u8>> {
         let end = start + len - 1;
-        let resp = self
+        let mut req = self
             .shared
             .agent
             .get(&self.url)
-            .set("Range", &format!("bytes={start}-{end}"))
-            .call()
-            .ok()?;
+            .set("Range", &format!("bytes={start}-{end}"));
+        if let Some(uid) = traffic_user_header() {
+            req = req.set("X-U", &uid);
+        }
+        let resp = req.call().ok()?;
         // Manba Range'ni e'tiborsiz qoldirib BUTUN faylni
         // yuborayotgan bo'lsa (status 200), boshidan boshqa hech
         // qayerni o'qib bo'lmaydi — bunday javobni qabul qilmaymiz,
