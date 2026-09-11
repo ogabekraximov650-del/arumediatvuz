@@ -4463,9 +4463,17 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
                             let oc = old["cols"].as_array().cloned().unwrap_or_default();
                             let op = row_to_obj(&oc, or_[0].as_array().unwrap_or(&vec![]))["photo_url"].as_str().unwrap_or("").to_string();
                             if !op.is_empty() { b2_delete(&env, &op).await; }
-                            // 4. season_db dan o'chirish
-                            turso_exec(&env, "DELETE FROM season_db WHERE anime_id=? AND season_id=?",
-                                vec![TursoArg::int(aid), TursoArg::int(sid)]).await?;
+                            // 4. season_db va unga bog'liq yozuvlar
+                            let _ = turso_batch(&env, &[
+                                ("DELETE FROM season_janr WHERE anime_id=? AND season_id=?",
+                                 vec![TursoArg::int(aid), TursoArg::int(sid)]),
+                                ("DELETE FROM ratings_db WHERE anime_id=? AND season_id=?",
+                                 vec![TursoArg::int(aid), TursoArg::int(sid)]),
+                                ("DELETE FROM favorites_db WHERE anime_id=? AND season_id=?",
+                                 vec![TursoArg::int(aid), TursoArg::int(sid)]),
+                                ("DELETE FROM season_db WHERE anime_id=? AND season_id=?",
+                                 vec![TursoArg::int(aid), TursoArg::int(sid)]),
+                            ]).await;
                             return ok(json!({"success": true}));
                         }
                     }
