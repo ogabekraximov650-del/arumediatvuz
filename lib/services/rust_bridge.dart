@@ -91,8 +91,8 @@ typedef _VideoTotalDart = int Function(Pointer<Utf8>);
 typedef _VideoWindowSizeC = Uint64 Function();
 typedef _VideoWindowSizeDart = int Function();
 
-// Trafikni KIM sarflaganini bildirish uchun (yuklab olish
-// so'rovlariga `X-U` sarlavhasi qo'yiladi).
+// Kirgan hisob raqamini yadroga bildirish (faqat jurnal uchun —
+// trafikni ilovaning o'zi sanaydi, `traffic_service.dart`).
 typedef _SetUserIdC = Void Function(Int64);
 typedef _SetUserIdDart = void Function(int);
 
