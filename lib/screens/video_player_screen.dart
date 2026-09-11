@@ -118,6 +118,8 @@ import 'package:video_player/video_player.dart';
 import '../services/download_manager.dart';
 import '../services/rust_bridge.dart';
 import '../services/video_cache_server.dart';
+import '../services/format.dart';
+import '../services/season_info.dart';
 import '../services/watch_history.dart';
 import '../services/watch_progress.dart';
 import '../theme/app_background.dart';
@@ -151,6 +153,21 @@ class VideoPlayerScreen extends StatefulWidget {
 class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   late final TabController _tabCtrl;
+
+  /// Oynalar QO'LDA suriladi (tarix oynalaridek). `TabBar` va bu
+  /// sahifa bir-birini kuzatib boradi.
+  late final PageController _tabPages;
+
+  /// Bo'lim ma'lumoti: ko'rishlar, tomosha vaqti, sevimlilar,
+  /// reyting va shu odamning O'Z bahosi. BITTA so'rov bilan
+  /// olinadi (`GET /api/season/:a/:s`).
+  SeasonInfo? _info;
+
+  /// Tomosha vaqtini o'lchash uchun oldingi kadrdagi nuqta.
+  ///
+  /// Faqat IJRO ketayotganda va tezlik 1x bo'lganda hisoblanadi;
+  /// sek (sakrash) katta farq berganda e'tiborsiz qoldiriladi.
+  Duration? _watchTickPos;
 
   List<Map<String, dynamic>> _episodes = [];
   List<Map<String, dynamic>> _seasons = [];
@@ -316,10 +333,14 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // Tartib (foydalanuvchi talabi): Ma'lumot | Qismlar | Bo'limlar,
+    // va ochilganda MA'LUMOT oynasi turadi.
     _tabCtrl = TabController(length: 3, vsync: this);
+    _tabPages = PageController();
     _watchConnectivity();
     _loadEpisodes();
     _loadSeasons();
+    _loadSeasonInfo();
   }
 
   @override
@@ -334,6 +355,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _releaseDownloadUpdates();
     _epScrollCtrl.dispose();
     DownloadManager.instance.unwatch(this);
+    _tabPages.dispose();
     _tabCtrl.dispose();
     _hideTimer?.cancel();
     _leftSeekHideTimer?.cancel();
@@ -407,6 +429,16 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       // Tarmoq yo'q/xato — keshdagi ro'yxat (agar bo'lsa) saqlanib qoladi.
     }
     if (mounted && _loadingEps) setState(() => _loadingEps = false);
+  }
+
+  /// Bo'lim ma'lumoti — BITTA so'rov.
+  Future<void> _loadSeasonInfo() async {
+    final aid = int.tryParse(widget.season['anime_id']?.toString() ?? '') ?? 0;
+    final sid = int.tryParse(widget.season['season_id']?.toString() ?? '') ?? 0;
+    if (aid <= 0) return;
+    final info = await SeasonService.load(aid, sid);
+    if (!mounted || info == null) return;
+    setState(() => _info = info);
   }
 
   Future<void> _loadSeasons() async {
@@ -725,6 +757,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _seekBusy = false;
     _healthTimer?.cancel();
     _windowTimer?.cancel();
+    _watchTickPos = null;
     _windowWaiters = 0;
     _windowWaiting = false;
     _lastCompleteHint = null;
@@ -1502,6 +1535,25 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
         // Tarix uchun ham eslab qo'yiladi — bu ham faqat XOTIRAGA,
         // serverga emas.
         WatchHistory.instance.note(v.position, v.duration);
+      }
+
+      // ── TOMOSHA VAQTI ────────────────────────────────────
+      //
+      // TALAB (foydalanuvchi): "videoni 1x tezlikda ko'rganda
+      // hisoblansin" va vaqt qism uzunligidan oshmasin.
+      //
+      // Shu sabab bu yerda SOAT emas, videoning O'Z nuqtasi
+      // o'lchanadi: pauza, buferlash va sek umuman qo'shilmaydi.
+      // Sakrash katta farq beradi — u ham tashlab yuboriladi.
+      final prev = _watchTickPos;
+      _watchTickPos = v.position;
+      if (prev != null &&
+          v.isPlaying &&
+          (v.playbackSpeed - 1.0).abs() < 0.01) {
+        final step = v.position.inMilliseconds - prev.inMilliseconds;
+        if (step > 0 && step <= 2000) {
+          WatchHistory.instance.addWatched(step);
+        }
       }
 
       // ── ERTA UZILGAN OQIM: QAYTA OCHISHNI TAKRORLASH ─────────
@@ -2351,6 +2403,10 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                   child: _buildInlinePlayer(),
                 ),
               ),
+              // Pleyer bilan qism o'tkazish orasida: qaysi bo'lim va
+              // qism ko'rilyapti, u necha marta ko'rilgan, qancha
+              // vaqt tomosha qilingan va qachon qo'shilgan.
+              _buildNowPlayingBar(),
               const SizedBox(height: 8),
               // Tartib (foydalanuvchi talabi):
               //   video -> tablar -> [<] N-qism [>] -> qismlar ro'yxati
@@ -2380,10 +2436,17 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                         fontWeight: FontWeight.w600, fontSize: 13),
                     unselectedLabelStyle: const TextStyle(fontSize: 13),
                     dividerColor: Colors.transparent,
+                    // Tartib (foydalanuvchi talabi):
+                    // Ma'lumot | Qismlar | Bo'limlar.
+                    onTap: (i) => _tabPages.animateToPage(
+                      i,
+                      duration: const Duration(milliseconds: 260),
+                      curve: Curves.easeOutCubic,
+                    ),
                     tabs: const [
+                      Tab(height: 32, text: 'Ma\'lumot'),
                       Tab(height: 32, text: 'Qismlar'),
                       Tab(height: 32, text: 'Bo\'limlar'),
-                      Tab(height: 32, text: 'Ma\'lumot'),
                     ],
                   ),
                 ),
@@ -2393,20 +2456,15 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
               _buildEpisodeNav(),
               const SizedBox(height: 6),
               Expanded(
-                // ── NEGA TabBarView EMAS ──────────────────────────
-                // TabBarView sahifalarni PageView kabi yonma-yon
-                // joylashtiradi va bir tabdan boshqasiga o'tganda
-                // ORADAGI tabni ham qurishga majbur bo'ladi — hammasi
-                // ~300 ms lik animatsiya ichida. "Qismlar"dan
-                // "Ma'lumot"ga o'tishda esa ikkita tab birdan
-                // quriladi (biri rasm yuklaydigan ro'yxat) va ilova
-                // bir zumga QOTIB qolardi.
+                // ── OYNALAR QO'LDA SURILADI ──────────────────────
                 //
-                // IndexedStack esa faqat TANLANGAN tabni ko'rsatadi,
-                // qolganlari o'z holatini saqlab turadi. Pastdagi
-                // `_lazyTab` yordamida tab BIRINCHI MARTA ochilgandagina
-                // quriladi — ya'ni hech qachon ortiqcha ish
-                // bajarilmaydi.
+                // TALAB (foydalanuvchi): tarix oynalaridek, barmoq
+                // bilan surib o'tilsin.
+                //
+                // Har bir oyna `_KeepAlivePage` ichida — ya'ni bir
+                // marta qurilgandan keyin TIRIK qoladi va surish
+                // paytida qaytadan qurilmaydi. Kuchsiz telefondagi
+                // qotish aynan shundan bo'lardi.
                 //
                 // ── SURISH PAYTIDA SO'ROVLAR TO'XTAYDI ────────────
                 // Yuklab olish holati Rust yadrosidan SINXRON FFI
@@ -2434,30 +2492,17 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                   //
                   // NEGA `TabBarView` EMAS: yuqoridagi izohda
                   // tushuntirilganidek, u o'tish paytida ORADAGI
-                  // tabni ham qurishga majbur bo'lardi va ilova bir
-                  // zumga qotib qolardi. Bu yerda esa faqat surish
-                  // HARAKATI ushlanadi, ko'rsatish esa avvalgidek
-                  // `IndexedStack` orqali (bitta tab — bitta qurish).
-                  //
-                  // `translucent` — tapni yutmaydi: ro'yxatdagi
-                  // tugmalar va vertikal surish avvalgidek ishlaydi
-                  // (vertikal surish gorizontal gesture bilan
-                  // to'qnashmaydi, Flutter arena ularni ajratadi).
-                  child: GestureDetector(
-                    behavior: HitTestBehavior.translucent,
-                    onHorizontalDragEnd: _onTabSwipe,
-                    child: AnimatedBuilder(
-                      animation: _tabCtrl,
-                      builder: (context, _) => IndexedStack(
-                        index: _tabCtrl.index,
-                        sizing: StackFit.expand,
-                        children: [
-                          _lazyTab(0, _buildEpisodeTab),
-                          _lazyTab(1, _buildSeasonsTab),
-                          _lazyTab(2, () => _buildInfoTab(tavsif.toString())),
-                        ],
-                      ),
-                    ),
+                  child: PageView(
+                    controller: _tabPages,
+                    physics: const BouncingScrollPhysics(),
+                    onPageChanged: (i) {
+                      if (_tabCtrl.index != i) _tabCtrl.animateTo(i);
+                    },
+                    children: [
+                      _KeepAlivePage(child: _buildInfoTab(tavsif.toString())),
+                      _KeepAlivePage(child: _buildEpisodeTab()),
+                      _KeepAlivePage(child: _buildSeasonsTab()),
+                    ],
                   ),
                 ),
               ),
@@ -2468,27 +2513,81 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     );
   }
 
-  /// Pastki qismni chapga/o'ngga surganda tabni almashtiradi.
-  ///
-  /// Chapga surish (`primaryVelocity < 0`) — KEYINGI tab,
-  /// o'ngga surish — OLDINGISI. Tasodifiy mayda siljishlar tabni
-  /// almashtirib yubormasligi uchun tezlik chegarasi qo'yilgan.
-  void _onTabSwipe(DragEndDetails d) {
-    final v = d.primaryVelocity ?? 0;
-    if (v.abs() < 200) return;
-    final next = _tabCtrl.index + (v < 0 ? 1 : -1);
-    if (next < 0 || next >= _tabCtrl.length) return;
-    _tabCtrl.animateTo(next);
+  // ══════════════════════════════════════════════════════════
+  //  PLEYER OSTIDAGI QATOR: HOZIR NIMA KO'RILYAPTI
+  // ══════════════════════════════════════════════════════════
+  //
+  // TALAB (foydalanuvchi): pleyer bilan qism o'tkazish tugmalari
+  // ORASIDA — qaysi bo'lim va qism ko'rilayotgani, shu qism necha
+  // marta ko'rilgani va qachon qo'shilgani ko'rinsin.
+  //
+  // Raqamlar qismlar ro'yxati bilan BIRGA keladi (`views_total`,
+  // `watch_ms_total`, `created_at`) — qo'shimcha so'rov yo'q.
+  Widget _buildNowPlayingBar() {
+    final ep = _currentEp;
+    if (ep == null) return const SizedBox(height: 8);
+
+    final bolim = int.tryParse(widget.season['bolim_id']?.toString() ?? '') ??
+        int.tryParse(widget.season['season_id']?.toString() ?? '') ??
+        0;
+    final num_ = _epNumOf(ep);
+    final views = (ep['views_total'] as num?)?.toInt() ?? 0;
+    final watchMs = (ep['watch_ms_total'] as num?)?.toInt() ?? 0;
+    final added = (ep['created_at'] as num?)?.toInt() ?? 0;
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+      child: Glass(
+        borderRadius: 14,
+        blur: 12,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              '${bolim > 0 ? bolim : 1}-bo\'lim · ${num_}-qism',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 13.5,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 5),
+            Wrap(
+              spacing: 14,
+              runSpacing: 4,
+              children: [
+                _nowStat(Icons.visibility_outlined,
+                    '${formatCount(views)} marta ko\'rilgan'),
+                _nowStat(Icons.schedule_rounded, '${formatHours(watchMs)} soat'),
+                if (added > 0)
+                  _nowStat(Icons.event_available_rounded, formatMoment(added)),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
-  /// Tab BIRINCHI MARTA ochilgandagina quriladi; keyin esa o'z
-  /// holati bilan yashab turadi (qayta ochilganda darhol chiqadi).
-  final Set<int> _builtTabs = {0};
-
-  Widget _lazyTab(int index, Widget Function() build) {
-    if (_tabCtrl.index == index) _builtTabs.add(index);
-    if (!_builtTabs.contains(index)) return const SizedBox.shrink();
-    return build();
+  Widget _nowStat(IconData icon, String text) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 13, color: Colors.white.withValues(alpha: 0.45)),
+        const SizedBox(width: 4),
+        Text(
+          text,
+          style: TextStyle(
+            color: Colors.white.withValues(alpha: 0.62),
+            fontSize: 11.5,
+          ),
+        ),
+      ],
+    );
   }
 
   Widget _buildFullscreenPlayer() {
@@ -3642,46 +3741,259 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     );
   }
 
+  // ══════════════════════════════════════════════════════════
+  //  MA'LUMOT OYNASI
+  // ══════════════════════════════════════════════════════════
+  //
+  // Yuqorida ikkita tugma: BAHOLASH (10 ta yulduz) va
+  // SEVIMLILARGA QO'SHISH — ikkovi ham BO'LIM darajasida
+  // (foydalanuvchi talabi).
+  //
+  // Tagida shu bo'limning umumiy raqamlari: ko'rishlar, tomosha
+  // vaqti, sevimlilar soni, reyting, qismlar soni va qo'shilgan
+  // sana. Undan keyin esa to'liq ma'lumot.
+  //
+  // Raqamlar avval bo'lim ro'yxati bilan kelgan qiymatlardan
+  // ko'rsatiladi, keyin `GET /api/season/...` javobi bilan
+  // aniqlashadi — ya'ni oyna hech qachon bo'sh turmaydi.
+
+  int _seasonNum(String key) {
+    final fresh = _info?.season[key];
+    if (fresh is num) return fresh.toInt();
+    final base = widget.season[key];
+    if (base is num) return base.toInt();
+    return int.tryParse(base?.toString() ?? '') ?? 0;
+  }
+
   Widget _buildInfoTab(String tavsif) {
     final studio = (widget.season['studio'] ?? '').toString();
     final tarjimon = (widget.season['tarjimon'] ?? '').toString();
     final holati = (widget.season['holati'] ?? '').toString();
     final turi = (widget.season['turi'] ?? '').toString();
     final yili = (widget.season['yili'] ?? '').toString();
-    final janri = (widget.season['janri'] ?? '').toString();
+    final janri =
+        (_info?.season['janri'] ?? widget.season['janri'] ?? '').toString();
+
+    final info = _info;
+    final bolim = _seasonNum('bolim_id');
+    final created = _seasonNum('created_at');
+    final ratingCount = _seasonNum('rating_count');
+
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 120),
-      child: Glass(
-        borderRadius: 18,
-        blur: 14,
-        padding: const EdgeInsets.all(18),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _infoRow('Turi', turi),
-            _infoRow('Yili', yili),
-            _infoRow('Janri', janri),
-            _infoRow('Studio', studio),
-            _infoRow('Tarjimon', tarjimon),
-            _infoRow('Holati', holati),
-            if (tavsif.isNotEmpty) ...[
-              const SizedBox(height: 12),
-              const Text('Tavsif',
-                  style: TextStyle(
-                      color: Colors.white60,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w500)),
-              const SizedBox(height: 6),
-              Text(tavsif,
-                  style: TextStyle(
-                      color: Colors.white.withValues(alpha: 0.8),
-                      fontSize: 14,
-                      height: 1.6)),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // ── BAHOLASH / SEVIMLILAR ─────────────────────────
+          Row(
+            children: [
+              Expanded(
+                child: _ActionTile(
+                  icon: info != null && info.myStars > 0
+                      ? Icons.star_rounded
+                      : Icons.star_border_rounded,
+                  color: const Color(0xFFFFC83D),
+                  label: info != null && info.myStars > 0
+                      ? 'Bahoyingiz: ${info.myStars}'
+                      : 'Baholash',
+                  onTap: _showRatingSheet,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: _ActionTile(
+                  icon: (info?.isFav ?? false)
+                      ? Icons.favorite_rounded
+                      : Icons.favorite_border_rounded,
+                  color: AppColors.accent,
+                  label: (info?.isFav ?? false)
+                      ? 'Sevimlilarda'
+                      : 'Sevimlilarga qo\'shish',
+                  onTap: _toggleFavorite,
+                ),
+              ),
             ],
-          ],
-        ),
+          ),
+          const SizedBox(height: 12),
+
+          // ── BO'LIM RAQAMLARI ──────────────────────────────
+          Glass(
+            borderRadius: 18,
+            blur: 14,
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _statLine(Icons.visibility_outlined, 'Ko\'rishlar',
+                    formatCount(_seasonNum('views_total'))),
+                _statLine(Icons.schedule_rounded, 'Tomosha vaqti',
+                    '${formatHours(_seasonNum('watch_ms_total'))} soat'),
+                _statLine(Icons.favorite_border_rounded,
+                    'Sevimlilarga qo\'shilgan',
+                    formatCount(_seasonNum('fav_count'))),
+                _statLine(
+                  Icons.star_border_rounded,
+                  'Reyting',
+                  ratingCount > 0
+                      ? '${formatRating(info?.rating ?? 0)}'
+                          '  (${formatCount(ratingCount)} ta baho)'
+                      : 'hali baholanmagan',
+                ),
+                _statLine(
+                  Icons.movie_creation_outlined,
+                  'Bo\'lim',
+                  '${bolim > 0 ? bolim : 1}-bo\'lim · '
+                      '${formatCount(_seasonNum('epizod_count'))} qism',
+                ),
+                if (created > 0)
+                  _statLine(Icons.event_available_rounded, 'Qo\'shilgan sana',
+                      formatMoment(created)),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+
+          // ── TO'LIQ MA'LUMOT ───────────────────────────────
+          Glass(
+            borderRadius: 18,
+            blur: 14,
+            padding: const EdgeInsets.all(18),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _infoRow('Turi', turi),
+                _infoRow('Yili', yili),
+                _infoRow('Janri', janri),
+                _infoRow('Studio', studio),
+                _infoRow('Tarjimon', tarjimon),
+                _infoRow('Holati', holati),
+                if (tavsif.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  const Text('Tavsif',
+                      style: TextStyle(
+                          color: Colors.white60,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500)),
+                  const SizedBox(height: 6),
+                  Text(tavsif,
+                      style: TextStyle(
+                          color: Colors.white.withValues(alpha: 0.8),
+                          fontSize: 14,
+                          height: 1.6)),
+                ],
+              ],
+            ),
+          ),
+        ],
       ),
     );
+  }
+
+  Widget _statLine(IconData icon, String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 5),
+      child: Row(
+        children: [
+          Icon(icon, size: 16, color: Colors.white.withValues(alpha: 0.45)),
+          const SizedBox(width: 9),
+          Text(
+            '$label:',
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.6),
+              fontSize: 13,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              value,
+              textAlign: TextAlign.right,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 13.5,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── BAHOLASH: 10 TA YULDUZ ────────────────────────────────
+  //
+  // Yulduzcha bosilganda ekranda 10 ta sariq yulduz chiqadi;
+  // qaysi biri bosilsa, o'sha baho saqlanadi (qayta bosilsa
+  // o'zgaradi).
+  Future<void> _showRatingSheet() async {
+    final aid = int.tryParse(widget.season['anime_id']?.toString() ?? '') ?? 0;
+    final sid = int.tryParse(widget.season['season_id']?.toString() ?? '') ?? 0;
+    if (aid <= 0) return;
+
+    final chosen = await showModalBottomSheet<int>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => _RatingSheet(current: _info?.myStars ?? 0),
+    );
+    if (chosen == null || !mounted) return;
+
+    final res = await SeasonService.rate(aid, sid, chosen);
+    if (!mounted) return;
+    if (res == null) {
+      _showNotice('Bahoni saqlab bo\'lmadi');
+      return;
+    }
+    setState(() {
+      final base = _info;
+      final season = Map<String, dynamic>.from(base?.season ?? widget.season);
+      season['rating_count'] = res.count;
+      _info = SeasonInfo(
+        season: season,
+        rating: res.rating,
+        myStars: chosen,
+        isFav: base?.isFav ?? false,
+      );
+    });
+  }
+
+  Future<void> _toggleFavorite() async {
+    final aid = int.tryParse(widget.season['anime_id']?.toString() ?? '') ?? 0;
+    final sid = int.tryParse(widget.season['season_id']?.toString() ?? '') ?? 0;
+    if (aid <= 0) return;
+    final want = !(_info?.isFav ?? false);
+
+    // Tugma DARHOL javob beradi — so'rov fon'da ketadi.
+    setState(() {
+      final base = _info;
+      final season = Map<String, dynamic>.from(base?.season ?? widget.season);
+      final next = ((season['fav_count'] as num?)?.toInt() ?? 0) +
+          (want ? 1 : -1);
+      season['fav_count'] = next < 0 ? 0 : next;
+      _info = SeasonInfo(
+        season: season,
+        rating: base?.rating ?? 0,
+        myStars: base?.myStars ?? 0,
+        isFav: want,
+      );
+    });
+
+    final count = await SeasonService.setFavorite(aid, sid, want);
+    if (!mounted) return;
+    if (count == null) {
+      // Saqlanmadi — holatni qaytaramiz.
+      setState(() {
+        final base = _info;
+        if (base != null) _info = base.copyWith(isFav: !want);
+      });
+      _showNotice('Saqlab bo\'lmadi — internetni tekshiring');
+      return;
+    }
+    setState(() {
+      final base = _info;
+      if (base != null) _info = base.copyWith(favCount: count);
+    });
   }
 
   Widget _infoRow(String label, String value) {
@@ -4560,5 +4872,168 @@ class _VideoProgressBarState extends State<_VideoProgressBar> {
         );
       },
     );
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+//  MA'LUMOT OYNASI UCHUN KICHIK VIDJETLAR
+// ══════════════════════════════════════════════════════════════
+
+/// Yulduzcha / yurakcha tugmasi: belgi va uning tagida yozuv.
+class _ActionTile extends StatelessWidget {
+  final IconData icon;
+  final Color color;
+  final String label;
+  final VoidCallback onTap;
+
+  const _ActionTile({
+    required this.icon,
+    required this.color,
+    required this.label,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Glass(
+        borderRadius: 16,
+        blur: 12,
+        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 26, color: color),
+            const SizedBox(height: 6),
+            Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Colors.white.withValues(alpha: 0.85),
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 10 ta sariq yulduz — qaysi biri bosilsa, o'sha baho.
+class _RatingSheet extends StatefulWidget {
+  final int current;
+  const _RatingSheet({required this.current});
+
+  @override
+  State<_RatingSheet> createState() => _RatingSheetState();
+}
+
+class _RatingSheetState extends State<_RatingSheet> {
+  /// Barmoq ustida turgan yulduz (bosilgunga qadar ko'rsatish
+  /// uchun) — bosilmaguncha hech narsa saqlanmaydi.
+  int _hover = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _hover = widget.current;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+        child: Glass(
+          borderRadius: 22,
+          blur: 18,
+          padding: const EdgeInsets.fromLTRB(18, 18, 18, 14),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'Bu bo\'limni baholang',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                _hover > 0 ? '$_hover / 10' : '10 ballik tizim',
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.55),
+                  fontSize: 12.5,
+                ),
+              ),
+              const SizedBox(height: 14),
+              // Kichik ekranda ham sig'sin: 10 ta yulduz teng
+              // bo'linadi va keraklisi bosiladi.
+              Row(
+                children: List.generate(10, (i) {
+                  final star = i + 1;
+                  return Expanded(
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTapDown: (_) => setState(() => _hover = star),
+                      onTap: () => Navigator.of(context).pop(star),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 6),
+                        child: Icon(
+                          star <= _hover
+                              ? Icons.star_rounded
+                              : Icons.star_border_rounded,
+                          size: 28,
+                          color: star <= _hover
+                              ? const Color(0xFFFFC83D)
+                              : Colors.white24,
+                        ),
+                      ),
+                    ),
+                  );
+                }),
+              ),
+              const SizedBox(height: 8),
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(),
+                child: const Text('Bekor qilish',
+                    style: TextStyle(color: Colors.white54)),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Oynani TIRIK saqlaydi: surish paytida qayta qurilmaydi.
+///
+/// Kuchsiz telefonda oynalar orasida surganda qotish aynan
+/// qayta qurishdan bo'ladi.
+class _KeepAlivePage extends StatefulWidget {
+  final Widget child;
+  const _KeepAlivePage({required this.child});
+
+  @override
+  State<_KeepAlivePage> createState() => _KeepAlivePageState();
+}
+
+class _KeepAlivePageState extends State<_KeepAlivePage>
+    with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    return widget.child;
   }
 }

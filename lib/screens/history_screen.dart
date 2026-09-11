@@ -230,12 +230,28 @@ class _HistoryTabState extends State<HistoryTab> {
 }
 
 /// Bitta ro'yxat (anime bo'yicha yoki qism bo'yicha).
-class _HistoryList extends StatelessWidget {
+///
+/// `AutomaticKeepAliveClientMixin` — surish paytida sahifa QAYTA
+/// QURILMAYDI. Busiz kuchsiz telefonda barmoq bilan surganda
+/// ro'yxat har kadrda qaytadan yig'ilardi va aynan shu qotishga
+/// olib kelardi.
+class _HistoryList extends StatefulWidget {
   final bool byAnime;
   const _HistoryList({required this.byAnime});
 
   @override
+  State<_HistoryList> createState() => _HistoryListState();
+}
+
+class _HistoryListState extends State<_HistoryList>
+    with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
   Widget build(BuildContext context) {
+    super.build(context);
+    final byAnime = widget.byAnime;
     return AnimatedBuilder(
       animation: WatchHistory.instance,
       builder: (context, _) {
@@ -255,7 +271,8 @@ class _HistoryList extends StatelessWidget {
                   itemCount: rows.length,
                   itemBuilder: (context, i) {
                     final item = rows[i];
-                    return Padding(
+                    return RepaintBoundary(
+                      child: Padding(
                       padding: const EdgeInsets.only(bottom: 12),
                       child: byAnime
                           ? AnimeRow(
@@ -270,6 +287,7 @@ class _HistoryList extends StatelessWidget {
                               ),
                             )
                           : EpisodeRow(item: item),
+                    ),
                     );
                   },
                 ),
@@ -567,21 +585,51 @@ class _FrameState extends State<_Frame> {
   @override
   void initState() {
     super.initState();
+    // ── REAL VAQTDA YANGILANISH ──────────────────────────────
+    //
+    // Kadr tayyor bo'lishi bilan `WatchHistory` xabar beradi va
+    // qator o'sha zahoti yangi rasmga o'tadi — boshqa oynaga
+    // kirib chiqishni kutish shart emas (foydalanuvchi talabi:
+    // "ikkala oynada ham real vaqt rejimida yangilansin").
+    WatchHistory.instance.addListener(_onHistoryChanged);
     _load();
+  }
+
+  @override
+  void dispose() {
+    WatchHistory.instance.removeListener(_onHistoryChanged);
+    super.dispose();
+  }
+
+  void _onHistoryChanged() {
+    if (!mounted) return;
+    final fresh = WatchHistory.instance.peekThumb(widget.item.thumbKey);
+    if (fresh == null || identical(fresh, _bytes)) return;
+    setState(() => _bytes = fresh);
   }
 
   @override
   void didUpdateWidget(covariant _Frame old) {
     super.didUpdateWidget(old);
     if (old.item.thumbKey != widget.item.thumbKey) {
-      _bytes = null;
+      // Eski kadr ekranda qolaveradi (bo'sh joy ko'rinmasin) —
+      // yangisi tayyor bo'lishi bilan almashadi.
       _load();
     }
   }
 
   Future<void> _load() async {
+    final key = widget.item.thumbKey;
+    final ready = WatchHistory.instance.peekThumb(key);
+    if (ready != null) {
+      if (mounted && !identical(ready, _bytes)) {
+        setState(() => _bytes = ready);
+      }
+      return;
+    }
     final data = await WatchHistory.instance.thumbnail(widget.item);
-    if (!mounted || data == null) return;
+    // Kutish davomida qator boshqa qismga o'tgan bo'lishi mumkin.
+    if (!mounted || data == null || key != widget.item.thumbKey) return;
     setState(() => _bytes = data);
   }
 

@@ -3,6 +3,7 @@ import 'package:image_picker/image_picker.dart';
 import 'dart:io';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
+import '../data/janrlar.dart';
 import '../theme/app_background.dart';
 import '../widgets/glass.dart';
 
@@ -24,14 +25,15 @@ class AddSeasonScreen extends StatefulWidget {
 class _AddSeasonScreenState extends State<AddSeasonScreen> {
   // bolim_id — foydalanuvchi qo'lda kiritadigan bo'lim raqami (1, 2, 3...)
   final _bolimIdCtrl = TextEditingController();
-  // season_id — PRIMARY KEY, foydalanuvchi qo'lda kiritadigan unikal ID
-  final _seasonIdCtrl = TextEditingController();
   final _nomiCtrl = TextEditingController();
   final _studioCtrl = TextEditingController();
   final _tarjimonCtrl = TextEditingController();
   final _yiliCtrl = TextEditingController();
-  final _janriCtrl = TextEditingController();
   final _tavsifCtrl = TextEditingController();
+
+  /// Tanlangan janrlar. Endi qo'lda yozilmaydi — tugmalar
+  /// bosiladi (`lib/data/janrlar.dart`).
+  final Set<String> _janrlar = {};
 
   String _turi = _turlar.first;
   String _holati = _holatlar.first;
@@ -58,7 +60,6 @@ class _AddSeasonScreenState extends State<AddSeasonScreen> {
     final s = widget.initialSeason;
     if (s != null) {
       _bolimIdCtrl.text = (s['bolim_id'] ?? '').toString();
-      _seasonIdCtrl.text = (s['season_id'] ?? '').toString();
       _originalSeasonId = s['season_id'] is int
           ? s['season_id']
           : int.tryParse((s['season_id'] ?? '').toString());
@@ -66,8 +67,12 @@ class _AddSeasonScreenState extends State<AddSeasonScreen> {
       _studioCtrl.text = s['studio'] ?? '';
       _tarjimonCtrl.text = s['tarjimon'] ?? '';
       _yiliCtrl.text = s['yili'] ?? '';
-      _janriCtrl.text = s['janri'] ?? '';
       _tavsifCtrl.text = s['tavsif'] ?? '';
+      // Eski yozuvlarda janrlar vergul bilan ajratilgan matn.
+      for (final part in (s['janri'] ?? '').toString().split(',')) {
+        final t = part.trim();
+        if (t.isNotEmpty) _janrlar.add(t);
+      }
       _photoUrl = s['photo_url'];
       _photoFileName = _extractFileName(_photoUrl);
       if (_turlar.contains(s['turi'])) _turi = s['turi'];
@@ -78,12 +83,10 @@ class _AddSeasonScreenState extends State<AddSeasonScreen> {
   @override
   void dispose() {
     _bolimIdCtrl.dispose();
-    _seasonIdCtrl.dispose();
     _nomiCtrl.dispose();
     _studioCtrl.dispose();
     _tarjimonCtrl.dispose();
     _yiliCtrl.dispose();
-    _janriCtrl.dispose();
     _tavsifCtrl.dispose();
     super.dispose();
   }
@@ -174,16 +177,20 @@ class _AddSeasonScreenState extends State<AddSeasonScreen> {
           ? '$API_BASE/api/seasons/${widget.animeId}/$_originalSeasonId'
           : '$API_BASE/api/seasons';
 
+      // MUHIM: `season_id` YUBORILMAYDI — uni server o'zi beradi
+      // (shu anime uchun MAX+1). Ilgari u qo'lda kiritilardi va
+      // band raqam kiritilganda server 500 xato qaytarardi.
+      final janrlar = _janrlar.toList()..sort();
       final body = jsonEncode({
         'anime_id': widget.animeId,
         'bolim_id': int.tryParse(_bolimIdCtrl.text) ?? 0,
-        'season_id': int.tryParse(_seasonIdCtrl.text) ?? 0,
         'photo_url': _photoFileName ?? '',
         'nomi': _nomiCtrl.text,
         'studio': _studioCtrl.text,
         'tarjimon': _tarjimonCtrl.text,
         'yili': _yiliCtrl.text,
-        'janri': _janriCtrl.text,
+        'janrlar': janrlar,
+        'janri': janrlar.join(', '),
         'turi': _turi,
         'holati': _holati,
         'tavsif': _tavsifCtrl.text,
@@ -198,7 +205,14 @@ class _AddSeasonScreenState extends State<AddSeasonScreen> {
       if (res.statusCode == 200 || res.statusCode == 201) {
         if (mounted) Navigator.of(context).pop(true);
       } else {
-        throw 'Saqlashda xato (${res.statusCode}): ${res.body}';
+        // Server tushunarli sabab yuborsa — aynan shuni
+        // ko'rsatamiz ("2-bo'lim allaqachon mavjud" kabi).
+        String why = 'Saqlashda xato (${res.statusCode})';
+        try {
+          final j = jsonDecode(res.body);
+          if (j is Map && j['error'] is String) why = j['error'] as String;
+        } catch (_) {}
+        throw why;
       }
     } catch (e) {
       setState(() => _errorMsg = 'Xato: $e');
@@ -320,15 +334,12 @@ class _AddSeasonScreenState extends State<AddSeasonScreen> {
                         const SizedBox(height: 16),
                       ],
 
-                      // Bo'lim IDsi (bolim_id) — 1-chi, 2-chi, 3-chi bo'lim uchun
-                      _buildTextField('Bo\'lim IDsi (raqam)', _bolimIdCtrl,
-                          Icons.tag_rounded,
-                          keyboardType: TextInputType.number),
-                      const SizedBox(height: 12),
-
-                      // Season ID (season_id) — unikal texnik ID (PRIMARY KEY)
-                      _buildTextField('Season ID (unikal)', _seasonIdCtrl,
-                          Icons.fingerprint_rounded,
+                      // Bo'lim raqami: 1-bo'lim, 2-bo'lim...
+                      //
+                      // Texnik `season_id` endi SO'RALMAYDI — uni
+                      // server o'zi beradi.
+                      _buildTextField('Bo\'lim raqami (N-bo\'lim)',
+                          _bolimIdCtrl, Icons.tag_rounded,
                           keyboardType: TextInputType.number),
                       const SizedBox(height: 12),
 
@@ -345,7 +356,9 @@ class _AddSeasonScreenState extends State<AddSeasonScreen> {
                           'Yili', _yiliCtrl, Icons.calendar_today_outlined,
                           keyboardType: TextInputType.number),
                       const SizedBox(height: 12),
-                      _buildTextField('Janri', _janriCtrl, Icons.label_outline),
+                      _buildSectionLabel('Janri'),
+                      const SizedBox(height: 8),
+                      _buildJanrChips(),
                       const SizedBox(height: 16),
 
                       _buildSectionLabel('Turi'),
@@ -470,6 +483,47 @@ class _AddSeasonScreenState extends State<AddSeasonScreen> {
                     ),
                   ),
                 ),
+              ),
+            ),
+          ),
+        );
+      }).toList(),
+    );
+  }
+
+  /// Janr tugmalari — ALIFBO tartibida, bir nechtasini tanlash
+  /// mumkin. Bosilganda rangi o'zgaradi va bazaga shu tanlov
+  /// saqlanadi (`season_janr` jadvali).
+  Widget _buildJanrChips() {
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: kJanrlar.map((j) {
+        final active = _janrlar.contains(j);
+        return GestureDetector(
+          onTap: () => setState(() {
+            if (!_janrlar.remove(j)) _janrlar.add(j);
+          }),
+          behavior: HitTestBehavior.opaque,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 140),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(12),
+              color: active
+                  ? AppColors.accent.withValues(alpha: 0.22)
+                  : AppColors.card,
+              border: Border.all(
+                color: active ? AppColors.accent : AppColors.border,
+                width: 1,
+              ),
+            ),
+            child: Text(
+              j,
+              style: TextStyle(
+                color: active ? Colors.white : Colors.white60,
+                fontSize: 13,
+                fontWeight: active ? FontWeight.w600 : FontWeight.w500,
               ),
             ),
           ),

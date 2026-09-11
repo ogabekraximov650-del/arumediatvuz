@@ -25,6 +25,121 @@
 - Commit qilishdan oldin: `rm -rf rust/target rust/Cargo.lock
   worker/target worker/Cargo.lock`.
 
+## BAZA BIR MARTA TOZALANDI (2026-09)
+
+B2 ombori va Turso bazasi **butunlay bo'shatildi** (bir martalik
+GitHub Action bilan; fayl ishlatilgach repodan o'chirildi). Shu
+sabab `init_db` da endi `ALTER TABLE ... ADD COLUMN` yamoqlari
+YO'Q — har bir jadval o'zining yakuniy ko'rinishida yaratiladi.
+
+**Yangi ustun kerak bo'lsa:** jadval ta'rifiga qo'shing VA alohida
+`ALTER TABLE` yozing (telefondagi eski bazalar uchun emas —
+Turso bitta, lekin deploy oralig'ida sxema ikki xil bo'lib
+qolmasligi uchun).
+
+## VAQT MINTAQASI — UTC+5 (TOSHKENT)
+
+Hamma vaqt Unix millisekundda (UTC) saqlanadi. Statistika
+"chelaklari" esa Toshkent vaqti bo'yicha belgilanadi:
+`day_key(ms)` -> `2026-09-11`, `hour_key(ms)` -> `2026-09-11T14`.
+**Bu funksiyalarni o'zgartirmang** — eski qatorlar boshqa
+mintaqada yozilgan bo'lsa, hisob siljib ketadi.
+
+## INDEKSLAR: KAM, LEKIN ANIQ
+
+Har bir indeks YOZISHNI sekinlashtiradi. Qoida: **birlamchi
+kalitning BOSHIDAGI ustunlar bo'yicha qidiruvga qo'shimcha indeks
+kerak emas.**
+
+| Indeks | Qaysi so'rov uchun |
+|---|---|
+| `season_janr(janr)` | janr bo'yicha filtr |
+| `users_db(LOWER(username))` unique | username takrorlanmasin |
+| `users_db(created_at)` | "shu davrda nechta hisob ochilgan" |
+| `login_tokens(expires_at)` | eskirgan tokenlarni tozalash |
+| `sessions_db(user_id, last_seen_at)` | qurilmalar ro'yxati, 4 ta chegara |
+| `sessions_db(last_seen_at)` | **kunlik faol foydalanuvchi** |
+| `watch_history_db(user_id, deleted_at, updated_at DESC)` | tarix ro'yxati |
+
+`anime_db`, `epizod_db`, `ratings_db`, `favorites_db`,
+`stats_*` — faqat birlamchi kalit. Qo'shimcha indeks qo'shishdan
+oldin uni AYNAN qaysi so'rov ishlatishini yozib qo'ying.
+
+`session_user` ham tejaldi: ikkita so'rov o'rniga bitta "quvur",
+va `last_seen_at` faqat **60 soniyada bir marta** yoziladi.
+
+## SHAFFOF STATISTIKA
+
+`GET /api/stats` — hammasi bitta so'rovda, chekkada **5 daqiqa**
+keshlanadi (`cache_seconds`), ilovada yana 10 daqiqa
+(`StatsService`). Raqamlar diskka ham yoziladi — oflaynda oxirgi
+ma'lum holat ko'rinadi.
+
+| Ko'rsatkich | Kunlik | Hafta / oy / yil | Umumiy |
+|---|---|---|---|
+| Foydalanuvchilar | oxirgi 24 soatda onlayn (`sessions_db.last_seen_at`) | `users_db.created_at` | hamma hisob |
+| Ko'rishlar | oxirgi 24 soat | kunlik chelaklar | jami |
+| Trafik | oxirgi 24 soat | kunlik chelaklar | jami |
+| Tomosha vaqti | oxirgi 24 soat | kunlik chelaklar | jami |
+
+**Hodisalar ro'yxati saqlanmaydi** (u millionlab qator bo'lardi) —
+faqat yig'indilar: `stats_hourly` (oxirgi 24 soat uchun, 3 kundan
+eskisi o'chiriladi) va `stats_daily` (hafta/oy/yil/jami).
+
+**Trafik** `/api/play` va `/api/image` javoblarining e'lon
+qilingan uzunligidan olinadi va `wait_until` bilan fon'da
+yoziladi — ijro yo'liga (loyihaning eng nozik qismiga) umuman
+tegilmaydi.
+
+**Ko'rish** = qism ochilib, chegaradan oshib ko'rilgani. Bitta
+ochilish = BITTA ko'rish: ilova `new_view` bayrog'ini yuboradi,
+server esa oxirgi yozuvdan 30 soniya o'tmagan bo'lsa sanamaydi.
+
+## TOMOSHA VAQTI
+
+TALAB: "1x tezlikda ko'rganda hisoblansin" va "epizod vaqtidan
+oshmasin".
+
+- ilova videoning O'Z nuqtasi bo'yicha o'lchaydi (pauza, buferlash
+  va sek qo'shilmaydi), faqat ijro ketayotganda va tezlik 1x
+  bo'lganda (`video_player_screen` -> `_watchTickPos`);
+- yig'indi qism uzunligidan oshmaydi (`WatchHistory.addWatched`
+  va serverda yana bir marta cheklanadi);
+- serverga JAMI vaqt yuboriladi, server esa faqat **farqni**
+  qo'shadi — takroriy yuborish raqamni shishirmaydi;
+- ko'rinishi: `1:59` (faqat soat:daqiqa), kattasi `1.284:05`.
+
+## BAHO (IMDb USULI) VA SEVIMLILAR
+
+Ikkovi ham **BO'LIM** darajasida (`ratings_db`, `favorites_db`).
+
+Reyting — **vaznli o'rtacha**:
+`(n/(n+m))*R + (m/(n+m))*C`, `m = 5` ta baho, `C` — saytdagi
+umumiy o'rtacha. Busiz bitta odam 10 qo'yishi bilan reyting
+`10.00` bo'lib qolardi.
+
+Tezlik uchun `season_db` da hisoblangan ustunlar turadi:
+`views_total`, `watch_ms_total`, `fav_count`, `rating_sum`,
+`rating_count`, `epizod_count`. Ya'ni Ma'lumot oynasi uchun
+BITTA qator o'qiladi (`GET /api/season/:a/:s`), `COUNT(*)`
+hech qachon ishlatilmaydi.
+
+## BO'LIM QO'SHISH VA JANRLAR
+
+**TOPILGAN XATO (500):** `season_id` birlamchi kalitning bir
+qismi edi va QO'LDA kiritilardi — band raqam kiritilsa SQLite
+"UNIQUE constraint failed" berardi va so'rov 500 bo'lib
+yiqilardi.
+
+Endi `season_id` ni **server beradi** (`MAX+1`), formada faqat
+"N-bo'lim" raqami so'raladi, band raqam esa tushunarli xabar
+bilan qaytariladi ("2-bo'lim allaqachon mavjud").
+
+Janrlar `lib/data/janrlar.dart` da (37 ta, alifbo tartibida) va
+bo'lim qo'shish oynasida **tugma** ko'rinishida. Bazada
+`season_janr` bog'lovchi jadvalida saqlanadi; `season_db.janri`
+esa faqat ko'rsatish uchun matn nusxasi.
+
 ## BREND: ARU / AniRaxUz
 
 Ilova nomi — **AniRaxUz**, logotipi — **ARU**. (`fulutter` faqat
@@ -233,12 +348,24 @@ uzunlikning **10%** i, lekin ko'pi bilan 15 (boshida) va 30
 Nom, bo'lim nomi va rasmlar `startEpisode()` orqali pleyerdan
 keladi (`widget.season`), ya'ni mahalliy yozuv ham to'liq bo'ladi.
 
+### KADRLAR REAL VAQTDA YANGILANADI
+
+Kadr tayyor bo'lishi bilan `WatchHistory` xabar beradi
+(`notifyListeners`), har bir qator esa `peekThumb` orqali uni
+darhol oladi. Ya'ni "Anime bo'yicha" va "Qism bo'yicha"
+oynalarining IKKALASI ham bir vaqtda yangilanadi — boshqa oynaga
+kirib chiqishni kutish shart emas.
+
 ### YOZUVNI O'CHIRISH
 
 Qism kadri ustida **uzoq bosilsa** "Rostdan ham bu tarixni
 o'chirib tashlaysizmi?" so'raladi. "Ha" bo'lsa: ro'yxatdan darhol
 yo'qoladi, kadr fayli o'chiriladi, serverga `DELETE /api/history`
-ketadi. Yuborib bo'lmasa — navbatga tushadi (`_op: delete`) va
+ketadi.
+
+**Yozuv bazadan O'CHMAYDI** (foydalanuvchi talabi): faqat
+`deleted_at` belgilanadi. Qism keyin qayta ko'rilsa yozuv yana
+paydo bo'ladi, statistika esa umuman buzilmaydi. Yuborib bo'lmasa — navbatga tushadi (`_op: delete`) va
 keyin yuboriladi, ya'ni yozuv qaytib kelmaydi.
 
 `GET` javobi ro'yxat uchun kerak bo'lgan hamma narsani bir yo'la
@@ -350,6 +477,24 @@ bosilsa — o'chirish so'raladi.
 **Kadr ustiga qorayish (scrim) TUSHMAYDI** — foydalanuvchi
 rasm tiniq ko'rinishini so'ragan; o'qilishi yozuvning O'Z qora
 soyasi bilan ta'minlanadi.
+
+### Pleyer oynalari
+
+Tartib: **Ma'lumot | Qismlar | Bo'limlar**, ochilganda Ma'lumot
+turadi. Oynalar `PageView` bilan **qo'lda suriladi**; har biri
+`_KeepAlivePage` ichida — bir marta qurilgandan keyin tirik
+qoladi va surish paytida QAYTA QURILMAYDI (kuchsiz telefondagi
+qotish aynan shundan edi). Tarix oynalarida ham xuddi shunday
+(`AutomaticKeepAliveClientMixin` + qatorlarda `RepaintBoundary`).
+
+Ma'lumot oynasida: yuqorida **Baholash** (10 ta yulduz) va
+**Sevimlilarga qo'shish**; tagida bo'limning raqamlari
+(ko'rishlar, tomosha vaqti, sevimlilar, reyting, `N-bo'lim ·
+M qism`, qo'shilgan sana); undan keyin to'liq ma'lumot.
+
+Pleyer bilan qism o'tkazish tugmalari **orasida** — hozir qaysi
+bo'lim va qism ko'rilayotgani, u necha marta ko'rilgani, qancha
+vaqt tomosha qilingani va qachon qo'shilgani.
 
 ### Pleyer QAYSI qismni ochadi
 

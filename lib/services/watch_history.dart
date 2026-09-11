@@ -60,6 +60,13 @@ class HistoryItem {
   final int positionMs;
   final int durationMs;
 
+  /// Shu odam shu qismni JAMI qancha ko'rgani (1x tezlikdagi
+  /// haqiqiy vaqt; qism uzunligidan oshmaydi).
+  final int watchedMs;
+
+  /// Shu odam qismni necha marta ochib ko'rgani.
+  final int viewCount;
+
   /// Oxirgi marta qachon ko'rilgani (Unix, millisekund).
   final int updatedAt;
 
@@ -75,6 +82,8 @@ class HistoryItem {
     required this.videoUrl,
     required this.positionMs,
     required this.durationMs,
+    this.watchedMs = 0,
+    this.viewCount = 0,
     required this.updatedAt,
   });
 
@@ -137,6 +146,8 @@ class HistoryItem {
         'video_url': videoUrl,
         'position_ms': positionMs,
         'duration_ms': durationMs,
+        'watched_ms': watchedMs,
+        'view_count': viewCount,
         'updated_at': updatedAt,
       };
 
@@ -158,6 +169,8 @@ class HistoryItem {
       videoUrl: strOf('video_url'),
       positionMs: intOf('position_ms'),
       durationMs: intOf('duration_ms'),
+      watchedMs: intOf('watched_ms'),
+      viewCount: intOf('view_count'),
       updatedAt: intOf('updated_at'),
     );
   }
@@ -208,6 +221,12 @@ class WatchHistory extends ChangeNotifier {
   // faqat `flush()` da bitta so'rov ketadi.
   Map<String, dynamic>? _pending;
 
+  /// Shu ochilish hali tarixga "yangi ko'rish" deb yozilmagan.
+  ///
+  /// Bitta ochilish = BITTA ko'rish: ilova fonga chiqib qaytsa
+  /// yoki yozuv ikki marta yuborilsa, hisob ikkilanmaydi.
+  bool _pendingNewView = false;
+
   /// Pleyer qaysi qismni ochganini bildiradi.
   ///
   /// Nom va rasmlar ham shu yerda beriladi: ular mahalliy ro'yxatni
@@ -235,11 +254,18 @@ class WatchHistory extends ChangeNotifier {
             prev['season_id'] != seasonId)) {
       unawaited(flush());
     }
+    // ── TOMOSHA VAQTI DAVOM ETADI ───────────────────────
+    //
+    // Serverga JAMI vaqt yuboriladi (shu odam shu qismni qancha
+    // ko'rgani), shu sabab avvalgi yozuvdan davom etamiz.
+    final before = findEpisode(animeId, seasonId, epizodNumber);
+    _pendingNewView = true;
     _pending = {
       'anime_id': animeId,
       'season_id': seasonId,
       'bolim_id': bolimId,
       'epizod_number': epizodNumber,
+      'watched_ms': before?.watchedMs ?? 0,
       'anime_name': animeName,
       'season_name': seasonName,
       'anime_photo': animePhoto,
@@ -256,6 +282,27 @@ class WatchHistory extends ChangeNotifier {
     if (p == null || duration <= Duration.zero) return;
     p['position_ms'] = position.inMilliseconds;
     p['duration_ms'] = duration.inMilliseconds;
+  }
+
+  /// Haqiqatda ko'rilgan vaqt qo'shiladi.
+  ///
+  /// TALAB (foydalanuvchi): "videoni 1x tezlikda ko'rganda
+  /// hisoblansin" va "ko'rish vaqti epizod vaqtidan oshmasligi
+  /// kerak". Shu sabab:
+  ///
+  ///   * pleyer FAQAT ijro ketayotganda va tezlik 1x bo'lganda
+  ///     chaqiradi (`video_player_screen.dart`);
+  ///   * bu yerda esa yig'indi qism uzunligidan oshmaydi.
+  ///
+  /// Sek (oldinga surish) hisoblanmaydi: pleyer o'tgan HAQIQIY
+  /// vaqtni beradi, sakrash emas.
+  void addWatched(int deltaMs) {
+    final p = _pending;
+    if (p == null || deltaMs <= 0) return;
+    final duration = (p['duration_ms'] as int?) ?? 0;
+    var total = ((p['watched_ms'] as int?) ?? 0) + deltaMs;
+    if (duration > 0 && total > duration) total = duration;
+    p['watched_ms'] = total;
   }
 
   /// Kutayotgan yozuvni serverga yuboradi. Pleyerdan chiqilganda,
@@ -286,6 +333,8 @@ class WatchHistory extends ChangeNotifier {
 
     final row = Map<String, dynamic>.from(p);
     row['updated_at'] = DateTime.now().millisecondsSinceEpoch;
+    row['new_view'] = _pendingNewView;
+    _pendingNewView = false;
 
     // 1) Mahalliy ro'yxat DARHOL yangilanadi — qator eng tepaga
     //    chiqadi va sana yangilanadi. Internet bo'lmasa ham.
@@ -332,6 +381,8 @@ class WatchHistory extends ChangeNotifier {
       videoUrl: pick(strOf('video_url'), old?.videoUrl),
       positionMs: intOf('position_ms'),
       durationMs: intOf('duration_ms'),
+      watchedMs: intOf('watched_ms'),
+      viewCount: (old?.viewCount ?? 0) + (row['new_view'] == true ? 1 : 0),
       updatedAt: intOf('updated_at') > 0
           ? intOf('updated_at')
           : DateTime.now().millisecondsSinceEpoch,
@@ -682,6 +733,13 @@ class WatchHistory extends ChangeNotifier {
   /// ilova o'nlab megabaytni ushlab turmasin (har biri ~20 KB).
   static const int _thumbMemoryLimit = 60;
 
+  /// Xotirada tayyor kadr bormi (kutmasdan).
+  ///
+  /// Tarix qatorlari shu orqali REAL VAQTDA yangilanadi: kadr
+  /// tayyor bo'lishi bilan `notifyListeners` chaqiriladi va qator
+  /// o'sha zahoti yangi rasmni oladi.
+  Uint8List? peekThumb(String key) => _thumbMemory[key];
+
   void _rememberThumb(String key, Uint8List bytes) {
     if (_thumbMemory.length >= _thumbMemoryLimit) {
       _thumbMemory.remove(_thumbMemory.keys.first);
@@ -772,6 +830,8 @@ class WatchHistory extends ChangeNotifier {
       if (data == null || data.isEmpty) return null;
 
       _rememberThumb(key, data);
+      // Ro'yxat DARHOL yangi kadrga o'tsin (kutib turmasin).
+      notifyListeners();
       // Shifrlab saqlaymiz va shu videoning eski kadrlarini
       // o'chiramiz (foydalanuvchi oldinga surgan bo'lsa, eskisi
       // endi noto'g'ri).

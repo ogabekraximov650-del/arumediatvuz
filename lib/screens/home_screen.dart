@@ -6,6 +6,7 @@ import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import '../widgets/aru_logo.dart';
 import '../widgets/glass.dart';
+import '../widgets/stats_banner.dart';
 import '../services/auth_service.dart';
 import '../services/rust_bridge.dart';
 import '../services/watch_history.dart';
@@ -239,6 +240,17 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                 ],
               ),
+            ),
+          ),
+          // ── SHAFFOF STATISTIKA ──────────────────────────
+          //
+          // Eng tepada: kunlik foydalanuvchilar va o'zi almashib
+          // turadigan kunlik raqamlar. Ustiga bosilsa — to'liq
+          // statistika sahifasi.
+          const SliverToBoxAdapter(
+            child: Padding(
+              padding: EdgeInsets.fromLTRB(16, 6, 16, 2),
+              child: StatsBanner(),
             ),
           ),
           if (_isOffline && _seasons.isNotEmpty)
