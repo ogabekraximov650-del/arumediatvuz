@@ -61,7 +61,20 @@ class MainActivity : FlutterActivity() {
             }
     }
 
-    /// Manzildagi videodan birinchi kadrni JPEG qilib qaytaradi.
+    /// Manzildagi videodan OXIRGI kadrni JPEG qilib qaytaradi.
+    ///
+    /// ── NEGA AYNAN OXIRGI KADR ─────────────────────────────────
+    ///
+    /// Manzilda (`rust/src/video_cache.rs` -> `/thumb`) kalit
+    /// kadrdan foydalanuvchi TO'XTAGAN kadrgacha bo'lgan kichik MP4
+    /// turadi. Uning eng oxirgi kadri — aynan kerakli kadr.
+    ///
+    /// Ilgari bu yerda `OPTION_CLOSEST_SYNC` bilan 0-vaqt
+    /// so'ralardi, ya'ni har doim KALIT KADR olinardi va rasm
+    /// to'xtagan joydan bir necha soniya oldingi bo'lib chiqardi.
+    /// Endi davomiylik o'qilib, uning oxiriga `OPTION_CLOSEST`
+    /// bilan boriladi — bu dekoderni kalit kadrdan boshlab
+    /// kerakli kadrgacha ochishga majbur qiladi.
     ///
     /// Kadr olinmasa `null` — bu XATO EMAS, oddiy zaxira yo'l:
     /// ilova o'shanda posterni ko'rsatadi.
@@ -70,27 +83,50 @@ class MainActivity : FlutterActivity() {
         val retriever = MediaMetadataRetriever()
         try {
             retriever.setDataSource(url, HashMap<String, String>())
-            // Manzilda BITTA kadrlik MP4 turadi, shu sabab vaqt 0.
-            var bmp = retriever.getFrameAtTime(
-                0,
-                MediaMetadataRetriever.OPTION_CLOSEST_SYNC
-            ) ?: return null
+
+            // Bo'lakning davomiyligi (ms). O'qilmasa 0 — pastdagi
+            // zaxira yo'l ishlaydi.
+            val durationMs = retriever
+                .extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                ?.toLongOrNull() ?: 0L
+
+            // Oxiridan 1 ms berida: bu AYNAN oxirgi kadrning ichiga
+            // tushadi (kadr kamida bir necha o'nlab millisekund
+            // ko'rsatiladi), davomiylikdan tashqariga chiqmaydi.
+            var bmp: Bitmap? = null
+            if (durationMs > 1) {
+                bmp = retriever.getFrameAtTime(
+                    (durationMs - 1) * 1000,
+                    MediaMetadataRetriever.OPTION_CLOSEST
+                )
+            }
+            // Zaxira: dekoder oxirgi kadrni ocholmasa — kalit kadr.
+            // Rasm bir oz eskiroq bo'ladi, lekin bo'sh joydan yaxshi.
+            if (bmp == null) {
+                bmp = retriever.getFrameAtTime(
+                    0,
+                    MediaMetadataRetriever.OPTION_CLOSEST_SYNC
+                )
+            }
+            if (bmp == null) return null
+
+            var frame: Bitmap = bmp
 
             // Ro'yxatdagi qator uchun to'liq o'lcham shart emas —
             // kichraytirish JPEG'ni bir necha barobar kichraytiradi.
-            if (bmp.width > maxWidth && bmp.width > 0) {
-                val h = (bmp.height.toLong() * maxWidth / bmp.width)
+            if (frame.width > maxWidth && frame.width > 0) {
+                val h = (frame.height.toLong() * maxWidth / frame.width)
                     .toInt().coerceAtLeast(1)
-                val scaled = Bitmap.createScaledBitmap(bmp, maxWidth, h, true)
-                if (scaled !== bmp) {
-                    bmp.recycle()
-                    bmp = scaled
+                val scaled = Bitmap.createScaledBitmap(frame, maxWidth, h, true)
+                if (scaled !== frame) {
+                    frame.recycle()
+                    frame = scaled
                 }
             }
 
             val out = ByteArrayOutputStream()
-            bmp.compress(Bitmap.CompressFormat.JPEG, quality, out)
-            bmp.recycle()
+            frame.compress(Bitmap.CompressFormat.JPEG, quality, out)
+            frame.recycle()
             return out.toByteArray()
         } catch (e: Throwable) {
             return null

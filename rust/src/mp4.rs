@@ -468,12 +468,65 @@ fn push_box(out: &mut Vec<u8>, kind: &[u8; 4], body: &[u8]) {
 
 /// Bitta kadrdan to'la haqiqiy MP4 yasaydi.
 ///
-/// Faqat VIDEO yo'lakcha bo'ladi (ovoz kerak emas), ichida bitta
-/// namuna va u kalit kadr deb belgilanadi. Kodek sozlamalari asl
-/// fayldan `stsd` atomi sifatida AYNAN ko'chiriladi — busiz hech
-/// qanday dekoder kadrni ocholmaydi.
+/// `build_clip_mp4` ning bitta namunali holati (sifat almashtirish
+/// yoki kalit kadrga qaytish uchun zaxira yo'l).
 pub fn build_single_frame_mp4(track: &VideoTrack, sample: u32, data: &[u8]) -> Option<Vec<u8>> {
-    let delta = track.delta_of(sample).max(1);
+    build_clip_mp4(track, sample, &[data.len() as u32], data)
+}
+
+/// Ketma-ket namunalardan to'la haqiqiy MP4 yasaydi.
+///
+/// Faqat VIDEO yo'lakcha bo'ladi (ovoz kerak emas). Kodek
+/// sozlamalari asl fayldan `stsd` atomi sifatida AYNAN ko'chiriladi
+/// — busiz hech qanday dekoder kadrni ocholmaydi.
+///
+/// ── NEGA BITTA KADR EMAS ──────────────────────────────────────
+///
+/// Dekoder kadrni faqat KALIT KADRDAN boshlab ocha oladi, ya'ni
+/// bitta kadrlik MP4 har doim so'ralgan vaqtdan 1-5 soniya oldingi
+/// rasmni berardi. Bu yerda esa kalit kadrdan SO'RALGAN kadrgacha
+/// bo'lgan hamma namuna solinadi va oxirgisi aynan kerakli kadr
+/// bo'ladi — Android undan millisekundgacha to'g'ri rasm chiqaradi.
+///
+/// MUHIM: dekodlash tartibida har bir namunaning tayanch kadrlari
+/// undan OLDIN turadi (MP4 qoidasi), shu sabab ro'yxatni istalgan
+/// joyda kesish xavfsiz — kesilgan bo'lakdagi hech bir kadr
+/// yetishmayotgan tayanchga murojaat qilmaydi.
+///
+/// `ctts` (ko'rsatish tartibi) ATAYLAB ko'chirilmaydi: usiz
+/// ko'rsatish vaqti namuna tartibi bilan bir xil bo'ladi va
+/// "eng oxirgi kadr" AYNAN so'ralgan namuna bo'lib qoladi.
+pub fn build_clip_mp4(
+    track: &VideoTrack,
+    first_sample: u32,
+    sizes: &[u32],
+    data: &[u8],
+) -> Option<Vec<u8>> {
+    if sizes.is_empty() || first_sample == 0 {
+        return None;
+    }
+    let count = sizes.len() as u32;
+    let total: u64 = sizes.iter().map(|v| *v as u64).sum();
+    if total != data.len() as u64 || total == 0 {
+        return None;
+    }
+
+    // ── Namunalar davomiyligi (siqilgan ro'yxat) ─────────────
+    let mut runs: Vec<(u32, u32)> = Vec::new();
+    let mut media_ticks: u64 = 0;
+    for i in 0..count {
+        let d = track.delta_of(first_sample + i).max(1);
+        media_ticks += d as u64;
+        match runs.last_mut() {
+            Some((c, last_d)) if *last_d == d => *c += 1,
+            _ => runs.push((1, d)),
+        }
+    }
+    let media_ticks = media_ticks.min(u32::MAX as u64) as u32;
+    // Ilova tomoni "oxirgi kadr"ni aynan shu davomiylik bo'yicha
+    // so'raydi, shu sabab u nol bo'lib qolmasligi shart.
+    let movie_ms = ((media_ticks as u64) * 1000 / (track.timescale.max(1) as u64)).max(1);
+    let movie_ms = movie_ms.min(u32::MAX as u64) as u32;
 
     // ── ftyp ──────────────────────────────────────────────────
     let mut ftyp = Vec::new();
@@ -491,30 +544,36 @@ pub fn build_single_frame_mp4(track: &VideoTrack, sample: u32, data: &[u8]) -> O
 
     let mut stts = Vec::new();
     stts.extend_from_slice(&0u32.to_be_bytes()); // version+flags
-    stts.extend_from_slice(&1u32.to_be_bytes()); // yozuvlar soni
-    stts.extend_from_slice(&1u32.to_be_bytes()); // namunalar soni
-    stts.extend_from_slice(&delta.to_be_bytes());
+    stts.extend_from_slice(&(runs.len() as u32).to_be_bytes());
+    for (c, d) in &runs {
+        stts.extend_from_slice(&c.to_be_bytes());
+        stts.extend_from_slice(&d.to_be_bytes());
+    }
     push_box(&mut stbl, b"stts", &stts);
 
+    // Birinchi namuna — kalit kadr (bo'lak aynan undan boshlanadi).
     let mut stss = Vec::new();
     stss.extend_from_slice(&0u32.to_be_bytes());
     stss.extend_from_slice(&1u32.to_be_bytes());
     stss.extend_from_slice(&1u32.to_be_bytes());
     push_box(&mut stbl, b"stss", &stss);
 
+    // Hamma namuna BITTA blokda ketma-ket turadi.
     let mut stsc = Vec::new();
     stsc.extend_from_slice(&0u32.to_be_bytes());
     stsc.extend_from_slice(&1u32.to_be_bytes());
     stsc.extend_from_slice(&1u32.to_be_bytes()); // birinchi blok
-    stsc.extend_from_slice(&1u32.to_be_bytes()); // blokda 1 namuna
+    stsc.extend_from_slice(&count.to_be_bytes()); // blokdagi namunalar
     stsc.extend_from_slice(&1u32.to_be_bytes()); // tavsif indeksi
     push_box(&mut stbl, b"stsc", &stsc);
 
     let mut stsz = Vec::new();
     stsz.extend_from_slice(&0u32.to_be_bytes());
     stsz.extend_from_slice(&0u32.to_be_bytes()); // har xil hajm
-    stsz.extend_from_slice(&1u32.to_be_bytes());
-    stsz.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    stsz.extend_from_slice(&count.to_be_bytes());
+    for s in sizes {
+        stsz.extend_from_slice(&s.to_be_bytes());
+    }
     push_box(&mut stbl, b"stsz", &stsz);
 
     // `stco` ichidagi manzil hali noma'lum (u butun sarlavha
@@ -552,7 +611,7 @@ pub fn build_single_frame_mp4(track: &VideoTrack, sample: u32, data: &[u8]) -> O
     mdhd.extend_from_slice(&0u32.to_be_bytes()); // yaratilgan
     mdhd.extend_from_slice(&0u32.to_be_bytes()); // o'zgartirilgan
     mdhd.extend_from_slice(&track.timescale.to_be_bytes());
-    mdhd.extend_from_slice(&delta.to_be_bytes());
+    mdhd.extend_from_slice(&media_ticks.to_be_bytes());
     mdhd.extend_from_slice(&0x55c4u16.to_be_bytes()); // til: und
     mdhd.extend_from_slice(&0u16.to_be_bytes());
     push_box(&mut mdia, b"mdhd", &mdhd);
@@ -575,7 +634,7 @@ pub fn build_single_frame_mp4(track: &VideoTrack, sample: u32, data: &[u8]) -> O
     tkhd.extend_from_slice(&0u32.to_be_bytes());
     tkhd.extend_from_slice(&1u32.to_be_bytes()); // track_id
     tkhd.extend_from_slice(&0u32.to_be_bytes());
-    tkhd.extend_from_slice(&1u32.to_be_bytes()); // davomiylik (1000 birlik)
+    tkhd.extend_from_slice(&movie_ms.to_be_bytes()); // davomiylik
     tkhd.extend_from_slice(&[0u8; 8]);
     tkhd.extend_from_slice(&0u16.to_be_bytes()); // qatlam
     tkhd.extend_from_slice(&0u16.to_be_bytes());
@@ -600,7 +659,7 @@ pub fn build_single_frame_mp4(track: &VideoTrack, sample: u32, data: &[u8]) -> O
     mvhd.extend_from_slice(&0u32.to_be_bytes());
     mvhd.extend_from_slice(&0u32.to_be_bytes());
     mvhd.extend_from_slice(&1000u32.to_be_bytes()); // vaqt birligi
-    mvhd.extend_from_slice(&1u32.to_be_bytes()); // davomiylik
+    mvhd.extend_from_slice(&movie_ms.to_be_bytes()); // davomiylik
     mvhd.extend_from_slice(&0x0001_0000u32.to_be_bytes()); // tezlik
     mvhd.extend_from_slice(&0x0100u16.to_be_bytes()); // ovoz
     mvhd.extend_from_slice(&0u16.to_be_bytes());
@@ -858,6 +917,75 @@ mod tests {
 
     /// Buzilgan yoki bo'lakli (fragmented) MP4 — yiqilmasdan
     /// `None` qaytarilsin.
+    /// KALIT KADRDAN SO'RALGAN KADRGACHA bo'lgan bo'lak: oxirgi
+    /// namuna AYNAN so'ralgan kadr bo'lishi va jadvallar unga mos
+    /// kelishi kerak — tarix kadrining aniqligi shunga bog'liq.
+    #[test]
+    fn kadrgacha_bolgan_bolak_togri_yigiladi() {
+        let t = parse_moov(&test_moov()).unwrap();
+        // 3-namuna (kalit kadr) va 4-namuna: 30 + 40 bayt.
+        let mut data = vec![0x11u8; 30];
+        data.extend_from_slice(&[0x22u8; 40]);
+        let out = build_clip_mp4(&t, 3, &[30, 40], &data).expect("yig'ilmadi");
+
+        let (ftyp_start, ftyp_len, _) = box_header(&out, 0).unwrap();
+        let (moov_start, moov_len, kind) = box_header(&out, ftyp_start + ftyp_len as usize).unwrap();
+        assert_eq!(&kind, b"moov");
+        let moov = &out[moov_start..moov_start + moov_len as usize];
+
+        let mdat_at = moov_start + moov_len as usize;
+        let (mdat_start, mdat_len, kind) = box_header(&out, mdat_at).unwrap();
+        assert_eq!(&kind, b"mdat");
+        assert_eq!(mdat_len as usize, data.len());
+        assert_eq!(&out[mdat_start..mdat_start + data.len()], &data[..]);
+
+        let trak = child(moov, b"trak").unwrap();
+        let mdia = child(trak, b"mdia").unwrap();
+        let minf = child(mdia, b"minf").unwrap();
+        let stbl = child(minf, b"stbl").unwrap();
+
+        // Ikkita namuna, hajmlari o'z tartibida.
+        let stsz = child(stbl, b"stsz").unwrap();
+        assert_eq!(be_u32(stsz, 8).unwrap(), 2);
+        assert_eq!(be_u32(stsz, 12).unwrap(), 30);
+        assert_eq!(be_u32(stsz, 16).unwrap(), 40);
+
+        // Hammasi BITTA blokda, blok esa `mdat` tanasidan boshlanadi.
+        let stsc = child(stbl, b"stsc").unwrap();
+        assert_eq!(be_u32(stsc, 4).unwrap(), 1);
+        assert_eq!(be_u32(stsc, 12).unwrap(), 2, "blokda 2 namuna bo'lishi kerak");
+        let stco = child(stbl, b"stco").unwrap();
+        assert_eq!(be_u32(stco, 4).unwrap(), 1);
+        assert_eq!(be_u32(stco, 8).unwrap() as usize, mdat_start);
+
+        // Faqat BIRINCHI namuna kalit kadr deb belgilanadi.
+        let stss = child(stbl, b"stss").unwrap();
+        assert_eq!(be_u32(stss, 4).unwrap(), 1);
+        assert_eq!(be_u32(stss, 8).unwrap(), 1);
+
+        // Davomiylik: 2 x 512 birlik, vaqt birligi 1024 -> 1000 ms.
+        // Ilova tomoni aynan shu davomiylik bo'yicha OXIRGI kadrni
+        // so'raydi, shu sabab u to'g'ri bo'lishi shart.
+        let stts = child(stbl, b"stts").unwrap();
+        assert_eq!(be_u32(stts, 4).unwrap(), 1, "bitta siqilgan yozuv");
+        assert_eq!(be_u32(stts, 8).unwrap(), 2);
+        assert_eq!(be_u32(stts, 12).unwrap(), 512);
+        let mdhd = child(mdia, b"mdhd").unwrap();
+        assert_eq!(be_u32(mdhd, 16).unwrap(), 1024, "mdhd davomiyligi");
+        let mvhd = child(moov, b"mvhd").unwrap();
+        assert_eq!(be_u32(mvhd, 16).unwrap(), 1000, "mvhd davomiyligi (ms)");
+    }
+
+    /// Hajmlar yig'indisi baytlarga to'g'ri kelmasa — hech qanday
+    /// MP4 yasalmaydi (buzuq fayl berishdan ko'ra posterni
+    /// ko'rsatgan yaxshi).
+    #[test]
+    fn nomos_hajmlar_bolak_yasatmaydi() {
+        let t = parse_moov(&test_moov()).unwrap();
+        assert!(build_clip_mp4(&t, 1, &[10, 20], &vec![0u8; 25]).is_none());
+        assert!(build_clip_mp4(&t, 1, &[], &[]).is_none());
+    }
+
     #[test]
     fn notogri_moov_yiqitmaydi() {
         assert!(parse_moov(&[]).is_none());

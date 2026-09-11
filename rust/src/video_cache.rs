@@ -4199,6 +4199,114 @@ fn thumb_to_memo(tag: &str, bytes: &[u8]) {
     }
 }
 
+/// KALIT KADRDAN SO'RALGAN KADRGACHA bo'lgan kichik MP4.
+///
+/// ── NEGA BITTA KADR YETMAYDI ──────────────────────────────────
+///
+/// Dekoder rasmni faqat KALIT KADRDAN boshlab ocha oladi. Kalit
+/// kadrlar esa odatda 2-10 soniyada bir keladi, ya'ni "bitta
+/// kadrlik MP4" har doim foydalanuvchi to'xtagan joydan bir necha
+/// soniya OLDINGI rasmni berardi (foydalanuvchi aynan shuni
+/// ko'rgan va shikoyat qilgan).
+///
+/// Endi kalit kadrdan so'ralgan kadrgacha bo'lgan namunalar bir
+/// yo'la olinadi va MP4 ning OXIRGI kadri aynan kerakli kadr
+/// bo'ladi.
+///
+/// ── TARMOQQA BITTA SO'ROV ─────────────────────────────────────
+///
+/// Namunalar fayl ichida ketma-ket yotadi (orasida ovoz bo'lishi
+/// mumkin), shu sabab ular BITTA oraliq bilan o'qiladi va keyin
+/// xotirada ajratiladi. Har bir namuna uchun alohida so'rov
+/// yuborish — yo'l kechikishi sabab — bir necha barobar sekin
+/// bo'lardi.
+///
+/// Oraliq juda katta chiqsa (buzilgan jadval yoki juda uzun kalit
+/// kadr oralig'i) eski yo'lga — bitta kalit kadrga — qaytamiz:
+/// rasm bir oz eskiroq bo'ladi, lekin trafik cheklangan qoladi.
+fn build_thumb_clip(
+    reader: &ThumbReader,
+    track: &crate::mp4::VideoTrack,
+    sync: u32,
+    target: u32,
+) -> Option<Vec<u8>> {
+    /// Bitta kadr uchun eng ko'pi shuncha bayt o'qiladi.
+    ///
+    /// Odatdagi kalit kadr oralig'i (2-10 s) bunga bemalol
+    /// sig'adi; chegara faqat buzilgan yoki g'alati fayldan
+    /// himoya. Yasalgan bo'lak 60 soniya XOTIRADA turadi
+    /// (`LAST_THUMB`), shu sabab uni katta qilib bo'lmaydi.
+    const MAX_SPAN: u64 = 8 * 1024 * 1024;
+    /// Va eng ko'pi shuncha namuna (uzun kalit kadr oralig'idan
+    /// himoya).
+    const MAX_SAMPLES: u32 = 900;
+
+    let single = |sample: u32| -> Option<Vec<u8>> {
+        let loc = track.locate(sample)?;
+        if loc.size == 0 || loc.size as u64 > 32 * 1024 * 1024 {
+            return None;
+        }
+        let data = reader.read(loc.offset, loc.size as u64)?;
+        let built = crate::mp4::build_single_frame_mp4(track, sample, &data)?;
+        log(format!(
+            "Kadr tayyor (kalit kadr): namuna #{sample}, {} bayt",
+            built.len()
+        ));
+        Some(built)
+    };
+
+    if target <= sync || target - sync + 1 > MAX_SAMPLES {
+        return single(sync);
+    }
+
+    // Namunalarning fayldagi o'rinlari.
+    let mut refs = Vec::with_capacity((target - sync + 1) as usize);
+    for s in sync..=target {
+        let loc = match track.locate(s) {
+            Some(v) => v,
+            None => return single(sync),
+        };
+        if loc.size == 0 {
+            return single(sync);
+        }
+        refs.push((loc.offset, loc.size));
+    }
+
+    let start = refs.iter().map(|(o, _)| *o).min()?;
+    let end = refs.iter().map(|(o, s)| *o + *s as u64).max()?;
+    if end <= start || end - start > MAX_SPAN {
+        return single(sync);
+    }
+
+    let span = match reader.read(start, end - start) {
+        Some(v) => v,
+        None => return single(sync),
+    };
+
+    let mut sizes = Vec::with_capacity(refs.len());
+    let mut data = Vec::with_capacity((end - start) as usize);
+    for (offset, size) in &refs {
+        let from = (*offset - start) as usize;
+        let to = from + *size as usize;
+        if to > span.len() {
+            return single(sync);
+        }
+        data.extend_from_slice(&span[from..to]);
+        sizes.push(*size);
+    }
+
+    match crate::mp4::build_clip_mp4(track, sync, &sizes, &data) {
+        Some(built) => {
+            log(format!(
+                "Kadr tayyor: namunalar #{sync}-#{target}, {} bayt",
+                built.len()
+            ));
+            Some(built)
+        }
+        None => single(sync),
+    }
+}
+
 fn serve_thumb(
     stream: &mut TcpStream,
     url: &str,
@@ -4251,27 +4359,12 @@ fn serve_thumb(
                 log("Kadr: video yo'lakcha o'qilmadi".to_string());
                 return not_found(stream);
             };
-            let sample = track.sync_at_or_before(track.sample_at_ms(ms));
-            let Some(loc) = track.locate(sample) else {
-                log("Kadr: namuna o'rni topilmadi".to_string());
+            let target = track.sample_at_ms(ms);
+            let sync = track.sync_at_or_before(target);
+            let Some(built) = build_thumb_clip(&reader, &track, sync, target) else {
+                log("Kadr: bo'lak yasalmadi".to_string());
                 return not_found(stream);
             };
-            // Bitta kadr 32 MB bo'lishi mumkin emas — bunday son
-            // faqat buzilgan jadvaldan chiqadi.
-            if loc.size == 0 || loc.size as u64 > 32 * 1024 * 1024 {
-                return not_found(stream);
-            }
-            let Some(data) = reader.read(loc.offset, loc.size as u64) else {
-                log("Kadr: baytlar olinmadi".to_string());
-                return not_found(stream);
-            };
-            let Some(built) = crate::mp4::build_single_frame_mp4(&track, sample, &data) else {
-                return not_found(stream);
-            };
-            log(format!(
-                "Kadr tayyor: namuna #{sample}, {} bayt",
-                built.len()
-            ));
             thumb_to_memo(&tag, &built);
             built
         }

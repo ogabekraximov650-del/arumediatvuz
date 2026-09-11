@@ -127,7 +127,22 @@ const String _apiBase = 'https://aniraxuzapp.ogabekraximov650.workers.dev';
 
 class VideoPlayerScreen extends StatefulWidget {
   final Map<String, dynamic> season;
-  const VideoPlayerScreen({super.key, required this.season});
+
+  /// Qaysi qism ochilsin (tarixdan kelinganda). `null` — ilova
+  /// o'zi tanlaydi: shu bo'limning OXIRGI ko'rilgan qismi, u ham
+  /// bo'lmasa eng birinchi qism.
+  final int? startEpizodNumber;
+
+  /// Qaysi joydan boshlansin (tarixdan kelinganda). `null` —
+  /// telefonda eslab qolingan nuqta ishlatiladi.
+  final Duration? startAt;
+
+  const VideoPlayerScreen({
+    super.key,
+    required this.season,
+    this.startEpizodNumber,
+    this.startAt,
+  });
 
   @override
   State<VideoPlayerScreen> createState() => _VideoPlayerScreenState();
@@ -174,6 +189,13 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   // ham bo'lmaydi va foydalanuvchini "ishlamayapti" deb chalkashtirish
   // keraksiz.
   bool _offline = false;
+
+  /// Internet bor-yo'qligi hali tekshirilmagan bo'lsa `false`.
+  ///
+  /// MUHIM: qism AVTOMATIK ochilishidan oldin buni bilish shart —
+  /// oflaynda pleyer umuman ochilmasligi kerak (foydalanuvchi
+  /// talabi), aks holda ekranda xato yozuvi chiqib qolardi.
+  bool _connectivityKnown = false;
   StreamSubscription<List<ConnectivityResult>>? _connSub;
   String? _selectedQuality;
   bool _playerLoading = false;
@@ -360,7 +382,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
         _episodes = cached;
         _loadingEps = false;
       });
-      _autoOpenFirstEpisode();
+      _autoOpenEpisode();
     }
 
     try {
@@ -377,7 +399,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
             _loadingEps = false;
           });
           _syncWatchedUrls();
-          _autoOpenFirstEpisode();
+          _autoOpenEpisode();
         }
         return;
       }
@@ -426,11 +448,21 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   Future<void> _watchConnectivity() async {
     void apply(List<ConnectivityResult> r) {
       final off = r.every((e) => e == ConnectivityResult.none);
-      if (off == _offline) return;
+      final firstTime = !_connectivityKnown;
+      _connectivityKnown = true;
+      if (off == _offline) {
+        // Birinchi tekshiruv: ro'yxat allaqachon kelgan bo'lishi
+        // mumkin, ya'ni avtomatik ochish shu yerda boshlanadi.
+        if (firstTime) _autoOpenEpisode();
+        return;
+      }
       if (mounted) setState(() => _offline = off);
       // Oflayn'da BARCHA qismlarning holati kerak (qaysi biri to'liq
       // yuklanganini bilish uchun), onlayn'da esa faqat ekrandagilar.
       _syncWatchedUrls();
+      if (firstTime) {
+        _autoOpenEpisode();
+      }
       if (off) {
         _onNetworkLost();
       } else {
@@ -652,11 +684,18 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // qism ochildi" deb xotirada belgilanadi. Serverga bitta so'rov
     // pleyerdan chiqilganda (yoki qism almashganda) ketadi:
     // `WatchHistory.flush()`.
+    //
+    // Nom va rasmlar ham beriladi: ular tarix ro'yxatini DARHOL
+    // (internetsiz ham) to'g'ri ko'rsatish uchun kerak.
     WatchHistory.instance.startEpisode(
       animeId: int.tryParse(widget.season['anime_id']?.toString() ?? '') ?? 0,
       seasonId: int.tryParse(widget.season['season_id']?.toString() ?? '') ?? 0,
+      bolimId: int.tryParse(widget.season['bolim_id']?.toString() ?? '') ?? 0,
       epizodNumber:
           int.tryParse(ep['epizod_number']?.toString() ?? '') ?? 0,
+      seasonName: (widget.season['nomi'] ?? '').toString(),
+      animeName: (widget.season['anime_name'] ?? '').toString(),
+      seasonPhoto: (widget.season['photo_url'] ?? '').toString(),
       videoUrl: url,
     );
 
@@ -2484,17 +2523,25 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                 : const SizedBox.shrink(),
           ),
 
+          // Hech qanday qism ochilmagan. Odatda bu OFLAYN holat:
+          // internet yo'q bo'lsa pleyer o'zi ochilmaydi
+          // (foydalanuvchi talabi) — yuklab olingan qismni
+          // foydalanuvchining O'ZI tanlaydi.
           if (_currentEp == null)
             const Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.play_circle_outline_rounded,
-                      color: Colors.white24, size: 52),
-                  SizedBox(height: 8),
-                  Text('Qismni tanlang',
-                      style: TextStyle(color: Colors.white38, fontSize: 13)),
-                ],
+              child: Padding(
+                padding: EdgeInsets.symmetric(horizontal: 20),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.play_circle_outline_rounded,
+                        color: Colors.white24, size: 52),
+                    SizedBox(height: 8),
+                    Text('Ko\'rmoqchi bo\'lgan qismni tanlang',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: Colors.white38, fontSize: 13)),
+                  ],
+                ),
               ),
             ),
 
@@ -3129,17 +3176,36 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   /// birinchi, taxminiy bosqichi uchun — keyin aniqlashtiriladi.
   static const double _kTileExtent = 60.0;
 
-  /// Ekran ochilishi bilan ENG BIRINCHI qism (eng kichik raqamlisi,
-  /// ya'ni "0-qism") pleyerga yuklanadi — lekin IJRO BOSHLANMAYDI.
-  /// Kesh-server videoning birinchi bo'lagini oladi va birinchi kadr
-  /// ekranda turadi, ya'ni "play" bosilishi bilan video darhol
-  /// ketadi.
-  ///
-  /// Ro'yxat KAMAYISH tartibida saralangan (3, 2, 1, 0) — shu sabab
-  /// eng birinchi qism ro'yxatning OXIRIDA turadi.
-  void _autoOpenFirstEpisode() {
+  // ═══════════════════════════════════════════════════════════
+  //  EKRAN OCHILGANDA QAYSI QISM YUKLANADI
+  // ═══════════════════════════════════════════════════════════
+  //
+  // TALAB (foydalanuvchi): "bosh sahifadan qaysi animeni ustiga
+  // bossa pleyrda aynan o'sha animega tegishli oxirgi marta
+  // ko'rilgan qism kelgan joydan ochilishi kerak".
+  //
+  // Tartib:
+  //   1. tarixdan kelingan bo'lsa — AYNAN o'sha qism, aynan
+  //      o'sha vaqtdan (`widget.startEpizodNumber` / `startAt`);
+  //   2. shu bo'limning tomosha tarixida yozuvi bo'lsa — o'sha
+  //      qism, to'xtagan joyidan;
+  //   3. aks holda — eng birinchi qism, boshidan.
+  //
+  // IJRO O'ZI BOSHLANMAYDI: kesh-server birinchi bo'lakni oladi
+  // va birinchi kadr ekranda turadi, "play" bosilishi bilan video
+  // darhol ketadi.
+  //
+  // OFLAYNDA UMUMAN OCHILMAYDI (foydalanuvchi talabi): pleyer
+  // o'rnida "Ko'rmoqchi bo'lgan qismni tanlang" yozuvi turadi va
+  // foydalanuvchi yuklab olingan qismni o'zi tanlaydi.
+  void _autoOpenEpisode() {
     if (!mounted || _currentEp != null) return;
+    // Internet bor-yo'qligi hali noma'lum — bir zumdan keyin
+    // `_watchConnectivity` o'zi qayta chaqiradi.
+    if (!_connectivityKnown) return;
+    if (_offline) return;
     if (_orderedEps.isEmpty) return;
+
     // MUHIM: birinchi KADRDAN KEYIN ochamiz.
     // `_loadEpisodes` ro'yxatni keshdan o'qiganda bu metod hali
     // `initState` ichida — ya'ni ilk build davomida — chaqirilishi
@@ -3147,12 +3213,76 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // controllerni yopish uchun kadr kutadi; buni build o'rtasida
     // qilib bo'lmaydi.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || _currentEp != null) return;
+      if (!mounted || _currentEp != null || _offline) return;
       final eps = _orderedEps;
       if (eps.isEmpty) return;
-      _playEpisode(eps.last, resumePlaying: false);
-      _centerOnEpisode(eps.last);
+
+      final target = _resumeTarget(eps);
+      // Tarixdan kelingan bo'lsa IJRO ham darhol boshlanadi
+      // (foydalanuvchi aynan o'sha qismni bosgan). Bosh sahifadan
+      // kelinganda esa, avvalgidek, birinchi kadr ekranda turadi
+      // va "play" ni foydalanuvchi bosadi.
+      _playEpisode(
+        target.$1,
+        resumeAt: target.$2,
+        resumePlaying: widget.startEpizodNumber != null,
+      );
+      _centerOnEpisode(target.$1);
     });
+  }
+
+  /// Qaysi qism va qaysi nuqtadan ochilishi kerak.
+  ///
+  /// Ro'yxat KAMAYISH tartibida saralangan (3, 2, 1, 0) — shu sabab
+  /// eng birinchi qism ro'yxatning OXIRIDA turadi.
+  (Map<String, dynamic>, Duration?) _resumeTarget(
+      List<Map<String, dynamic>> eps) {
+    // 1) Tarixdan kelindi.
+    final wanted = widget.startEpizodNumber;
+    if (wanted != null) {
+      for (final e in eps) {
+        if (_epNumOf(e) == wanted) return (e, widget.startAt);
+      }
+    }
+
+    // 2) Shu bo'limning oxirgi ko'rilgan qismi.
+    final animeId = int.tryParse(widget.season['anime_id']?.toString() ?? '');
+    final seasonId = int.tryParse(widget.season['season_id']?.toString() ?? '');
+    if (animeId != null && seasonId != null) {
+      final last = WatchHistory.instance.lastOfSeason(animeId, seasonId);
+      if (last != null) {
+        for (final e in eps) {
+          if (_epNumOf(e) != last.epizodNumber) continue;
+          return (e, _savedPositionOf(e));
+        }
+      }
+    }
+
+    // 3) Eng birinchi qism.
+    return (eps.last, null);
+  }
+
+  /// Shu qism QAYERDA to'xtatilgan.
+  ///
+  /// Avval telefondagi nuqta (`WatchProgress` — har soniyada
+  /// yangilanadi, eng aniq), bo'lmasa tomosha tarixidagi nuqta.
+  ///
+  /// Ikkinchi manba SHART: telefondagi ro'yxat sifat bo'yicha
+  /// (video manzili bo'yicha) saqlanadi va ilova qayta
+  /// o'rnatilganda yoki boshqa sifat tanlanganda bo'sh bo'ladi —
+  /// o'shanda ham qism boshidan emas, KELGAN JOYIDAN ochilishi
+  /// kerak (foydalanuvchi talabi).
+  Duration? _savedPositionOf(Map<String, dynamic> ep) {
+    final local = WatchProgress.instance.positionOf(_getUrl(ep));
+    if (local != null) return local;
+
+    final animeId = int.tryParse(widget.season['anime_id']?.toString() ?? '');
+    final seasonId = int.tryParse(widget.season['season_id']?.toString() ?? '');
+    if (animeId == null || seasonId == null) return null;
+    final saved = WatchHistory.instance
+        .findEpisode(animeId, seasonId, _epNumOf(ep));
+    if (saved == null || saved.positionMs <= 0) return null;
+    return Duration(milliseconds: saved.positionMs);
   }
 
   /// Joriy qismning ro'yxatdagi o'rni (topilmasa -1).
@@ -3179,7 +3309,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     if (target < 0 || target >= eps.length) return;
     // Ijro holati saqlanadi: video ketayotgan bo'lsa yangi qism ham
     // darhol ijro etiladi, pauzada bo'lsa pauzada ochiladi.
-    _playEpisode(eps[target], resumePlaying: _intendedPlaying);
+    _playEpisode(eps[target],
+        resumeAt: _savedPositionOf(eps[target]),
+        resumePlaying: _intendedPlaying);
     _centerOnEpisode(eps[target]);
   }
 
@@ -3391,7 +3523,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
             if (isCurrent) {
               _togglePlayPause();
             } else {
-              _playEpisode(ep);
+              // Qism KELGAN JOYIDAN ochiladi (boshidan emas).
+              _playEpisode(ep, resumeAt: _savedPositionOf(ep));
             }
           },
           onToggleExpand: () => _toggleExpanded(epKey),

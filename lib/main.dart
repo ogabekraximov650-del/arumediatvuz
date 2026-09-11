@@ -5,6 +5,7 @@ import 'services/app_keys.dart';
 import 'services/auth_service.dart';
 import 'services/rust_bridge.dart';
 import 'services/video_cache_server.dart';
+import 'services/watch_history.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -38,6 +39,11 @@ Future<void> main() async {
   // o'qish tez — tarmoq kutilmaydi: sessiya haqiqiyligi keyin,
   // fon'da tekshiriladi.
   await AuthService.instance.restore();
+
+  // Diskdagi tomosha tarixi — TARMOQSIZ o'qiladi (shifrlangan
+  // nusxadan). Bosh sahifadan anime bosilganda "oxirgi ko'rilgan
+  // qism" darhol ma'lum bo'lishi kerak, shu sabab bu yerda.
+  WatchHistory.instance.loadFromDisk();
 
   runApp(const FulutterApp());
 }

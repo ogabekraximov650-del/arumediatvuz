@@ -178,6 +178,23 @@ epizod_number` birlamchi kalit, ya'ni bitta qism uchun HAR DOIM
 bitta qator. `(user_id, updated_at DESC)` indeksi — ro'yxat aynan
 shu tartibda so'raladi.
 
+### KIRMAGAN FOYDALANUVCHI ANIMENI OCHOLMAYDI
+
+Bosh sahifadagi kartalar HAMMAGA ko'rinadi, lekin ustiga bosilganda
+`AuthService.isLoggedIn` tekshiriladi (`HomeScreen._openSeason`).
+Kirilmagan bo'lsa pleyer OCHILMAYDI — o'rniga oyna chiqadi:
+"Iltimos anime ko'rish uchun avval profil sahifasiga o'tib
+accountingizga kiring yoki yangi accaunt oching".
+
+### BOSH SAHIFADAGI KARTA
+
+Karta = bitta BO'LIM (`season_db` qatori). Nomning ustida
+`N-bo'lim` yozuvi turadi (`bolim_id`), nomga ajratiladigan joy
+esa kartaning O'Z kengligidan hisoblanadi (`LayoutBuilder`):
+harf kattaligi va qatorlar soni ekranga qarab o'zgaradi, ya'ni
+uzun nom kichik telefonda rasmni bosib ketmaydi, kattasida esa
+to'liq ko'rinadi.
+
 ### So'rovlar soni — buzmang
 
 | Qachon | Nechta so'rov |
@@ -187,6 +204,42 @@ shu tartibda so'raladi.
 
 To'xtagan joy har soniya eslab qolinadi, lekin u FAQAT telefon
 xotirasiga yoziladi (`WatchProgress`) — serverga emas.
+
+### QANCHA KO'RILSA TARIXGA TUSHADI (chegara QAT'IY EMAS)
+
+**TOPILGAN XATO.** Chegara qat'iy 15 soniya edi: `flush()` da ham,
+`WatchProgress.save()` da ham. 17 soniyalik qismda esa boshidagi 15
+va oxiridagi 30 soniya butun qismni qoplab olardi — ya'ni qisqa
+qism necha marta ko'rilsa ham **tarixga umuman tushmasdi** va har
+safar **boshidan** ochilardi. Foydalanuvchi aynan shuni ko'rgan.
+
+Endi chegara qism uzunligiga bog'langan va ikkala joyda BITTA
+qoida (`WatchProgress.minPositionFor` / `endMarginFor`):
+uzunlikning **10%** i, lekin ko'pi bilan 15 (boshida) va 30
+(oxirida) soniya. Uzun qismlarda hech narsa o'zgarmadi.
+
+### RO'YXAT DARHOL YANGILANADI (server javobi kutilmaydi)
+
+`flush()` yozuvni serverga yuborishdan OLDIN uchta ish qiladi:
+
+1. `_applyLocal` — yozuvni xotiradagi ro'yxatga qo'yadi (bor bo'lsa
+   ustiga yozadi), sanani yangilaydi, ro'yxatni qayta saralaydi va
+   shifrlangan nusxaga yozadi. Shu sabab hozirgina ko'rilgan qism
+   Kutubxonada **eng tepada** turadi — internet bo'lmasa ham;
+2. `_prepareThumb` — to'xtagan joydagi kadrni SHU ZAHOTI yasab
+   diskka yozadi (pastga qarang);
+3. va faqat keyin — bitta `POST`.
+
+Nom, bo'lim nomi va rasmlar `startEpisode()` orqali pleyerdan
+keladi (`widget.season`), ya'ni mahalliy yozuv ham to'liq bo'ladi.
+
+### YOZUVNI O'CHIRISH
+
+Qism kadri ustida **uzoq bosilsa** "Rostdan ham bu tarixni
+o'chirib tashlaysizmi?" so'raladi. "Ha" bo'lsa: ro'yxatdan darhol
+yo'qoladi, kadr fayli o'chiriladi, serverga `DELETE /api/history`
+ketadi. Yuborib bo'lmasa — navbatga tushadi (`_op: delete`) va
+keyin yuboriladi, ya'ni yozuv qaytib kelmaydi.
 
 `GET` javobi ro'yxat uchun kerak bo'lgan hamma narsani bir yo'la
 beradi (anime nomi, posteri, bo'lim raqami), ya'ni qo'shimcha
@@ -204,9 +257,42 @@ yuboriladi. O'qib bo'lmasa — oxirgi olingan ro'yxat ko'rsatiladi.
 Kalitlar HAR BIR HISOB UCHUN ALOHIDA: bitta telefondan ikki kishi
 kirsa, biri ikkinchisining tarixini ko'rmaydi.
 
-### To'xtagan joydagi kadr
+### To'xtagan joydagi kadr — MILLISEKUNDGACHA ANIQ
 
-`rust/src/mp4.rs` — MP4 konteyneridan BITTA kadr ajratib oladi;
+**TOPILGAN XATO.** Ilgari ikkita joyda aniqlik yo'qolardi:
+kalit (`thumbKey`) vaqtni **10 soniyaga** yaxlitlardi va Rust
+faqat **kalit kadr**ni berardi (Android esa uni
+`OPTION_CLOSEST_SYNC` bilan o'qirdi). Natijada rasm to'xtagan
+joydan bir necha soniya narida bo'lardi.
+
+Endi:
+
+* `thumbKey` — aniq millisekund (`<video>_<ms>`);
+* Rust `/thumb` kalit kadrdan **so'ralgan kadrgacha** bo'lgan
+  namunalarni BITTA oraliq bilan o'qib, ulardan kichik MP4 yasaydi
+  (`mp4::build_clip_mp4`). Dekodlash tartibida har bir kadrning
+  tayanchlari undan oldin turadi, shu sabab bo'lakni istalgan
+  joyda kesish xavfsiz. `ctts` ATAYLAB ko'chirilmaydi — usiz
+  "eng oxirgi kadr" AYNAN so'ralgan kadr bo'lib qoladi;
+* `MainActivity.kt` bo'lakning davomiyligini o'qib, **oxiridan
+  1 ms beri**ga `OPTION_CLOSEST` bilan boradi.
+
+Chegaralar: bitta kadr uchun eng ko'pi **16 MB** va **900**
+namuna o'qiladi; oshsa eski yo'lga (bitta kalit kadr) qaytadi —
+rasm eskiroq bo'ladi, lekin trafik cheklangan qoladi.
+
+### Kadr QACHON yasaladi
+
+Ko'rish tugagan zahoti (`flush()` ichida), ro'yxat ochilishini
+kutmasdan. Ikkita sabab:
+
+* tarix oynasi ochilganda og'ir ish qolmaydi — "Anime bo'yicha"
+  dan "Qism bo'yicha" ga o'tishdagi qotish aynan shundan edi;
+* **oflaynda ham rasm ko'rinadi**: yuklab olinmagan qism uchun
+  kadr tarmoqdan olinadi, tarmoq esa aynan ko'rish paytida bor
+  edi.
+
+`rust/src/mp4.rs` — MP4 konteyneridan kadr ajratib oladi;
 `video_cache.rs` dagi `/thumb?u=<url>&ms=<vaqt>` yo'li uni xizmat
 qiladi:
 
@@ -217,15 +303,15 @@ qiladi:
    soniyaning KALIT KADRI topiladi;
 3. faqat o'sha kadr olinadi (diskdan — bepul, yoki tarmoqdan —
    50-300 KB);
-4. `build_single_frame_mp4` bitta kadrlik to'la haqiqiy MP4
-   yasaydi (`stsd` asl fayldan AYNAN ko'chiriladi — busiz dekoder
-   kadrni ocholmaydi);
+4. `build_clip_mp4` kalit kadrdan so'ralgan kadrgacha bo'lgan
+   to'la haqiqiy MP4 yasaydi (`stsd` asl fayldan AYNAN
+   ko'chiriladi — busiz dekoder kadrni ocholmaydi);
 5. natija xotirada 60 soniya turadi va o'zi o'chadi — diskka
    YOZILMAYDI.
 
-Dart tomoni (`WatchHistory.thumbnail`) bu manzilni
-`video_thumbnail` paketiga beradi, u telefonning APPARAT dekoderi
-bilan JPEG chiqaradi. JPEG shifrlangan holda saqlanadi va qism
+Dart tomoni (`WatchHistory.thumbnail`) bu manzilni ilovaning O'Z
+kadr ajratuvchisiga (`MainActivity.kt`) beradi, u telefonning
+APPARAT dekoderi bilan JPEG chiqaradi. JPEG shifrlangan holda saqlanadi va qism
 oldinga surilsa eskisi o'chiriladi.
 
 **Kadrni Rust dekodlamaydi va dekodlamasin**: H.264/H.265
@@ -245,11 +331,45 @@ ko'rsatadi — hech qachon yiqilmaydi.
 Uchta oyna: **Tarix** (ishlaydi), **Sevimlilar** va
 **Yuklanmalar** (hozircha bo'sh — keyingi vazifa).
 
-Tarix ichida "Anime bo'yicha" va "Qism bo'yicha". Qism qatori —
-16:9 kadr, pastida progress chizig'i, o'ng tomonda kichik
-yozuvlar. **Kadr ustiga qorayish (scrim) TUSHMAYDI** — foydalanuvchi
+Tarix ichida "Anime bo'yicha" va "Qism bo'yicha". Ikkovi BITTA
+joyda yashaydi (`PageView`): tugma bosilsa ham, barmoq bilan
+surilsa ham sahifa suzib almashadi.
+
+**Anime bo'yicha** — har bir anime bitta karta: oxirgi ko'rilgan
+qismning KADRI, tagida **bo'lim nomi** (anime nomi EMAS), tagida
+"Oxirgi marta N-bo'lim M-qismni ko'rdingiz" va
+"Sana: 12:46/01/01/2026" (soat/kun/oy/yil).
+
+**Qism bo'yicha** — 16:9 kadr, pastida progress chizig'i,
+chiziqning USTIDA yozuvlar: chapda bo'lim nomi / `N-bo'lim
+M-qism` / `sana: ...`, o'ngda esa `43,21% | 12:34/56:12`.
+
+Kadrga bosilsa — o'sha qism AYNAN o'sha joydan ochiladi; uzoq
+bosilsa — o'chirish so'raladi.
+
+**Kadr ustiga qorayish (scrim) TUSHMAYDI** — foydalanuvchi
 rasm tiniq ko'rinishini so'ragan; o'qilishi yozuvning O'Z qora
 soyasi bilan ta'minlanadi.
+
+### Pleyer QAYSI qismni ochadi
+
+`_autoOpenEpisode` / `_resumeTarget` (`video_player_screen.dart`):
+
+1. tarixdan kelingan bo'lsa — AYNAN o'sha qism, o'sha vaqtdan
+   (`startEpizodNumber` / `startAt`);
+2. shu bo'limning tarixda yozuvi bo'lsa — o'sha qism, to'xtagan
+   joyidan;
+3. aks holda — eng birinchi qism.
+
+**Oflaynda pleyer UMUMAN ochilmaydi** (foydalanuvchi talabi):
+o'rnida "Ko'rmoqchi bo'lgan qismni tanlang" yozuvi turadi.
+Shu sabab avtomatik ochish internet holati ANIQLANGUNCHA
+kutadi (`_connectivityKnown`).
+
+Qism qo'lda tanlanganda ham nuqta `_savedPositionOf` orqali
+topiladi: avval `WatchProgress` (aniqroq), bo'lmasa tarixdagi
+nuqta — ya'ni ilova qayta o'rnatilgan bo'lsa ham qism kelgan
+joyidan ochiladi.
 
 ## Tekshiruv (har bir o'zgarishdan keyin)
 
@@ -492,8 +612,10 @@ ikkovi bitta to'plamda bo'lsa ikkinchisi hech qachon yaratilmasdi.
 ## Qayerda to'xtaganini eslab qolish
 
 `lib/services/watch_progress.dart` — barcha nuqtalar bitta JSON
-ro'yxatda (`watch_positions`). Boshidagi 15 soniya va oxiridagi
-30 soniya saqlanmaydi; yozish **har soniyada, darhol diskka**
+ro'yxatda (`watch_positions`). Boshidagi va oxiridagi chegaralar
+qism uzunligining 10% i (ko'pi bilan 15 / 30 soniya — yuqoridagi
+"QANCHA KO'RILSA" bo'limiga qarang); yozish **har soniyada,
+darhol diskka**
 (faqat telefon xotirasiga — serverga umuman yuborilmaydi).
 
 ## TANBAL (LAZY) OYNA KESHLASH — eng muhim qoida

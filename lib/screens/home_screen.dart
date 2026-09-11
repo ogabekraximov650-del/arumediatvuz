@@ -6,7 +6,9 @@ import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import '../widgets/aru_logo.dart';
 import '../widgets/glass.dart';
+import '../services/auth_service.dart';
 import '../services/rust_bridge.dart';
+import '../services/watch_history.dart';
 import 'video_player_screen.dart';
 
 const String API_BASE = 'https://aniraxuzapp.ogabekraximov650.workers.dev';
@@ -30,6 +32,74 @@ class _HomeScreenState extends State<HomeScreen> {
     super.initState();
     _loadData();
     _listenConnectivity();
+    // Diskdagi tomosha tarixi — TARMOQSIZ o'qiladi. Anime ustiga
+    // bosilganda "oxirgi ko'rilgan qism" darhol ma'lum bo'lishi
+    // uchun kerak.
+    WatchHistory.instance.loadFromDisk();
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  //  KIRMAGAN FOYDALANUVCHI ANIMENI OCHOLMAYDI
+  // ═══════════════════════════════════════════════════════════
+  //
+  // TALAB (foydalanuvchi): kartalar KO'RINIB tursin, lekin ustiga
+  // bosilganda hisobga kirish so'ralsin.
+  void _openSeason(Map<String, dynamic> season) {
+    if (!AuthService.instance.isLoggedIn) {
+      _askLogin();
+      return;
+    }
+    // Tarix hali o'qilmagan bo'lsa (masalan endigina kirilgan) —
+    // shu yerda o'qib olamiz, so'rov ketmaydi.
+    WatchHistory.instance.loadFromDisk();
+    Navigator.of(context).push(
+      PageRouteBuilder(
+        transitionDuration: const Duration(milliseconds: 300),
+        pageBuilder: (_, anim, __) => VideoPlayerScreen(season: season),
+        transitionsBuilder: (_, anim, __, child) => FadeTransition(
+          opacity: CurvedAnimation(parent: anim, curve: Curves.easeOutCubic),
+          child: child,
+        ),
+      ),
+    );
+  }
+
+  void _askLogin() {
+    showDialog<void>(
+      context: context,
+      barrierColor: Colors.black54,
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.transparent,
+        insetPadding: const EdgeInsets.symmetric(horizontal: 28),
+        child: Glass(
+          borderRadius: 22,
+          padding: const EdgeInsets.fromLTRB(22, 22, 22, 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.lock_outline_rounded,
+                  size: 44, color: AppColors.accent),
+              const SizedBox(height: 14),
+              const Text(
+                'Iltimos anime ko\'rish uchun avval profil sahifasiga '
+                'o\'tib accountingizga kiring yoki yangi accaunt oching',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                    color: Colors.white, fontSize: 14.5, height: 1.45),
+              ),
+              const SizedBox(height: 18),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton(
+                  onPressed: () => Navigator.of(ctx).pop(),
+                  child: const Text('Tushunarli'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   @override
@@ -242,19 +312,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   (context, index) => RepaintBoundary(
                     child: SeasonCard(
                       season: _seasons[index],
-                      onTap: () => Navigator.of(context).push(
-                        PageRouteBuilder(
-                          transitionDuration: const Duration(milliseconds: 300),
-                          pageBuilder: (_, anim, __) =>
-                              VideoPlayerScreen(season: _seasons[index]),
-                          transitionsBuilder: (_, anim, __, child) =>
-                              FadeTransition(
-                            opacity: CurvedAnimation(
-                                parent: anim, curve: Curves.easeOutCubic),
-                            child: child,
-                          ),
-                        ),
-                      ),
+                      onTap: () => _openSeason(_seasons[index]),
                     ),
                   ),
                   childCount: _seasons.length,
@@ -276,9 +334,21 @@ class SeasonCard extends StatelessWidget {
   final VoidCallback onTap;
   const SeasonCard({super.key, required this.season, required this.onTap});
 
+  // ── KARTADAGI YOZUV ───────────────────────────────────────
+  //
+  // TALAB (foydalanuvchi): bo'lim nomining USTIDA "N-bo'lim" deb
+  // yozilsin, nom uzun bo'lsa esa EKRAN HAJMIGA QARAB uzunroq
+  // joy egallasin.
+  //
+  // Shu sabab o'lchamlar qat'iy emas: harf kattaligi ham, nomga
+  // ajratiladigan qatorlar soni ham kartaning O'Z kengligidan
+  // hisoblanadi (`LayoutBuilder`). Kichik telefonda yozuv rasmni
+  // bosib ketmaydi, kattasida esa nom to'liq ko'rinadi.
   @override
   Widget build(BuildContext context) {
     final photoUrl = season['photo_url'] as String?;
+    final name = (season['nomi'] ?? '').toString();
+    final bolim = int.tryParse(season['bolim_id']?.toString() ?? '') ?? 0;
 
     return GlassTappable(
       onTap: onTap,
@@ -336,40 +406,72 @@ class SeasonCard extends StatelessWidget {
                           size: 36, color: Colors.white38)),
                 ),
 
-              // Pastdan gradient
+              // Pastdan gradient + yozuvlar. Ikkovi bitta
+              // `LayoutBuilder` ichida: gradient balandligi
+              // yozuvning O'Z balandligidan kelib chiqadi.
               Positioned(
-                bottom: 0,
                 left: 0,
                 right: 0,
-                height: 90,
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.bottomCenter,
-                      end: Alignment.topCenter,
-                      colors: [
-                        Colors.black.withValues(alpha: 0.85),
-                        Colors.transparent
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-
-              // Nomi
-              Positioned(
-                left: 10,
-                right: 10,
-                bottom: 10,
-                child: Text(
-                  season['nomi'] ?? '',
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                      fontWeight: FontWeight.w700,
-                      fontSize: 14,
-                      color: Colors.white,
-                      height: 1.2),
+                bottom: 0,
+                child: LayoutBuilder(
+                  builder: (context, box) {
+                    final w = box.maxWidth;
+                    // ~166 dp lik katakda 14 dp, kattaroq ekranda
+                    // kattaroq — lekin hech qachon o'lchovdan
+                    // chiqmaydi.
+                    final nameSize = (w * 0.085).clamp(12.5, 18.0).toDouble();
+                    final tagSize =
+                        (nameSize * 0.78).clamp(10.0, 13.5).toDouble();
+                    // Uzun nom ekran kattalashgani sari ko'proq
+                    // qator oladi (kichik ekranda 2, kattasida 3).
+                    final lines = name.length > 26 && w >= 150 ? 3 : 2;
+                    final textHeight =
+                        nameSize * 1.22 * lines + tagSize * 1.3 + 16;
+                    return Container(
+                      padding: const EdgeInsets.fromLTRB(10, 26, 10, 10),
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          begin: Alignment.bottomCenter,
+                          end: Alignment.topCenter,
+                          colors: [
+                            Colors.black.withValues(alpha: 0.88),
+                            Colors.black.withValues(alpha: 0.65),
+                            Colors.transparent,
+                          ],
+                          stops: const [0, 0.55, 1],
+                        ),
+                      ),
+                      constraints: BoxConstraints(minHeight: textHeight),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (bolim > 0)
+                            Text(
+                              '$bolim-bo\'lim',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontWeight: FontWeight.w600,
+                                fontSize: tagSize,
+                                color: AppColors.accent,
+                                height: 1.3,
+                              ),
+                            ),
+                          Text(
+                            name,
+                            maxLines: lines,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                                fontWeight: FontWeight.w700,
+                                fontSize: nameSize,
+                                color: Colors.white,
+                                height: 1.22),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
                 ),
               ),
             ],

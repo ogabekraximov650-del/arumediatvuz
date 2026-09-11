@@ -1,16 +1,32 @@
 // lib/screens/history_screen.dart — TOMOSHA TARIXI.
 //
-// Ikki ko'rinish bor:
+// Ikki ko'rinish bor va ular BITTA joyda yashaydi (`PageView`):
 //
-//   * ANIME BO'YICHA — har bir anime bitta qator: o'ngda rasmi,
-//     chapida nomi va "Oxirgi marta N-qismni ko'rdingiz". Ustiga
-//     bosilsa — shu animening ko'rilgan qismlari;
+//   * ANIME BO'YICHA — har bir anime bitta karta: oxirgi ko'rilgan
+//     qismning KADRI, tagida bo'lim nomi, "Oxirgi marta N-bo'lim
+//     M-qismni ko'rdingiz" va sana. Ustiga bosilsa — shu animening
+//     ko'rilgan qismlari;
 //   * QISM BO'YICHA — hamma animening hamma ko'rilgan qismlari.
 //
 // Ikkalasida ham eng oxirgi ko'rilgani ENG TEPADA turadi.
 //
+// ── QO'L BILAN SURIB O'TILADI ─────────────────────────────────
+//
+// TALAB (foydalanuvchi): "Anime bo'yicha oynasini chapga sursa
+// o'ng tarafdan qism bo'yicha oynasi surilib kelishi kerak, ya'ni
+// ikkitasi bitta joyda ishlaydi".
+//
+// Shu sabab `PageView`: tugmalar ham o'sha sahifani suzdiradi,
+// barmoq bilan ham suriladi. Ilgari ikkovi `bool` bilan darhol
+// almashardi va o'sha paytda BUTUN ro'yxat bir yo'la qurilib,
+// har bir qator kadr yasashni so'rardi — aynan shundan qotish
+// bo'lardi. Endi kadrlar ko'rish paytida diskda tayyor bo'ladi
+// (`WatchHistory._prepareThumb`), ro'yxat esa faqat ko'rinadigan
+// qatorlarni quradi.
+//
 // Qism qatori — foydalanuvchi TO'XTAGAN JOYDAGI kadr (16:9), uning
-// pastida progress chizig'i, o'ng tomonda esa kichik yozuvlar.
+// pastida progress chizig'i, chizig'ning USTIDA esa yozuvlar:
+// chapda bo'lim nomi / qism / sana, o'ngda foiz va vaqt.
 // Kadr ustiga soya yoki qorayish TUSHMAYDI (foydalanuvchi talabi) —
 // yozuvlar faqat O'Z ATROFIDAGI qora soya bilan ajratiladi, shu
 // sabab rasm tiniq ko'rinadi va yozuv ham o'qiladi.
@@ -23,6 +39,134 @@ import 'package:flutter/material.dart';
 import '../services/watch_history.dart';
 import '../theme/app_background.dart';
 import '../widgets/glass.dart';
+import 'video_player_screen.dart';
+
+// ── UMUMIY YORDAMCHILAR ───────────────────────────────────────
+
+/// `12:34` yoki `01:12:34` — joriy nuqta / umumiy davomiylik.
+String _clock(int ms) {
+  final total = ms ~/ 1000;
+  final h = total ~/ 3600;
+  final m = (total % 3600) ~/ 60;
+  final s = total % 60;
+  String two(int v) => v.toString().padLeft(2, '0');
+  return h > 0 ? '${two(h)}:${two(m)}:${two(s)}' : '${two(m)}:${two(s)}';
+}
+
+/// `12:46/01/01/2026` — soat/kun/oy/yil (foydalanuvchi ko'rsatgan
+/// tartib).
+String _date(int ms) {
+  if (ms <= 0) return '';
+  final d = DateTime.fromMillisecondsSinceEpoch(ms);
+  String two(int v) => v.toString().padLeft(2, '0');
+  return '${two(d.hour)}:${two(d.minute)}/'
+      '${two(d.day)}/${two(d.month)}/${d.year}';
+}
+
+/// `43,21%` — vergul bilan (foydalanuvchi ko'rsatgan ko'rinish).
+String _percent(double value) {
+  final v = value.isNaN ? 0.0 : value.clamp(0, 100).toDouble();
+  return '${v.toStringAsFixed(2).replaceAll('.', ',')}%';
+}
+
+/// Tarixdagi yozuvdan pleyer uchun "bo'lim" ma'lumoti.
+Map<String, dynamic> _seasonOf(HistoryItem item) => {
+      'anime_id': item.animeId,
+      'season_id': item.seasonId,
+      'bolim_id': item.bolimId,
+      'nomi': item.seasonName,
+      'anime_name': item.animeName,
+      'photo_url': item.seasonPhoto.isNotEmpty
+          ? item.seasonPhoto
+          : item.animePhoto,
+    };
+
+/// Qismni AYNAN to'xtagan joyidan ochadi (foydalanuvchi talabi:
+/// "kadrning qayeriga bossam ham o'sha vaqtda ko'rilgan joyidan
+/// boshlanishi kerak").
+void _openEpisode(BuildContext context, HistoryItem item) {
+  Navigator.of(context).push(
+    PageRouteBuilder(
+      transitionDuration: const Duration(milliseconds: 260),
+      pageBuilder: (_, anim, __) => VideoPlayerScreen(
+        season: _seasonOf(item),
+        startEpizodNumber: item.epizodNumber,
+        startAt: Duration(milliseconds: item.positionMs),
+      ),
+      transitionsBuilder: (_, anim, __, child) => FadeTransition(
+        opacity: CurvedAnimation(parent: anim, curve: Curves.easeOutCubic),
+        child: child,
+      ),
+    ),
+  );
+}
+
+/// "Rostdan ham bu tarixni o'chirib tashlaysizmi?"
+Future<void> _confirmRemove(BuildContext context, HistoryItem item) async {
+  final ok = await showDialog<bool>(
+    context: context,
+    barrierColor: Colors.black54,
+    builder: (ctx) => Dialog(
+      backgroundColor: Colors.transparent,
+      insetPadding: const EdgeInsets.symmetric(horizontal: 28),
+      child: Glass(
+        borderRadius: 22,
+        padding: const EdgeInsets.fromLTRB(22, 22, 22, 16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.delete_outline_rounded,
+                size: 42, color: Colors.white70),
+            const SizedBox(height: 12),
+            Text(
+              'Rostdan ham bu tarixni o\'chirib tashlaysizmi?',
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                  color: Colors.white, fontSize: 15, height: 1.4),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              '${item.title} · ${item.bolimNumber}-bo\'lim '
+              '${item.epizodNumber}-qism',
+              textAlign: TextAlign.center,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.6), fontSize: 12.5),
+            ),
+            const SizedBox(height: 18),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: () => Navigator.of(ctx).pop(false),
+                    child: const Text('Yo\'q'),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: FilledButton(
+                    onPressed: () => Navigator.of(ctx).pop(true),
+                    style: FilledButton.styleFrom(
+                        backgroundColor: Colors.red.shade600),
+                    child: const Text('Ha, o\'chirilsin'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+  if (ok == true) {
+    await WatchHistory.instance.remove(item);
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+//  TARIX OYNASI
+// ══════════════════════════════════════════════════════════════
 
 class HistoryTab extends StatefulWidget {
   const HistoryTab({super.key});
@@ -32,9 +176,6 @@ class HistoryTab extends StatefulWidget {
 }
 
 class _HistoryTabState extends State<HistoryTab> {
-  /// `true` — anime bo'yicha, `false` — qism bo'yicha.
-  bool _byAnime = true;
-
   // ── BU YERDA `initState` DA YUKLASH YO'Q ──────────────────
   //
   // Kutubxona sahifasi ilova ochilganda BIRGA quriladi
@@ -45,61 +186,95 @@ class _HistoryTabState extends State<HistoryTab> {
   // bosilganda — boshlanadi. Ro'yxat 60 soniya "yangi" hisoblanadi,
   // ya'ni oynalar orasida yurganda qayta so'ralmaydi.
 
+  final PageController _pages = PageController();
+
+  /// 0 — anime bo'yicha, 1 — qism bo'yicha.
+  int _page = 0;
+
+  @override
+  void dispose() {
+    _pages.dispose();
+    super.dispose();
+  }
+
+  void _goTo(int i) {
+    if (i == _page) return;
+    // Sahifa SUZIB keladi — tugma bosilganda ham, barmoq bilan
+    // surilganda ham bir xil harakat.
+    _pages.animateToPage(
+      i,
+      duration: const Duration(milliseconds: 280),
+      curve: Curves.easeOutCubic,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        _Switcher(page: _page, onChanged: _goTo),
+        Expanded(
+          child: PageView(
+            controller: _pages,
+            physics: const BouncingScrollPhysics(),
+            onPageChanged: (i) => setState(() => _page = i),
+            children: const [
+              _HistoryList(byAnime: true),
+              _HistoryList(byAnime: false),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Bitta ro'yxat (anime bo'yicha yoki qism bo'yicha).
+class _HistoryList extends StatelessWidget {
+  final bool byAnime;
+  const _HistoryList({required this.byAnime});
+
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
       animation: WatchHistory.instance,
       builder: (context, _) {
         final h = WatchHistory.instance;
-        final rows = _byAnime ? h.byAnime : h.items;
+        final rows = byAnime ? h.byAnime : h.items;
 
-        return Column(
-          children: [
-            _Switcher(
-              byAnime: _byAnime,
-              onChanged: (v) => setState(() => _byAnime = v),
-            ),
-            Expanded(
-              child: RefreshIndicator(
-                color: AppColors.accent,
-                backgroundColor: AppColors.card,
-                onRefresh: () => h.load(force: true),
-                child: rows.isEmpty
-                    ? _EmptyState(loading: h.isLoading)
-                    : ListView.builder(
-                        physics: const BouncingScrollPhysics(
-                            parent: AlwaysScrollableScrollPhysics()),
-                        padding: const EdgeInsets.fromLTRB(16, 4, 16, 120),
-                        itemCount: rows.length,
-                        itemBuilder: (context, i) {
-                          final item = rows[i];
-                          return Padding(
-                            padding: const EdgeInsets.only(bottom: 12),
-                            child: _byAnime
-                                ? AnimeRow(
-                                    item: item,
-                                    onTap: () => _openAnime(context, item),
-                                  )
-                                : EpisodeRow(item: item),
-                          );
-                        },
-                      ),
-              ),
-            ),
-          ],
+        return RefreshIndicator(
+          color: AppColors.accent,
+          backgroundColor: AppColors.card,
+          onRefresh: () => h.load(force: true),
+          child: rows.isEmpty
+              ? _EmptyState(loading: h.isLoading)
+              : ListView.builder(
+                  physics: const BouncingScrollPhysics(
+                      parent: AlwaysScrollableScrollPhysics()),
+                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 120),
+                  itemCount: rows.length,
+                  itemBuilder: (context, i) {
+                    final item = rows[i];
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 12),
+                      child: byAnime
+                          ? AnimeRow(
+                              item: item,
+                              onTap: () => Navigator.of(context).push(
+                                MaterialPageRoute<void>(
+                                  builder: (_) => AnimeHistoryScreen(
+                                    animeId: item.animeId,
+                                    title: item.title,
+                                  ),
+                                ),
+                              ),
+                            )
+                          : EpisodeRow(item: item),
+                    );
+                  },
+                ),
         );
       },
-    );
-  }
-
-  void _openAnime(BuildContext context, HistoryItem item) {
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => AnimeHistoryScreen(
-          animeId: item.animeId,
-          title: item.animeName,
-        ),
-      ),
     );
   }
 }
@@ -107,9 +282,9 @@ class _HistoryTabState extends State<HistoryTab> {
 // ── Anime bo'yicha / Qism bo'yicha ────────────────────────────
 
 class _Switcher extends StatelessWidget {
-  final bool byAnime;
-  final ValueChanged<bool> onChanged;
-  const _Switcher({required this.byAnime, required this.onChanged});
+  final int page;
+  final ValueChanged<int> onChanged;
+  const _Switcher({required this.page, required this.onChanged});
 
   @override
   Widget build(BuildContext context) {
@@ -120,16 +295,16 @@ class _Switcher extends StatelessWidget {
           Expanded(
             child: _SwitchButton(
               label: 'Anime bo\'yicha',
-              active: byAnime,
-              onTap: () => onChanged(true),
+              active: page == 0,
+              onTap: () => onChanged(0),
             ),
           ),
           const SizedBox(width: 10),
           Expanded(
             child: _SwitchButton(
               label: 'Qism bo\'yicha',
-              active: !byAnime,
-              onTap: () => onChanged(false),
+              active: page == 1,
+              onTap: () => onChanged(1),
             ),
           ),
         ],
@@ -181,9 +356,13 @@ class _SwitchButton extends StatelessWidget {
   }
 }
 
-// ── ANIME QATORI ──────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+//  ANIME QATORI
+// ══════════════════════════════════════════════════════════════
 //
-// O'ngda rasm, chapida nomi va oxirgi ko'rilgan qism.
+// TALAB (foydalanuvchi): oxirgi marta ko'rilgan epizod RASMI,
+// rasm tagida BO'LIM NOMI (anime nomi emas), tagida esa
+// "Oxirgi marta 1-bo'lim 1-qismni ko'rdingiz" va sana.
 
 class AnimeRow extends StatelessWidget {
   final HistoryItem item;
@@ -197,53 +376,50 @@ class AnimeRow extends StatelessWidget {
       behavior: HitTestBehavior.opaque,
       child: Glass(
         borderRadius: 18,
-        padding: const EdgeInsets.all(12),
-        child: Row(
+        padding: const EdgeInsets.all(10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    item.animeName.isEmpty ? 'Anime' : item.animeName,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 15.5,
-                      fontWeight: FontWeight.w700,
-                      height: 1.25,
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    'Oxirgi marta ${item.epizodNumber}-qismni ko\'rdingiz',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: Colors.white.withValues(alpha: 0.62),
-                      fontSize: 12.5,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(width: 12),
             ClipRRect(
               borderRadius: BorderRadius.circular(12),
-              child: SizedBox(
-                width: 62,
-                height: 78,
-                child: item.poster.isEmpty
-                    ? Container(color: Colors.white10)
-                    : CachedNetworkImage(
-                        imageUrl: item.poster,
-                        fit: BoxFit.cover,
-                        placeholder: (_, __) => Container(color: Colors.white10),
-                        errorWidget: (_, __, ___) =>
-                            Container(color: Colors.white10),
-                      ),
+              child: AspectRatio(
+                aspectRatio: 16 / 9,
+                child: _Frame(item: item),
+              ),
+            ),
+            const SizedBox(height: 10),
+            Text(
+              item.title,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 15.5,
+                fontWeight: FontWeight.w700,
+                height: 1.25,
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'Oxirgi marta ${item.bolimNumber}-bo\'lim '
+              '${item.epizodNumber}-qismni ko\'rdingiz',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: Colors.white.withValues(alpha: 0.68),
+                fontSize: 12.5,
+                height: 1.3,
+              ),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              'Sana: ${_date(item.updatedAt)}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: Colors.white.withValues(alpha: 0.52),
+                fontSize: 12,
               ),
             ),
           ],
@@ -253,109 +429,123 @@ class AnimeRow extends StatelessWidget {
   }
 }
 
-// ── QISM QATORI (to'xtagan kadr + progress) ───────────────────
+// ══════════════════════════════════════════════════════════════
+//  QISM QATORI (to'xtagan kadr + progress)
+// ══════════════════════════════════════════════════════════════
+//
+// Yozuvlar PROGRESS CHIZIG'INING USTIDA (foydalanuvchi talabi):
+//
+//   chapda:  bo'lim nomi
+//            N-bo'lim M-qism
+//            sana: 12:34/01/01/2026
+//   o'ngda:  43,21% | 12:34/56:12
+//
+// Kadrga bosilsa — o'sha qism AYNAN o'sha joydan ochiladi.
+// Uzoq bosilsa — tarixdan o'chirish so'raladi.
 
 class EpisodeRow extends StatelessWidget {
   final HistoryItem item;
   const EpisodeRow({super.key, required this.item});
 
-  static String _clock(int ms) {
-    final total = ms ~/ 1000;
-    final h = total ~/ 3600;
-    final m = (total % 3600) ~/ 60;
-    final s = total % 60;
-    String two(int v) => v.toString().padLeft(2, '0');
-    return h > 0 ? '${two(h)}:${two(m)}:${two(s)}' : '${two(m)}:${two(s)}';
-  }
-
-  static String _date(int ms) {
-    if (ms <= 0) return '';
-    final d = DateTime.fromMillisecondsSinceEpoch(ms);
-    String two(int v) => v.toString().padLeft(2, '0');
-    return '${d.year}/${two(d.month)}/${two(d.day)}/'
-        '${two(d.hour)}:${two(d.minute)}';
-  }
-
   @override
   Widget build(BuildContext context) {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(16),
-      child: AspectRatio(
-        aspectRatio: 16 / 9,
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            _Frame(item: item),
+    return GestureDetector(
+      onTap: () => _openEpisode(context, item),
+      onLongPress: () => _confirmRemove(context, item),
+      behavior: HitTestBehavior.opaque,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(16),
+        child: AspectRatio(
+          aspectRatio: 16 / 9,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              _Frame(item: item),
 
-            // ── YOZUVLAR ──────────────────────────────────────
-            //
-            // O'ng tomonda, progress chizig'ining tepasida.
-            // Kadrning kichik qismini egallaydi va ustiga hech
-            // qanday qorayish tushmaydi — o'qilishi faqat
-            // yozuvning O'Z soyasi bilan ta'minlanadi.
-            Positioned(
-              right: 8,
-              left: 8,
-              bottom: 10,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  _ShadowText(
-                    item.animeName.isEmpty ? 'Anime' : item.animeName,
-                    size: 11.5,
-                    weight: FontWeight.w700,
-                  ),
-                  _ShadowText(
-                    '${item.bolimId > 0 ? item.bolimId : item.seasonId}-bo\'lim'
-                    '  ${item.epizodNumber}-qism',
-                    size: 10.5,
-                  ),
-                  _ShadowText(
-                    'sana: ${_date(item.updatedAt)}',
-                    size: 10,
-                    alpha: 0.85,
-                  ),
-                  _ShadowText(
-                    '${_clock(item.positionMs)}/${_clock(item.durationMs)}',
-                    size: 10.5,
-                    weight: FontWeight.w600,
-                  ),
-                ],
-              ),
-            ),
-
-            // ── PROGRESS CHIZIG'I ─────────────────────────────
-            //
-            // `FractionallySizedBox` ishlatiladi: u ulushni
-            // to'g'ridan-to'g'ri oladi va 0 yoki 1 bo'lganda ham
-            // to'g'ri ishlaydi (`Expanded(flex: 0)` esa bo'sh
-            // `Container`ni butun enga yoyib yuborardi).
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: 0,
-              child: SizedBox(
-                height: 3.5,
-                child: Stack(
+              // ── YOZUVLAR ────────────────────────────────────
+              //
+              // Progress chizig'ining ustida. Kadr ustiga hech
+              // qanday qorayish tushmaydi — o'qilishi yozuvning
+              // O'Z soyasi bilan ta'minlanadi.
+              Positioned(
+                left: 8,
+                right: 8,
+                bottom: 8,
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
-                    Container(color: Colors.white24),
-                    FractionallySizedBox(
-                      widthFactor: item.progress,
-                      alignment: Alignment.centerLeft,
-                      child: Container(
-                        decoration: const BoxDecoration(
-                          gradient: LinearGradient(
-                            colors: [AppColors.accent, AppColors.accent2],
+                    // Chap tomon — bo'lim nomi, qism, sana.
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          _ShadowText(
+                            item.title,
+                            size: 11.5,
+                            weight: FontWeight.w700,
+                            align: TextAlign.left,
                           ),
-                        ),
+                          _ShadowText(
+                            '${item.bolimNumber}-bo\'lim '
+                            '${item.epizodNumber}-qism',
+                            size: 10.5,
+                            align: TextAlign.left,
+                          ),
+                          _ShadowText(
+                            'sana: ${_date(item.updatedAt)}',
+                            size: 10,
+                            alpha: 0.85,
+                            align: TextAlign.left,
+                          ),
+                        ],
                       ),
+                    ),
+                    const SizedBox(width: 8),
+                    // O'ng tomon — faqat foiz va vaqt.
+                    _ShadowText(
+                      '${_percent(item.percent)} | '
+                      '${_clock(item.positionMs)}/${_clock(item.durationMs)}',
+                      size: 10.5,
+                      weight: FontWeight.w600,
+                      align: TextAlign.right,
                     ),
                   ],
                 ),
               ),
-            ),
-          ],
+
+              // ── PROGRESS CHIZIG'I ─────────────────────────────
+              //
+              // `FractionallySizedBox` ishlatiladi: u ulushni
+              // to'g'ridan-to'g'ri oladi va 0 yoki 1 bo'lganda ham
+              // to'g'ri ishlaydi (`Expanded(flex: 0)` esa bo'sh
+              // `Container`ni butun enga yoyib yuborardi).
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: SizedBox(
+                  height: 3.5,
+                  child: Stack(
+                    children: [
+                      Container(color: Colors.white24),
+                      FractionallySizedBox(
+                        widthFactor: item.progress,
+                        alignment: Alignment.centerLeft,
+                        child: Container(
+                          decoration: const BoxDecoration(
+                            gradient: LinearGradient(
+                              colors: [AppColors.accent, AppColors.accent2],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -434,12 +624,14 @@ class _ShadowText extends StatelessWidget {
   final double size;
   final FontWeight weight;
   final double alpha;
+  final TextAlign align;
 
   const _ShadowText(
     this.text, {
     required this.size,
     this.weight = FontWeight.w500,
     this.alpha = 1,
+    this.align = TextAlign.right,
   });
 
   @override
@@ -449,7 +641,7 @@ class _ShadowText extends StatelessWidget {
       text,
       maxLines: 1,
       overflow: TextOverflow.ellipsis,
-      textAlign: TextAlign.right,
+      textAlign: align,
       style: TextStyle(
         color: Colors.white.withValues(alpha: alpha),
         fontSize: size,

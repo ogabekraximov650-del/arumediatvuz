@@ -14,10 +14,21 @@
 //
 // ── NIMA SAQLANMAYDI ───────────────────────────────────────────
 //
-//   * boshidagi 15 soniya — foydalanuvchi videoni endi ochgan,
+//   * boshidagi qisqa oraliq — foydalanuvchi videoni endi ochgan,
 //     "davom ettirish" mantiqsiz;
-//   * oxiridagi 30 soniya — qism ko'rib bo'lingan, keyingi safar
+//   * oxiridagi qisqa oraliq — qism ko'rib bo'lingan, keyingi safar
 //     boshidan boshlangani to'g'ri.
+//
+// ── CHEGARALAR QISM UZUNLIGIGA QARAB ───────────────────────────
+//
+// TOPILGAN XATO (foydalanuvchi ko'rgan): chegaralar QAT'IY 15 va
+// 30 soniya edi. 17 soniyalik qismda esa bu ikkovi butun qismni
+// qoplab olardi — ya'ni QISQA QISM HECH QACHON eslab qolinmasdi va
+// har safar boshidan ochilardi.
+//
+// Endi chegara qism uzunligining 10% i (lekin ko'pi bilan 15 / 30
+// soniya): uzun qismlarda hech narsa o'zgarmaydi, qisqa qismlar
+// esa to'g'ri ishlaydi.
 //
 // Yozish TEZLIKKA ta'sir qilmaydi: nuqta HAR SONIYA, faqat
 // O'ZGARGAN bo'lsa saqlanadi va faqat telefon xotirasiga yoziladi
@@ -36,10 +47,27 @@ class WatchProgress {
   static const int _maxEntries = 300;
 
   /// Boshidagi shu vaqt ichida to'xtatilsa — eslab qolinmaydi.
-  static const Duration _minPosition = Duration(seconds: 15);
+  /// Qisqa qismlarda uzunlikning 10% iga tushadi.
+  static const Duration _maxMinPosition = Duration(seconds: 15);
 
   /// Oxiriga shuncha qolganda — qism ko'rib bo'lingan hisoblanadi.
-  static const Duration _endMargin = Duration(seconds: 30);
+  /// Bu ham qisqa qismlarda 10% ga tushadi.
+  static const Duration _maxEndMargin = Duration(seconds: 30);
+
+  /// Qisqa qismlar uchun chegara: uzunlikning shuncha ulushi.
+  static const double _shortShare = 0.10;
+
+  /// Shu qism uchun "hali boshida" chegarasi.
+  static Duration minPositionFor(Duration duration) {
+    final share = duration * _shortShare;
+    return share < _maxMinPosition ? share : _maxMinPosition;
+  }
+
+  /// Shu qism uchun "allaqachon oxirida" chegarasi.
+  static Duration endMarginFor(Duration duration) {
+    final share = duration * _shortShare;
+    return share < _maxEndMargin ? share : _maxEndMargin;
+  }
 
   /// url -> millisekund. Xotirada saqlanadi, diskka esa siyrak
   /// yoziladi.
@@ -81,8 +109,8 @@ class WatchProgress {
   void save(String url, Duration position, Duration duration) {
     if (url.isEmpty || duration <= Duration.zero) return;
     ensureLoaded();
-    final atEnd = duration - position <= _endMargin;
-    if (position < _minPosition || atEnd) {
+    final atEnd = duration - position <= endMarginFor(duration);
+    if (position < minPositionFor(duration) || atEnd) {
       if (_positions.remove(url) != null) _dirty = true;
       return;
     }
