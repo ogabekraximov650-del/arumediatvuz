@@ -472,7 +472,15 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
 
     try {
       apply(await Connectivity().checkConnectivity());
-    } catch (_) {}
+    } catch (_) {
+      // Tekshiruv ishlamadi — ONLAYN deb hisoblaymiz va qismni
+      // ochaveramiz. Aks holda qism avtomatik ochilishi butunlay
+      // to'xtab qolardi: `_autoOpenEpisode` ulanish holati
+      // ma'lum bo'lishini kutadi, holat esa endi hech qachon
+      // kelmasdi.
+      _connectivityKnown = true;
+      _autoOpenEpisode();
+    }
     _connSub = Connectivity().onConnectivityChanged.listen(apply);
   }
 
