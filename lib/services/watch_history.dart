@@ -117,20 +117,23 @@ class HistoryItem {
       };
 
   factory HistoryItem.fromJson(Map<String, dynamic> j) {
-    int num(String k) => (j[k] as num?)?.toInt() ?? 0;
-    String str(String k) => (j[k] ?? '').toString();
+    // Maydon nomi `num` bo'lishi MUMKIN EMAS: u Dart'dagi son
+    // turining nomi va funksiya ichida o'sha turni to'sib qo'yadi
+    // ("'num' isn't a type" xatosi).
+    int intOf(String k) => (j[k] as num?)?.toInt() ?? 0;
+    String strOf(String k) => (j[k] ?? '').toString();
     return HistoryItem(
-      animeId: num('anime_id'),
-      seasonId: num('season_id'),
-      bolimId: num('bolim_id'),
-      epizodNumber: num('epizod_number'),
-      animeName: str('anime_name'),
-      animePhoto: str('anime_photo'),
-      seasonPhoto: str('season_photo'),
-      videoUrl: str('video_url'),
-      positionMs: num('position_ms'),
-      durationMs: num('duration_ms'),
-      updatedAt: num('updated_at'),
+      animeId: intOf('anime_id'),
+      seasonId: intOf('season_id'),
+      bolimId: intOf('bolim_id'),
+      epizodNumber: intOf('epizod_number'),
+      animeName: strOf('anime_name'),
+      animePhoto: strOf('anime_photo'),
+      seasonPhoto: strOf('season_photo'),
+      videoUrl: strOf('video_url'),
+      positionMs: intOf('position_ms'),
+      durationMs: intOf('duration_ms'),
+      updatedAt: intOf('updated_at'),
     );
   }
 }
