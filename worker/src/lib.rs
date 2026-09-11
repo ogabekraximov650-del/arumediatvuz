@@ -268,7 +268,75 @@ async fn ensure_db(env: &Env) {
         return;
     }
     init_db(env).await;
+    migrate_db(env).await;
     DB_READY.store(true, Ordering::Relaxed);
+}
+
+/// Eski sxema qolib ketgan bo'lsa — jimgina to'g'rilaydi.
+///
+/// ═══════════════════════════════════════════════════════════════
+///  NEGA KERAK (TOPILGAN XATO)
+/// ═══════════════════════════════════════════════════════════════
+///
+/// Baza tozalangandan keyin, YANGI worker deploy bo'lguncha
+/// oraliqda ESKI worker bitta so'rov oldi va o'zining `init_db` si
+/// bilan ESKI jadvallarni qaytadan yaratib qo'ydi. Yangi
+/// `CREATE TABLE IF NOT EXISTS` esa endi hech narsa qilmaydi —
+/// natijada `season_db` da `views_total` kabi ustunlar bo'lmay
+/// qoldi va Ma'lumot oynasi 500 xato berardi.
+///
+/// Shu sabab endi ilova QO'LDA tozalashga TAYANMAYDI: yetishmayotgan
+/// ustunlar o'zi qo'shiladi. Tekshiruv arzon — bitta so'rov, va u
+/// izolyat umri davomida BIR MARTA bajariladi.
+///
+/// `ALTER TABLE ... ADD COLUMN` ustun mavjud bo'lganda xato beradi
+/// va Turso to'plamdagi birinchi xatodan keyin qolganini
+/// BAJARMAYDI — shu sabab har biri ALOHIDA yuboriladi va xatosi
+/// e'tiborsiz qoldiriladi.
+async fn migrate_db(env: &Env) {
+    // Yangi ustunlardan bittasi bormi? Bo'lsa — hammasi joyida.
+    let probe = turso_exec(env,
+        "SELECT COUNT(*) FROM pragma_table_info('season_db') WHERE name='views_total'",
+        vec![]).await;
+    if let Ok(res) = &probe {
+        if scalar(res) > 0 {
+            return;
+        }
+    }
+
+    for sql in [
+        "ALTER TABLE season_db ADD COLUMN epizod_count INTEGER DEFAULT 0",
+        "ALTER TABLE season_db ADD COLUMN views_total INTEGER DEFAULT 0",
+        "ALTER TABLE season_db ADD COLUMN watch_ms_total INTEGER DEFAULT 0",
+        "ALTER TABLE season_db ADD COLUMN fav_count INTEGER DEFAULT 0",
+        "ALTER TABLE season_db ADD COLUMN rating_sum INTEGER DEFAULT 0",
+        "ALTER TABLE season_db ADD COLUMN rating_count INTEGER DEFAULT 0",
+        "ALTER TABLE epizod_db ADD COLUMN views_total INTEGER DEFAULT 0",
+        "ALTER TABLE epizod_db ADD COLUMN watch_ms_total INTEGER DEFAULT 0",
+        "ALTER TABLE watch_history_db ADD COLUMN watched_ms INTEGER DEFAULT 0",
+        "ALTER TABLE watch_history_db ADD COLUMN view_count INTEGER DEFAULT 0",
+        "ALTER TABLE watch_history_db ADD COLUMN deleted_at INTEGER DEFAULT 0",
+        "ALTER TABLE watch_history_db ADD COLUMN created_at INTEGER",
+        // Eski, endi keraksiz indekslar (birlamchi kalit o'zi
+        // qoplaydigan yoki umuman ishlatilmaydigan).
+        "DROP INDEX IF EXISTS idx_name",
+        "DROP INDEX IF EXISTS idx_janri",
+        "DROP INDEX IF EXISTS idx_season_anime",
+        "DROP INDEX IF EXISTS idx_season_janri",
+        "DROP INDEX IF EXISTS idx_epizod_season",
+        "DROP INDEX IF EXISTS idx_users_tg",
+        "DROP INDEX IF EXISTS idx_sessions_token",
+        // Tarix indeksi endi `deleted_at` ni ham o'z ichiga oladi.
+        "DROP INDEX IF EXISTS idx_history_user",
+        "CREATE INDEX IF NOT EXISTS idx_history_user
+           ON watch_history_db(user_id, deleted_at, updated_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_sessions_seen
+           ON sessions_db(last_seen_at)",
+        "CREATE INDEX IF NOT EXISTS idx_users_created
+           ON users_db(created_at)",
+    ] {
+        let _ = turso_exec(env, sql, vec![]).await;
+    }
 }
 
 async fn init_db(env: &Env) {

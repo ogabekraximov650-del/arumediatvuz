@@ -20,8 +20,8 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
+import 'auth_service.dart';
 import 'rust_bridge.dart';
-import 'video_cache_server.dart';
 
 /// Bitta ko'rsatkichning davrlar bo'yicha qiymati.
 class StatBlock {

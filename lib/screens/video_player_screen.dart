@@ -2497,6 +2497,13 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                     physics: const BouncingScrollPhysics(),
                     onPageChanged: (i) {
                       if (_tabCtrl.index != i) _tabCtrl.animateTo(i);
+                      // "Qismlar" oynasi birinchi marta ochilganda
+                      // ro'yxat hali qurilmagan bo'ladi — joriy
+                      // qismni o'rtaga olib kelamiz.
+                      if (i == 1) {
+                        final ep = _currentEp;
+                        if (ep != null) _centerOnEpisode(ep);
+                      }
                     },
                     children: [
                       _KeepAlivePage(child: _buildInfoTab(tavsif.toString())),

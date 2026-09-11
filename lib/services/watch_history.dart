@@ -259,13 +259,28 @@ class WatchHistory extends ChangeNotifier {
     // Serverga JAMI vaqt yuboriladi (shu odam shu qismni qancha
     // ko'rgani), shu sabab avvalgi yozuvdan davom etamiz.
     final before = findEpisode(animeId, seasonId, epizodNumber);
-    _pendingNewView = true;
+
+    // ── QAYSI HOLAT "YANGI KO'RISH" ─────────────────────
+    //
+    // Faqat BOSHQA qism ochilganda. Sifat almashtirilganda yoki
+    // pleyer qaytadan ochilganda (xatodan tiklanish) qism
+    // O'ZGARMAYDI — u paytda hisob oshmasligi kerak.
+    final sameEpisode = prev != null &&
+        prev['anime_id'] == animeId &&
+        prev['season_id'] == seasonId &&
+        prev['epizod_number'] == epizodNumber;
+    if (!sameEpisode) _pendingNewView = true;
+
+    // Sifat almashtirilganda shu seansda yig'ilgan vaqt
+    // YO'QOLMASLIGI kerak, shu sabab kattasini olamiz.
+    final carried = sameEpisode ? ((prev['watched_ms'] as int?) ?? 0) : 0;
+    final saved = before?.watchedMs ?? 0;
     _pending = {
       'anime_id': animeId,
       'season_id': seasonId,
       'bolim_id': bolimId,
       'epizod_number': epizodNumber,
-      'watched_ms': before?.watchedMs ?? 0,
+      'watched_ms': carried > saved ? carried : saved,
       'anime_name': animeName,
       'season_name': seasonName,
       'anime_photo': animePhoto,

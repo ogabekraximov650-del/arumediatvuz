@@ -13,7 +13,6 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import 'auth_service.dart';
-import 'video_cache_server.dart';
 
 class SeasonInfo {
   final Map<String, dynamic> season;
