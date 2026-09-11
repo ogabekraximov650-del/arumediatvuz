@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:dio/dio.dart';
+import '../services/storage_janitor.dart';
 import '../services/ui_state.dart';
 import '../theme/app_background.dart';
 import '../widgets/glass.dart';
@@ -113,6 +114,12 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
 
     final file = File(picked.path);
     final fileSizeBytes = await file.length();
+    // `image_picker` tanlangan videoni ILOVANING vaqtinchalik
+    // papkasiga NUSXALAYDI. Nusxa yuklash tugashi bilan
+    // o'chiriladi — aks holda ilova hajmi har yuklangan qism
+    // hajmicha o'sib borardi (storage_janitor.dart izohiga
+    // qarang). Galereyadagi ASL faylga tegilmaydi.
+    Future<void> dropCopy() => StorageJanitor.dropPicked(picked.path);
     final ext = picked.path.split('.').last.toLowerCase();
     final contentType = ext == 'mkv' ? 'video/x-matroska' : 'video/mp4';
     final fileName =
@@ -123,6 +130,7 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
     try {
       tokenRes = await http.post(Uri.parse('$_apiBase/api/upload-token'));
     } catch (e) {
+      await dropCopy();
       if (mounted) {
         ScaffoldMessenger.of(context)
             .showSnackBar(SnackBar(content: Text('Token xato: $e')));
@@ -130,6 +138,7 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
       return;
     }
     if (tokenRes.statusCode != 200) {
+      await dropCopy();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Upload token olib bo\'lmadi')));
@@ -141,7 +150,10 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
     final authToken = tokenData['authorizationToken'] as String;
 
     // 2. Progress state'ni boshlash
-    if (!mounted) return;
+    if (!mounted) {
+      await dropCopy();
+      return;
+    }
     setState(() {
       q.isUploading = true;
       q.progress = 0;
@@ -213,6 +225,9 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text('${q.label} yuklashda xato: $e')));
       }
+    } finally {
+      // Yuklash qanday tugashidan qat'i nazar — nusxa o'chadi.
+      await dropCopy();
     }
   }
 

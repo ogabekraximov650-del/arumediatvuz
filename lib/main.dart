@@ -1,9 +1,13 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'screens/root_screen.dart';
 import 'services/app_keys.dart';
 import 'services/auth_service.dart';
 import 'services/rust_bridge.dart';
+import 'services/storage_janitor.dart';
+import 'services/traffic_service.dart';
 import 'services/video_cache_server.dart';
 import 'services/watch_history.dart';
 
@@ -44,6 +48,19 @@ Future<void> main() async {
   // nusxadan). Bosh sahifadan anime bosilganda "oxirgi ko'rilgan
   // qism" darhol ma'lum bo'lishi kerak, shu sabab bu yerda.
   WatchHistory.instance.loadFromDisk();
+
+  // ── TRAFIK HISOBI ───────────────────────────────────────────
+  // Qurilma darajasidagi hisoblagichdan o'qiladi va sutkada bir
+  // marta serverga yuboriladi (traffic_service.dart izohiga
+  // qarang). Kutilmaydi — ilova ochilishini sekinlashtirmasin.
+  unawaited(TrafficService.instance.start());
+
+  // ── VAQTINCHALIK FAYLLAR ────────────────────────────────────
+  // Admin panelida tanlangan rasm/video ilovaning vaqtinchalik
+  // papkasiga NUSXALANADI. Yuklash o'rtasida ilova yopilgan
+  // bo'lsa, nusxa qolib ketadi va ilova hajmi o'sib boradi —
+  // shu sabab eski qoldiqlar ochilishda tozalanadi.
+  unawaited(StorageJanitor.sweep());
 
   runApp(const FulutterApp());
 }

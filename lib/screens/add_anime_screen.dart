@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'dart:io';
+import 'dart:async';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
+import '../services/storage_janitor.dart';
 import '../services/ui_state.dart';
 import '../theme/app_background.dart';
 import '../widgets/glass.dart';
@@ -82,6 +84,12 @@ class _AddAnimeScreenState extends State<AddAnimeScreen> {
     // mumkin — `setState` o'shanda istisno tashlaydi.
     if (!mounted) return;
     if (pickedFile != null) {
+      // `image_picker` rasmni ilovaning vaqtinchalik papkasiga
+      // NUSXALAYDI. Avvalgi nusxa endi keraksiz — o'chiramiz,
+      // aks holda har tanlash ilova hajmini oshirardi
+      // (storage_janitor.dart izohiga qarang).
+      final old = _selectedImage;
+      if (old != null) unawaited(StorageJanitor.dropPicked(old.path));
       setState(() {
         _selectedImage = File(pickedFile.path);
         _errorMsg = null;
@@ -133,6 +141,11 @@ class _AddAnimeScreenState extends State<AddAnimeScreen> {
       // Lokal oldindan ko'rish uchun to'liq URL, serverga esa bare nom.
       _photoUrl = '$API_BASE/api/image/$b2FileName';
       _photoFileName = b2FileName;
+      // Rasm B2'ga o'tdi — ilovaning vaqtinchalik papkasidagi
+      // nusxa endi keraksiz. XATO bo'lganda o'chirilmaydi:
+      // foydalanuvchi qayta urinib ko'rishi mumkin.
+      final copy = _selectedImage;
+      if (copy != null) unawaited(StorageJanitor.dropPicked(copy.path));
       return _photoFileName;
     } catch (e) {
       if (mounted) setState(() => _errorMsg = 'Rasm yuklashda xato: $e');

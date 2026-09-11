@@ -67,6 +67,10 @@ typedef _VideoSetPosDart = int Function(Pointer<Utf8>, int);
 typedef _VideoUrlActionC = Int32 Function(Pointer<Utf8>);
 typedef _VideoUrlActionDart = int Function(Pointer<Utf8>);
 
+// Hisobdan chiqilganda butun keshni o'chirish (argumentsiz).
+typedef _VideoWipeC = Int32 Function();
+typedef _VideoWipeDart = int Function();
+
 // ── TANBAL (LAZY) OYNA KESHLASH ─────────────────────────────────
 //
 // Katta fayl (masalan 1.5 GB) 480 MiB'lik "oynalarga" bo'linadi va
@@ -128,6 +132,7 @@ class RustCore {
   late final _VideoUrlActionDart _videoDownload;
   late final _VideoUrlActionDart _videoPause;
   late final _VideoUrlActionDart _videoDelete;
+  late final _VideoWipeDart _videoWipe;
   late final _VideoUrlActionDart _videoPrepare;
   late final _VideoUrlActionDart _videoPrepareStatus;
   late final _VideoUrlActionDart _videoComplete;
@@ -195,6 +200,8 @@ class RustCore {
         'rust_video_cache_pause');
     _videoDelete = _lib.lookupFunction<_VideoUrlActionC, _VideoUrlActionDart>(
         'rust_video_cache_delete');
+    _videoWipe = _lib.lookupFunction<_VideoWipeC, _VideoWipeDart>(
+        'rust_video_cache_wipe');
     _videoPrepare = _lib.lookupFunction<_VideoUrlActionC, _VideoUrlActionDart>(
         'rust_video_cache_prepare');
     _videoComplete = _lib.lookupFunction<_VideoUrlActionC, _VideoUrlActionDart>(
@@ -549,11 +556,24 @@ class RustCore {
   /// yerda). `init()` chaqirilmagan bo'lsa `null`.
   String? get dataDirPath => _cacheDirPath;
 
+  /// Yuklab olingan BARCHA videolarni va yuklash navbatini
+  /// o'chiradi. Hisobdan chiqilganda chaqiriladi
+  /// (`OfflineData.wipe`).
+  int videoCacheWipe() {
+    if (!_loaded) return 0;
+    try {
+      return _videoWipe();
+    } catch (_) {
+      return 0;
+    }
+  }
+
   /// Kirgan hisob raqamini yadroga bildiradi (chiqilganda 0).
   ///
-  /// Yadro undan keyin yuklab olish so'rovlariga `X-U` sarlavhasini
-  /// qo'yadi — worker esa sarflangan trafikni AYNAN shu hisobga
-  /// yozadi (profil sahifasidagi "Trafik" shundan chiqadi).
+  /// Trafikni endi ilovaning O'ZI sanaydi
+  /// (`traffic_service.dart`), shu sabab yadro so'rovlarga hech
+  /// qanday qo'shimcha sarlavha qo'ymaydi — raqam faqat
+  /// jurnalda ko'rinadi.
   void setUserId(int id) {
     if (!_loaded) return;
     try {

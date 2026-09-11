@@ -8,7 +8,9 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 
+import 'offline_data.dart';
 import 'rust_bridge.dart';
+import 'traffic_service.dart';
 
 const String kApiBase = 'https://aniraxuzapp.ogabekraximov650.workers.dev';
 
@@ -365,6 +367,13 @@ class AuthService extends ChangeNotifier {
 
   Future<void> logout() async {
     final s = _session;
+    // Chiqishda hamma narsa tozalanadi, shu sabab shu paytgacha
+    // sanalgan trafik SHU YERDA yuboriladi (odatdagi qoida —
+    // sutkada bir marta). Yiqilsa ham chiqish davom etadi.
+    try {
+      await TrafficService.instance.sampleNow();
+      await TrafficService.instance.reportNow();
+    } catch (_) {}
     if (s != null && s.isNotEmpty) {
       try {
         await http.post(
@@ -615,8 +624,6 @@ class AuthService extends ChangeNotifier {
   Future<void> _save(String session, AppUser u) async {
     _session = session;
     _user = u;
-    // Yadro yuklab olish so'rovlariga `X-U` sarlavhasini qo'yadi —
-    // sarflangan trafik AYNAN shu hisobga yoziladi.
     RustCore.instance.setUserId(u.id);
     try {
       await _storage.write(key: _sessionKey, value: session);
@@ -627,6 +634,17 @@ class AuthService extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Qurilmadan hisobni olib tashlaydi.
+  ///
+  /// Chiqish ham, hisobni o'chirish ham SHU YERGA keladi — ya'ni
+  /// tozalash qoidasi bitta joyda turadi.
+  ///
+  /// TALAB (foydalanuvchi): chiqilgan zahoti oflayn rejim uchun
+  /// yuklab olingan ma'lumotlar ham o'chirilsin. Buni
+  /// `OfflineData.wipe` bajaradi: yuklab olingan videolar,
+  /// ro'yxat keshlari, tarix kadrlari va posterlar keshi.
+  /// Boshqa hisob bilan kirilganda hammasi qaytadan, KERAK
+  /// BO'LGANDA yuklab olinadi.
   Future<void> _clear() async {
     _session = null;
     _user = null;
@@ -635,6 +653,11 @@ class AuthService extends ChangeNotifier {
       await _storage.delete(key: _sessionKey);
       await _storage.delete(key: _userKey);
     } catch (_) {}
+    // Ekran darhol bo'shashi uchun avval xabar beramiz, tozalash
+    // esa shundan keyin (u bir necha yuz millisekund olishi
+    // mumkin — disk operatsiyasi).
+    notifyListeners();
+    await OfflineData.wipe();
     notifyListeners();
   }
 

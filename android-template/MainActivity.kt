@@ -34,6 +34,8 @@ package __PKG__
 
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
+import android.net.TrafficStats
+import android.os.Process
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -57,6 +59,46 @@ class MainActivity : FlutterActivity() {
                         val bytes = grabFrame(url, maxWidth, quality)
                         runOnUiThread { result.success(bytes) }
                     }.start()
+                }
+            }
+
+        // ═══════════════════════════════════════════════════════
+        //  TRAFIK HISOBLAGICHI
+        // ═══════════════════════════════════════════════════════
+        //
+        // TALAB (foydalanuvchi): trafikni endi ILOVA sanasin —
+        // worker noto'g'ri sanardi va ijroni buzardi.
+        //
+        // Android'ning o'zida shu uchun tayyor hisoblagich bor:
+        // `TrafficStats.getUidRxBytes(uid)` — shu ilova QABUL
+        // QILGAN umumiy bayt. U tizim darajasida, yadro
+        // hisoblagichidan olinadi, ya'ni:
+        //
+        //   * pleyer (ExoPlayer) oqimi ham,
+        //   * yuklab olish ham,
+        //   * rasm va API so'rovlari ham
+        //
+        // hammasi kiradi va HAQIQATAN qabul qilingan bayt sanaladi
+        // (e'lon qilingan uzunlik emas — eski xatoning sababi shu
+        // edi). Mahalliy 127.0.0.1 uzatmasi bunga KIRMAYDI, ya'ni
+        // diskdan o'qib pleyerga berilgan video trafik sifatida
+        // hisoblanmaydi.
+        //
+        // Son qurilma yoqilganidan beri o'sib boradi va telefon
+        // o'chirilganda nolga tushadi — Dart tomoni buni farqlar
+        // (`traffic_service.dart`) orqali hal qiladi.
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "aru/net")
+            .setMethodCallHandler { call, result ->
+                if (call.method != "rx") {
+                    result.notImplemented()
+                } else {
+                    val rx = try {
+                        TrafficStats.getUidRxBytes(Process.myUid())
+                    } catch (e: Throwable) {
+                        -1L
+                    }
+                    // -1 = qurilma qo'llab-quvvatlamaydi.
+                    result.success(rx)
                 }
             }
     }

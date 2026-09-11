@@ -118,7 +118,6 @@ import 'package:video_player/video_player.dart';
 import '../services/download_manager.dart';
 import '../services/rust_bridge.dart';
 import '../services/video_cache_server.dart';
-import '../services/auth_service.dart';
 import '../services/format.dart';
 import '../services/season_info.dart';
 import '../services/watch_history.dart';
@@ -1244,6 +1243,10 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     if (_playViaLocal) return;
     _windowTimer = Timer.periodic(const Duration(seconds: 2), (_) {
       if (!mounted || _playViaLocal) return;
+      // Barmoq ekranda (oynalar surilmoqda) — UI oqimini band
+      // qilmaymiz. Bir-ikki soniya kechikish sezilmaydi, kadr
+      // tashlash esa darhol ko'rinadi.
+      if (_gestureBusy) return;
       // Hajm hali noma'lum bo'lsa (isitish javobi kechikkan bo'lishi
       // mumkin) — uni qayta so'raymiz. Hajmsiz oyna chegarasini
       // hisoblab bo'lmaydi.
@@ -1348,16 +1351,15 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // aralashmaydi, quvvat sarfi kam va SurfaceTexture bilan
     // bog'liq muammolar (Impeller) umuman tegmaydi. YouTube va
     // ExoPlayer asosidagi ilovalar shu yo'ldan boradi.
-    // ── TRAFIK KIMGA YOZILADI ────────────────────────────────
+    // ── TRAFIK ENDI SARLAVHA BILAN SANALMAYDI ────────────────
     //
-    // `X-U` — kirgan hisob raqami. Worker javobda HAQIQATAN
-    // yuborilgan baytlarni sanaydi va aynan shu hisobga yozadi
-    // (profil sahifasidagi "Trafik"). Sarlavha manzilni
-    // o'zgartirmaydi, ya'ni kesh kalitlariga tegmaydi.
-    final uid = AuthService.instance.user?.id ?? 0;
+    // Ilgari bu yerda `X-U` sarlavhasi qo'yilar, worker esa javob
+    // tanasini sanovchi quvurdan o'tkazardi. Hisob noto'g'ri
+    // chiqdi va ba'zan ijro "yuklanmadi" xatosiga yiqildi. Endi
+    // so'rov TOZA ketadi, trafikni esa ilovaning o'zi sanaydi
+    // (`lib/services/traffic_service.dart`).
     final ctrl = VideoPlayerController.networkUrl(
       uri,
-      httpHeaders: uid > 0 ? {'X-U': '$uid'} : const {},
       viewType: VideoViewType.platformView,
       videoPlayerOptions: VideoPlayerOptions(
         // Ilova fonga ketganda ExoPlayer ijroni to'xtatadi va
@@ -1522,6 +1524,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _lastWatchPosition = null;
     _healthTimer = Timer.periodic(const Duration(milliseconds: 800), (_) {
       if (!mounted) return;
+      // Surish davomida o'tkazib yuboriladi (yuqoridagi izoh).
+      if (_gestureBusy) return;
       final c = _controller;
       if (c == null) return;
       final VideoPlayerValue v = c.value;
@@ -2407,15 +2411,22 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
               ),
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(16),
-                  child: _buildInlinePlayer(),
+                // ── ALOHIDA QATLAM ──────────────────────────────
+                // Pleyer o'z vaqti bilan (pozitsiya, bufer, halqa)
+                // qayta chiziladi. Alohida qatlamsiz bu qayta
+                // chizish PASTDAGI ro'yxatni ham sudrab ketardi —
+                // aynan surish paytida bu sezilarli qotish beradi.
+                child: RepaintBoundary(
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(16),
+                    child: _buildInlinePlayer(),
+                  ),
                 ),
               ),
               // Pleyer bilan qism o'tkazish orasida: qaysi bo'lim va
               // qism ko'rilyapti, u necha marta ko'rilgan, qancha
               // vaqt tomosha qilingan va qachon qo'shilgan.
-              _buildNowPlayingBar(),
+              RepaintBoundary(child: _buildNowPlayingBar()),
               const SizedBox(height: 8),
               // Tartib (foydalanuvchi talabi):
               //   video -> tablar -> [<] N-qism [>] -> qismlar ro'yxati
@@ -3271,9 +3282,14 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   /// to'xtatib qo'ymaslik uchun).
   bool _dlHeld = false;
 
+  /// To'xtatish boshlangan payt — "qulf ochilmay qolish"dan
+  /// himoya uchun (pastdagi `_gestureBusy` izohiga qarang).
+  DateTime _heldAt = DateTime.fromMillisecondsSinceEpoch(0);
+
   void _holdDownloadUpdates() {
     if (_dlHeld) return;
     _dlHeld = true;
+    _heldAt = DateTime.now();
     DownloadManager.instance.hold();
   }
 
@@ -3281,6 +3297,25 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     if (!_dlHeld) return;
     _dlHeld = false;
     DownloadManager.instance.release();
+  }
+
+  /// Hozir barmoq ekranda (ro'yxat yoki oynalar surilmoqda).
+  ///
+  /// Davriy ishlar (holat so'rovi, sog'liq tekshiruvi) shu paytda
+  /// o'tkazib yuboriladi: ular UI oqimida bajariladi va aynan kadr
+  /// tayyorlanayotgan paytga to'g'ri kelsa, surish "tutilib"
+  /// ko'rinadi.
+  ///
+  /// HIMOYA: surish tugaganini bildiruvchi xabar biror sababga
+  /// ko'ra kelmay qolsa (ekran almashdi, ro'yxat qayta qurildi),
+  /// qulf abadiy yopiq qolmasin — 5 soniyadan keyin o'zi ochiladi.
+  bool get _gestureBusy {
+    if (!_dlHeld) return false;
+    if (DateTime.now().difference(_heldAt) > const Duration(seconds: 5)) {
+      _releaseDownloadUpdates();
+      return false;
+    }
+    return true;
   }
 
   // ══════════════════════════════════════════════════════════════
@@ -5073,6 +5108,17 @@ class _KeepAlivePageState extends State<_KeepAlivePage>
   @override
   Widget build(BuildContext context) {
     super.build(context);
-    return widget.child;
+    // ── NEGA `RepaintBoundary` ────────────────────────────────
+    //
+    // Surish paytida PageView ikkala oynani bir vaqtda ko'rsatadi
+    // va ularni HAR KADRDA surib turadi. Alohida qatlam
+    // bo'lmasa, oynaning butun mazmuni (ro'yxat, soyalar,
+    // yumaloq burchaklar) har kadrda QAYTADAN chiziladi —
+    // kuchsiz telefonda aynan shu "qotish" bo'lib ko'rinadi.
+    //
+    // `RepaintBoundary` bilan har bir oyna bir marta chizilib,
+    // GPU'da tayyor qatlam sifatida saqlanadi: surish esa o'sha
+    // tayyor qatlamni KO'CHIRISHga aylanadi.
+    return RepaintBoundary(child: widget.child);
   }
 }

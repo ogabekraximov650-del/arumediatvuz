@@ -247,4 +247,11 @@ class MyStatsService extends ChangeNotifier {
     _loading = false;
     notifyListeners();
   }
+
+  /// Hisobdan chiqilganda shaxsiy raqamlar ham yo'qoladi.
+  void clear() {
+    _stats = const MyStats();
+    _loadedAt = null;
+    notifyListeners();
+  }
 }

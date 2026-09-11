@@ -215,4 +215,12 @@ class FavoritesService extends ChangeNotifier {
   void markChanged() {
     _loadedAt = null;
   }
+
+  /// Hisobdan chiqilganda — ro'yxat ham, disk nusxasi ham
+  /// (`OfflineData.wipe`) tozalanadi.
+  void clear() {
+    _items = [];
+    _loadedAt = null;
+    notifyListeners();
+  }
 }

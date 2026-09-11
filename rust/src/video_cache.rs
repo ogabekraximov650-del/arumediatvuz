@@ -2646,6 +2646,74 @@ pub extern "C" fn rust_video_cache_delete(url_ptr: *const c_char) -> i32 {
     }
 }
 
+/// ── HAMMASINI O'CHIRISH (hisobdan chiqilganda) ────────────────
+///
+/// TALAB (foydalanuvchi): "foydalanuvchi accountini o'chirsa yoki
+/// chiqib ketsa, ilova shu zahoti oflayn rejim uchun yuklab
+/// olingan ma'lumotlarni tozalab tashlasin".
+///
+/// Shu sabab bu yerda BUTUN kesh papkasi bo'shatiladi: yuklab
+/// olingan videolar, navbat, isitish belgilari — hammasi. Avval
+/// barcha yuklashlar to'xtatiladi va navbat bo'shatiladi, aks
+/// holda fon oqimi o'chirilgan faylni qaytadan yozib qo'yardi.
+///
+/// Qaytadi: o'chirilgan papkalar soni (diagnostika uchun).
+#[no_mangle]
+pub extern "C" fn rust_video_cache_wipe() -> i32 {
+    let Some(shared) = SHARED.get() else { return 0 };
+
+    // 1) Navbatni butunlay bo'shatamiz — fon oqimlari yangi ish
+    //    olmaydi va ketayotganlari keyingi tekshiruvda to'xtaydi.
+    if let Ok(mut map) = downloads().lock() {
+        for st in map.values_mut() {
+            st.wanted = false;
+        }
+        map.clear();
+        save_queue_locked(&map);
+    }
+    DL_EPOCH.fetch_add(1, Ordering::SeqCst);
+
+    // 2) Xotiradagi hosila hisoblar.
+    if let Ok(mut m) = stats().lock() {
+        m.clear();
+    }
+    if let Ok(mut m) = warm_state().lock() {
+        m.clear();
+    }
+    if let Ok(mut m) = prepares().lock() {
+        m.clear();
+    }
+    if let Ok(mut m) = LAST_THUMB.lock() {
+        *m = None;
+    }
+
+    // 3) Diskdagi hamma narsa. Papkalar avval "axlat" nomiga
+    //    ko'chiriladi: shu zahoti ko'rinmay qoladi, o'chirish esa
+    //    fon'da davom etsa ham xavfsiz.
+    let mut removed = 0;
+    if let Ok(entries) = fs::read_dir(&shared.cache_root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            if is_dir {
+                let trash = shared
+                    .cache_root
+                    .join(format!("{TRASH_PREFIX}wipe_{}", micros_now()));
+                if fs::rename(&path, &trash).is_ok() {
+                    let _ = fs::remove_dir_all(&trash);
+                } else {
+                    let _ = fs::remove_dir_all(&path);
+                }
+                removed += 1;
+            } else {
+                let _ = fs::remove_file(&path);
+            }
+        }
+    }
+    log(format!("Kesh butunlay tozalandi: {removed} ta papka"));
+    removed
+}
+
 // ── Bo'lakni diskdan o'qish yoki tarmoqdan yuklab, diskka yozish ────
 
 /// Shu video uchun XOTIRADAGI hosila ma'lumotlarni (davomiylik va
@@ -3546,27 +3614,33 @@ pub extern "C" fn rust_video_cache_window_size() -> u64 {
 //  TRAFIKNI KIM SARFLAGANI
 // ═══════════════════════════════════════════════════════════════
 //
-// Worker har bir javobda HAQIQATAN yuborilgan baytlarni sanaydi va
-// `X-U` sarlavhasidagi hisob raqamiga yozadi (profil sahifasidagi
-// "qancha trafik ishlatgani" shundan chiqadi).
+// ── O'ZGARDI: ENDI SANOQNI ILOVANING O'ZI YURITADI ────────────
 //
-// NEGA SARLAVHA, MANZIL EMAS: manzil ham Cloudflare keshida, ham
-// telefondagi keshda KALIT sifatida ishlatiladi. Unga `?u=...`
-// qo'shilsa, har bir foydalanuvchi uchun alohida kesh paydo
-// bo'lardi va yuklab olingan fayllar "yo'qolardi". Sarlavha esa
-// hech qanday kalitga tegmaydi.
+// Ilgari har bir so'rovga `X-U` sarlavhasi qo'yilar, worker esa
+// javob tanasini sanovchi quvurdan o'tkazib, natijani o'sha
+// hisobga yozardi. Hisob NOTO'G'RI chiqdi (pleyer ochilgan
+// oraliqni yarmida uzadi) va ijro ba'zan "yuklanmadi" xatosiga
+// yiqildi.
+//
+// Endi worker javobga UMUMAN tegmaydi. Baytlarni ilova qurilma
+// darajasida sanaydi (`lib/services/traffic_service.dart`) va
+// sutkada bir marta bitta son yuboradi. Shu sabab bu yerdagi
+// sarlavha ham olib tashlandi.
+//
+// Hisob raqami baribir saqlanadi: u kelajakda kerak bo'lishi
+// mumkin va `rust_set_user_id` ilova tomonidan chaqiriladi.
 static TRAFFIC_USER: AtomicI64 = AtomicI64::new(0);
 
 /// Ilova kirgan hisob raqamini bildiradi (chiqilganda 0).
+///
+/// Hozircha yadro undan foydalanmaydi — so'rovlarga hech qanday
+/// qo'shimcha sarlavha qo'yilmaydi.
 #[no_mangle]
 pub extern "C" fn rust_set_user_id(id: i64) {
-    TRAFFIC_USER.store(id.max(0), Ordering::Relaxed);
-}
-
-/// `X-U` sarlavhasi uchun qiymat (hisob yo'q bo'lsa — bo'sh).
-fn traffic_user_header() -> Option<String> {
-    let id = TRAFFIC_USER.load(Ordering::Relaxed);
-    if id > 0 { Some(id.to_string()) } else { None }
+    let old = TRAFFIC_USER.swap(id.max(0), Ordering::Relaxed);
+    if old != id.max(0) {
+        log(format!("Hisob almashdi: {old} -> {}", id.max(0)));
+    }
 }
 
 /// ── YUKLAB OLISH ISITISHNI KUTADI ─────────────────────────────
@@ -3733,14 +3807,12 @@ fn fetch_span(
     log(format!(
         "Bo'laklar {first}..={last} worker'dan olinmoqda ({range_start}-{range_end})..."
     ));
-    let mut req = shared
+    let resp = shared
         .agent
         .get(url)
-        .set("Range", &format!("bytes={range_start}-{range_end}"));
-    if let Some(uid) = traffic_user_header() {
-        req = req.set("X-U", &uid);
-    }
-    let resp = req.call().map_err(|e| e.to_string())?;
+        .set("Range", &format!("bytes={range_start}-{range_end}"))
+        .call()
+        .map_err(|e| e.to_string())?;
     let status = resp.status();
 
     // ── BUTUNLIK TEKSHIRUVI ────────────────────────────────────
@@ -4133,15 +4205,13 @@ impl ThumbReader<'_> {
 
     fn read_from_net(&self, start: u64, len: u64) -> Option<Vec<u8>> {
         let end = start + len - 1;
-        let mut req = self
+        let resp = self
             .shared
             .agent
             .get(&self.url)
-            .set("Range", &format!("bytes={start}-{end}"));
-        if let Some(uid) = traffic_user_header() {
-            req = req.set("X-U", &uid);
-        }
-        let resp = req.call().ok()?;
+            .set("Range", &format!("bytes={start}-{end}"))
+            .call()
+            .ok()?;
         // Manba Range'ni e'tiborsiz qoldirib BUTUN faylni
         // yuborayotgan bo'lsa (status 200), boshidan boshqa hech
         // qayerni o'qib bo'lmaydi — bunday javobni qabul qilmaymiz,

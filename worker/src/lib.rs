@@ -345,14 +345,20 @@ async fn migrate_db(env: &Env) {
 
 /// Statistikani BIR MARTA nolga tushiradi.
 ///
-/// Foydalanuvchi talabi (2026-09): "eski va soxta statistikani
-/// tozalab tashla". Belgisi `app_config` da turadi, ya'ni ish
-/// FAQAT BIR MARTA bajariladi va keyingi deploylarda takrorlanmaydi.
+/// Belgisi `app_config` da turadi, ya'ni ish FAQAT BIR MARTA
+/// bajariladi va keyingi deploylarda takrorlanmaydi. Yana tozalash
+/// kerak bo'lsa — belgining RAQAMINI oshirish yetarli
+/// (`stats_reset_v3` -> `stats_reset_v4`).
 ///
-/// Tomosha tarixining o'zi (qaysi qismni qayerda to'xtatgan)
-/// SAQLANIB QOLADI — faqat hisoblagichlar nolga tushadi.
+/// `v3` (foydalanuvchi talabi): trafik hisobi worker'dan ilovaga
+/// o'tkazildi, shu sabab eski (noto'g'ri sanalgan) raqamlar
+/// butunlay tozalanadi.
+///
+/// Tomosha tarixining o'zi (qaysi qismni qayerda to'xtatgan),
+/// baholar va sevimlilar SAQLANIB QOLADI — faqat hisoblagichlar
+/// nolga tushadi.
 async fn reset_stats_once(env: &Env) {
-    const MARK: &str = "stats_reset_v2";
+    const MARK: &str = "stats_reset_v3";
     if config_get(env, MARK).await.is_some() {
         return;
     }
@@ -3360,193 +3366,65 @@ fn stat_args(bucket: &str, metric: &str, value: i64) -> Vec<TursoArg> {
     vec![TursoArg::text(bucket), TursoArg::text(metric), TursoArg::int(value)]
 }
 
-/// Har shuncha baytdan keyin hisob bazaga yoziladi.
-///
-/// Kichik qilib bo'lmaydi: har bir yozuv — bitta baza so'rovi.
-/// Kattaroq qilinsa esa, mijoz oqimni yarmida uzganda ko'proq
-/// bayt hisobga tushmay qoladi. 8 MiB — shu ikkovining o'rtasi.
-const TRAFFIC_REPORT_EVERY: u64 = 8 * 1024 * 1024;
+// ═══════════════════════════════════════════════════════════════
+//  TRAFIKNI ENDI ILOVA SANAYDI (worker emas)
+// ═══════════════════════════════════════════════════════════════
+//
+// ── NEGA O'ZGARTIRILDI (foydalanuvchi topgan xato) ────────────
+//
+// Ilgari worker javob tanasini `TransformStream` orqali o'tkazib,
+// yuborilgan baytlarni o'zi sanardi. Ikki muammo chiqdi:
+//
+//   1) HISOB NOTO'G'RI edi. Pleyer `Range: bytes=0-` deb butun
+//      qolgan faylni so'raydi, bir necha megabayt bufer yig'ib
+//      ulanishni uzadi va keyingi joydan qayta so'raydi — shu
+//      sabab 166 MB lik video "1,14 GB" bo'lib ko'rinardi.
+//   2) IJRO BUZILDI. O'ralgan oqim ba'zan uzilib qolar va
+//      pleyerda "yuklanmadi" xatosi chiqardi.
+//
+// Ijro yo'li — loyihaning eng nozik joyi, shu sabab u endi
+// BUTUNLAY tegilmagan holda qoldirildi: worker javobni qanday
+// olsa shundayligicha uzatadi.
+//
+// Hisobni ILOVANING O'ZI yuritadi (`lib/services/traffic_service.dart`):
+// u qurilma darajasida HAQIQATAN qabul qilingan baytlarni sanaydi
+// va SUTKADA BIR MARTA `POST /api/traffic` bilan bitta son
+// yuboradi. Worker esa o'sha sonni umumiy va shaxsiy hisobga
+// qo'shadi. Trafik raqami real vaqtda kerak emas, shu sabab bu
+// yo'l ham arzon (kuniga bitta so'rov), ham aniq.
 
-/// Javob tanasini SANOVCHI quvurdan o'tkazadi.
+/// POST /api/traffic — ilova sanagan sutkalik trafik.
 ///
-/// ═══════════════════════════════════════════════════════════════
-///  NEGA `Content-Length` NI SANAB BO'LMAYDI (TOPILGAN XATO)
-/// ═══════════════════════════════════════════════════════════════
+/// Tana: `{"bytes": 123456}`. Faqat kirgan foydalanuvchi uchun
+/// ishlaydi; javob `{"ok":true}` bo'lsa, ilova o'z hisobini
+/// nolga tushiradi va qaytadan sanay boshlaydi.
 ///
-/// Pleyer (ExoPlayer) videoni ochganda `Range: bytes=0-` deb, ya'ni
-/// FAYL OXIRIGACHA so'raydi. Worker javobda butun qolgan hajmni
-/// e'lon qiladi (masalan 166 MB), pleyer esa bir necha megabayt
-/// bufer yig'ib ULANISHNI UZADI va keyingi joydan qayta so'raydi.
-///
-/// Ilgari shu E'LON QILINGAN uzunlik sanalardi — natijada 166 MB
-/// lik video va 3 daqiqalik tomosha "1,14 GB" bo'lib ko'rinardi.
-///
-/// Endi tana `TransformStream` orqali o'tkaziladi va HAQIQATAN
-/// yuborilgan baytlar sanaladi. Hisob har 8 MiB da bazaga
-/// yoziladi, ya'ni oqim yarmida uzilsa ham deyarli hammasi
-/// hisobga tushadi.
-///
-/// ── XAVFSIZLIK TO'RI ──────────────────────────────────────────
-///
-/// Bu ijro yo'li — loyihaning eng nozik joyi. Shu sabab o'rash
-/// biror sababga ko'ra ishlamasa (tana oqim emas, uzunlik
-/// noma'lum, `TransformStream` topilmadi), javob HECH
-/// O'ZGARMASDAN qaytariladi. Ya'ni eng yomon holatda trafik
-/// sanalmaydi, lekin video HAR DOIM ishlaydi.
-///
-/// Oxirida yana `FixedLengthStream` turadi — busiz runtime
-/// javobni "chunked" qilib yuboradi va uzunligi noma'lum javob
-/// erta uzilganda mijoz uni "fayl tugadi" deb qabul qilardi
-/// (`fixed_length_stream` izohiga qarang).
-fn counted_response(resp: Response, env: &Env, user: i64) -> Response {
-    let src = match resp.body() {
-        ResponseBody::Stream(rs) => rs.clone(),
-        _ => return resp,
+/// Son AQLGA SIG'ADIGAN chegaraga olinadi (256 GiB): buzilgan
+/// yoki o'ylab topilgan qiymat umumiy statistikani buzmasin.
+async fn traffic_route(mut req: Request, env: &Env) -> Result<Response> {
+    const MAX_ONE_REPORT: i64 = 256 * 1024 * 1024 * 1024;
+    let Some(u) = session_user(env, &bearer(&req)).await? else {
+        return json_resp(&json!({"error": "unauthorized"}), 401);
     };
-    let Some(len) = resp
-        .headers()
-        .get("Content-Length")
-        .ok()
-        .flatten()
-        .and_then(|v| v.parse::<u64>().ok())
-    else {
-        return resp;
-    };
-    if len == 0 {
-        return resp;
+    let body: Value = req.json().await.unwrap_or(json!({}));
+    let bytes = body["bytes"].as_i64().unwrap_or(0);
+    if bytes <= 0 {
+        // Sanaydigan narsa yo'q — bu xato emas.
+        return ok_nostore(json!({"ok": true, "bytes": 0}));
     }
-    let Ok(counted) = counting_stream(&src, env.clone(), user) else {
-        return resp;
-    };
-    let Ok(fixed) = fixed_length_stream(&counted, len) else {
-        return resp;
-    };
-    let status = resp.status_code();
-    let headers = resp.headers().clone();
-    match Response::from_body(ResponseBody::Stream(fixed)) {
-        Ok(out) => out.with_status(status).with_headers(headers),
-        Err(_) => resp,
-    }
-}
-
-/// Baytlarni sanab, o'zgartirmasdan o'tkazib yuboradigan oqim.
-fn counting_stream(
-    src: &web_sys::ReadableStream,
-    env: Env,
-    user: i64,
-) -> Result<web_sys::ReadableStream> {
-    use std::cell::Cell;
-    use std::rc::Rc;
-    use worker::wasm_bindgen::closure::Closure;
-    use worker::wasm_bindgen::{JsCast, JsValue};
-
-    let pending = Rc::new(Cell::new(0u64));
-
-    // Har bir bo'lak: sanaymiz va O'ZGARTIRMASDAN uzatamiz.
-    let count_env = env.clone();
-    let count_pending = pending.clone();
-    let transform = Closure::wrap(Box::new(move |chunk: JsValue, controller: JsValue| {
-        let size = js_sys::Reflect::get(&chunk, &JsValue::from_str("byteLength"))
-            .ok()
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0) as u64;
-        // Avval uzatamiz — hisob ijroga to'sqinlik qilmasin.
-        if let Ok(f) = js_sys::Reflect::get(&controller, &JsValue::from_str("enqueue")) {
-            if let Ok(f) = f.dyn_into::<js_sys::Function>() {
-                let _ = f.call1(&controller, &chunk);
-            }
-        }
-        let total = count_pending.get() + size;
-        if total >= TRAFFIC_REPORT_EVERY {
-            count_pending.set(0);
-            let env = count_env.clone();
-            worker::wasm_bindgen_futures::spawn_local(async move {
-                note_traffic(&env, total as i64, user).await;
-            });
-        } else {
-            count_pending.set(total);
-        }
-    }) as Box<dyn FnMut(JsValue, JsValue)>);
-
-    // Oqim tugadi — qolganini yozamiz.
-    let flush_env = env;
-    let flush_pending = pending;
-    let flush = Closure::wrap(Box::new(move |_controller: JsValue| {
-        let left = flush_pending.replace(0);
-        if left > 0 {
-            let env = flush_env.clone();
-            worker::wasm_bindgen_futures::spawn_local(async move {
-                note_traffic(&env, left as i64, user).await;
-            });
-        }
-    }) as Box<dyn FnMut(JsValue)>);
-
-    let transformer = js_sys::Object::new();
-    js_sys::Reflect::set(
-        &transformer,
-        &JsValue::from_str("transform"),
-        transform.as_ref().unchecked_ref(),
-    )
-    .map_err(|_| Error::RustError("transform o'rnatilmadi".into()))?;
-    js_sys::Reflect::set(
-        &transformer,
-        &JsValue::from_str("flush"),
-        flush.as_ref().unchecked_ref(),
-    )
-    .map_err(|_| Error::RustError("flush o'rnatilmadi".into()))?;
-    // Yopilmalar oqim umri davomida yashashi kerak.
-    transform.forget();
-    flush.forget();
-
-    let global = js_sys::global();
-    let ctor = js_sys::Reflect::get(&global, &JsValue::from_str("TransformStream"))
-        .map_err(|_| Error::RustError("TransformStream topilmadi".into()))?;
-    let ctor: js_sys::Function = ctor
-        .dyn_into()
-        .map_err(|_| Error::RustError("TransformStream funksiya emas".into()))?;
-    let args = js_sys::Array::new();
-    args.push(&transformer);
-    let ts = js_sys::Reflect::construct(&ctor, &args)
-        .map_err(|_| Error::RustError("TransformStream yaratilmadi".into()))?;
-
-    let pipe_through = js_sys::Reflect::get(src, &JsValue::from_str("pipeThrough"))
-        .map_err(|_| Error::RustError("pipeThrough yo'q".into()))?;
-    let pipe_through: js_sys::Function = pipe_through
-        .dyn_into()
-        .map_err(|_| Error::RustError("pipeThrough funksiya emas".into()))?;
-    let readable = pipe_through
-        .call1(src, &ts)
-        .map_err(|_| Error::RustError("pipeThrough ishlamadi".into()))?;
-    readable
-        .dyn_into::<web_sys::ReadableStream>()
-        .map_err(|_| Error::RustError("natija ReadableStream emas".into()))
-}
-
-/// So'rovdagi foydalanuvchi belgisi (`X-U` sarlavhasi).
-///
-/// Ilova pleyer va yuklab olish so'rovlarida shu sarlavhani
-/// yuboradi — sarlavha MANZILNI o'zgartirmaydi, ya'ni na
-/// Cloudflare keshiga, na telefondagi kesh kalitiga ta'sir
-/// qilmaydi (manzil kalit sifatida ishlatiladi).
-fn traffic_user(req: &Request) -> i64 {
-    req.headers()
-        .get("X-U")
-        .ok()
-        .flatten()
-        .and_then(|v| v.trim().parse::<i64>().ok())
-        .filter(|v| *v > 0)
-        .unwrap_or(0)
+    let bytes = bytes.min(MAX_ONE_REPORT);
+    note_traffic(env, bytes, u["id"].as_i64().unwrap_or(0)).await;
+    ok_nostore(json!({"ok": true, "bytes": bytes}))
 }
 
 /// Trafikni hisobga qo'shadi (javob yuborilgandan keyin, fon'da).
 ///
-/// O'lchov — javobda E'LON QILINGAN uzunlik. Mijoz oqimni yarmida
-/// uzsa haqiqiy raqam biroz kichikroq bo'ladi; buning evaziga ijro
-/// yo'liga (loyihaning eng nozik qismiga) umuman tegilmaydi.
+/// O'lchovni ILOVA beradi (`POST /api/traffic`): u qurilma
+/// darajasida haqiqatan qabul qilingan baytlarni sanaydi, worker
+/// esa faqat qo'shib qo'yadi — umumiy chelaklarga va o'sha
+/// odamning shaxsiy hisobiga.
 async fn note_traffic(env: &Env, bytes: i64, user: i64) {
     if bytes <= 0 { return; }
-    // Ijro yo'li bazaga umuman tegmaydi, ya'ni jadvallar hali
-    // tekshirilmagan bo'lishi mumkin.
     ensure_db(env).await;
     let now = now_ms();
     let mut stmts: Vec<(&str, Vec<TursoArg>)> = vec![
@@ -4267,7 +4145,8 @@ async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
         || path == "/api/rating"
         || path == "/api/favorite"
         || path == "/api/favorites"
-        || path == "/api/me/stats";
+        || path == "/api/me/stats"
+        || path == "/api/traffic";
     let write = matches!(method, Method::Post | Method::Put | Method::Delete) && !auth_path;
     let mut resp = route(req, env, ctx).await?;
 
@@ -4326,16 +4205,16 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
     // B2 proxy — Range header bilan uzatiladi (video seek)
     if method == Method::Get {
         if let Some(fname) = path.strip_prefix("/api/image/") {
-            let resp = b2_proxy(&env, &ctx, fname, range_header).await?;
-            return Ok(counted_response(resp, &env, traffic_user(&req)));
+            // Javob HECH O'ZGARTIRILMASDAN uzatiladi — trafikni
+            // endi ilovaning o'zi sanaydi (`traffic_route` izohi).
+            return b2_proxy(&env, &ctx, fname, range_header).await;
         }
         // Pleyer SHU manzildan oqim oladi (b2_play izohiga qarang).
         // Farqi: javob hech qachon sun'iy kesilmaydi va bo'laklab
         // keshlash mantiqi umuman ishlatilmaydi — ya'ni pleyer
         // faqat o'zi so'ragan baytni oladi.
         if let Some(fname) = path.strip_prefix("/api/play/") {
-            let resp = b2_play(&env, &ctx, fname, range_header).await?;
-            return Ok(counted_response(resp, &env, traffic_user(&req)));
+            return b2_play(&env, &ctx, fname, range_header).await;
         }
         // Oynani keshga isitish — ilova video ochilganda BIR MARTA
         // chaqiradi va so'rov tugaguncha ulanib turadi (b2_warm
@@ -4367,6 +4246,11 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
     // ── SHAFFOF STATISTIKA ────────────────────────────────────
     if path == "/api/stats" && method == Method::Get {
         return stats_route(&env).await;
+    }
+
+    // ── ILOVA SANAGAN TRAFIK (sutkada bir marta) ──────────────
+    if path == "/api/traffic" && method == Method::Post {
+        return traffic_route(req, &env).await;
     }
 
     // ── SHAXSIY STATISTIKA VA SEVIMLILAR RO'YXATI ─────────────

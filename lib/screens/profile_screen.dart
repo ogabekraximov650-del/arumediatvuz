@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -6,6 +8,7 @@ import 'package:image_picker/image_picker.dart';
 import '../services/auth_service.dart';
 import '../services/format.dart';
 import '../services/stats_service.dart';
+import '../services/storage_janitor.dart';
 import '../widgets/aru_logo.dart';
 import '../widgets/glass.dart';
 import '../widgets/telegram_logo.dart';
@@ -788,6 +791,9 @@ class _AvatarState extends State<_Avatar> {
 
     setState(() => _busy = true);
     final bytes = await picked.readAsBytes();
+    // `image_picker` rasmni ilovaning vaqtinchalik papkasiga
+    // nusxalaydi. Baytlar o'qib bo'lindi — nusxa endi keraksiz.
+    unawaited(StorageJanitor.dropPicked(picked.path));
     final err = await AuthService.instance.updateAvatar(bytes);
     if (!mounted) return;
     setState(() => _busy = false);

@@ -55,6 +55,26 @@ bajariladi.
 deploy qiling, KEYIN tozalang. Aks holda eski worker eski sxemani
 qaytarib qo'yadi.
 
+### STATISTIKANI QAYTA TOZALASH
+
+`reset_stats_once` — `app_config` dagi belgi bo'yicha bir marta
+ishlaydigan tozalash. **Yana tozalash kerak bo'lsa belgining
+RAQAMINI oshiring** (`stats_reset_v3` -> `stats_reset_v4`) va
+deploy qiling — boshqa hech narsa qilish shart emas, GitHub
+Action ham kerak emas.
+
+Tozalanadi: `stats_hourly`, `stats_daily`, `season_db` va
+`epizod_db` dagi `views_total`/`watch_ms_total`,
+`watch_history_db` dagi `view_count`/`watched_ms`,
+`users_db.traffic_bytes`.
+
+Tegilmaydi: tomosha tarixining O'ZI (qaysi qismni qayerda
+to'xtatgan), baholar (`ratings_db`) va sevimlilar
+(`favorites_db`).
+
+`v3` — trafik hisobi worker'dan ilovaga o'tkazilgani uchun
+(eski raqamlar noto'g'ri sanalgan edi).
+
 ## VAQT MINTAQASI — UTC+5 (TOSHKENT)
 
 Hamma vaqt Unix millisekundda (UTC) saqlanadi. Statistika
@@ -107,35 +127,129 @@ kunlik, haftalik, oylik va umumiy yetarli.
 faqat yig'indilar: `stats_hourly` (oxirgi 24 soat uchun, 3 kundan
 eskisi o'chiriladi) va `stats_daily` (hafta/oy/jami).
 
-**Trafik — HAQIQATAN YUBORILGAN BAYTLAR.**
+**TRAFIKNI ILOVA SANAYDI (worker EMAS).**
 
-TOPILGAN XATO: ilgari javobning E'LON QILINGAN uzunligi
-(`Content-Length`) sanalardi. Pleyer esa videoni ochganda
-`Range: bytes=0-` deb butun fayl oxirigacha so'raydi, bir necha
-megabayt bufer yig'ib ulanishni uzadi va keyingi joydan qayta
-so'raydi — natijada 166 MB lik video "1,14 GB" bo'lib
-ko'rinardi.
+Ikki marta tuzatildi, ikkinchisi yakuniy:
 
-Endi javob tanasi SANOVCHI quvurdan (`TransformStream`)
-o'tkaziladi va faqat haqiqatan o'tgan baytlar sanaladi; hisob
-har 8 MiB da bazaga yoziladi. O'rash biror sababga ko'ra
-ishlamasa, javob HECH O'ZGARMASDAN qaytariladi — ya'ni eng
-yomon holatda trafik sanalmaydi, lekin video har doim ishlaydi.
-Oxirida yana `FixedLengthStream` turadi (busiz javob "chunked"
-bo'lib, erta uzilganda mijoz uni "fayl tugadi" deb qabul
-qilardi).
+1. *Birinchi urinish (endi yo'q).* Javobning E'LON QILINGAN
+   uzunligi (`Content-Length`) sanalardi — 166 MB lik video
+   "1,14 GB" bo'lib ko'rinardi, chunki pleyer `Range: bytes=0-`
+   deb butun faylni so'rab, bir necha megabaytdan keyin
+   ulanishni uzadi.
+2. *Ikkinchi urinish (endi yo'q).* Javob tanasi sanovchi
+   `TransformStream` quvuridan o'tkazilardi. Hisob to'g'rilandi,
+   lekin IJRO BUZILDI — pleyerda "yuklanmadi" xatosi chiqa
+   boshladi.
 
-**Trafik KIMGA yoziladi:** ilova pleyer va yuklab olish
-so'rovlariga `X-U: <hisob raqami>` sarlavhasini qo'yadi
-(yadroda `rust_set_user_id`). Sarlavha MANZILGA tegmaydi — na
-Cloudflare keshi, na telefondagi kesh kaliti o'zgaradi. Profil
-sahifasidagi "Trafik" aynan shundan chiqadi.
+**Hozirgi qoida: worker javobga UMUMAN tegmaydi.** `b2_play` va
+`b2_proxy` javoblari qanday bo'lsa shundayligicha uzatiladi.
+Hech qanday `X-U` sarlavhasi ham yo'q (yadrodan ham, pleyerdan
+ham olib tashlangan) — manzil ham, kesh kalitlari ham toza.
+
+Sanoq ilovada:
+
+* `android-template/MainActivity.kt` -> `aru/net` kanali ->
+  `TrafficStats.getUidRxBytes(Process.myUid())`. Bu — tizim
+  yadrosining hisoblagichi, ya'ni ilova HAQIQATAN qabul qilgan
+  bayt: pleyer oqimi, yuklab olish, rasmlar, API — hammasi.
+  Mahalliy `127.0.0.1` uzatmasi bunga KIRMAYDI.
+* `lib/services/traffic_service.dart` — har 60 soniyada (va
+  ilova fon'ga o'tganda) o'lchov oladi, FARQNI yig'indiga
+  qo'shadi va diskka yozadi (`list_traffic.rustbin`, shifrlangan).
+  Yozuvda hisob raqami ham bor: hisob almashsa eski yig'indi
+  tashlab yuboriladi.
+* **SUTKADA BIR MARTA** `POST /api/traffic {"bytes": N}` —
+  bitta so'rov. Worker `note_traffic` bilan umumiy chelaklarga
+  va `users_db.traffic_bytes` ga qo'shadi. Javob 200 bo'lsa
+  ilova yuborilgan miqdorni ayiradi va qaytadan sanay boshlaydi.
+* Telefon o'chib yonganda tizim hisoblagichi nolga tushadi —
+  bu aniqlanadi (yangi qiymat eskisidan kichik) va o'sha
+  qiymatning o'zi farq sifatida olinadi.
+
+Profil sahifasidagi "Trafik" avvalgidek Turso'dan keladi
+(`GET /api/me/stats` -> `users_db.traffic_bytes`) va hisobot
+muvaffaqiyatli o'tgan zahoti majburan yangilanadi.
 
 **Ko'rish — ODAM BOSHIGA BITTA.** Foydalanuvchi talabi: "bitta
 odam bitta videoni 50 marta ko'rsa ham ko'rishlar soni 1 tadan
 oshmasin". Shu sabab umumiy hisob faqat shu odam shu qismni
 BIRINCHI marta ko'rganda oshadi (`view_count = 0` bo'lganda);
 shaxsiy `view_count` esa o'sib boraveradi.
+
+## ILOVA HAJMI: VAQTINCHALIK NUSXALAR
+
+TOPILGAN XATO (foydalanuvchi: "ilova hajmi juda tez ko'tarilib
+ketyapti, xuddi keraksiz fayllarni yuklab olayotgandek").
+
+Sabab yuklab olingan videolar emas, **fayl TANLASH** edi:
+`image_picker` galereyadan tanlangan faylni ilovaning
+vaqtinchalik papkasiga (`getTemporaryDirectory`, Android'da
+`cacheDir`) NUSXALAYDI. Admin panelidan 300 MB lik qism
+yuklansa, telefonda yana 300 MB paydo bo'lardi — va hech qachon
+o'chmasdi. Uch sifat bilan bitta qism ~1 GB joy egallardi.
+
+Yechim `lib/services/storage_janitor.dart` da, ikki qatlam:
+
+1. `dropPicked(path)` — yuklash tugashi bilan nusxa o'chiriladi.
+   Video uchun qanday tugashidan qat'i nazar (`finally`), rasm
+   uchun esa FAQAT muvaffaqiyatda — xato bo'lsa foydalanuvchi
+   qayta urinib ko'ra olsin.
+2. `sweep()` — ilova ochilganda 30 daqiqadan eski qoldiqlar
+   tozalanadi (tizim ilovani yuklash o'rtasida yopib qo'ygan
+   bo'lsa). `libCachedImageData` (posterlar keshi) tegilmaydi.
+
+Faqat ilovaning O'Z papkasidagi nusxa o'chiriladi —
+galereyadagi asl faylga hech qachon tegilmaydi.
+
+## HISOBDAN CHIQQANDA HAMMASI TOZALANADI
+
+TALAB (foydalanuvchi): "account o'chirilsa yoki chiqib ketilsa,
+oflayn rejim uchun yuklab olingan ma'lumotlar shu zahoti
+tozalansin; boshqa account bilan kirilganda kerak vaqtda kerakli
+ma'lumot qaytadan yuklansin".
+
+`AuthService._clear()` — chiqish ham, hisobni o'chirish ham shu
+yerga keladi — `OfflineData.wipe()` ni chaqiradi
+(`lib/services/offline_data.dart`):
+
+* `rust_video_cache_wipe()` — yuklab olingan BARCHA videolar,
+  yuklash navbati, isitish belgilari. Avval navbat bo'shatiladi
+  va `DL_EPOCH` oshiriladi, aks holda fon oqimi o'chirilgan
+  faylni qaytadan yozib qo'yardi;
+* `list_*.rustbin` va `thumb_*.rustbin` — ro'yxat keshlari
+  (animelar, bo'limlar, qismlar, sevimlilar, statistika, trafik
+  hisobi) va tarix kadrlari;
+* posterlar keshi — `imageCache` (xotira) + vaqtinchalik
+  papkadagi `libCachedImageData`;
+* xotiradagi xizmatlar: `WatchHistory`, `FavoritesService`,
+  `MyStatsService`, `TrafficService.reset()`.
+
+**Nega hammasi, tanlab emas:** kesh fayllarida "kimniki" degan
+belgi yo'q va kerak ham emas — ro'yxatlar bir necha kilobaytda
+qaytadan keladi. Tanlab tozalash murakkab va xatoga moyil
+bo'lardi, natijada boshqa odamning videosi telefonda qolib
+ketishi mumkin edi.
+
+## PLEYER OYNALARINI SURISH — SILLIQLIK
+
+Uchta oyna (`Ma'lumot | Qismlar | Bo'limlar`) `PageView` bilan
+qo'lda suriladi. Kuchsiz telefonda qotishning sabablari va
+yechimlari:
+
+* har bir oyna `_KeepAlivePage` ichida — bir marta qurilgach
+  tirik qoladi (`AutomaticKeepAliveClientMixin`);
+* oyna ichi `RepaintBoundary` da — surish paytida mazmun
+  qaytadan CHIZILMAYDI, tayyor qatlam ko'chiriladi;
+* pleyerning o'zi ham, uning ostidagi "hozir nima ko'rilyapti"
+  qatori ham alohida `RepaintBoundary` da — pleyerning o'z
+  yangilanishi pastdagi ro'yxatni sudrab ketmaydi;
+* barmoq ekranda turganda davriy ishlar to'xtaydi
+  (`_gestureBusy`): yuklab olish holati so'ralmaydi, oyna
+  tekshiruvi va sog'liq kuzatuvchisi o'tkazib yuboriladi.
+  Qulf 5 soniyadan keyin o'zi ochiladi — "surish tugadi" xabari
+  kelmay qolsa ham tizim to'xtab qolmaydi;
+* `allowImplicitScrolling: true` — qo'shni oyna oldindan
+  quriladi.
 
 ## TOMOSHA VAQTI
 
