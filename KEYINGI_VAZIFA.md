@@ -37,6 +37,24 @@ YO'Q — har bir jadval o'zining yakuniy ko'rinishida yaratiladi.
 Turso bitta, lekin deploy oralig'ida sxema ikki xil bo'lib
 qolmasligi uchun).
 
+### SXEMA O'ZINI O'ZI TO'G'RILAYDI
+
+**TOPILGAN XATO.** Baza tozalangandan keyin, YANGI worker deploy
+bo'lguncha oraliqda ESKI worker bitta so'rov oldi va o'zining
+`init_db` si bilan ESKI jadvallarni qaytadan yaratib qo'ydi.
+`CREATE TABLE IF NOT EXISTS` endi hech narsa qilmaydi — natijada
+`season_db` da yangi ustunlar bo'lmay qoldi va Ma'lumot oynasi
+500 xato berardi.
+
+Shu sabab `migrate_db` qo'shildi: yetishmayotgan ustunlar va
+eskirgan indekslar O'ZI to'g'rilanadi. Tekshiruv arzon (bitta
+`pragma_table_info` so'rovi) va izolyat umrida bir marta
+bajariladi.
+
+**QOIDA:** agar yana tozalash kerak bo'lsa — avval YANGI workerni
+deploy qiling, KEYIN tozalang. Aks holda eski worker eski sxemani
+qaytarib qo'yadi.
+
 ## VAQT MINTAQASI — UTC+5 (TOSHKENT)
 
 Hamma vaqt Unix millisekundda (UTC) saqlanadi. Statistika
