@@ -1,0 +1,155 @@
+# BIR MARTALIK TOZALASH — B2 va Turso.
+#
+# Foydalanuvchi talabi bilan qo'lda ishga tushiriladi va ishlatilgach
+# repodan O'CHIRILADI. Avtomatik ishga tushmaydi: faqat "Run workflow"
+# tugmasi va "TOZALA" deb yozilgan tasdiq bilan.
+#
+# TARTIB MUHIM: avval YANGI worker deploy bo'lishi kerak, keyin shu
+# tozalash. Aks holda eski worker bo'sh bazaga ESKI sxemani qaytarib
+# yozib qo'yadi.
+
+name: Wipe B2 + Turso (bir martalik)
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Tasdiq uchun TOZALA deb yozing'
+        required: true
+        default: ''
+
+jobs:
+  wipe:
+    runs-on: ubuntu-latest
+    environment: secret
+    steps:
+      - name: Tasdiqni tekshirish
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "TOZALA" ]; then
+            echo "❌ Tasdiq yo'q — hech narsa o'chirilmadi."
+            exit 1
+          fi
+
+      - name: Turso jadvallarini butunlay o'chirish
+        env:
+          TURSO_URL: ${{ secrets.TURSO_URL }}
+          TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request
+
+          url = os.environ["TURSO_URL"].rstrip("/") + "/v2/pipeline"
+          token = os.environ["TURSO_TOKEN"]
+
+          def pipeline(statements):
+              reqs = [{"type": "execute", "stmt": {"sql": s}} for s in statements]
+              reqs.append({"type": "close"})
+              body = json.dumps({"requests": reqs}).encode()
+              req = urllib.request.Request(
+                  url, data=body,
+                  headers={"Authorization": "Bearer " + token,
+                           "Content-Type": "application/json"})
+              with urllib.request.urlopen(req, timeout=120) as r:
+                  return json.load(r)
+
+          # 1) Qaysi jadvallar bor?
+          out = pipeline([
+              "SELECT name FROM sqlite_master "
+              "WHERE type='table' AND name NOT LIKE 'sqlite_%' "
+              "AND name NOT LIKE 'libsql_%'"
+          ])
+          rows = out["results"][0]["response"]["result"]["rows"]
+          names = [r[0]["value"] for r in rows]
+          print("Topilgan jadvallar:", names or "(yo'q)")
+
+          # 2) Hammasini tashlaymiz.
+          if names:
+              pipeline(['DROP TABLE IF EXISTS "%s"' % n for n in names])
+
+          # 3) Tekshirish.
+          out = pipeline([
+              "SELECT COUNT(*) FROM sqlite_master "
+              "WHERE type='table' AND name NOT LIKE 'sqlite_%' "
+              "AND name NOT LIKE 'libsql_%'"
+          ])
+          left = out["results"][0]["response"]["result"]["rows"][0][0]["value"]
+          print("Qolgan jadvallar:", left)
+          if int(left) != 0:
+              raise SystemExit("Turso to'liq tozalanmadi")
+          print("✅ Turso bo'sh")
+          PY
+
+      - name: B2 ombordagi barcha fayllarni o'chirish
+        env:
+          B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
+          B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, urllib.parse, urllib.request
+
+          key_id = os.environ["B2_KEY_ID"]
+          app_key = os.environ["B2_APPLICATION_KEY"]
+          BUCKET = "aniraxuz"
+
+          def post(u, token, payload):
+              req = urllib.request.Request(
+                  u, data=json.dumps(payload).encode(),
+                  headers={"Authorization": token,
+                           "Content-Type": "application/json"})
+              with urllib.request.urlopen(req, timeout=120) as r:
+                  return json.load(r)
+
+          def get(u, token):
+              req = urllib.request.Request(u, headers={"Authorization": token})
+              with urllib.request.urlopen(req, timeout=120) as r:
+                  return json.load(r)
+
+          basic = "Basic " + base64.b64encode(
+              (key_id + ":" + app_key).encode()).decode()
+          auth = get("https://api.backblazeb2.com/b2api/v3/b2_authorize_account",
+                     basic)
+          token = auth["authorizationToken"]
+          api = auth["apiInfo"]["storageApi"]["apiUrl"]
+          account_id = auth["accountId"]
+
+          buckets = get(
+              "%s/b2api/v3/b2_list_buckets?accountId=%s&bucketName=%s"
+              % (api, account_id, BUCKET), token)["buckets"]
+          if not buckets:
+              raise SystemExit("B2 ombor topilmadi: " + BUCKET)
+          bucket_id = buckets[0]["bucketId"]
+          print("Ombor:", BUCKET, bucket_id)
+
+          deleted = 0
+          start_name = None
+          start_id = None
+          while True:
+              q = "%s/b2api/v3/b2_list_file_versions?bucketId=%s&maxFileCount=1000" % (
+                  api, bucket_id)
+              if start_name:
+                  q += "&startFileName=" + urllib.parse.quote(start_name)
+              if start_id:
+                  q += "&startFileId=" + start_id
+              page = get(q, token)
+              files = page.get("files", [])
+              if not files:
+                  break
+              for f in files:
+                  post("%s/b2api/v3/b2_delete_file_version" % api, token,
+                       {"fileName": f["fileName"], "fileId": f["fileId"]})
+                  deleted += 1
+              start_name = page.get("nextFileName")
+              start_id = page.get("nextFileId")
+              if not start_name:
+                  break
+          print("O'chirilgan fayl versiyalari:", deleted)
+
+          left = get("%s/b2api/v3/b2_list_file_versions?bucketId=%s&maxFileCount=1"
+                     % (api, bucket_id), token).get("files", [])
+          if left:
+              raise SystemExit("B2 to'liq tozalanmadi")
+          print("✅ B2 bo'sh")
+          PY
+
+      - name: Tugadi
+        run: echo "✅ B2 va Turso butunlay tozalandi"

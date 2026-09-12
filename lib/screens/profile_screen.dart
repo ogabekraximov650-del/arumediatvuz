@@ -9,6 +9,7 @@ import '../services/auth_service.dart';
 import '../services/format.dart';
 import '../services/stats_service.dart';
 import '../services/storage_janitor.dart';
+import '../services/traffic_service.dart';
 import '../widgets/aru_logo.dart';
 import '../widgets/glass.dart';
 import '../widgets/telegram_logo.dart';
@@ -512,10 +513,31 @@ class _MyStatsGridState extends State<_MyStatsGrid> {
 
   @override
   Widget build(BuildContext context) {
+    // ── TRAFIK IKKI QISMDAN IBORAT ──────────────────────────
+    //
+    // TALAB (foydalanuvchi): "agar Turso bazaga 24 soat ichida
+    // trafik yuborilmagan bo'lsa va ilova bazadan shaxsiy trafikni
+    // ololmasa, hisoblanayotgan trafikni shaxsiy statistikada
+    // ko'rsatishi kerak".
+    //
+    // Shu sabab ekranda BAZADAGI raqam + ILOVADA hozircha
+    // yig'ilib turgan, hali yuborilmagan baytlar ko'rsatiladi.
+    // Natijada:
+    //
+    //   * raqam har doim TIRIK — video ko'rilgan sayin o'sadi,
+    //     sutkalik hisobotni kutib turmaydi;
+    //   * hisobot o'tgan zahoti yig'indi bazaga ko'chadi va
+    //     ko'rsatkich SAKRAMAYDI (bazadagisi o'sadi, mahalliysi
+    //     shuncha kamayadi);
+    //   * internet bo'lmasa ham (bazadan olib bo'lmaydi) diskdagi
+    //     oxirgi raqam + mahalliy yig'indi ko'rinadi.
     return AnimatedBuilder(
-      animation: MyStatsService.instance,
+      animation: Listenable.merge(
+        [MyStatsService.instance, TrafficService.instance],
+      ),
       builder: (context, _) {
         final s = MyStatsService.instance.stats;
+        final traffic = s.traffic + TrafficService.instance.pendingBytes;
         return Column(
           children: [
             Row(
@@ -552,7 +574,7 @@ class _MyStatsGridState extends State<_MyStatsGrid> {
                   child: _StatBox(
                     icon: Icons.cloud_download_rounded,
                     label: 'Trafik',
-                    value: formatBytes(s.traffic),
+                    value: formatBytes(traffic),
                   ),
                 ),
               ],

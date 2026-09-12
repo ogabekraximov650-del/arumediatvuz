@@ -129,6 +129,17 @@ class WatchProgress {
     flush();
   }
 
+  /// Hisob almashdi — ro'yxat YANGI papkadan qaytadan o'qiladi.
+  ///
+  /// Hech narsa o'chirilmaydi: eski hisobning fayli o'z papkasida
+  /// turaveradi va o'sha hisobga qaytilsa yana o'qiladi.
+  void reload() {
+    _positions.clear();
+    _dirty = false;
+    _loaded = false;
+    ensureLoaded();
+  }
+
   /// Video o'chirilganda uning nuqtasi ham kerak emas.
   void forget(String url) {
     ensureLoaded();

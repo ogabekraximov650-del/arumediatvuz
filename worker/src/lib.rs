@@ -84,6 +84,25 @@ fn resolve_list(origin: &str, list: Vec<Value>, keys: &[&str]) -> Vec<Value> {
     list.into_iter().map(|o| resolve_fields(origin, o, keys)).collect()
 }
 
+/// To'liq manzildan YALANG fayl nomini ajratadi (`resolve_url` ning
+/// teskarisi).
+///
+/// NEGA KERAK: bazada manzil emas, faqat fayl nomi saqlanadi.
+/// Ayniqsa `watch_history_db` uchun muhim — u eng tez o'sadigan
+/// jadval va har qatorda to'liq manzil ~90 belgi, yalang nom esa
+/// ~35 belgi joy egallaydi. Domen o'zgarsa ham eski yozuvlar
+/// ishlayveradi, chunki manzil har safar qaytadan yig'iladi.
+fn bare_name(value: &str) -> String {
+    let v = value.trim();
+    if v.is_empty() { return String::new(); }
+    // So'rov qismi (`?...`) va yo'lning oxirgi bo'lagi.
+    let no_query = v.split('?').next().unwrap_or(v);
+    match no_query.rsplit('/').next() {
+        Some(name) if !name.is_empty() => name.to_string(),
+        _ => no_query.to_string(),
+    }
+}
+
 const ANIME_URL_KEYS: &[&str] = &["photo_url"];
 const SEASON_URL_KEYS: &[&str] = &["photo_url"];
 const EPIZOD_URL_KEYS: &[&str] = &["url_360p", "url_480p", "url_720p", "url_1080p"];
@@ -268,109 +287,7 @@ async fn ensure_db(env: &Env) {
         return;
     }
     init_db(env).await;
-    migrate_db(env).await;
-    reset_stats_once(env).await;
     DB_READY.store(true, Ordering::Relaxed);
-}
-
-/// Eski sxema qolib ketgan bo'lsa — jimgina to'g'rilaydi.
-///
-/// ═══════════════════════════════════════════════════════════════
-///  NEGA KERAK (TOPILGAN XATO)
-/// ═══════════════════════════════════════════════════════════════
-///
-/// Baza tozalangandan keyin, YANGI worker deploy bo'lguncha
-/// oraliqda ESKI worker bitta so'rov oldi va o'zining `init_db` si
-/// bilan ESKI jadvallarni qaytadan yaratib qo'ydi. Yangi
-/// `CREATE TABLE IF NOT EXISTS` esa endi hech narsa qilmaydi —
-/// natijada `season_db` da `views_total` kabi ustunlar bo'lmay
-/// qoldi va Ma'lumot oynasi 500 xato berardi.
-///
-/// Shu sabab endi ilova QO'LDA tozalashga TAYANMAYDI: yetishmayotgan
-/// ustunlar o'zi qo'shiladi. Tekshiruv arzon — bitta so'rov, va u
-/// izolyat umri davomida BIR MARTA bajariladi.
-///
-/// `ALTER TABLE ... ADD COLUMN` ustun mavjud bo'lganda xato beradi
-/// va Turso to'plamdagi birinchi xatodan keyin qolganini
-/// BAJARMAYDI — shu sabab har biri ALOHIDA yuboriladi va xatosi
-/// e'tiborsiz qoldiriladi.
-async fn migrate_db(env: &Env) {
-    // Yangi ustunlardan bittasi bormi? Bo'lsa — hammasi joyida.
-    let probe = turso_exec(env,
-        "SELECT COUNT(*) FROM pragma_table_info('season_db') WHERE name='views_total'",
-        vec![]).await;
-    if let Ok(res) = &probe {
-        if scalar(res) > 0 {
-            return;
-        }
-    }
-
-    for sql in [
-        "ALTER TABLE season_db ADD COLUMN epizod_count INTEGER DEFAULT 0",
-        "ALTER TABLE season_db ADD COLUMN views_total INTEGER DEFAULT 0",
-        "ALTER TABLE season_db ADD COLUMN watch_ms_total INTEGER DEFAULT 0",
-        "ALTER TABLE season_db ADD COLUMN fav_count INTEGER DEFAULT 0",
-        "ALTER TABLE season_db ADD COLUMN rating_sum INTEGER DEFAULT 0",
-        "ALTER TABLE season_db ADD COLUMN rating_count INTEGER DEFAULT 0",
-        "ALTER TABLE epizod_db ADD COLUMN views_total INTEGER DEFAULT 0",
-        "ALTER TABLE epizod_db ADD COLUMN watch_ms_total INTEGER DEFAULT 0",
-        "ALTER TABLE watch_history_db ADD COLUMN watched_ms INTEGER DEFAULT 0",
-        "ALTER TABLE watch_history_db ADD COLUMN view_count INTEGER DEFAULT 0",
-        "ALTER TABLE watch_history_db ADD COLUMN deleted_at INTEGER DEFAULT 0",
-        "ALTER TABLE watch_history_db ADD COLUMN created_at INTEGER",
-        // Foydalanuvchi sarflagan trafik (profil sahifasidagi
-        // shaxsiy statistika uchun).
-        "ALTER TABLE users_db ADD COLUMN traffic_bytes INTEGER DEFAULT 0",
-        // Eski, endi keraksiz indekslar (birlamchi kalit o'zi
-        // qoplaydigan yoki umuman ishlatilmaydigan).
-        "DROP INDEX IF EXISTS idx_name",
-        "DROP INDEX IF EXISTS idx_janri",
-        "DROP INDEX IF EXISTS idx_season_anime",
-        "DROP INDEX IF EXISTS idx_season_janri",
-        "DROP INDEX IF EXISTS idx_epizod_season",
-        "DROP INDEX IF EXISTS idx_users_tg",
-        "DROP INDEX IF EXISTS idx_sessions_token",
-        // Tarix indeksi endi `deleted_at` ni ham o'z ichiga oladi.
-        "DROP INDEX IF EXISTS idx_history_user",
-        "CREATE INDEX IF NOT EXISTS idx_history_user
-           ON watch_history_db(user_id, deleted_at, updated_at DESC)",
-        "CREATE INDEX IF NOT EXISTS idx_sessions_seen
-           ON sessions_db(last_seen_at)",
-        "CREATE INDEX IF NOT EXISTS idx_users_created
-           ON users_db(created_at)",
-    ] {
-        let _ = turso_exec(env, sql, vec![]).await;
-    }
-}
-
-/// Statistikani BIR MARTA nolga tushiradi.
-///
-/// Belgisi `app_config` da turadi, ya'ni ish FAQAT BIR MARTA
-/// bajariladi va keyingi deploylarda takrorlanmaydi. Yana tozalash
-/// kerak bo'lsa — belgining RAQAMINI oshirish yetarli
-/// (`stats_reset_v3` -> `stats_reset_v4`).
-///
-/// `v3` (foydalanuvchi talabi): trafik hisobi worker'dan ilovaga
-/// o'tkazildi, shu sabab eski (noto'g'ri sanalgan) raqamlar
-/// butunlay tozalanadi.
-///
-/// Tomosha tarixining o'zi (qaysi qismni qayerda to'xtatgan),
-/// baholar va sevimlilar SAQLANIB QOLADI — faqat hisoblagichlar
-/// nolga tushadi.
-async fn reset_stats_once(env: &Env) {
-    const MARK: &str = "stats_reset_v3";
-    if config_get(env, MARK).await.is_some() {
-        return;
-    }
-    let _ = turso_batch(env, &[
-        ("DELETE FROM stats_hourly", vec![]),
-        ("DELETE FROM stats_daily", vec![]),
-        ("UPDATE season_db SET views_total=0, watch_ms_total=0", vec![]),
-        ("UPDATE epizod_db SET views_total=0, watch_ms_total=0", vec![]),
-        ("UPDATE watch_history_db SET view_count=0, watched_ms=0", vec![]),
-        ("UPDATE users_db SET traffic_bytes=0", vec![]),
-    ]).await;
-    config_put(env, MARK, "done").await;
 }
 
 async fn init_db(env: &Env) {
@@ -403,11 +320,12 @@ async fn init_db(env: &Env) {
 
     // ── 1. KONTENT ─────────────────────────────────────────────
     let _ = turso_batch(env, &[
+        // `created_at` YO'Q: anime qachon qo'shilgani hech qayerda
+        // ko'rsatilmaydi (pleyerdagi "qo'shilgan sana" BO'LIMniki).
         ("CREATE TABLE IF NOT EXISTS anime_db (
             id INTEGER PRIMARY KEY,
             photo_url TEXT, name TEXT, davlat TEXT, studiya TEXT,
-            janri TEXT, tavsif TEXT,
-            created_at INTEGER
+            janri TEXT, tavsif TEXT
         )", vec![]),
         // Indeks yo'q: ro'yxat `ORDER BY id DESC LIMIT 100` (PK),
         // qidiruv esa ILOVANING O'ZIDA (Rust yadrosi) bajariladi.
@@ -458,8 +376,6 @@ async fn init_db(env: &Env) {
             id INTEGER PRIMARY KEY,
             telegram_id INTEGER UNIQUE,
             username TEXT, first_name TEXT, last_name TEXT,
-            language_code TEXT,
-            is_premium INTEGER DEFAULT 0,
             is_banned INTEGER DEFAULT 0,
             balance INTEGER DEFAULT 0,
             avatar_file TEXT,
@@ -480,20 +396,21 @@ async fn init_db(env: &Env) {
             status TEXT,
             user_id INTEGER,
             session_token TEXT,
-            device TEXT, platform TEXT, app_version TEXT, api_base TEXT,
+            device TEXT, platform TEXT, app_version TEXT,
             created_at INTEGER,
             expires_at INTEGER
         )", vec![]),
         ("CREATE INDEX IF NOT EXISTS idx_login_exp ON login_tokens(expires_at)", vec![]),
 
+        // Qurilmalar ro'yxati. Foydalanuvchining ismi/username'i
+        // BU YERDA SAQLANMAYDI — u `users_db` da turadi va kerak
+        // bo'lsa `user_id` bo'yicha olinadi. Nusxa saqlash qatorni
+        // bekorga kattalashtirardi va nom o'zgarganda eskirib
+        // qolardi.
         ("CREATE TABLE IF NOT EXISTS sessions_db (
             id INTEGER PRIMARY KEY,
             user_id INTEGER,
-            telegram_id INTEGER,
-            username TEXT,
-            first_name TEXT,
             session_token TEXT UNIQUE,
-            api_base TEXT,
             device TEXT,
             platform TEXT,
             app_version TEXT,
@@ -520,6 +437,18 @@ async fn init_db(env: &Env) {
         //   deleted_at — 0 bo'lmasa, tarixda KO'RINMAYDI. Yozuv
         //                o'chirilmaydi: qism qayta ko'rilsa yana
         //                paydo bo'ladi va statistika buzilmaydi.
+        // ── BU JADVAL ENG TEZ O'SADI ──────────────────────────
+        //
+        // Qatorlar soni = foydalanuvchilar x ko'rilgan qismlar.
+        // Shu sabab bu yerda BITTA HAM ortiqcha ustun yo'q:
+        //
+        //   * `video_url` — B2'dagi YALANG FAYL NOMI (to'liq
+        //     manzil EMAS). To'liq manzil har qatorda ~90 belgi
+        //     bo'lardi, yalang nom esa ~35. Ilovaga berishdan
+        //     oldin manzil `resolve_list` bilan to'ldiriladi —
+        //     `epizod_db.url_*` bilan bir xil qoida.
+        //   * `created_at` OLIB TASHLANDI — u yozilar, lekin
+        //     hech qayerda o'qilmasdi.
         ("CREATE TABLE IF NOT EXISTS watch_history_db (
             user_id INTEGER,
             anime_id INTEGER,
@@ -531,7 +460,6 @@ async fn init_db(env: &Env) {
             watched_ms INTEGER DEFAULT 0,
             view_count INTEGER DEFAULT 0,
             deleted_at INTEGER DEFAULT 0,
-            created_at INTEGER,
             updated_at INTEGER,
             PRIMARY KEY (user_id, anime_id, season_id, epizod_number)
         )", vec![]),
@@ -2623,13 +2551,15 @@ async fn upsert_user(env: &Env, from: &Value) -> Result<Value> {
 
     // ── ISM VA USERNAME TELEGRAMDAN OLINMAYDI ─────────────────
     //
-    // Foydalanuvchi talabi. Telegramdan faqat `telegram_id` (hisobni
-    // tanish uchun), til va premium belgisi olinadi. Ism va username
-    // esa ILOVANING O'ZIDA hosil qilinadi va keyingi kirishlarda
-    // USTIGA YOZILMAYDI — aks holda foydalanuvchi tanlagan nom har
-    // safar Telegramdagisiga qaytib qolardi.
-    let lang = from["language_code"].as_str().unwrap_or("").to_string();
-    let is_premium = if from["is_premium"] == json!(true) { 1 } else { 0 };
+    // Foydalanuvchi talabi. Telegramdan FAQAT `telegram_id` olinadi
+    // (hisobni tanish uchun). Ism va username ILOVANING O'ZIDA hosil
+    // qilinadi va keyingi kirishlarda USTIGA YOZILMAYDI — aks holda
+    // foydalanuvchi tanlagan nom har safar Telegramdagisiga qaytib
+    // qolardi.
+    //
+    // Til va "premium" belgisi ilgari saqlanardi, lekin hech qayerda
+    // ishlatilmasdi — baza bekorga shishmasligi uchun ustunlar olib
+    // tashlandi.
     let now = now_ms();
 
     // ── MAVJUD HISOB: BITTA SO'ROV ────────────────────────────
@@ -2641,12 +2571,8 @@ async fn upsert_user(env: &Env, from: &Value) -> Result<Value> {
     // ko'rinardi. `RETURNING *` ikkovini bitta so'rovga jamlaydi:
     // qator o'zgargan bo'lsa o'zi qaytadi, bo'lmasa bo'sh keladi.
     let res = turso_exec(env,
-        "UPDATE users_db SET language_code=?,is_premium=?,last_login_at=?
-         WHERE telegram_id=? RETURNING *",
-        vec![
-            TursoArg::text(&lang), TursoArg::int(is_premium),
-            TursoArg::int(now), TursoArg::int(tg_id),
-        ]).await?;
+        "UPDATE users_db SET last_login_at=? WHERE telegram_id=? RETURNING *",
+        vec![TursoArg::int(now), TursoArg::int(tg_id)]).await?;
     if let Some(u) = first_row(&res) { return Ok(u); }
 
     // ── YANGI HISOB: ISM VA USERNAME AVTOMATIK ────────────────
@@ -2670,13 +2596,12 @@ async fn upsert_user(env: &Env, from: &Value) -> Result<Value> {
         let first_name = format!("User {n}");
         let res = turso_exec(env,
             "INSERT INTO users_db (id,telegram_id,username,first_name,last_name,
-             language_code,is_premium,is_banned,created_at,last_login_at,profile_done)
-             VALUES (?,?,?,?,'',?,?,0,?,?,1) RETURNING *",
+             is_banned,created_at,last_login_at,profile_done)
+             VALUES (?,?,?,?,'',0,?,?,1) RETURNING *",
             vec![
                 TursoArg::int(new_id), TursoArg::int(tg_id),
                 TursoArg::text(&username), TursoArg::text(&first_name),
-                TursoArg::text(&lang),
-                TursoArg::int(is_premium), TursoArg::int(now), TursoArg::int(now),
+                TursoArg::int(now), TursoArg::int(now),
             ]).await;
 
         match res {
@@ -2782,10 +2707,10 @@ fn valid_avatar_file(file: &str, user_id: i64) -> bool {
 /// Yangi sessiya ochadi, 4 ta qurilma chegarasini qo'llaydi VA
 /// kirish tokenini "tasdiqlangan" holatiga o'tkazadi.
 ///
-/// Jurnalda saqlanadigan ma'lumot (talab bo'yicha):
-///   • hisob ma'lumoti — user_id, telegram_id, username, first_name
-///   • qaysi API orqali kirgan — api_base
-///   • qaysi qurilma bilan kirgan — device, platform, app_version
+/// Jurnalda saqlanadigan ma'lumot:
+///   • kim kirgan — `user_id` (ism va username `users_db` da);
+///   • qaysi qurilma bilan — device, platform, app_version;
+///   • qachon — created_at, last_seen_at.
 ///
 /// ═══════════════════════════════════════════════════════════════
 ///  NEGA HAMMASI BITTA SO'ROVDA
@@ -2818,7 +2743,6 @@ async fn create_session(
     let device = login["device"].as_str().unwrap_or("").to_string();
     let platform = login["platform"].as_str().unwrap_or("").to_string();
     let app_version = login["app_version"].as_str().unwrap_or("").to_string();
-    let api_base = login["api_base"].as_str().unwrap_or("").to_string();
 
     // Qayta urinish: sessiya ID'si yoki tokeni ayni damda boshqa
     // kirish tomonidan band qilingan bo'lishi mumkin. Har urinishda
@@ -2856,16 +2780,13 @@ async fn create_session(
         }
 
         stmts.push((
-            "INSERT INTO sessions_db (id,user_id,telegram_id,username,first_name,
-             session_token,api_base,device,platform,app_version,created_at,last_seen_at)
+            "INSERT INTO sessions_db (id,user_id,session_token,
+             device,platform,app_version,created_at,last_seen_at)
              VALUES ((SELECT COALESCE(MAX(id),0)+1 FROM sessions_db),
-                     ?,?,?,?,?,?,?,?,?,?,?)",
+                     ?,?,?,?,?,?,?)",
             vec![
                 TursoArg::int(user_id),
-                TursoArg::int(user["telegram_id"].as_i64().unwrap_or(0)),
-                TursoArg::text(user["username"].as_str().unwrap_or("")),
-                TursoArg::text(user["first_name"].as_str().unwrap_or("")),
-                TursoArg::text(&token), TursoArg::text(&api_base), TursoArg::text(&device),
+                TursoArg::text(&token), TursoArg::text(&device),
                 TursoArg::text(&platform), TursoArg::text(&app_version),
                 TursoArg::int(now), TursoArg::int(now),
             ],
@@ -3189,7 +3110,11 @@ async fn history_route(
                 .map(|r| row_to_obj(&cols, r.as_array().unwrap_or(&vec![])))
                 .collect();
             // Rasm manzillari ilovaga to'liq ko'rinishda beriladi.
-            let items = resolve_list(&origin_of(&req), items, &["anime_photo", "season_photo"]);
+            let items = resolve_list(
+                &origin_of(&req),
+                items,
+                &["anime_photo", "season_photo", "video_url"],
+            );
             ok_nostore(json!({"items": items}))
         }
 
@@ -3213,7 +3138,8 @@ async fn history_route(
             let anime_id = b["anime_id"].as_i64().unwrap_or(0);
             let season_id = b["season_id"].as_i64().unwrap_or(0);
             let epizod = b["epizod_number"].as_i64().unwrap_or(0);
-            let video_url = b["video_url"].as_str().unwrap_or("").trim().to_string();
+            // Bazaga YALANG fayl nomi yoziladi (`bare_name` izohi).
+            let video_url = bare_name(b["video_url"].as_str().unwrap_or(""));
             let position = b["position_ms"].as_i64().unwrap_or(0).max(0);
             let duration = b["duration_ms"].as_i64().unwrap_or(0).max(0);
             // Ilova yuborgan JAMI tomosha vaqti (shu odam, shu qism).
@@ -3233,7 +3159,7 @@ async fn history_route(
 
             // 1) Eski holat — bitta qator (birlamchi kalit bo'yicha).
             let old = turso_exec(env,
-                "SELECT watched_ms, view_count, updated_at, created_at
+                "SELECT watched_ms, view_count, updated_at
                    FROM watch_history_db
                   WHERE user_id=? AND anime_id=? AND season_id=? AND epizod_number=?",
                 key.clone()).await?;
@@ -3243,8 +3169,6 @@ async fn history_route(
             let old_views = old_row.as_ref()
                 .and_then(|r| r["view_count"].as_i64()).unwrap_or(0).max(0);
 
-            let created_at = old_row.as_ref()
-                .and_then(|r| r["created_at"].as_i64()).filter(|v| *v > 0).unwrap_or(now);
 
             // ── TOMOSHA VAQTI QOIDASI ────────────────────────
             //
@@ -3276,8 +3200,8 @@ async fn history_route(
                 "INSERT INTO watch_history_db
                     (user_id,anime_id,season_id,epizod_number,video_url,
                      position_ms,duration_ms,watched_ms,view_count,deleted_at,
-                     created_at,updated_at)
-                 VALUES (?,?,?,?,?,?,?,?,?,0,?,?)
+                     updated_at)
+                 VALUES (?,?,?,?,?,?,?,?,?,0,?)
                  ON CONFLICT(user_id,anime_id,season_id,epizod_number) DO UPDATE SET
                     video_url=excluded.video_url,
                     position_ms=excluded.position_ms,
@@ -3291,7 +3215,7 @@ async fn history_route(
                     TursoArg::int(epizod), TursoArg::text(&video_url),
                     TursoArg::int(position), TursoArg::int(duration),
                     TursoArg::int(capped), TursoArg::int(old_views + view_inc),
-                    TursoArg::int(created_at), TursoArg::int(now),
+                    TursoArg::int(now),
                 ],
             ));
 
@@ -3763,14 +3687,13 @@ async fn auth_route(req: Request, env: &Env, origin: &str, path: &str, method: M
             let token = random_hex(16);
             turso_exec(env,
                 "INSERT INTO login_tokens (token,status,user_id,session_token,
-                 device,platform,app_version,api_base,created_at,expires_at)
-                 VALUES (?,'pending',0,'',?,?,?,?,?,?)",
+                 device,platform,app_version,created_at,expires_at)
+                 VALUES (?,'pending',0,'',?,?,?,?,?)",
                 vec![
                     TursoArg::text(&token),
                     TursoArg::text(b["device"].as_str().unwrap_or("")),
                     TursoArg::text(b["platform"].as_str().unwrap_or("")),
                     TursoArg::text(b["app_version"].as_str().unwrap_or("")),
-                    TursoArg::text(origin),
                     TursoArg::int(now),
                     TursoArg::int(now + LOGIN_TOKEN_TTL_MS),
                 ]).await?;
@@ -4311,8 +4234,8 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
             let b: Value = req.json().await?;
             let new_id = next_anime_id(&env).await?;
             let res = turso_exec(&env,
-                "INSERT INTO anime_db (id,photo_url,name,davlat,studiya,janri,tavsif,created_at)
-                 VALUES (?,?,?,?,?,?,?,?) RETURNING *",
+                "INSERT INTO anime_db (id,photo_url,name,davlat,studiya,janri,tavsif)
+                 VALUES (?,?,?,?,?,?,?) RETURNING *",
                 vec![
                     TursoArg::int(new_id),
                     TursoArg::text(b["photo_url"].as_str().unwrap_or("")),
@@ -4321,7 +4244,6 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
                     TursoArg::text(b["studiya"].as_str().unwrap_or("")),
                     TursoArg::text(b["janri"].as_str().unwrap_or("")),
                     TursoArg::text(b["tavsif"].as_str().unwrap_or("")),
-                    TursoArg::int(now_ms()),
                 ],
             ).await?;
             let cols = res["cols"].as_array().cloned().unwrap_or_default();

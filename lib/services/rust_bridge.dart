@@ -8,6 +8,7 @@ import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
 import 'package:ffi/ffi.dart';
+import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
 // ── FFI signature'lari ──────────────────────────────────────────
@@ -151,6 +152,11 @@ class RustCore {
 
   bool _loaded = false;
   String? _cacheFilePath;
+
+  /// Joriy hisobning papkasi — `<hujjatlar>/accountid_<id>`.
+  /// Kirilmagan bo'lsa `accountid_0` (mehmon).
+  String? _accountDirPath;
+  int _accountId = -1;
   String? _cacheDirPath;
   int? _videoCachePort;
 
@@ -238,7 +244,10 @@ class RustCore {
 
     final dir = await getApplicationDocumentsDirectory();
     _cacheDirPath = dir.path;
+    // Anime ro'yxati — UMUMIY kontent, hisobga bog'liq emas.
     _cacheFilePath = '${dir.path}/anime_cache.rustbin';
+    // Hisob ma'lum bo'lguncha mehmon papkasi ishlatiladi.
+    setAccount(0);
 
     _loaded = true;
   }
@@ -313,7 +322,7 @@ class RustCore {
   // turadi — allaqachon keshlangan videolarni oflayn ko'rish mumkin.
 
   String? _pathForKey(String key) {
-    final dir = _cacheDirPath;
+    final dir = _accountDirPath ?? _cacheDirPath;
     if (dir == null) return null;
     // Kalitni fayl nomi uchun xavfsiz holatga keltiramiz.
     final safe = key.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_');
@@ -552,13 +561,88 @@ class RustCore {
     }
   }
 
-  /// Ilova ma'lumotlari saqlanadigan papka (Rust kesh fayli shu
-  /// yerda). `init()` chaqirilmagan bo'lsa `null`.
-  String? get dataDirPath => _cacheDirPath;
+  /// JORIY HISOBNING papkasi (`accountid_<id>`). Tarix kadrlari va
+  /// ro'yxat keshlari shu yerda. `init()` chaqirilmagan bo'lsa
+  /// `null`.
+  String? get dataDirPath => _accountDirPath ?? _cacheDirPath;
+
+  // ═══════════════════════════════════════════════════════════
+  //  HAR BIR HISOBGA — O'Z PAPKASI
+  // ═══════════════════════════════════════════════════════════
+  //
+  // TALAB (foydalanuvchi): "boshqa accountga o'tganda ilova ichida
+  // accountid_1 deb oxiriga user id qo'yib papka ochilgan bo'lishi
+  // kerak... yani account ma'lumotlari chalkashib ketmasligi uchun".
+  //
+  // Shu sabab hisobga TEGISHLI hamma narsa (tomosha tarixi, qayerda
+  // to'xtagani, sevimlilar, shaxsiy statistika, trafik hisobi,
+  // tarix kadrlari) `<hujjatlar>/accountid_<id>` ichida yotadi.
+  // Hisob almashsa — papka almashadi, ya'ni hech narsa o'chirilmaydi
+  // va eski hisobga qaytilganda hammasi joyida turadi.
+  //
+  // ── RASM VA VIDEO IKKALA HISOBDA HAM BITTA JOYDAN ─────────
+  //
+  // Bu papkaga video ham, poster ham TUSHMAYDI:
+  //
+  //   * videolar — `<qo'llab-quvvatlash>/video_byte_cache` (Rust
+  //     yadrosi, hisobdan qat'i nazar bitta);
+  //   * posterlar — vaqtinchalik papkadagi `libCachedImageData`;
+  //   * anime ro'yxati — `anime_cache.rustbin` (umumiy kontent).
+  //
+  // Ya'ni bitta telefonda ikki hisob bir xil faylni ikki marta
+  // yuklab olmaydi.
+  void setAccount(int userId) {
+    final root = _cacheDirPath;
+    if (root == null) return;
+    final id = userId > 0 ? userId : 0;
+    if (_accountId == id && _accountDirPath != null) return;
+    final path = '$root/accountid_$id';
+    try {
+      final dir = Directory(path);
+      final existed = dir.existsSync();
+      if (!existed) dir.createSync(recursive: true);
+      _accountDirPath = path;
+      _accountId = id;
+      if (!existed && id > 0) _adoptLegacyFiles(root, path);
+    } catch (e) {
+      // Papka ochilmadi — eski joyda (ildizda) ishlayveramiz.
+      debugPrint('Hisob papkasi ochilmadi: $e');
+      _accountDirPath = root;
+      _accountId = id;
+    }
+  }
+
+  /// Joriy hisob raqami (mehmon bo'lsa 0).
+  int get accountId => _accountId < 0 ? 0 : _accountId;
+
+  /// ── ESKI VERSIYADAN KO'CHIRISH ────────────────────────────
+  ///
+  /// Yangilanishdan oldin fayllar to'g'ridan-to'g'ri hujjatlar
+  /// papkasida yotardi. Ular O'SHA PAYTDA kirgan hisobniki, shu
+  /// sabab hisob birinchi marta o'z papkasini olganda ular
+  /// ko'chiriladi — tomosha tarixi va "qayerda to'xtagani"
+  /// yo'qolmasin.
+  void _adoptLegacyFiles(String root, String target) {
+    try {
+      for (final e in Directory(root).listSync()) {
+        if (e is! File) continue;
+        final name = e.uri.pathSegments.last;
+        if (!name.startsWith('list_') && !name.startsWith('thumb_')) continue;
+        try {
+          e.renameSync('$target/$name');
+        } catch (_) {}
+      }
+    } catch (e) {
+      debugPrint('Eski fayllar ko\'chirilmadi: $e');
+    }
+  }
 
   /// Yuklab olingan BARCHA videolarni va yuklash navbatini
-  /// o'chiradi. Hisobdan chiqilganda chaqiriladi
-  /// (`OfflineData.wipe`).
+  /// o'chiradi.
+  ///
+  /// HOZIRCHA HECH QAYERDAN CHAQIRILMAYDI: hisobdan chiqilganda
+  /// endi hech narsa tozalanmaydi (foydalanuvchi talabi). Yadroda
+  /// qoldirildi — kelajakda "keshni tozalash" tugmasi uchun.
   int videoCacheWipe() {
     if (!_loaded) return 0;
     try {

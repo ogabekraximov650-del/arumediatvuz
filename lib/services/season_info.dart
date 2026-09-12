@@ -216,8 +216,9 @@ class FavoritesService extends ChangeNotifier {
     _loadedAt = null;
   }
 
-  /// Hisobdan chiqilganda — ro'yxat ham, disk nusxasi ham
-  /// (`OfflineData.wipe`) tozalanadi.
+  /// Hisob almashganda xotiradagi ro'yxat bo'shatiladi. Diskdagi
+  /// nusxa O'CHIRILMAYDI — u hisobning o'z papkasida qoladi
+  /// (`AccountData` izohiga qarang).
   void clear() {
     _items = [];
     _loadedAt = null;

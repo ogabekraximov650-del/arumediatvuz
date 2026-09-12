@@ -8,7 +8,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 
-import 'offline_data.dart';
+import 'account_data.dart';
 import 'rust_bridge.dart';
 import 'traffic_service.dart';
 
@@ -164,8 +164,12 @@ class AuthService extends ChangeNotifier {
       final cached = await _storage.read(key: _userKey);
       if (cached != null && cached.isNotEmpty) {
         _user = AppUser.fromJson(jsonDecode(cached) as Map<String, dynamic>);
-        RustCore.instance.setUserId(_user?.id ?? 0);
       }
+      // Hisob papkasi (`accountid_<id>`) BOSHQA HAMMA NARSADAN
+      // OLDIN tanlanadi — tomosha tarixi va qolgan keshlar aynan
+      // shu papkadan o'qilishi kerak.
+      RustCore.instance.setAccount(_user?.id ?? 0);
+      RustCore.instance.setUserId(_user?.id ?? 0);
     } catch (_) {
       // Xavfsiz ombor ishlamadi — mehmon sifatida davom etamiz.
       _session = null;
@@ -622,9 +626,16 @@ class AuthService extends ChangeNotifier {
   // ── Ichki ────────────────────────────────────────────────────
 
   Future<void> _save(String session, AppUser u) async {
+    final switched = _user?.id != u.id;
     _session = session;
     _user = u;
-    RustCore.instance.setUserId(u.id);
+    // Boshqa hisobga o'tilgan bo'lsa — papka ham almashadi
+    // (`AccountData` izohiga qarang). Hech narsa o'chirilmaydi.
+    if (switched) {
+      await AccountData.switchTo(u.id);
+    } else {
+      RustCore.instance.setUserId(u.id);
+    }
     try {
       await _storage.write(key: _sessionKey, value: session);
       await _storage.write(key: _userKey, value: jsonEncode(u.toJson()));
@@ -636,28 +647,25 @@ class AuthService extends ChangeNotifier {
 
   /// Qurilmadan hisobni olib tashlaydi.
   ///
-  /// Chiqish ham, hisobni o'chirish ham SHU YERGA keladi — ya'ni
-  /// tozalash qoidasi bitta joyda turadi.
+  /// Chiqish ham, hisobni o'chirish ham SHU YERGA keladi.
   ///
-  /// TALAB (foydalanuvchi): chiqilgan zahoti oflayn rejim uchun
-  /// yuklab olingan ma'lumotlar ham o'chirilsin. Buni
-  /// `OfflineData.wipe` bajaradi: yuklab olingan videolar,
-  /// ro'yxat keshlari, tarix kadrlari va posterlar keshi.
-  /// Boshqa hisob bilan kirilganda hammasi qaytadan, KERAK
-  /// BO'LGANDA yuklab olinadi.
+  /// TALAB (foydalanuvchi): "chiqish yoki hisobni o'chirishda endi
+  /// HECH NARSA TOZALANMASIN". Shu sabab bu yerda faqat SESSIYA
+  /// olib tashlanadi va ilova mehmon papkasiga (`accountid_0`)
+  /// o'tadi. Hisobning o'z papkasi (tomosha tarixi, qayerda
+  /// to'xtagani, sevimlilar, trafik hisobi) joyida qoladi va
+  /// o'sha hisobga qaytilsa hammasi o'z holicha ochiladi.
+  /// Yuklab olingan videolar va posterlar esa umuman
+  /// hisobga bog'liq emas — ular bitta joyda turadi.
   Future<void> _clear() async {
     _session = null;
     _user = null;
-    RustCore.instance.setUserId(0);
     try {
       await _storage.delete(key: _sessionKey);
       await _storage.delete(key: _userKey);
     } catch (_) {}
-    // Ekran darhol bo'shashi uchun avval xabar beramiz, tozalash
-    // esa shundan keyin (u bir necha yuz millisekund olishi
-    // mumkin — disk operatsiyasi).
     notifyListeners();
-    await OfflineData.wipe();
+    await AccountData.switchTo(0);
     notifyListeners();
   }
 

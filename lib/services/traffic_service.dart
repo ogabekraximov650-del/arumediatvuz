@@ -53,7 +53,7 @@ import 'auth_service.dart';
 import 'rust_bridge.dart';
 import 'stats_service.dart';
 
-class TrafficService with WidgetsBindingObserver {
+class TrafficService extends ChangeNotifier with WidgetsBindingObserver {
   TrafficService._();
   static final TrafficService instance = TrafficService._();
 
@@ -68,11 +68,15 @@ class TrafficService with WidgetsBindingObserver {
   /// Yadro hisoblagichini shuncha vaqtda bir marta o'qiymiz.
   /// Arzon chaqiruv (bitta tizim fayli), lekin tez-tez qilishning
   /// ma'nosi yo'q.
-  static const Duration _sampleEvery = Duration(seconds: 60);
+  static const Duration _sampleEvery = Duration(seconds: 30);
 
   /// Diskka shuncha vaqtda bir martadan ko'p yozilmaydi (ilova
   /// fon'ga o'tganda va yopilishidan oldin baribir yoziladi).
   static const Duration _saveEvery = Duration(minutes: 5);
+
+  /// Yig'indi shuncha o'sgan bo'lsa — vaqtini kutmasdan yoziladi.
+  /// Yozuv juda kichik (bir necha o'nlab bayt), shu sabab arzon.
+  static const int _saveAfterBytes = 8 * 1024 * 1024;
 
   Timer? _timer;
   bool _started = false;
@@ -92,6 +96,9 @@ class TrafficService with WidgetsBindingObserver {
   int _uid = 0;
 
   DateTime _savedAt = DateTime.fromMillisecondsSinceEpoch(0);
+
+  /// Oxirgi saqlashdagi yig'indi (qancha o'sganini bilish uchun).
+  int _savedPending = 0;
   bool _reporting = false;
 
   /// Hozircha yuborilmagan bayt (diagnostika/ekran uchun).
@@ -135,6 +142,9 @@ class TrafficService with WidgetsBindingObserver {
   Future<void> sampleNow() => _sample(save: true);
 
   Future<void> _sample({bool save = false}) async {
+    // Hali ishga tushmagan bo'lsa o'lchov nuqtasi yo'q — bir
+    // o'lchovlik farq butun hisoblagichga teng bo'lib ketardi.
+    if (!_started) return;
     final now = await _readCounter();
     if (now < 0) return; // qurilma qo'llab-quvvatlamaydi
     // Telefon o'chib yonganda hisoblagich nolga tushadi — o'shanda
@@ -142,14 +152,63 @@ class TrafficService with WidgetsBindingObserver {
     final delta = now >= _lastSample ? now - _lastSample : now;
     _lastSample = now;
     if (delta > 0) _pending += delta;
+    // Diskka: vaqti kelganda YOKI yig'indi sezilarli o'sganda.
+    // Ilova to'satdan yopilsa ham ko'pi bilan shuncha bayt
+    // hisobdan chiqib ketadi.
+    final grew = _pending - _savedPending >= _saveAfterBytes;
     final due = DateTime.now().difference(_savedAt) >= _saveEvery;
-    if (save || due) _save();
+    if (save || due || grew) _save();
+    if (delta > 0) notifyListeners();
   }
 
+  /// Qurilma hisoblagichi qo'llab-quvvatlanmaydi (bir marta
+  /// aniqlanadi va o'zgarmaydi).
+  bool _kernelCounterMissing = false;
+
+  /// ── QABUL QILINGAN BARCHA BAYTLAR ──────────────────────────
+  ///
+  /// TALAB (foydalanuvchi): "ilova qabul qilgan HAR QANDAY baytni
+  /// hisoblashi kerak — video, rasm, database ma'lumotlari va
+  /// hokazo".
+  ///
+  /// Aynan shuning uchun raqam ilovaning O'Z hisoblagichlaridan
+  /// emas, TIZIM YADROSIDAN olinadi:
+  /// `TrafficStats.getUidRxBytes(Process.myUid())` — shu ilovaning
+  /// UID'i ostida ochilgan HAMMA soket bo'yicha qabul qilingan
+  /// bayt. Ya'ni:
+  ///
+  ///   * pleyer oqimi (ExoPlayer),
+  ///   * yuklab olish (Rust yadrosi),
+  ///   * posterlar va avatarlar (`/api/image/...`),
+  ///   * har qanday API so'rovi (tarix, statistika, kirish),
+  ///   * hatto Telegram havolasi tekshiruvi
+  ///
+  /// — hammasi bir joyda, TCP va UDP bilan birga. Sarlavhalar va
+  /// qayta yuborilgan paketlar ham kiradi, ya'ni raqam operator
+  /// hisoblaydigan trafikka eng yaqin.
+  ///
+  /// Mahalliy `127.0.0.1` uzatmasi bunga KIRMAYDI — diskdan o'qib
+  /// pleyerga berilgan video trafik sifatida sanalmaydi.
+  ///
+  /// ── ZAXIRA YO'L ────────────────────────────────────────────
+  ///
+  /// Juda eski yoki g'alati qurilmada yadro hisoblagichi `-1`
+  /// qaytarishi mumkin. Bunday holda hech bo'lmaganda video
+  /// trafigi sanaladi (Rust yadrosining o'z hisobi). U ilova
+  /// ishga tushganda noldan boshlanadi — quyidagi farq qoidasi
+  /// buni o'zi hal qiladi.
   Future<int> _readCounter() async {
+    if (!_kernelCounterMissing) {
+      try {
+        final v = await _channel.invokeMethod<int>('rx');
+        if (v != null && v >= 0) return v;
+      } catch (_) {
+        // Kanal yo'q (masalan Android bo'lmagan tizim).
+      }
+      _kernelCounterMissing = true;
+    }
     try {
-      final v = await _channel.invokeMethod<int>('rx');
-      return v ?? -1;
+      return RustCore.instance.videoCacheNetBytes;
     } catch (_) {
       return -1;
     }
@@ -216,6 +275,7 @@ class TrafficService with WidgetsBindingObserver {
         _reportedAt = DateTime.now().millisecondsSinceEpoch;
         _save();
         // Profil sahifasidagi "Trafik" darhol yangilansin.
+        notifyListeners();
         unawaited(MyStatsService.instance.load(force: true));
       }
     } catch (_) {
@@ -241,6 +301,7 @@ class TrafficService with WidgetsBindingObserver {
 
   void _save() {
     _savedAt = DateTime.now();
+    _savedPending = _pending;
     try {
       RustCore.instance.saveListCache(_key, [
         {
@@ -253,20 +314,39 @@ class TrafficService with WidgetsBindingObserver {
     } catch (_) {}
   }
 
-  /// Hisobdan chiqilganda: yig'indi nolga tushadi va sanoq SHU
-  /// PAYTDAN boshlanadi — keyingi hisobga begona trafik
-  /// yozilmasin.
-  ///
-  /// MUHIM: o'lchov nuqtasi (`_lastSample`) nolga TUSHIRILMAYDI,
-  /// aks holda keyingi o'lchovda qurilma yoqilganidan beri
-  /// to'plangan butun son "farq" bo'lib qo'shilib ketardi. Uning
-  /// o'rniga hisoblagichning HOZIRGI qiymati olinadi.
-  Future<void> reset() async {
-    final now = await _readCounter();
+  // ── HISOB ALMASHGANDA ────────────────────────────────────────
+  //
+  // Trafik hisobi ham hisobga TEGISHLI ma'lumot, ya'ni u ham
+  // `accountid_<id>` papkasida yotadi. Almashish ikki bosqichda
+  // bo'ladi:
+  //
+  //   1. `detach()` — oxirgi baytlar sanaladi va ESKI papkaga
+  //      yoziladi (papka hali almashmagan);
+  //   2. `attach()` — YANGI papkadagi yozuv o'qiladi va o'lchov
+  //      nuqtasi hozirgi qiymatga tenglanadi, ya'ni oldingi
+  //      hisobning trafigi yangisiga qo'shilib ketmaydi.
+  //
+  // Hech narsa O'CHIRILMAYDI: eski hisobga qaytilsa, uning
+  // yig'indisi o'z papkasida turgan bo'ladi.
+
+  /// Eski hisobning hisobini yakunlab, diskka yozadi.
+  Future<void> detach() async {
+    await _sample(save: true);
+  }
+
+  /// Yangi hisobning yozuvini o'qiydi va sanoqni shu paytdan
+  /// boshlaydi.
+  Future<void> attach() async {
     _pending = 0;
     _uid = 0;
+    _reportedAt = 0;
+    _lastSample = 0;
+    _load();
+    final now = await _readCounter();
+    // O'lchov nuqtasi HOZIRGI qiymat: almashish paytidagi baytlar
+    // allaqachon eski hisobga yozilgan.
     _lastSample = now < 0 ? 0 : now;
-    _reportedAt = DateTime.now().millisecondsSinceEpoch;
     _save();
+    notifyListeners();
   }
 }

@@ -25,55 +25,39 @@
 - Commit qilishdan oldin: `rm -rf rust/target rust/Cargo.lock
   worker/target worker/Cargo.lock`.
 
-## BAZA BIR MARTA TOZALANDI (2026-09)
+## BAZA TOZALANDI VA SXEMA IXCHAMLASHTIRILDI (2026-09)
 
-B2 ombori va Turso bazasi **butunlay bo'shatildi** (bir martalik
-GitHub Action bilan; fayl ishlatilgach repodan o'chirildi). Shu
-sabab `init_db` da endi `ALTER TABLE ... ADD COLUMN` yamoqlari
-YO'Q — har bir jadval o'zining yakuniy ko'rinishida yaratiladi.
+B2 ombori va Turso bazasi **ikkinchi marta butunlay bo'shatildi**
+(bir martalik GitHub Action bilan; fayl ishlatilgach repodan
+o'chirildi). Shu sabab `init_db` jadvallarni yakuniy ko'rinishida
+yaratadi va `ALTER TABLE` yamoqlari YO'Q.
 
-**Yangi ustun kerak bo'lsa:** jadval ta'rifiga qo'shing VA alohida
-`ALTER TABLE` yozing (telefondagi eski bazalar uchun emas —
-Turso bitta, lekin deploy oralig'ida sxema ikki xil bo'lib
-qolmasligi uchun).
+**`migrate_db` va `reset_stats_once` OLIB TASHLANDI.** Ular eski
+sxemani yamoqlash uchun edi; baza toza bo'lgach ikkalasi ham
+faqat ortiqcha kod va har yangi izolyatda ortiqcha so'rov edi.
 
-### SXEMA O'ZINI O'ZI TO'G'RILAYDI
+**QOIDA (o'zgarmadi):** yana tozalash kerak bo'lsa — avval YANGI
+workerni deploy qiling, KEYIN tozalang. Aks holda tozalash
+paytida kelgan bitta so'rov eski sxemani qaytarib yozib qo'yadi.
 
-**TOPILGAN XATO.** Baza tozalangandan keyin, YANGI worker deploy
-bo'lguncha oraliqda ESKI worker bitta so'rov oldi va o'zining
-`init_db` si bilan ESKI jadvallarni qaytadan yaratib qo'ydi.
-`CREATE TABLE IF NOT EXISTS` endi hech narsa qilmaydi — natijada
-`season_db` da yangi ustunlar bo'lmay qoldi va Ma'lumot oynasi
-500 xato berardi.
+### ORTIQCHA USTUNLAR OLIB TASHLANDI
 
-Shu sabab `migrate_db` qo'shildi: yetishmayotgan ustunlar va
-eskirgan indekslar O'ZI to'g'rilanadi. Tekshiruv arzon (bitta
-`pragma_table_info` so'rovi) va izolyat umrida bir marta
-bajariladi.
+Sabab: baza bekorga shishmasin. Qaysi ustun nega ketdi:
 
-**QOIDA:** agar yana tozalash kerak bo'lsa — avval YANGI workerni
-deploy qiling, KEYIN tozalang. Aks holda eski worker eski sxemani
-qaytarib qo'yadi.
+| Jadval | Olib tashlandi | Nega |
+|---|---|---|
+| `users_db` | `language_code`, `is_premium` | yozilardi, hech qayerda o'qilmasdi |
+| `sessions_db` | `telegram_id`, `username`, `first_name`, `api_base` | `users_db` dagining nusxasi; ism o'zgarsa eskirib qolardi |
+| `login_tokens` | `api_base` | ishlatilmasdi |
+| `anime_db` | `created_at` | anime qachon qo'shilgani hech qayerda ko'rsatilmaydi |
+| `watch_history_db` | `created_at` | yozilardi, o'qilmasdi |
 
-### STATISTIKANI QAYTA TOZALASH
-
-`reset_stats_once` — `app_config` dagi belgi bo'yicha bir marta
-ishlaydigan tozalash. **Yana tozalash kerak bo'lsa belgining
-RAQAMINI oshiring** (`stats_reset_v3` -> `stats_reset_v4`) va
-deploy qiling — boshqa hech narsa qilish shart emas, GitHub
-Action ham kerak emas.
-
-Tozalanadi: `stats_hourly`, `stats_daily`, `season_db` va
-`epizod_db` dagi `views_total`/`watch_ms_total`,
-`watch_history_db` dagi `view_count`/`watched_ms`,
-`users_db.traffic_bytes`.
-
-Tegilmaydi: tomosha tarixining O'ZI (qaysi qismni qayerda
-to'xtatgan), baholar (`ratings_db`) va sevimlilar
-(`favorites_db`).
-
-`v3` — trafik hisobi worker'dan ilovaga o'tkazilgani uchun
-(eski raqamlar noto'g'ri sanalgan edi).
+**`watch_history_db.video_url` endi YALANG FAYL NOMI.** Bu jadval
+eng tez o'sadi (qatorlar = foydalanuvchilar × ko'rilgan qismlar),
+shu sabab har qatorda to'liq manzil (~90 belgi) o'rniga faqat
+fayl nomi (~35 belgi) saqlanadi. Manzil ilovaga berishdan oldin
+`resolve_list` bilan yig'iladi — `epizod_db.url_*` bilan bir xil
+qoida. Yon foyda: domen o'zgarsa eski yozuvlar ishlayveradi.
 
 ## VAQT MINTAQASI — UTC+5 (TOSHKENT)
 
@@ -166,9 +150,22 @@ Sanoq ilovada:
   bu aniqlanadi (yangi qiymat eskisidan kichik) va o'sha
   qiymatning o'zi farq sifatida olinadi.
 
-Profil sahifasidagi "Trafik" avvalgidek Turso'dan keladi
-(`GET /api/me/stats` -> `users_db.traffic_bytes`) va hisobot
-muvaffaqiyatli o'tgan zahoti majburan yangilanadi.
+**Har qanday bayt sanaladi.** `getUidRxBytes` — ilovaning UID'i
+ostidagi HAMMA soket: video oqimi, yuklab olish, posterlar,
+avatarlar, baza/API so'rovlari, TCP va UDP, sarlavhalari bilan.
+Yadro hisoblagichi bo'lmagan qurilmada zaxira yo'l ishlaydi
+(Rust yadrosining video hisobi).
+
+**Profil sahifasidagi "Trafik" = Turso'dagi raqam + ilovada
+hozircha yuborilmagan yig'indi.** Talab: hisobot sutkada bir
+marta ketadi, lekin ko'rsatkich kutib turmasligi kerak. Shu
+sabab ekranda ikkovining yig'indisi ko'rinadi:
+
+* raqam TIRIK — video ko'rilgan sayin o'sadi;
+* hisobot o'tgan zahoti yig'indi bazaga ko'chadi va son
+  SAKRAMAYDI (bazadagisi o'sadi, mahalliysi shuncha kamayadi);
+* internet bo'lmasa ham diskdagi oxirgi raqam + mahalliy
+  yig'indi ko'rinadi.
 
 **Ko'rish — ODAM BOSHIGA BITTA.** Foydalanuvchi talabi: "bitta
 odam bitta videoni 50 marta ko'rsa ham ko'rishlar soni 1 tadan
@@ -201,34 +198,39 @@ Yechim `lib/services/storage_janitor.dart` da, ikki qatlam:
 Faqat ilovaning O'Z papkasidagi nusxa o'chiriladi —
 galereyadagi asl faylga hech qachon tegilmaydi.
 
-## HISOBDAN CHIQQANDA HAMMASI TOZALANADI
+## HAR BIR HISOBGA — O'Z PAPKASI
 
-TALAB (foydalanuvchi): "account o'chirilsa yoki chiqib ketilsa,
-oflayn rejim uchun yuklab olingan ma'lumotlar shu zahoti
-tozalansin; boshqa account bilan kirilganda kerak vaqtda kerakli
-ma'lumot qaytadan yuklansin".
+TALAB (foydalanuvchi): "chiqish yoki hisobni o'chirishda endi hech
+narsa tozalanmasin; boshqa accountga o'tganda ilova ichida
+`accountid_1` deb oxiriga user id qo'yib papka ochilsin, yangi
+accountga o'tsa `accountid_5` — ya'ni account ma'lumotlari
+chalkashib ketmasligi uchun. Lekin rasm va video fayllar bitta
+joydan olinishi kerak ikkala accountda ham."
 
-`AuthService._clear()` — chiqish ham, hisobni o'chirish ham shu
-yerga keladi — `OfflineData.wipe()` ni chaqiradi
-(`lib/services/offline_data.dart`):
+Hisobga TEGISHLI hamma narsa `<hujjatlar>/accountid_<id>` ichida:
 
-* `rust_video_cache_wipe()` — yuklab olingan BARCHA videolar,
-  yuklash navbati, isitish belgilari. Avval navbat bo'shatiladi
-  va `DL_EPOCH` oshiriladi, aks holda fon oqimi o'chirilgan
-  faylni qaytadan yozib qo'yardi;
-* `list_*.rustbin` va `thumb_*.rustbin` — ro'yxat keshlari
-  (animelar, bo'limlar, qismlar, sevimlilar, statistika, trafik
-  hisobi) va tarix kadrlari;
-* posterlar keshi — `imageCache` (xotira) + vaqtinchalik
-  papkadagi `libCachedImageData`;
-* xotiradagi xizmatlar: `WatchHistory`, `FavoritesService`,
-  `MyStatsService`, `TrafficService.reset()`.
+* tomosha tarixi va tarix kadrlari (`list_*`, `thumb_*`);
+* qayerda to'xtagani (`WatchProgress`);
+* sevimlilar, shaxsiy statistika, trafik hisobi.
 
-**Nega hammasi, tanlab emas:** kesh fayllarida "kimniki" degan
-belgi yo'q va kerak ham emas — ro'yxatlar bir necha kilobaytda
-qaytadan keladi. Tanlab tozalash murakkab va xatoga moyil
-bo'lardi, natijada boshqa odamning videosi telefonda qolib
-ketishi mumkin edi.
+Kirilmagan bo'lsa — `accountid_0` (mehmon).
+
+**UMUMIY bo'lib qoladigan narsalar** (ikkala hisob ham bitta
+joydan oladi, bir xil fayl ikki marta yuklab olinmaydi):
+
+* yuklab olingan videolar — `video_byte_cache` (Rust yadrosi);
+* posterlar — vaqtinchalik papkadagi `libCachedImageData`;
+* anime ro'yxati — `anime_cache.rustbin`.
+
+**HECH NARSA O'CHIRILMAYDI.** `AccountData.switchTo(id)` faqat
+uch ish qiladi: eski papkaga yozilmagan narsalarni yozadi,
+papkani almashtiradi, xotiradagi ro'yxatlarni yangi papkadan
+qaytadan o'qiydi. Eski hisobga qaytilsa hammasi o'z holicha
+ochiladi.
+
+**ESKI VERSIYADAN KO'CHISH:** ilgari fayllar hujjatlar papkasining
+o'zida yotardi. Hisob birinchi marta o'z papkasini olganda ular
+avtomatik ko'chiriladi (`_adoptLegacyFiles`) — tarix yo'qolmaydi.
 
 ## PLEYER OYNALARINI SURISH — SILLIQLIK
 

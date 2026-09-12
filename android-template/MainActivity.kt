@@ -70,19 +70,22 @@ class MainActivity : FlutterActivity() {
         // worker noto'g'ri sanardi va ijroni buzardi.
         //
         // Android'ning o'zida shu uchun tayyor hisoblagich bor:
-        // `TrafficStats.getUidRxBytes(uid)` — shu ilova QABUL
-        // QILGAN umumiy bayt. U tizim darajasida, yadro
-        // hisoblagichidan olinadi, ya'ni:
+        // `TrafficStats.getUidRxBytes(uid)` — shu ilovaning UID'i
+        // ostida ochilgan HAMMA soket bo'yicha QABUL QILINGAN
+        // umumiy bayt. U tizim yadrosidan olinadi, ya'ni ilova
+        // qabul qilgan HAR QANDAY bayt kiradi:
         //
-        //   * pleyer (ExoPlayer) oqimi ham,
-        //   * yuklab olish ham,
-        //   * rasm va API so'rovlari ham
+        //   * pleyer (ExoPlayer) video oqimi,
+        //   * yuklab olish (Rust yadrosi),
+        //   * posterlar va avatar rasmlari,
+        //   * baza/API so'rovlari (tarix, statistika, kirish),
+        //   * TCP va UDP, sarlavhalar bilan birga.
         //
-        // hammasi kiradi va HAQIQATAN qabul qilingan bayt sanaladi
-        // (e'lon qilingan uzunlik emas — eski xatoning sababi shu
-        // edi). Mahalliy 127.0.0.1 uzatmasi bunga KIRMAYDI, ya'ni
-        // diskdan o'qib pleyerga berilgan video trafik sifatida
-        // hisoblanmaydi.
+        // Hisob HAQIQATAN qabul qilingan baytdan olinadi (javobda
+        // e'lon qilingan uzunlikdan emas — eski xatoning sababi
+        // aynan shu edi). Mahalliy 127.0.0.1 uzatmasi KIRMAYDI,
+        // ya'ni diskdan o'qib pleyerga berilgan video trafik
+        // sifatida hisoblanmaydi.
         //
         // Son qurilma yoqilganidan beri o'sib boradi va telefon
         // o'chirilganda nolga tushadi — Dart tomoni buni farqlar
