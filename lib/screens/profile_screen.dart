@@ -723,6 +723,7 @@ const List<Color> _kStorageColors = [
   Color(0xFF4DD0E1), // Tomosha tarixi
   Color(0xFFFF8A65), // Sevimlilar
   Color(0xFF9FA8DA), // Statistika
+  Color(0xFFCE93D8), // Sozlamalar
   Color(0xFF8D9498), // Vaqtinchalik fayllar
   Color(0xFF5C6368), // Boshqa
 ];

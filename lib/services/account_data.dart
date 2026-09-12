@@ -34,6 +34,7 @@
 // Ya'ni bitta telefondagi ikki hisob bir xil faylni ikki marta
 // yuklab olmaydi.
 
+import 'app_settings.dart';
 import 'rust_bridge.dart';
 import 'season_info.dart';
 import 'stats_service.dart';
@@ -75,6 +76,10 @@ class AccountData {
     } catch (_) {}
     try {
       WatchProgress.instance.reload();
+    } catch (_) {}
+    // Sozlamalar ham hisobga tegishli (`list_settings.rustbin`).
+    try {
+      AppSettings.instance.reload();
     } catch (_) {}
 
     // ── 3. YANGI PAPKADAGI NUSXALAR DARHOL KO'RINSIN ──────────

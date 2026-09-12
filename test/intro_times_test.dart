@@ -59,6 +59,34 @@ void main() {
     });
   });
 
+  group('normalizeIntroInput', () {
+    test('ikki nuqta bilan yozilgan matn tegilmaydi', () {
+      expect(normalizeIntroInput('5:14'), '5:14');
+      expect(normalizeIntroInput(' 6:44 '), '6:44');
+    });
+
+    test('ikki nuqtasiz yozilgan raqam to\'g\'rilanadi', () {
+      // Oxirgi ikki raqam — soniya.
+      expect(normalizeIntroInput('514'), '5:14');
+      expect(normalizeIntroInput('644'), '6:44');
+      expect(normalizeIntroInput('12345'), '123:45');
+      expect(normalizeIntroInput('44'), '0:44');
+      expect(normalizeIntroInput('7'), '0:07');
+    });
+
+    test('bo\'sh va ma\'nosiz yozuv — bo\'sh satr', () {
+      expect(normalizeIntroInput(''), '');
+      expect(normalizeIntroInput('   '), '');
+      expect(normalizeIntroInput('0'), '');
+      expect(normalizeIntroInput('abc'), '');
+    });
+
+    test('to\'g\'rilangan matn keyin o\'qib bo\'ladi', () {
+      // Yozish -> saqlash -> pleyer o'qishi: zanjir buzilmasin.
+      expect(introMs(normalizeIntroInput('514')), 314000);
+    });
+  });
+
   group('introRangesOf', () {
     test('faqat TO\'G\'RI juftliklar olinadi', () {
       final ranges = introRangesOf({

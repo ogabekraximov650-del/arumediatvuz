@@ -115,6 +115,7 @@ import 'package:http/http.dart' as http;
 // videoni oflayn ko'rsatadi), ijro oqimiga aralashmaydi.
 import 'package:video_player/video_player.dart';
 
+import '../services/app_settings.dart';
 import '../services/download_manager.dart';
 import '../services/rust_bridge.dart';
 import '../services/video_cache_server.dart';
@@ -342,6 +343,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   @override
   void initState() {
     super.initState();
+    // Pleyer sozlamalari (intro avtomatik o'tkazilsinmi) —
+    // diskdan, tarmoqsiz.
+    AppSettings.instance.load();
     WidgetsBinding.instance.addObserver(this);
     // Tartib (foydalanuvchi talabi): Ma'lumot | Qismlar | Bo'limlar,
     // va ochilganda MA'LUMOT oynasi turadi.
@@ -2373,7 +2377,32 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       if (_introVisible && mounted) setState(() => _introVisible = false);
       return;
     }
+    // ── AVTOMATIK O'TKAZISH ─────────────────────────────────
+    //
+    // TALAB (foydalanuvchi): uch nuqta ostidagi tugma yoqilgan
+    // bo'lsa intro O'ZI o'tkazib yuboriladi, o'chiq bo'lsa
+    // foydalanuvchi qo'lda bosadi.
+    if (AppSettings.instance.autoSkipIntro) {
+      _skipIntro();
+      return;
+    }
     _showIntroButton();
+  }
+
+  /// Uch nuqta ostidagi tugma bosildi.
+  void _toggleAutoSkipIntro() {
+    final on = !AppSettings.instance.autoSkipIntro;
+    AppSettings.instance.setAutoSkipIntro(on);
+    if (!mounted) return;
+    setState(() {});
+    // Hozir intro oralig'ida turgan bo'lsa — darhol o'tkaziladi,
+    // ya'ni tugma bosilishi bilan natija ko'rinadi.
+    if (on && _introIndex >= 0) {
+      _skipIntro();
+    }
+    _showNotice(on
+        ? 'Intro endi avtomatik o\'tkaziladi'
+        : 'Introni qo\'lda o\'tkazasiz');
   }
 
   /// Tugmani ko'rsatadi va 5 soniyalik taymerni qayta qo'yadi.
@@ -3152,21 +3181,54 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
           // turishi SHART: aks holda tugmaga bosilgan tap sek
           // qatlamiga tushib, video o'tkazish o'rniga oldinga
           // sakrab ketardi.
+          // ── INTRO TUGMASI: CHAP YUQORIDA ──────────────────────
+          //
+          // TALAB (foydalanuvchi): "intro tugmasini pleyer
+          // ekranining chap yuqori qismiga, ya'ni videoning chap
+          // yuqori qismiga qo'y".
+          //
+          // Fullscreen'da kontrollar ochiq bo'lsa yuqori qatorda
+          // "orqaga" tugmasi turadi — shu sabab intro tugmasi
+          // o'sha qatorning TAGIGA tushadi, aks holda ular
+          // ustma-ust kelardi.
           if (_currentEp != null && _playerError == null && _introVisible)
-            // ── JOYI: CHAP CHET BILAN TUGMA ORASIDA ─────────────
-            //
-            // TALAB (foydalanuvchi): "intro vaqti kelganda chap
-            // tarafdan video cheti va play/pause ning TENG
-            // O'RTASIDAN chiqsin".
-            //
-            // `Alignment(-0.5, 0)` aynan shu nuqta: -1 — videoning
-            // chap cheti, 0 — markaz (play/pause), ya'ni -0.5
-            // ikkovining o'rtasi. Chekka bo'shliq (`Padding`)
-            // ishlatilmaydi — u tugmani markazdan siljitib
-            // yuborardi.
             Align(
-              alignment: const Alignment(-0.5, 0),
-              child: _SkipIntroButton(onTap: _skipIntro),
+              alignment: Alignment.topLeft,
+              child: Padding(
+                padding: EdgeInsets.only(
+                  left: isFullscreen ? 16 : 10,
+                  top: isFullscreen && _showControls ? 54 : 10,
+                ),
+                child: _SkipIntroButton(onTap: _skipIntro),
+              ),
+            ),
+
+          // ── UCH NUQTA: O'NG YUQORIDA ──────────────────────────
+          //
+          // TALAB (foydalanuvchi): "o'ng yuqori qismiga 3ta nuqta
+          // qo'y, ustiga bossa introni avtomatik o'tkazish degan
+          // yoqib-o'chiradigan tugma bo'lsin".
+          //
+          // Faqat kontrollar ochiq bo'lganda ko'rinadi — video
+          // ko'rilayotganda ekran toza qolishi kerak.
+          if (_currentEp != null && _playerError == null && _showControls)
+            Align(
+              alignment: Alignment.topRight,
+              child: Padding(
+                padding: EdgeInsets.only(
+                  right: isFullscreen ? 8 : 4,
+                  top: isFullscreen ? 6 : 2,
+                ),
+                child: _PlayerMenuButton(
+                  autoSkipIntro: AppSettings.instance.autoSkipIntro,
+                  onToggleAutoSkip: _toggleAutoSkipIntro,
+                  // Menyu ochiq turganda kontrollar yashirinmasin:
+                  // aks holda tugma daraxtdan olib tashlanib,
+                  // ochiq menyu "muallaq" qolardi.
+                  onOpened: () => _hideTimer?.cancel(),
+                  onClosed: _scheduleHide,
+                ),
+              ),
             ),
         ],
       ),
@@ -3220,6 +3282,10 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                             fontSize: 14),
                       ),
                     ),
+                    // O'ng yuqorida uch nuqta turadi (Stack'dagi
+                    // alohida qatlamda) — sarlavha uning tagiga
+                    // kirib ketmasligi uchun joy qoldiriladi.
+                    const SizedBox(width: 44),
                   ],
                 ),
               ),
@@ -5395,6 +5461,9 @@ class _RatingSheetState extends State<_RatingSheet> {
 // Shu sabab ko'rinishi pastki paneldagi `HQ` tugmasidan AYNAN
 // ko'chirilgan: fon oq 15%, chekkasi `white30`, burchagi 7.
 // Ikkovini birga o'zgartiring — aks holda ular ajralib qoladi.
+//
+// Nomi — "Introni o'tkazish" (foydalanuvchi aniq shunday
+// so'ragan), joyi — videoning CHAP YUQORI burchagi.
 class _SkipIntroButton extends StatelessWidget {
   final VoidCallback onTap;
 
@@ -5421,7 +5490,7 @@ class _SkipIntroButton extends StatelessWidget {
             Icon(Icons.fast_forward_rounded, size: 15, color: Colors.white),
             SizedBox(width: 5),
             Text(
-              'O\'tkazib yuborish',
+              'Introni o\'tkazish',
               style: TextStyle(
                 color: Colors.white,
                 fontSize: 12,
@@ -5431,6 +5500,79 @@ class _SkipIntroButton extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+//  UCH NUQTA — PLEYER SOZLAMALARI
+// ══════════════════════════════════════════════════════════════
+//
+// TALAB (foydalanuvchi): "o'ng yuqori qismiga 3ta nuqta qo'y,
+// ustiga bossa `introni avtomatik o'tkazish` degan yoqib
+// o'chiradigan tugma bo'lsin: yoqib qo'ysa intro avtomatik
+// o'tkazib yuboriladi, agar o'chiq bo'lsa qo'lda o'tkazishi
+// kerak".
+//
+// Holat `AppSettings` da saqlanadi (diskda, shifrlangan, hisob
+// papkasida) — ilova yopilib ochilganda ham o'sha holatda qoladi.
+class _PlayerMenuButton extends StatelessWidget {
+  final bool autoSkipIntro;
+  final VoidCallback onToggleAutoSkip;
+  final VoidCallback onOpened;
+  final VoidCallback onClosed;
+
+  const _PlayerMenuButton({
+    required this.autoSkipIntro,
+    required this.onToggleAutoSkip,
+    required this.onOpened,
+    required this.onClosed,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return PopupMenuButton<int>(
+      // Menyu ilova rangida — tizimning oq oynasi video ustida
+      // ko'zni qamashtirardi.
+      color: AppColors.card,
+      surfaceTintColor: Colors.transparent,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(14),
+        side: BorderSide(color: Colors.white.withValues(alpha: 0.12)),
+      ),
+      position: PopupMenuPosition.under,
+      tooltip: 'Sozlamalar',
+      icon: const Icon(Icons.more_vert_rounded,
+          color: Colors.white, size: 22),
+      onOpened: onOpened,
+      onCanceled: onClosed,
+      onSelected: (_) {
+        onToggleAutoSkip();
+        onClosed();
+      },
+      itemBuilder: (context) => [
+        PopupMenuItem<int>(
+          value: 0,
+          child: Row(
+            children: [
+              Icon(
+                autoSkipIntro
+                    ? Icons.check_box_rounded
+                    : Icons.check_box_outline_blank_rounded,
+                size: 20,
+                color: autoSkipIntro ? AppColors.accent : Colors.white54,
+              ),
+              const SizedBox(width: 10),
+              const Expanded(
+                child: Text(
+                  'Introni avtomatik o\'tkazish',
+                  style: TextStyle(color: Colors.white, fontSize: 13.5),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }

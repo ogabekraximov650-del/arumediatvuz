@@ -158,6 +158,7 @@ const String _kEpisodes = 'Qismlar ro\'yxati';
 const String _kHistory = 'Tomosha tarixi';
 const String _kFavorites = 'Sevimlilar';
 const String _kStats = 'Statistika';
+const String _kSettings = 'Sozlamalar';
 const String _kTemp = 'Vaqtinchalik fayllar';
 const String _kOther = 'Boshqa';
 
@@ -172,6 +173,7 @@ const List<String> kStorageLabels = [
   _kHistory,
   _kFavorites,
   _kStats,
+  _kSettings,
   _kTemp,
   _kOther,
 ];
@@ -236,6 +238,7 @@ String _labelOfDocFile(String name) {
     if (key.startsWith('seasons_') || key.startsWith('season_')) {
       return _kAnime;
     }
+    if (key.startsWith('settings')) return _kSettings;
     if (key.startsWith('app_stats') ||
         key.startsWith('my_stats') ||
         key.startsWith('traffic')) {

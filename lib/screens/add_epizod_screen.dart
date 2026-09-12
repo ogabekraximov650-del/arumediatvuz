@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'dart:io';
 import 'dart:convert';
@@ -365,10 +366,11 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
         'url_1080p': _qualities[3].url ?? '',
         'size_1080p': _qualities[3].size ?? '',
         // Intro oraliqlari — YOZILGAN KO'RINISHIDA (`"5:14"`),
-        // juftlik bo'lib.
+        // juftlik bo'lib. Ikki nuqtasiz yozilgan bo'lsa
+        // (`514`) to'g'rilanadi.
         for (var i = 0; i < kIntroRows; i++) ...{
-          'intro_${i * 2 + 1}': _introFrom[i].text.trim(),
-          'intro_${i * 2 + 2}': _introTo[i].text.trim(),
+          'intro_${i * 2 + 1}': normalizeIntroInput(_introFrom[i].text),
+          'intro_${i * 2 + 2}': normalizeIntroInput(_introTo[i].text),
         },
       });
 
@@ -574,7 +576,7 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
           const SizedBox(height: 4),
           Text(
             'Chapga boshlanish, o\'ngga tugash vaqti: 5:14 va 6:44.\n'
-            'Video 5:14 ga kelganda pleyerda "O\'tkazib yuborish" '
+            'Video 5:14 ga kelganda pleyerda "Introni o\'tkazish" '
             'tugmasi chiqadi. Bo\'sh qatorlar e\'tiborga olinmaydi.',
             style: TextStyle(
               color: Colors.white.withValues(alpha: 0.45),
@@ -618,8 +620,24 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
       padding: const EdgeInsets.symmetric(horizontal: 12),
       child: TextField(
         controller: ctrl,
-        // Raqam va ikki nuqta — telefon klaviaturasida ikkovi ham bor.
-        keyboardType: TextInputType.phone,
+        // ── KLAVIATURADA IKKI NUQTA BO'LISHI SHART ───────────
+        //
+        // TOPILGAN XATO (foydalanuvchi: "intro vaqtini yozib
+        // bo'lmayapti, boshqacha keyboard chiqishi kerak edi").
+        //
+        // Bu yerda `TextInputType.phone` turardi — telefon
+        // klaviaturasida `-`, `+`, `*#` bor, LEKIN `:` YO'Q.
+        // Ya'ni `5:14` deb yozishning iloji yo'q edi.
+        //
+        // `datetime` — aynan vaqt uchun: raqamlar bilan birga
+        // `:` chiqadi. Ustiga pastdagi filtr faqat raqam va ikki
+        // nuqtani o'tkazadi, saqlashda esa `514` ham `5:14` ga
+        // to'g'rilanadi (`normalizeIntroInput`).
+        keyboardType: TextInputType.datetime,
+        inputFormatters: [
+          FilteringTextInputFormatter.allow(RegExp(r'[0-9:]')),
+          LengthLimitingTextInputFormatter(8),
+        ],
         style: const TextStyle(color: Colors.white, fontSize: 14),
         decoration: InputDecoration(
           isDense: true,

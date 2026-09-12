@@ -54,6 +54,36 @@ int introMs(Object? raw) {
   return total > 0 ? total * 1000 : 0;
 }
 
+/// Foydalanuvchi yozganini SAQLASHDAN OLDIN to'g'rilaydi.
+///
+/// TOPILGAN XATO (foydalanuvchi: "intro vaqtini yozib bo'lmayapti,
+/// boshqacha keyboard chiqishi kerak edi"): telefon klaviaturasida
+/// ikki nuqta YO'Q edi.
+///
+/// Klaviatura almashtirildi (`TextInputType.datetime` — raqamlar
+/// bilan birga `:` ham chiqadi), lekin bu yerda yana bir himoya
+/// bor: foydalanuvchi ikki nuqtasiz `514` deb yozsa ham u `5:14`
+/// bo'lib saqlanadi. Ya'ni oxirgi ikki raqam — SONIYA.
+///
+///   `5:14` -> `5:14`   (tegilmaydi)
+///   `514`  -> `5:14`
+///   `44`   -> `0:44`
+///   `7`    -> `0:07`
+///   bo'sh  -> bo'sh
+String normalizeIntroInput(String raw) {
+  final t = raw.trim();
+  if (t.isEmpty) return '';
+  if (t.contains(':')) return t;
+  final digits = t.replaceAll(RegExp(r'[^0-9]'), '');
+  if (digits.isEmpty) return '';
+  final n = int.tryParse(digits);
+  if (n == null || n == 0) return '';
+  if (digits.length <= 2) return '0:${digits.padLeft(2, '0')}';
+  final sec = digits.substring(digits.length - 2);
+  final min = digits.substring(0, digits.length - 2);
+  return '$min:$sec';
+}
+
 /// Bazadan kelgan qiymatni OYNAGA qo'yish uchun matn.
 ///
 /// Odatda bu o'sha matnning o'zi (`"5:14"`). Eski yozuvlarda

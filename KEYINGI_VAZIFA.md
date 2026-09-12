@@ -464,18 +464,35 @@ Yechim: `_adoptFreshEpisode()` — yangi ro'yxat kelganda ochiq
 qism AYNAN o'sha qismning yangi qatori bilan almashtiriladi
 (`epizod_id` bo'yicha) va intro oraliqlari qaytadan o'qiladi.
 
-### TUGMANING KO'RINISHI VA JOYI
+### VAQTNI YOZIB BO'LMASDI (TOPILGAN XATO)
 
-TALAB (foydalanuvchi): "intro tugmasi HQ tugmasi bilan BIR XIL
-darajadagi shaffoflikda bo'lsin va intro vaqti kelganda chap
-tarafdan video cheti va play/pause ning TENG O'RTASIDAN chiqsin".
+Foydalanuvchi: "intro vaqtini yozib bo'lmayapti, boshqacha
+keyboard chiqishi kerak edi".
 
-* ko'rinishi pastki paneldagi `HQ` tugmasidan AYNAN ko'chirilgan:
-  fon oq 15%, chekkasi `white30`, burchagi 7. **Ikkovini birga
-  o'zgartiring** — aks holda ular ajralib qoladi;
-* joyi — `Alignment(-0.5, 0)`: -1 videoning chap cheti, 0 markaz
-  (play/pause), ya'ni -0.5 ikkovining o'rtasi. Chekka bo'shliq
-  (`Padding`) ISHLATILMAYDI — u tugmani o'rtadan siljitardi.
+Sabab: maydonda `TextInputType.phone` turardi. Telefon
+klaviaturasida `-`, `+`, `*#`, `.` bor, LEKIN **ikki nuqta
+(`:`) YO'Q** — ya'ni `5:14` deb yozishning imkoni yo'q edi.
+
+Endi `TextInputType.datetime` (aynan vaqt uchun: raqamlar bilan
+birga `:` chiqadi). Ustiga ikki qavat himoya:
+
+* `FilteringTextInputFormatter` faqat raqam va `:` ni o'tkazadi;
+* saqlashda `normalizeIntroInput` ishga tushadi — `514` ham
+  `5:14` bo'lib saqlanadi (oxirgi ikki raqam soniya), `44` ->
+  `0:44`, `7` -> `0:07`.
+
+### TUGMANING KO'RINISHI, NOMI VA JOYI
+
+* **nomi** — "Introni o'tkazish" (foydalanuvchi aniq shunday
+  so'ragan);
+* **joyi** — videoning CHAP YUQORI burchagi. Fullscreen'da
+  kontrollar ochiq bo'lsa yuqori qatorda "orqaga" tugmasi
+  turadi, shu sabab intro tugmasi o'sha qatorning TAGIGA
+  tushadi (`top: 54`) — aks holda ular ustma-ust kelardi;
+* **ko'rinishi** pastki paneldagi `HQ` tugmasidan AYNAN
+  ko'chirilgan: fon oq 15%, chekkasi `white30`, burchagi 7.
+  **Ikkovini birga o'zgartiring** — aks holda ular ajralib
+  qoladi.
 
 Ko'rinish qoidasi (foydalanuvchi aniq aytgan):
 
@@ -487,6 +504,30 @@ Ko'rinish qoidasi (foydalanuvchi aniq aytgan):
 Tugma Stack'ning ENG USTIDA, sek gesture qatlamidan KEYIN
 turadi — aks holda unga bosilgan tap sek qatlamiga tushib,
 video oldinga sakrab ketardi.
+
+### AVTOMATIK O'TKAZISH (uch nuqta menyusi)
+
+TALAB (foydalanuvchi): "o'ng yuqori qismiga 3ta nuqta qo'y,
+ustiga bossa `introni avtomatik o'tkazish` degan yoqib
+o'chiradigan tugma bo'lsin: yoqib qo'ysa intro avtomatik
+o'tkazib yuboriladi, agar o'chiq bo'lsa qo'lda o'tkazishi kerak".
+
+* uch nuqta — videoning O'NG YUQORI burchagida, faqat kontrollar
+  ochiq bo'lganda ko'rinadi (video ko'rilayotganda ekran toza
+  qolishi kerak). Fullscreen sarlavhasi uning tagiga kirmasin
+  deb yuqori qatorda 44 px joy qoldirilgan;
+* menyu ochiq turganda kontrollar YASHIRINMAYDI (`onOpened` ->
+  `_hideTimer.cancel()`) — aks holda tugma daraxtdan olib
+  tashlanib, ochiq menyu "muallaq" qolardi;
+* yoqilgan bo'lsa `_updateIntro` tugma ko'rsatish o'rniga
+  darhol `_skipIntro()` chaqiradi. Tugma yoqilgan damda video
+  intro ichida bo'lsa — o'sha zahoti o'tkaziladi.
+
+Holat `lib/services/app_settings.dart` da: diskda, SHIFRLANGAN
+va HISOB PAPKASIDA (`list_settings.rustbin`). Ya'ni bitta
+telefonda ikki kishi kirsa har birining o'z sozlamasi bo'ladi.
+`shared_preferences` ATAYLAB qo'shilmadi — bittagina bayroq
+uchun yangi bog'liqlik va shifrlanmagan fayl ortiqcha.
 
 ## PLEYERDAGI VAQT — FAQAT DAQIQA VA SONIYA
 
@@ -670,6 +711,7 @@ Fayl nomi qoidasi (`rust_bridge.dart`):
 | `list_watch_history*`, `list_watch_positions*` | Tomosha tarixi |
 | `list_favorites` | Sevimlilar |
 | `list_app_stats`, `list_my_stats`, `list_traffic` | Statistika |
+| `list_settings` | Sozlamalar |
 | `<temp>` dagi qolgani | Vaqtinchalik fayllar |
 | qolgani | Boshqa |
 
