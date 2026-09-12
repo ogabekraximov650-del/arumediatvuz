@@ -9,6 +9,7 @@ import '../services/auth_service.dart';
 import '../services/format.dart';
 import '../services/stats_service.dart';
 import '../services/storage_janitor.dart';
+import '../services/storage_usage.dart';
 import '../services/traffic_service.dart';
 import '../widgets/aru_logo.dart';
 import '../widgets/glass.dart';
@@ -408,6 +409,8 @@ class _ProfileBody extends StatelessWidget {
           // emas — asosiy anime bo'yicha), nechta qism, necha soat
           // va qancha trafik sarflagan.
           const _MyStatsGrid(),
+          const SizedBox(height: 12),
+          const _StorageBox(),
           const SizedBox(height: 16),
           // ── TUGMALAR TARTIBI (foydalanuvchi belgilagan) ───────
           //   1. Bildirishnoma
@@ -582,6 +585,243 @@ class _MyStatsGridState extends State<_MyStatsGrid> {
           ],
         );
       },
+    );
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+//  XOTIRA OYNASI
+// ══════════════════════════════════════════════════════════════
+//
+// TALAB (foydalanuvchi): "ilovada qanaqa ma'lumot bo'lsa hammasi
+// tartib bilan bo'lib yozib chiqilsin, masalan `video 2MB 50%`;
+// yoki anime kartochkasi, tomosha tarixi, database ma'lumotlari
+// va hokazolar hajmi va jami hajmdan egallab turgan foizi bilan
+// ko'rsatilsin".
+//
+// ── OLIB TASHLANGANLAR (foydalanuvchi talabi) ────────────────
+//
+//   * "video + rasm" yozuvi;
+//   * "Tozalash" tugmasi;
+//   * "Telefon xotirasi 0.00% band" qatori.
+//
+// Ularning o'rnida FAQAT jami hajm (o'ng yuqorida) va toifalar
+// ro'yxati qoldi. Toifalar `storage_usage.dart` da aniqlanadi.
+
+class _StorageBox extends StatefulWidget {
+  const _StorageBox();
+
+  @override
+  State<_StorageBox> createState() => _StorageBoxState();
+}
+
+class _StorageBoxState extends State<_StorageBox> {
+  @override
+  void initState() {
+    super.initState();
+    // O'lchov fon oqimida ketadi — sahifa ochilishini
+    // sekinlashtirmaydi.
+    unawaited(StorageUsageService.instance.refresh());
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: StorageUsageService.instance,
+      builder: (context, _) {
+        final svc = StorageUsageService.instance;
+        final u = svc.usage;
+        final total = u.totalBytes;
+        return Glass(
+          borderRadius: 18,
+          blur: 14,
+          padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // ── SARLAVHA + JAMI HAJM ──────────────────────
+              Row(
+                children: [
+                  Icon(Icons.sd_storage_rounded,
+                      size: 15, color: AppColors.accent),
+                  const SizedBox(width: 6),
+                  Text(
+                    'Xotira',
+                    style: TextStyle(
+                      color: Colors.white.withValues(alpha: 0.55),
+                      fontSize: 12,
+                    ),
+                  ),
+                  const Spacer(),
+                  Text(
+                    svc.measured ? formatBytes(total) : '—',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 17,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+
+              // ── HAMMA TOIFA BITTA CHIZIQDA ────────────────
+              _StackedBar(usage: u),
+              const SizedBox(height: 12),
+
+              // ── TOIFALAR RO'YXATI ─────────────────────────
+              if (!svc.measured)
+                Text(
+                  'Hisoblanmoqda...',
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.4),
+                    fontSize: 12,
+                  ),
+                )
+              else if (u.slices.isEmpty)
+                Text(
+                  'Ilovada saqlangan ma\'lumot yo\'q',
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.4),
+                    fontSize: 12,
+                  ),
+                )
+              else
+                for (final slice in u.slices) ...[
+                  _StorageRow(
+                    color: storageColorOf(slice.label),
+                    label: slice.label,
+                    size: formatBytes(slice.bytes),
+                    percent: _pct(u.shareOf(slice)),
+                  ),
+                  if (slice != u.slices.last) const SizedBox(height: 7),
+                ],
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// `12,34%` — ikki kasr xona (foydalanuvchi ko'rsatgan ko'rinish).
+String _pct(double share) {
+  final v = (share.isNaN ? 0.0 : share * 100).clamp(0.0, 100.0);
+  return '${v.toStringAsFixed(2)}%';
+}
+
+/// Toifalar ranglari — `kStorageLabels` tartibida.
+///
+/// Ro'yxat va chiziq AYNAN bir xil rangdan foydalanadi, shu sabab
+/// rang bitta joydan olinadi.
+const List<Color> _kStorageColors = [
+  Color(0xFF4CC2FF), // Videolar
+  Color(0xFFFFC83D), // Posterlar
+  Color(0xFF7BD88F), // Tarix kadrlari
+  Color(0xFFE94560), // Anime kartochkalari
+  Color(0xFFB388FF), // Qismlar ro'yxati
+  Color(0xFF4DD0E1), // Tomosha tarixi
+  Color(0xFFFF8A65), // Sevimlilar
+  Color(0xFF9FA8DA), // Statistika
+  Color(0xFF8D9498), // Vaqtinchalik fayllar
+  Color(0xFF5C6368), // Boshqa
+];
+
+Color storageColorOf(String label) {
+  final i = kStorageLabels.indexOf(label);
+  if (i < 0) return _kStorageColors.last;
+  return _kStorageColors[i % _kStorageColors.length];
+}
+
+/// Hamma toifa bitta chiziqda, har biri o'z rangida.
+class _StackedBar extends StatelessWidget {
+  final StorageUsage usage;
+
+  const _StackedBar({required this.usage});
+
+  @override
+  Widget build(BuildContext context) {
+    final total = usage.totalBytes;
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(4),
+      child: SizedBox(
+        height: 7,
+        child: total <= 0
+            ? ColoredBox(color: Colors.white.withValues(alpha: 0.10))
+            : Row(
+                children: [
+                  for (final slice in usage.slices)
+                    Expanded(
+                      // Juda kichik toifa ham ko'rinib tursin
+                      // (aks holda chiziq "bo'sh" bo'lib qolardi).
+                      flex: (usage.shareOf(slice) * 1000).round().clamp(1, 1000),
+                      child: ColoredBox(color: storageColorOf(slice.label)),
+                    ),
+                ],
+              ),
+      ),
+    );
+  }
+}
+
+/// Bitta qator: "● Videolar        2,0 MB   50.00%".
+class _StorageRow extends StatelessWidget {
+  final Color color;
+  final String label;
+  final String size;
+  final String percent;
+
+  const _StorageRow({
+    required this.color,
+    required this.label,
+    required this.size,
+    required this.percent,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Container(
+          width: 7,
+          height: 7,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 7),
+        Expanded(
+          child: Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.72),
+              fontSize: 12.5,
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Text(
+          size,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 12.5,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        const SizedBox(width: 10),
+        SizedBox(
+          // Foizlar bir tekis turadi — ro'yxat "sakramaydi".
+          width: 58,
+          child: Text(
+            percent,
+            textAlign: TextAlign.right,
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.5),
+              fontSize: 12,
+            ),
+          ),
+        ),
+      ],
     );
   }
 }

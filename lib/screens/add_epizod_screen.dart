@@ -7,6 +7,7 @@ import 'package:dio/dio.dart';
 import '../services/storage_janitor.dart';
 import '../services/ui_state.dart';
 import '../theme/app_background.dart';
+import '../services/intro_times.dart';
 import '../widgets/glass.dart';
 
 const String _apiBase = 'https://aniraxuzapp.ogabekraximov650.workers.dev';
@@ -66,6 +67,29 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
   final _numberCtrl = TextEditingController();
   final _nameCtrl = TextEditingController();
 
+  // ══════════════════════════════════════════════════════════
+  //  OPENINGNI O'TKAZIB YUBORISH — VAQT OYNALARI
+  // ══════════════════════════════════════════════════════════
+  //
+  // TALAB (foydalanuvchi): "video yuklash oynasining tagiga eniga
+  // 2 ta, bo'yiga 5 ta qilib vaqtni yozadigan oynalar qo'sh.
+  // `1:23   2:12` deb yozib qo'yilsa pleyerdagi video aynan shu
+  // 1:23 ga kelganda `o'tkazib yuborish` tugmasi chiqadi va
+  // foydalanuvchi tugmani bossa video 2:12 ga sakrab o'tadi."
+  //
+  // 5 ta qator — o'tkazib yuboriladigan joyi ko'p animelar uchun.
+  //
+  // Vaqt AYNAN yozilgan ko'rinishida saqlanadi (`5:14`, `6:44`) —
+  // foydalanuvchi talabi: "intro vaqtini 5:14 va 6:44 qilib
+  // yoziladigan qil, soniya bilan emas".
+  //
+  // Ilgari bu yerda ikki marta o'girish bor edi (yozishda matn ->
+  // soniya, ochishda soniya -> matn). Endi u qatlam YO'Q: bazada
+  // ham, ekranda ham bir xil matn turadi. Pleyer matnni qism
+  // ochilganda bir marta millisekundga o'giradi.
+  late final List<TextEditingController> _introFrom;
+  late final List<TextEditingController> _introTo;
+
   bool _isSaving = false;
   String? _errorMsg;
 
@@ -81,8 +105,17 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
       _QualityState(label: '1080p', urlKey: 'url_1080p', sizeKey: 'size_1080p'),
     ];
 
+    _introFrom =
+        List.generate(kIntroRows, (_) => TextEditingController());
+    _introTo = List.generate(kIntroRows, (_) => TextEditingController());
+
     final ep = widget.initialEpizod;
     if (ep != null) {
+      for (var i = 0; i < kIntroRows; i++) {
+        // `intro_1`/`intro_2` — 1-oraliq, `intro_3`/`intro_4` — 2-si...
+        _introFrom[i].text = introText(ep['intro_${i * 2 + 1}']);
+        _introTo[i].text = introText(ep['intro_${i * 2 + 2}']);
+      }
       _numberCtrl.text = (ep['epizod_number'] ?? '').toString();
       _nameCtrl.text = ep['epizod_name'] ?? '';
       for (final q in _qualities) {
@@ -98,8 +131,16 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
   void dispose() {
     _numberCtrl.dispose();
     _nameCtrl.dispose();
+    for (final c in _introFrom) {
+      c.dispose();
+    }
+    for (final c in _introTo) {
+      c.dispose();
+    }
     super.dispose();
   }
+
+
 
   // ── Fayl tanlash va B2'ga yuklash (Dio — real progress) ─────────
   Future<void> _pickAndUpload(_QualityState q) async {
@@ -323,6 +364,12 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
         'size_720p': _qualities[2].size ?? '',
         'url_1080p': _qualities[3].url ?? '',
         'size_1080p': _qualities[3].size ?? '',
+        // Intro oraliqlari — YOZILGAN KO'RINISHIDA (`"5:14"`),
+        // juftlik bo'lib.
+        for (var i = 0; i < kIntroRows; i++) ...{
+          'intro_${i * 2 + 1}': _introFrom[i].text.trim(),
+          'intro_${i * 2 + 2}': _introTo[i].text.trim(),
+        },
       });
 
       final res = isEdit
@@ -442,6 +489,8 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
                         const SizedBox(height: 12),
                       ],
 
+                      const SizedBox(height: 8),
+                      _buildIntroCard(),
                       const SizedBox(height: 12),
 
                       Row(
@@ -494,6 +543,91 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+
+  /// Openingni o'tkazib yuborish oraliqlari — 2 ustun x 5 qator.
+  Widget _buildIntroCard() {
+    return Glass(
+      borderRadius: 16,
+      blur: 14,
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.fast_forward_rounded,
+                  size: 18, color: Colors.white70),
+              const SizedBox(width: 8),
+              const Text(
+                'O\'tkazib yuboriladigan joylar',
+                style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'Chapga boshlanish, o\'ngga tugash vaqti: 5:14 va 6:44.\n'
+            'Video 5:14 ga kelganda pleyerda "O\'tkazib yuborish" '
+            'tugmasi chiqadi. Bo\'sh qatorlar e\'tiborga olinmaydi.',
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.45),
+              fontSize: 11.5,
+              height: 1.35,
+            ),
+          ),
+          const SizedBox(height: 12),
+          for (var i = 0; i < kIntroRows; i++) ...[
+            Row(
+              children: [
+                SizedBox(
+                  width: 20,
+                  child: Text(
+                    '${i + 1}',
+                    style: TextStyle(
+                      color: Colors.white.withValues(alpha: 0.35),
+                      fontSize: 12,
+                    ),
+                  ),
+                ),
+                Expanded(child: _introField(_introFrom[i], 'boshi')),
+                const SizedBox(width: 10),
+                Expanded(child: _introField(_introTo[i], 'oxiri')),
+              ],
+            ),
+            if (i != kIntroRows - 1) const SizedBox(height: 8),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _introField(TextEditingController ctrl, String hint) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.06),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.10)),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      child: TextField(
+        controller: ctrl,
+        // Raqam va ikki nuqta — telefon klaviaturasida ikkovi ham bor.
+        keyboardType: TextInputType.phone,
+        style: const TextStyle(color: Colors.white, fontSize: 14),
+        decoration: InputDecoration(
+          isDense: true,
+          contentPadding: const EdgeInsets.symmetric(vertical: 11),
+          hintText: hint,
+          hintStyle: TextStyle(
+              color: Colors.white.withValues(alpha: 0.3), fontSize: 13),
+          border: InputBorder.none,
         ),
       ),
     );

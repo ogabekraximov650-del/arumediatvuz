@@ -9,6 +9,7 @@
 
 import 'package:flutter/material.dart';
 
+import '../services/offline_library.dart';
 import '../services/season_info.dart';
 import '../widgets/glass.dart';
 import 'home_screen.dart';
@@ -51,10 +52,27 @@ class _FavoritesTabState extends State<FavoritesTab>
   Widget build(BuildContext context) {
     super.build(context);
     return AnimatedBuilder(
-      animation: FavoritesService.instance,
+      animation: Listenable.merge(
+          [FavoritesService.instance, OfflineLibrary.instance]),
       builder: (context, _) {
         final fav = FavoritesService.instance;
-        final rows = fav.items;
+        final lib = OfflineLibrary.instance;
+        var rows = fav.items;
+        // ── OFLAYNDA — FAQAT YUKLAB OLINGANLARI ─────────────
+        //
+        // TALAB (foydalanuvchi): "oflayn vaqtda ... saqlangan
+        // animelardan faqatgina yuklab olingan epizodi borlari
+        // ko'rinsin, qolganlari esa yashirilsin lekin xotirada
+        // tursin".
+        //
+        // Ro'yxatning o'zi tegilmaydi — u diskda to'liq turaveradi.
+        if (lib.isOffline && lib.ready) {
+          rows = rows.where((s) {
+            final a = int.tryParse('${s['anime_id'] ?? ''}') ?? 0;
+            final sid = int.tryParse('${s['season_id'] ?? ''}') ?? 0;
+            return lib.hasSeason(a, sid);
+          }).toList();
+        }
 
         return RefreshIndicator(
           color: AppColors.accent,

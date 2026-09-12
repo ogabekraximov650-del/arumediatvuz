@@ -34,8 +34,6 @@ package __PKG__
 
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
-import android.net.TrafficStats
-import android.os.Process
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -62,48 +60,24 @@ class MainActivity : FlutterActivity() {
                 }
             }
 
-        // ═══════════════════════════════════════════════════════
-        //  TRAFIK HISOBLAGICHI
-        // ═══════════════════════════════════════════════════════
+        // ── TRAFIK KANALI OLIB TASHLANGAN ──────────────────────
         //
-        // TALAB (foydalanuvchi): trafikni endi ILOVA sanasin —
-        // worker noto'g'ri sanardi va ijroni buzardi.
+        // Bu yerda ilgari `TrafficStats.getUidRxBytes` bor edi.
+        // U ilovaning UID'i ostidagi HAMMA soketni sanardi —
+        // shu jumladan MAHALLIY (`127.0.0.1`) uzatmani ham:
+        // pleyer videoni ilovaning o'z kesh-serveridan oladi,
+        // ya'ni bitta video IKKI MARTA sanalardi, yuklab olingan
+        // videoni oflayn qayta ko'rganda esa trafik yo'q joydan
+        // o'sardi.
         //
-        // Android'ning o'zida shu uchun tayyor hisoblagich bor:
-        // `TrafficStats.getUidRxBytes(uid)` — shu ilovaning UID'i
-        // ostida ochilgan HAMMA soket bo'yicha QABUL QILINGAN
-        // umumiy bayt. U tizim yadrosidan olinadi, ya'ni ilova
-        // qabul qilgan HAR QANDAY bayt kiradi:
+        // Hisob endi AYNAN tarmoqqa chiqadigan ikki joyda olinadi
+        // (Rust yadrosi va ilovaning http klienti) —
+        // `lib/services/traffic_service.dart` ga qarang.
         //
-        //   * pleyer (ExoPlayer) video oqimi,
-        //   * yuklab olish (Rust yadrosi),
-        //   * posterlar va avatar rasmlari,
-        //   * baza/API so'rovlari (tarix, statistika, kirish),
-        //   * TCP va UDP, sarlavhalar bilan birga.
-        //
-        // Hisob HAQIQATAN qabul qilingan baytdan olinadi (javobda
-        // e'lon qilingan uzunlikdan emas — eski xatoning sababi
-        // aynan shu edi). Mahalliy 127.0.0.1 uzatmasi KIRMAYDI,
-        // ya'ni diskdan o'qib pleyerga berilgan video trafik
-        // sifatida hisoblanmaydi.
-        //
-        // Son qurilma yoqilganidan beri o'sib boradi va telefon
-        // o'chirilganda nolga tushadi — Dart tomoni buni farqlar
-        // (`traffic_service.dart`) orqali hal qiladi.
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "aru/net")
-            .setMethodCallHandler { call, result ->
-                if (call.method != "rx") {
-                    result.notImplemented()
-                } else {
-                    val rx = try {
-                        TrafficStats.getUidRxBytes(Process.myUid())
-                    } catch (e: Throwable) {
-                        -1L
-                    }
-                    // -1 = qurilma qo'llab-quvvatlamaydi.
-                    result.success(rx)
-                }
-            }
+        // Keyinroq shu yerda telefon xotirasini o'qiydigan
+        // `aru/storage` kanali ham bor edi; profil sahifasidan
+        // "telefon xotirasi N% band" qatori olib tashlangach
+        // (foydalanuvchi talabi) u ham keraksiz bo'lib qoldi.
     }
 
     /// Manzildagi videodan OXIRGI kadrni JPEG qilib qaytaradi.

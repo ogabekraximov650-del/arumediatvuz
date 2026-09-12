@@ -566,6 +566,15 @@ class RustCore {
   /// `null`.
   String? get dataDirPath => _accountDirPath ?? _cacheDirPath;
 
+  /// ILDIZ hujjatlar papkasi — hamma hisoblarning papkalari
+  /// (`accountid_*`) va umumiy fayllar (`anime_cache.rustbin`)
+  /// shu ichida yotadi.
+  ///
+  /// `dataDirPath` dan farqi: u FAQAT joriy hisobning papkasini
+  /// beradi. Xotira hisobi esa ilovaning HAMMASINI sanashi kerak
+  /// (`storage_usage.dart`).
+  String? get rootDirPath => _cacheDirPath;
+
   // ═══════════════════════════════════════════════════════════
   //  HAR BIR HISOBGA — O'Z PAPKASI
   // ═══════════════════════════════════════════════════════════

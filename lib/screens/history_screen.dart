@@ -36,6 +36,7 @@ import 'dart:typed_data';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 
+import '../services/offline_library.dart';
 import '../services/watch_history.dart';
 import '../theme/app_background.dart';
 import '../widgets/glass.dart';
@@ -43,14 +44,17 @@ import 'video_player_screen.dart';
 
 // ── UMUMIY YORDAMCHILAR ───────────────────────────────────────
 
-/// `12:34` yoki `01:12:34` — joriy nuqta / umumiy davomiylik.
+/// `12:34` — joriy nuqta / umumiy davomiylik.
+///
+/// TALAB (foydalanuvchi): vaqt FAQAT daqiqa va soniyada
+/// ko'rsatilsin — 2 soatlik video `120:00` bo'ladi. Soat
+/// ajratilmaydi, daqiqa 60 dan oshaveradi. Pleyerdagi vaqt bilan
+/// bir xil qoida (`video_player_screen.dart` -> `_fmt`).
 String _clock(int ms) {
   final total = ms ~/ 1000;
-  final h = total ~/ 3600;
-  final m = (total % 3600) ~/ 60;
+  final m = total ~/ 60;
   final s = total % 60;
-  String two(int v) => v.toString().padLeft(2, '0');
-  return h > 0 ? '${two(h)}:${two(m)}:${two(s)}' : '${two(m)}:${two(s)}';
+  return '${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
 }
 
 /// `12:46/01/01/2026` — soat/kun/oy/yil (foydalanuvchi ko'rsatgan
@@ -90,7 +94,9 @@ void _openEpisode(BuildContext context, HistoryItem item) {
       transitionDuration: const Duration(milliseconds: 260),
       pageBuilder: (_, anim, __) => VideoPlayerScreen(
         season: _seasonOf(item),
-        startEpizodNumber: item.epizodNumber,
+        // Qism RAQAMI emas, o'zgarmas IDsi: admin raqamni
+        // o'zgartirsa ham aynan shu qism ochiladi.
+        startEpizodId: item.epizodId,
         startAt: Duration(milliseconds: item.positionMs),
       ),
       transitionsBuilder: (_, anim, __, child) => FadeTransition(
@@ -214,6 +220,18 @@ class _HistoryTabState extends State<HistoryTab> {
       children: [
         _Switcher(page: _page, onChanged: _goTo),
         Expanded(
+          // ── SURISH SILLIQ, KADRLAR ESA DARHOL ───────────────
+          //
+          // Bu yerda ilgari "surish paytida kadr yuklanmasin"
+          // degan qulf bor edi. U qotishni oldini oldi, lekin
+          // rasmlar kechikib chiqadigan bo'ldi (foydalanuvchi:
+          // "juda sekin yangilanyapti").
+          //
+          // Endi qulf YO'Q: kadrlar ro'yxat o'qilishi bilan
+          // fon'da xotiraga ko'chiriladi
+          // (`WatchHistory._warmThumbs`), ya'ni surish paytida
+          // bajariladigan ish umuman qolmaydi — ham silliq, ham
+          // darhol.
           child: PageView(
             controller: _pages,
             physics: const BouncingScrollPhysics(),
@@ -251,15 +269,44 @@ class _HistoryListState extends State<_HistoryList>
   @override
   bool get wantKeepAlive => true;
 
+  // ══════════════════════════════════════════════════════════
+  //  OFLAYNDA — FAQAT YUKLAB OLINGAN QISMLAR
+  // ══════════════════════════════════════════════════════════
+  //
+  // TALAB (foydalanuvchi): "oflayn vaqtda tomosha tarixi va
+  // saqlangan animelardan faqatgina yuklab olingan epizodi
+  // borlari ko'rinsin, qolganlari esa yashirilsin LEKIN
+  // XOTIRADA TURSIN".
+  //
+  // Ya'ni yozuvlar o'chirilmaydi — internet yoqilishi bilan
+  // hammasi qaytadi. Bu yerda faqat ro'yxat filtrlanadi.
+  //
+  // "Anime bo'yicha" oynasida tekshiruv BO'LIM darajasida:
+  // animening kamida bitta qismi yuklangan bo'lsa karta
+  // ko'rinadi, ichiga kirilganda esa yana qism darajasida
+  // filtrlanadi.
+  List<HistoryItem> _visible(List<HistoryItem> rows, bool byAnime) {
+    final lib = OfflineLibrary.instance;
+    // Indeks hali yig'ilmagan bo'lsa hech narsa yashirilmaydi —
+    // aks holda ro'yxat bir lahzaga bo'm-bo'sh ko'rinardi.
+    if (!lib.isOffline || !lib.ready) return rows;
+    return rows
+        .where((e) => byAnime
+            ? lib.hasSeason(e.animeId, e.seasonId)
+            : lib.hasEpisode(e.animeId, e.seasonId, e.epizodId))
+        .toList();
+  }
+
   @override
   Widget build(BuildContext context) {
     super.build(context);
     final byAnime = widget.byAnime;
     return AnimatedBuilder(
-      animation: WatchHistory.instance,
+      animation:
+          Listenable.merge([WatchHistory.instance, OfflineLibrary.instance]),
       builder: (context, _) {
         final h = WatchHistory.instance;
-        final rows = byAnime ? h.byAnime : h.items;
+        final rows = _visible(byAnime ? h.byAnime : h.items, byAnime);
 
         return RefreshIndicator(
           color: AppColors.accent,
@@ -726,9 +773,19 @@ class AnimeHistoryScreen extends StatelessWidget {
         backgroundColor: Colors.transparent,
         body: SafeArea(
           child: AnimatedBuilder(
-            animation: WatchHistory.instance,
+            animation: Listenable.merge(
+                [WatchHistory.instance, OfflineLibrary.instance]),
             builder: (context, _) {
-              final rows = WatchHistory.instance.episodesOf(animeId);
+              final lib = OfflineLibrary.instance;
+              var rows = WatchHistory.instance.episodesOf(animeId);
+              // Oflaynda faqat yuklab olingan qismlar (qolganlari
+              // yashiriladi, xotirada esa turaveradi).
+              if (lib.isOffline && lib.ready) {
+                rows = rows
+                    .where((e) =>
+                        lib.hasEpisode(e.animeId, e.seasonId, e.epizodId))
+                    .toList();
+              }
               return Column(
                 children: [
                   Padding(

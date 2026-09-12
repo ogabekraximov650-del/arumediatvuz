@@ -119,6 +119,7 @@ import '../services/download_manager.dart';
 import '../services/rust_bridge.dart';
 import '../services/video_cache_server.dart';
 import '../services/format.dart';
+import '../services/intro_times.dart';
 import '../services/season_info.dart';
 import '../services/watch_history.dart';
 import '../services/watch_progress.dart';
@@ -130,10 +131,13 @@ const String _apiBase = 'https://aniraxuzapp.ogabekraximov650.workers.dev';
 class VideoPlayerScreen extends StatefulWidget {
   final Map<String, dynamic> season;
 
-  /// Qaysi qism ochilsin (tarixdan kelinganda). `null` — ilova
-  /// o'zi tanlaydi: shu bo'limning OXIRGI ko'rilgan qismi, u ham
-  /// bo'lmasa eng birinchi qism.
-  final int? startEpizodNumber;
+  /// Qaysi qism ochilsin (tarixdan kelinganda) — qismning
+  /// O'ZGARMAS IDsi. `null` — ilova o'zi tanlaydi: shu bo'limning
+  /// OXIRGI ko'rilgan qismi, u ham bo'lmasa eng birinchi qism.
+  ///
+  /// Raqam EMAS, ID: admin qism raqamini o'zgartirsa ham tarixdagi
+  /// kadr aynan o'sha qismni ochishi kerak (foydalanuvchi talabi).
+  final int? startEpizodId;
 
   /// Qaysi joydan boshlansin (tarixdan kelinganda). `null` —
   /// telefonda eslab qolingan nuqta ishlatiladi.
@@ -142,7 +146,7 @@ class VideoPlayerScreen extends StatefulWidget {
   const VideoPlayerScreen({
     super.key,
     required this.season,
-    this.startEpizodNumber,
+    this.startEpizodId,
     this.startAt,
   });
 
@@ -215,6 +219,12 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   bool _connectivityKnown = false;
   StreamSubscription<List<ConnectivityResult>>? _connSub;
   String? _selectedQuality;
+
+  /// Foydalanuvchi shu seansda sifatni QO'LDA tanladimi.
+  ///
+  /// Tanlagan bo'lsa — tarixdagi "oxirgi ko'rilgan sifat" endi
+  /// ustidan yozmaydi: odam nima tanlasa o'sha qoladi.
+  bool _qualityChosenByUser = false;
   bool _playerLoading = false;
 
   // Hozirgi video QAYERDAN kelayapti:
@@ -365,6 +375,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _healthTimer?.cancel();
     _windowTimer?.cancel();
     _noticeTimer?.cancel();
+    _introTimer?.cancel();
     _recoveryStreakResetTimer?.cancel();
     _restoreSystemUI();
     final c = _controller;
@@ -420,6 +431,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
             _episodes = fresh;
             _loadingEps = false;
           });
+          _adoptFreshEpisode();
           _syncWatchedUrls();
           _autoOpenEpisode();
         }
@@ -431,11 +443,52 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     if (mounted && _loadingEps) setState(() => _loadingEps = false);
   }
 
+  /// ── OCHILGAN QISM YANGI RO'YXATDAN QAYTA OLINADI ───────────
+  ///
+  /// TOPILGAN XATO (foydalanuvchi: "pleyerda intro chiqmayapti").
+  ///
+  /// Pleyer qismlar ro'yxatini AVVAL diskdagi keshdan o'qiydi va
+  /// darhol qism ochadi. Keyin serverdan yangi ro'yxat keladi va
+  /// `_episodes` almashtiriladi — LEKIN `_currentEp` eski (kesh)
+  /// obyekt bo'lib qolardi.
+  ///
+  /// Ya'ni admin qismga endi qo'shgan intro vaqtlari ochiq qismda
+  /// KO'RINMASDI: ular faqat yangi ro'yxatda bor edi, pleyer esa
+  /// eskisiga qarab turardi. Xuddi shu narsa yangi qo'shilgan
+  /// sifat yoki o'zgargan nom uchun ham amal qilardi.
+  ///
+  /// Shu sabab yangi ro'yxat kelganda ochiq qism AYNAN o'sha
+  /// qismning yangi qatori bilan almashtiriladi (`epizod_id`
+  /// bo'yicha) va intro oraliqlari qaytadan o'qiladi.
+  void _adoptFreshEpisode() {
+    final cur = _currentEp;
+    if (cur == null) return;
+    final id = _epIdOf(cur);
+    if (id <= 0) return;
+    for (final e in _episodes) {
+      if (_epIdOf(e) != id) continue;
+      _currentEp = e;
+      _introRanges = introRangesOf(e);
+      // Hozir qaysi oraliqdaligi endi boshqacha bo'lishi mumkin.
+      _introIndex = -1;
+      return;
+    }
+  }
+
   /// Bo'lim ma'lumoti — BITTA so'rov.
   Future<void> _loadSeasonInfo() async {
     final aid = int.tryParse(widget.season['anime_id']?.toString() ?? '') ?? 0;
     final sid = int.tryParse(widget.season['season_id']?.toString() ?? '') ?? 0;
     if (aid <= 0) return;
+    // ── AVVAL DISKDAGI NUSXA ────────────────────────────────
+    //
+    // TOPILGAN XATO: oflaynda "Ma'lumot" oynasi bo'sh turardi.
+    // Endi diskdagi nusxa DARHOL ko'rsatiladi (tarmoq kutilmaydi),
+    // internet bo'lsa esa bir necha soniyadan keyin yangisi
+    // ustidan yoziladi.
+    final cached = SeasonService.fromDisk(aid, sid);
+    if (cached != null && mounted) setState(() => _info = cached);
+
     final info = await SeasonService.load(aid, sid);
     if (!mounted || info == null) return;
     setState(() => _info = info);
@@ -666,6 +719,35 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     return '';
   }
 
+  /// ── OXIRGI KO'RILGAN SIFATDAN DAVOM ETISH ─────────────────
+  ///
+  /// TALAB (foydalanuvchi): "jurnalga oxirgi marta foydalanuvchi
+  /// qaysi sifatni ko'rgani ham yozib qo'yilsin va keyingi safar
+  /// internetni yoqib videoni ko'rganida aynan o'sha sifatdan
+  /// davom etishi kerak".
+  ///
+  /// Sifat tomosha tarixida (`last_quality`) saqlanadi, ya'ni u
+  /// ilova qayta o'rnatilganda ham, boshqa telefonda ham o'sha
+  /// odam uchun bir xil bo'ladi.
+  ///
+  /// Foydalanuvchi shu seansda sifatni qo'lda tanlagan bo'lsa
+  /// TEGILMAYDI — uning tanlovi ustunroq.
+  void _restoreQuality(Map<String, dynamic> ep) {
+    if (_qualityChosenByUser) return;
+    final animeId = int.tryParse(widget.season['anime_id']?.toString() ?? '');
+    final seasonId = int.tryParse(widget.season['season_id']?.toString() ?? '');
+    if (animeId == null || seasonId == null) return;
+    final saved =
+        WatchHistory.instance.qualityOf(animeId, seasonId, _epIdOf(ep));
+    if (saved.isEmpty || saved == _selectedQuality) return;
+    // Shu qismda o'sha sifat bormi (bo'lmasa tegmaymiz).
+    final url = (ep['url_$saved'] ?? '').toString();
+    if (url.isEmpty) return;
+    // Oflaynda faqat to'liq yuklangan sifat ochiladi.
+    if (_offline && !_isComplete(url)) return;
+    _selectedQuality = saved;
+  }
+
   String _qualityLabel(Map<String, dynamic> ep) {
     if (_selectedQuality != null) return _selectedQuality!;
     for (final k in ['1080p', '720p', '480p', '360p']) {
@@ -695,6 +777,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     bool resumePlaying = true,
     bool isRecovery = false,
   }) async {
+    _restoreQuality(ep);
     final url = _getUrl(ep);
     if (url.isEmpty) return;
 
@@ -731,13 +814,20 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       animeId: int.tryParse(widget.season['anime_id']?.toString() ?? '') ?? 0,
       seasonId: int.tryParse(widget.season['season_id']?.toString() ?? '') ?? 0,
       bolimId: int.tryParse(widget.season['bolim_id']?.toString() ?? '') ?? 0,
-      epizodNumber:
-          int.tryParse(ep['epizod_number']?.toString() ?? '') ?? 0,
+      epizodId: _epIdOf(ep),
+      epizodNumber: _epNumOf(ep),
+      // Oxirgi ko'rilgan sifat — keyingi safar shundan davom etadi.
+      quality: _qualityOfUrl(ep, url),
       seasonName: (widget.season['nomi'] ?? '').toString(),
       animeName: (widget.season['anime_name'] ?? '').toString(),
       seasonPhoto: (widget.season['photo_url'] ?? '').toString(),
       videoUrl: url,
     );
+
+    // Yangi qism — intro oraliqlari qaytadan o'qiladi.
+    _introTimer?.cancel();
+    _introIndex = -1;
+    _introRanges = introRangesOf(ep);
 
     setState(() {
       _currentEp = ep;
@@ -747,6 +837,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       _preparing = false;
       _playerError = null;
       _intendedPlaying = resumePlaying;
+      _introVisible = false;
     });
 
     // Sek navbatini tozalaymiz — eski epizodga tegishli so'rovlar
@@ -1430,6 +1521,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       _onCompleted(c);
     } else if (v.isInitialized) {
       _lastGoodPosition = v.position;
+      _updateIntro(v.position);
     }
   }
 
@@ -1812,7 +1904,12 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
 
   void _onTapVideo() {
     setState(() => _showControls = !_showControls);
-    if (_showControls) _scheduleHide();
+    if (_showControls) {
+      _scheduleHide();
+      // TALAB: "agar video ustiga bossa pleyer tugmalari bilan
+      // qayta chiqsin" — o'tkazib yuborish tugmasi ham.
+      _showIntroButton();
+    }
   }
 
   // Ketma-ket tez-tez bosishda play/pause "qotib qolishi"ning oldini
@@ -2217,11 +2314,100 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     }
   }
 
+  // ══════════════════════════════════════════════════════════
+  //  OPENINGNI O'TKAZIB YUBORISH
+  // ══════════════════════════════════════════════════════════
+  //
+  // TALAB (foydalanuvchi): qism qo'shishda `1:23  2:12` deb
+  // yozilsa, video 1:23 ga kelganda ekranning O'RTA CHAP chetida
+  // "O'tkazib yuborish" tugmasi chiqsin; bosilsa video 2:12 ga
+  // sakrab o'tsin.
+  //
+  // Bazada 5 ta juftlik bor (`intro_1 ... intro_10`, SONIYADA) —
+  // o'tkaziladigan joyi ko'p animelar uchun.
+  //
+  // Ko'rinish qoidasi (foydalanuvchi aniq aytgan):
+  //
+  //   * vaqti kelganda chiqadi va 5 SONIYADAN keyin o'zi
+  //     yashirinadi — ekranni to'sib turmaydi;
+  //   * video ustiga bosilsa pleyer tugmalari bilan BIRGA qayta
+  //     chiqadi;
+  //   * tugma SHAFFOF (video ko'rinib tursin).
+
+  /// Hozir qaysi intro oralig'idamiz (-1 — hech qaysi).
+  int _introIndex = -1;
+
+  /// Tugma ayni damda ekrandami.
+  bool _introVisible = false;
+
+  /// 5 soniyalik ko'rinish taymeri.
+  Timer? _introTimer;
+
+  /// Tugma shuncha vaqt turadi.
+  static const Duration _introShowFor = Duration(seconds: 5);
+
+  /// Joriy qismning intro oraliqlari: (boshi, oxiri) millisekundda.
+  ///
+  /// Qism ochilganda BIR MARTA hisoblanadi: bu ro'yxat pleyerning
+  /// har bir yangilanishida (soniyasiga bir necha marta) o'qiladi,
+  /// ya'ni uni har safar qaytadan yig'ish bekorga axlat yig'ardi.
+  List<(int, int)> _introRanges = const [];
+
+  /// Shu nuqta qaysi intro oralig'iga tushadi (-1 — hech qaysi).
+  int _introAt(Duration pos) {
+    final ms = pos.inMilliseconds;
+    final ranges = _introRanges;
+    for (var i = 0; i < ranges.length; i++) {
+      if (ms >= ranges[i].$1 && ms < ranges[i].$2) return i;
+    }
+    return -1;
+  }
+
+  /// Har bir pozitsiya yangilanishida chaqiriladi.
+  void _updateIntro(Duration pos) {
+    final idx = _introAt(pos);
+    if (idx == _introIndex) return;
+    _introIndex = idx;
+    if (idx < 0) {
+      _introTimer?.cancel();
+      if (_introVisible && mounted) setState(() => _introVisible = false);
+      return;
+    }
+    _showIntroButton();
+  }
+
+  /// Tugmani ko'rsatadi va 5 soniyalik taymerni qayta qo'yadi.
+  void _showIntroButton() {
+    if (_introIndex < 0 || !mounted) return;
+    _introTimer?.cancel();
+    if (!_introVisible) setState(() => _introVisible = true);
+    _introTimer = Timer(_introShowFor, () {
+      if (mounted && _introVisible) setState(() => _introVisible = false);
+    });
+  }
+
+  /// Tugma bosildi — video oraliqning OXIRIGA sakraydi.
+  void _skipIntro() {
+    final ranges = _introRanges;
+    if (_introIndex < 0 || _introIndex >= ranges.length) return;
+    final to = Duration(milliseconds: ranges[_introIndex].$2);
+    _introTimer?.cancel();
+    _introIndex = -1;
+    if (mounted) setState(() => _introVisible = false);
+    _scheduleSeekTo(to);
+  }
+
+  /// Pleyerdagi vaqt — FAQAT DAQIQA VA SONIYA.
+  ///
+  /// TALAB (foydalanuvchi): "pleyerdagi vaqt faqat daqiqa va
+  /// soniyalarda ko'rsatilsin; agar video 2 soat bo'lsa pleyer
+  /// 120:00 qilib ko'rsatishi kerak".
+  ///
+  /// Ya'ni soat AJRATILMAYDI — daqiqa 60 dan oshib ketaveradi.
   String _fmt(Duration d) {
-    final h = d.inHours;
-    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final m = d.inMinutes;
     final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
-    return h > 0 ? '$h:$m:$s' : '$m:$s';
+    return '$m:$s';
   }
 
   // ── Fullscreen: alohida sahifaga o'tmaydi — xuddi shu controller
@@ -2282,7 +2468,12 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                       final ctrl = _controller;
                       final resumeAt = ctrl?.value.position;
                       final resumePlaying = ctrl?.value.isPlaying ?? true;
-                      setState(() => _selectedQuality = q);
+                      setState(() {
+                        _selectedQuality = q;
+                        // Foydalanuvchi ATAYLAB tanladi — endi
+                        // tarixdagi eski sifat ustidan yozmaydi.
+                        _qualityChosenByUser = true;
+                      });
                       _playEpisode(
                         ep,
                         resumeAt: resumeAt,
@@ -2368,8 +2559,12 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   }
 
   Widget _buildNormalScreen() {
-    final name = widget.season['nomi'] ?? '';
-    final tavsif = widget.season['tavsif'] ?? '';
+    // Nom va tavsif AVVAL `_info` dan (to'liq qator — serverdan
+    // yoki oflaynda diskdagi nusxadan), keyin ekranga kelgan
+    // qatordan. Tarixdan ochilganda `widget.season` da tavsif
+    // umuman bo'lmaydi.
+    final name = _seasonStr('nomi');
+    final tavsif = _seasonStr('tavsif');
     // Video ostidagi "N-qism / N-bo'lim / yil / janr" yorliqlari OLIB
     // TASHLANDI (foydalanuvchi talabi): qism raqami endi pastdagi
     // boshqaruvda ("N-qism" tugmalari orasida) ko'rinadi, yil va janr
@@ -2558,9 +2753,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     final ep = _currentEp;
     if (ep == null) return const SizedBox(height: 8);
 
-    final bolim = int.tryParse(widget.season['bolim_id']?.toString() ?? '') ??
-        int.tryParse(widget.season['season_id']?.toString() ?? '') ??
-        0;
+    final bolim = _seasonNum('bolim_id') > 0
+        ? _seasonNum('bolim_id')
+        : _seasonNum('season_id');
     final num_ = _epNumOf(ep);
     final views = (ep['views_total'] as num?)?.toInt() ?? 0;
     final watchMs = (ep['watch_ms_total'] as num?)?.toInt() ?? 0;
@@ -2752,25 +2947,45 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
               ),
             ),
 
-          // ── KUTISH HALQASI: KONTROLLARDAN MUSTAQIL ────────────
+          // ── HALQA VA TUGMA: BITTA QATLAM ──────────────────────
           //
-          // TALAB: "play/pause atrofida aylanadigan progress chizig'i
-          // KUTISH VAQTIDA HAR DOIM ko'rinishi kerak — qolgan pleyer
-          // tugmalari esa chiqmasin".
+          // TOPILGAN XATO (foydalanuvchi: "pleyerda sek qilganda
+          // aylanadigan progress chizig'idan IKKITA chiqib
+          // qolyapti, bitta bo'lishi kerak edi").
           //
-          // Muammo shunda ediki, halqa `_buildControls` ichida
-          // joylashgan va butun kontrollar paneli bilan birga
-          // yashirinardi: 3 soniyadan keyin kontrollar ketishi bilan
-          // buferlash/sek aylanasi ham ko'rinmay qolardi va ekran
-          // "qotib qolgandek" tuyulardi.
+          // Sabab: halqa IKKI joyda chizilardi — kontrollar
+          // ichidagi tugma atrofida va kontrollar yashiringandagi
+          // alohida qatlamda. Ular `_showControls` bo'yicha
+          // almashardi, LEKIN kontrollar `AnimatedOpacity` bilan
+          // 200 ms so'nadi: bayroq o'zgargan zahoti ikkinchi halqa
+          // chiqar, birinchisi esa hali so'nib ulgurmagan bo'lardi.
+          // Ustiga ikkovi HAR XIL joyda turardi (biri kontrollar
+          // ustunining o'rtasida, ikkinchisi ekran markazida) —
+          // shu sabab ular ustma-ust ham tushmasdi va aniq ikkita
+          // halqa bo'lib ko'rinardi.
           //
-          // Endi kutish holati uchun ALOHIDA qatlam bor: u faqat
-          // HALQANI chizadi (ikonkasiz, tugmalarsiz) va faqat
-          // kontrollar yashiringan paytda ishlaydi — kontrollar
-          // ko'ringanda halqani `_centerButton` o'zi chizadi, ya'ni
-          // ikkitasi hech qachon ustma-ust tushmaydi.
+          // Endi play/pause tugmasi ham, halqa ham SHU YAGONA
+          // qatlamda: joyi har doim bir xil (ekran markazi),
+          // chizuvchi bitta. Kontrollar ichida bu tugma YO'Q —
+          // u yerda faqat tugma egallaydigan bo'sh joy qoldi.
+          //
+          // Nima ko'rinishi holatga bog'liq:
+          //
+          //   * kontrollar ochiq   -> ikonka + progress halqasi;
+          //   * kutish (buferlash, sek, tayyorlash) -> AYLANMA
+          //     halqa — kontrollar ochiqmi yoki yopiqmi, farqi yo'q;
+          //   * kontrollar yopiq va kutish yo'q -> hech nima.
+          //
+          // Tap faqat kontrollar ochiq bo'lganda qabul qilinadi:
+          // aks holda videoga bosish kontrollarni chiqarish
+          // o'rniga pauza qilib qo'yardi.
           if (_currentEp != null && _playerError == null)
-            IgnorePointer(child: Center(child: _busyRingOverlay(isFullscreen))),
+            IgnorePointer(
+              ignoring: !_showControls,
+              child: Center(
+                child: _playPauseReactive(),
+              ),
+            ),
 
           // ── FAQAT BITTA AYLANMA CHIZIQ ────────────────────────
           //
@@ -2930,6 +3145,29 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                 },
               ),
             ),
+
+          // ── "O'TKAZIB YUBORISH" — ENG USTKI QATLAM ────────────
+          //
+          // Sek gesture qatlamidan KEYIN (ya'ni uning USTIDA)
+          // turishi SHART: aks holda tugmaga bosilgan tap sek
+          // qatlamiga tushib, video o'tkazish o'rniga oldinga
+          // sakrab ketardi.
+          if (_currentEp != null && _playerError == null && _introVisible)
+            // ── JOYI: CHAP CHET BILAN TUGMA ORASIDA ─────────────
+            //
+            // TALAB (foydalanuvchi): "intro vaqti kelganda chap
+            // tarafdan video cheti va play/pause ning TENG
+            // O'RTASIDAN chiqsin".
+            //
+            // `Alignment(-0.5, 0)` aynan shu nuqta: -1 — videoning
+            // chap cheti, 0 — markaz (play/pause), ya'ni -0.5
+            // ikkovining o'rtasi. Chekka bo'shliq (`Padding`)
+            // ishlatilmaydi — u tugmani markazdan siljitib
+            // yuborardi.
+            Align(
+              alignment: const Alignment(-0.5, 0),
+              child: _SkipIntroButton(onTap: _skipIntro),
+            ),
         ],
       ),
     );
@@ -2988,10 +3226,17 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
 
             const Spacer(),
 
-            // ── O'rta qator: faqat play/pause markazda ──────────────
-            // Sek tugmalari olib tashlandi — ularning o'rniga video
+            // ── O'rta qator: play/pause tugmasi uchun BO'SH JOY ────
+            //
+            // Tugmaning o'zi bu yerda EMAS — u Stack'dagi alohida
+            // qatlamda, ekran markazida turadi (yuqoridagi "HALQA VA
+            // TUGMA: BITTA QATLAM" izohiga qarang). Bu yerda faqat
+            // o'sha tugma egallaydigan balandlik qoldirildi, ya'ni
+            // ustun tuzilishi va pastki panelning o'rni o'zgarmadi.
+            //
+            // Sek tugmalari olib tashlangan — ularning o'rniga video
             // ustida ikki marta bosish orqali ishlaydigan gesture bor.
-            Center(child: _playPauseReactive(size: isFullscreen ? 46 : 40)),
+            SizedBox(height: _playPauseDiameter(isFullscreen)),
 
             const Spacer(),
 
@@ -3015,7 +3260,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   // `isPlaying` false bo'lib qoladi; agar ikonka shunga qarab
   // chizilsa, har bir sekda tugma "play" ga sakrab, ko'zni
   // qamashtirardi. Endi u foydalanuvchining NIYATINI ko'rsatadi.
-  /// Kontrollar YASHIRINGAN paytdagi kutish halqasi.
+  /// Markazdagi play/pause tugmasi VA yagona kutish halqasi.
   ///
   /// Kutish deb hisoblanadigan holatlar (foydalanuvchi uchun bularning
   /// hammasi bir xil: "video hozir tayyorlanmoqda"):
@@ -3023,46 +3268,25 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   ///   * pleyer buferlamoqda (`isBuffering`);
   ///   * sek kutilmoqda yoki bajarilmoqda;
   ///   * progress chizig'i barmoq bilan surilmoqda.
-  Widget _busyRingOverlay(bool isFullscreen) {
-    // Kontrollar ko'rinib turibdi — halqani `_centerButton` chizadi.
-    if (_showControls || _playerLoading) return const SizedBox.shrink();
+  ///
+  /// Ikonka esa faqat kontrollar ochiq bo'lganda ko'rinadi. Ya'ni
+  /// kontrollar yashiringan paytda ekranda faqat aylanma halqa
+  /// qoladi — va u HAR DOIM bitta bo'ladi.
+  Widget _playPauseReactive() {
+    // Yuklanish/tayyorlanish paytida kontrollar majburiy ochiladi,
+    // shu sabab ikonka ham o'shanda ko'rinadi.
+    final showIcon = _showControls || _playerLoading;
 
-    final ctrl = _controller;
-    if (ctrl == null) return _spinnerOnly(isFullscreen);
-
-    return ValueListenableBuilder<VideoPlayerValue>(
-      valueListenable: ctrl,
-      builder: (_, value, __) {
-        final busy = !value.isInitialized ||
-            value.isBuffering ||
-            _isScrubbing ||
-            _seekBusy ||
-            // Videoning keyingi bo'lagi keshga olinayotgan payt ham
-            // "kutish" holati — halqa aylanib turishi kerak.
-            _windowWaiting ||
-            _pendingTarget != null;
-        if (!busy) return const SizedBox.shrink();
-        return _spinnerOnly(isFullscreen);
-      },
-    );
-  }
-
-  /// Faqat aylanma halqa — markazdagi tugma o'lchamida, ikonkasiz.
-  Widget _spinnerOnly(bool isFullscreen) => _PlayerRing(
-        size: _playPauseDiameter(isFullscreen),
-        strokeWidth: 2.6,
-        color: AppColors.accent,
-        trackColor: Colors.transparent,
-        busy: true,
-        progress: 0,
-      );
-
-  Widget _playPauseReactive({required double size}) {
     final ctrl = _controller;
     if (ctrl == null) {
       return GestureDetector(
         onTap: _togglePlayPause,
-        child: _centerButton(playing: false, busy: true, progress: 0),
+        child: _centerButton(
+          playing: false,
+          busy: true,
+          progress: 0,
+          showIcon: showIcon,
+        ),
       );
     }
     return ValueListenableBuilder<VideoPlayerValue>(
@@ -3072,6 +3296,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
             value.isBuffering ||
             _isScrubbing ||
             _seekBusy ||
+            // Videoning keyingi bo'lagi keshga olinayotgan payt ham
+            // "kutish" holati — halqa aylanib turishi kerak.
             _windowWaiting ||
             _pendingTarget != null;
         final dur = value.duration.inMilliseconds;
@@ -3084,16 +3310,26 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
             playing: busy ? _intendedPlaying : value.isPlaying,
             busy: busy,
             progress: progress,
+            showIcon: showIcon,
           ),
         );
       },
     );
   }
 
+  /// Halqa + ikonka. HALQANI CHIZADIGAN YAGONA JOY.
+  ///
+  /// | kutish | ikonka | ekranda                        |
+  /// |--------|--------|--------------------------------|
+  /// | ha     | ha     | aylanma halqa + ikonka         |
+  /// | ha     | yo'q   | faqat aylanma halqa            |
+  /// | yo'q   | ha     | progress halqasi + ikonka      |
+  /// | yo'q   | yo'q   | hech nima (bo'sh joy)          |
   Widget _centerButton({
     required bool playing,
     required bool busy,
     required double progress,
+    required bool showIcon,
   }) {
     const iconSize = 40.0;
     const ringPadding = 6.0;
@@ -3104,16 +3340,20 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       child: Stack(
         alignment: Alignment.center,
         children: [
-          _PlayerRing(
-            size: ringSize,
-            strokeWidth: 2.6,
-            color: AppColors.accent,
-            trackColor:
-                busy ? Colors.transparent : Colors.white.withValues(alpha: 0.22),
-            busy: busy,
-            progress: progress,
-          ),
-          _playPauseIcon(playing: playing, size: iconSize),
+          if (busy || showIcon)
+            _PlayerRing(
+              size: ringSize,
+              strokeWidth: 2.6,
+              color: AppColors.accent,
+              trackColor: busy || !showIcon
+                  ? Colors.transparent
+                  : Colors.white.withValues(alpha: 0.22),
+              // Kutish paytida halqa AYLANADI; aks holda u
+              // videoning qayeridaligini ko'rsatadi.
+              busy: busy,
+              progress: showIcon ? progress : 0,
+            ),
+          if (showIcon) _playPauseIcon(playing: playing, size: iconSize),
         ],
       ),
     );
@@ -3226,6 +3466,22 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
 
   static int _epNumOf(Map<String, dynamic> ep) =>
       int.tryParse('${ep['epizod_number'] ?? ''}') ?? 0;
+
+  /// Qismning O'ZGARMAS IDsi (`epizod_db.epizod_id`).
+  ///
+  /// Tomosha tarixi, "davom ettirish" va kadrlar AYNAN shu bilan
+  /// bog'lanadi: qism raqami o'zgarsa ham yozuv joyida qoladi.
+  static int _epIdOf(Map<String, dynamic> ep) =>
+      int.tryParse('${ep['epizod_id'] ?? ''}') ?? 0;
+
+  /// Manzil qaysi sifatga tegishli ('' — topilmadi).
+  static String _qualityOfUrl(Map<String, dynamic> ep, String url) {
+    if (url.isEmpty) return '';
+    for (final k in ['1080p', '720p', '480p', '360p']) {
+      if ((ep['url_$k'] ?? '').toString() == url) return k;
+    }
+    return '';
+  }
 
   /// Epizodni ro'yxatda BARQAROR tanib olish uchun kalit (ochilgan
   /// qismlar shu kalit bilan eslab qolinadi).
@@ -3347,7 +3603,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   //
   // Tartib:
   //   1. tarixdan kelingan bo'lsa — AYNAN o'sha qism, aynan
-  //      o'sha vaqtdan (`widget.startEpizodNumber` / `startAt`);
+  //      o'sha vaqtdan (`widget.startEpizodId` / `startAt`);
   //   2. shu bo'limning tomosha tarixida yozuvi bo'lsa — o'sha
   //      qism, to'xtagan joyidan;
   //   3. aks holda — eng birinchi qism, boshidan.
@@ -3356,16 +3612,28 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   // va birinchi kadr ekranda turadi, "play" bosilishi bilan video
   // darhol ketadi.
   //
-  // OFLAYNDA UMUMAN OCHILMAYDI (foydalanuvchi talabi): pleyer
-  // o'rnida "Ko'rmoqchi bo'lgan qismni tanlang" yozuvi turadi va
-  // foydalanuvchi yuklab olingan qismni o'zi tanlaydi.
+  // OFLAYNDA HAM OCHILADI (2026-09 da o'zgardi): qism to'liq
+  // yuklab olingan bo'lsa. Yuklanmagan bo'lsa pleyer o'rnida
+  // avvalgidek bo'sh joy qoladi va foydalanuvchi yuklab olingan
+  // qismni o'zi tanlaydi.
   void _autoOpenEpisode() {
     if (!mounted || _currentEp != null) return;
     // Internet bor-yo'qligi hali noma'lum — bir zumdan keyin
     // `_watchConnectivity` o'zi qayta chaqiradi.
     if (!_connectivityKnown) return;
-    if (_offline) return;
     if (_orderedEps.isEmpty) return;
+    // ── OFLAYNDA HAM OCHILADI ─────────────────────────────────
+    //
+    // TOPILGAN XATO (foydalanuvchi: "oflayn vaqtda tomosha
+    // tarixidagi kadr ustiga bossa aynan o'sha epizod ochilsin").
+    //
+    // Bu yerda ilgari shunchaki `if (_offline) return;` turardi —
+    // ya'ni internet yo'q bo'lsa pleyer HECH QACHON o'zi qism
+    // ochmasdi, hatto qism to'liq yuklab olingan bo'lsa ham.
+    //
+    // Endi oflaynda ham ochiladi; `_getUrl` allaqachon faqat
+    // TO'LIQ yuklab olingan sifatni beradi, ya'ni ochib
+    // bo'lmaydigan qism baribir ochilmaydi (pastda tekshiriladi).
 
     // MUHIM: birinchi KADRDAN KEYIN ochamiz.
     // `_loadEpisodes` ro'yxatni keshdan o'qiganda bu metod hali
@@ -3374,11 +3642,20 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // controllerni yopish uchun kadr kutadi; buni build o'rtasida
     // qilib bo'lmaydi.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || _currentEp != null || _offline) return;
+      if (!mounted || _currentEp != null) return;
       final eps = _orderedEps;
       if (eps.isEmpty) return;
 
-      final target = _resumeTarget(eps);
+      var target = _resumeTarget(eps);
+      if (_getUrl(target.$1).isEmpty) {
+        // Oflaynda tanlangan qism yuklab olinmagan bo'lishi
+        // mumkin (masalan bo'lim birinchi marta ochilyapti).
+        // Shunday bo'lsa YUKLAB OLINGAN eng oxirgi qism
+        // ochiladi — ro'yxat kamayish tartibida saralangan.
+        final ready = eps.where((e) => _getUrl(e).isNotEmpty);
+        if (ready.isEmpty) return;
+        target = (ready.first, _savedPositionOf(ready.first));
+      }
       // Tarixdan kelingan bo'lsa IJRO ham darhol boshlanadi
       // (foydalanuvchi aynan o'sha qismni bosgan). Bosh sahifadan
       // kelinganda esa, avvalgidek, birinchi kadr ekranda turadi
@@ -3386,7 +3663,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       _playEpisode(
         target.$1,
         resumeAt: target.$2,
-        resumePlaying: widget.startEpizodNumber != null,
+        resumePlaying: widget.startEpizodId != null,
       );
       _centerOnEpisode(target.$1);
     });
@@ -3398,11 +3675,11 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   /// eng birinchi qism ro'yxatning OXIRIDA turadi.
   (Map<String, dynamic>, Duration?) _resumeTarget(
       List<Map<String, dynamic>> eps) {
-    // 1) Tarixdan kelindi.
-    final wanted = widget.startEpizodNumber;
+    // 1) Tarixdan kelindi — qismning IDsi bo'yicha.
+    final wanted = widget.startEpizodId;
     if (wanted != null) {
       for (final e in eps) {
-        if (_epNumOf(e) == wanted) return (e, widget.startAt);
+        if (_epIdOf(e) == wanted) return (e, widget.startAt);
       }
     }
 
@@ -3413,7 +3690,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       final last = WatchHistory.instance.lastOfSeason(animeId, seasonId);
       if (last != null) {
         for (final e in eps) {
-          if (_epNumOf(e) != last.epizodNumber) continue;
+          if (_epIdOf(e) != last.epizodId) continue;
           return (e, _savedPositionOf(e));
         }
       }
@@ -3440,8 +3717,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     final animeId = int.tryParse(widget.season['anime_id']?.toString() ?? '');
     final seasonId = int.tryParse(widget.season['season_id']?.toString() ?? '');
     if (animeId == null || seasonId == null) return null;
-    final saved = WatchHistory.instance
-        .findEpisode(animeId, seasonId, _epNumOf(ep));
+    final saved =
+        WatchHistory.instance.findEpisode(animeId, seasonId, _epIdOf(ep));
     if (saved == null || saved.positionMs <= 0) return null;
     return Duration(milliseconds: saved.positionMs);
   }
@@ -3819,14 +4096,30 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     return int.tryParse(base?.toString() ?? '') ?? 0;
   }
 
+  /// Bo'limning matnli maydoni.
+  ///
+  /// AVVAL `_info` (to'liq qator — serverdan yoki diskdagi
+  /// nusxadan), keyin ekranga kelgan `widget.season`.
+  ///
+  /// Tartib SHUNDAY bo'lishi SHART: tarixdan yoki sevimlilardan
+  /// ochilganda `widget.season` da atigi bir necha maydon bo'ladi
+  /// (anime_id, season_id, nomi, rasm) — studiya, tarjimon, janr
+  /// va tavsif faqat `_info` da bo'ladi. Ilgari bu yerda faqat
+  /// `widget.season` o'qilardi va aynan shu sabab oflaynda (ham
+  /// tarixdan ochilganda) ma'lumotlar bo'sh ko'rinardi.
+  String _seasonStr(String key) {
+    final fresh = _info?.season[key];
+    if (fresh != null && fresh.toString().isNotEmpty) return fresh.toString();
+    return (widget.season[key] ?? '').toString();
+  }
+
   Widget _buildInfoTab(String tavsif) {
-    final studio = (widget.season['studio'] ?? '').toString();
-    final tarjimon = (widget.season['tarjimon'] ?? '').toString();
-    final holati = (widget.season['holati'] ?? '').toString();
-    final turi = (widget.season['turi'] ?? '').toString();
-    final yili = (widget.season['yili'] ?? '').toString();
-    final janri =
-        (_info?.season['janri'] ?? widget.season['janri'] ?? '').toString();
+    final studio = _seasonStr('studio');
+    final tarjimon = _seasonStr('tarjimon');
+    final holati = _seasonStr('holati');
+    final turi = _seasonStr('turi');
+    final yili = _seasonStr('yili');
+    final janri = _seasonStr('janri');
 
     final info = _info;
     final bolim = _seasonNum('bolim_id');
@@ -5092,6 +5385,56 @@ class _RatingSheetState extends State<_RatingSheet> {
 ///
 /// Kuchsiz telefonda oynalar orasida surganda qotish aynan
 /// qayta qurishdan bo'ladi.
+// ══════════════════════════════════════════════════════════════
+//  "O'TKAZIB YUBORISH" TUGMASI
+// ══════════════════════════════════════════════════════════════
+//
+// TALAB (foydalanuvchi): "intro tugmasi HQ tugmasi bilan BIR XIL
+// darajadagi shaffoflikda bo'lsin".
+//
+// Shu sabab ko'rinishi pastki paneldagi `HQ` tugmasidan AYNAN
+// ko'chirilgan: fon oq 15%, chekkasi `white30`, burchagi 7.
+// Ikkovini birga o'zgartiring — aks holda ular ajralib qoladi.
+class _SkipIntroButton extends StatelessWidget {
+  final VoidCallback onTap;
+
+  const _SkipIntroButton({required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      // Tugma atrofidagi kichik bo'sh joy ham tapni qabul qiladi —
+      // barmoq bilan tushish oson bo'lsin.
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
+        decoration: BoxDecoration(
+          // HQ tugmasi bilan bir xil (`_BottomBarState` ga qarang).
+          color: Colors.white.withValues(alpha: 0.15),
+          borderRadius: BorderRadius.circular(7),
+          border: Border.all(color: Colors.white30),
+        ),
+        child: const Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.fast_forward_rounded, size: 15, color: Colors.white),
+            SizedBox(width: 5),
+            Text(
+              'O\'tkazib yuborish',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _KeepAlivePage extends StatefulWidget {
   final Widget child;
   const _KeepAlivePage({required this.child});

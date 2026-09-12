@@ -48,6 +48,24 @@ class HistoryItem {
   final int animeId;
   final int seasonId;
   final int bolimId;
+
+  /// Qismning O'ZGARMAS raqami (`epizod_db.epizod_id`).
+  ///
+  /// ── NEGA KALIT AYNAN SHU (TOPILGAN XATO) ──────────────────
+  ///
+  /// Ilgari yozuv `epizod_number` bo'yicha saqlanardi. Admin
+  /// qism raqamini o'zgartirishi bilan tarixdagi yozuv HECH
+  /// QAYSI qismga tegmay qolardi: kadr yangilanmasdi, "davom
+  /// ettirish" ishlamasdi — foydalanuvchi buni "tarixdagi
+  /// kadrlar qotib qoldi" deb ko'rgan.
+  ///
+  /// `epizodId` qism qo'shilganda bir marta beriladi va hech
+  /// qachon o'zgarmaydi.
+  final int epizodId;
+
+  /// Ko'rsatish uchun qism raqami ("3-qism"). Server buni har
+  /// safar `epizod_db` dan yangilab beradi, ya'ni raqam
+  /// o'zgarsa ro'yxatda ham darhol yangisi ko'rinadi.
   final int epizodNumber;
   final String animeName;
 
@@ -57,6 +75,11 @@ class HistoryItem {
   final String animePhoto;
   final String seasonPhoto;
   final String videoUrl;
+
+  /// Foydalanuvchi shu qismni OXIRGI marta qaysi sifatda ko'rgani
+  /// ("720p"). Keyingi safar internet yoqilganda video aynan shu
+  /// sifatdan davom etadi (foydalanuvchi talabi).
+  final String lastQuality;
   final int positionMs;
   final int durationMs;
 
@@ -74,6 +97,7 @@ class HistoryItem {
     required this.animeId,
     required this.seasonId,
     required this.bolimId,
+    required this.epizodId,
     required this.epizodNumber,
     required this.animeName,
     required this.seasonName,
@@ -82,6 +106,7 @@ class HistoryItem {
     required this.videoUrl,
     required this.positionMs,
     required this.durationMs,
+    this.lastQuality = '',
     this.watchedMs = 0,
     this.viewCount = 0,
     required this.updatedAt,
@@ -115,9 +140,12 @@ class HistoryItem {
   /// ichki `season_id` ishlatiladi).
   int get bolimNumber => bolimId > 0 ? bolimId : seasonId;
 
-  /// Bir xil qismmi (anime + bo'lim + qism).
-  bool sameEpisode(int a, int s, int e) =>
-      animeId == a && seasonId == s && epizodNumber == e;
+  /// Bir xil qismmi (anime + bo'lim + qism IDsi).
+  ///
+  /// Solishtirish RAQAM bo'yicha emas, ID bo'yicha — raqam
+  /// o'zgarishi mumkin, ID esa yo'q.
+  bool sameEpisode(int a, int s, int id) =>
+      animeId == a && seasonId == s && epizodId == id;
 
   /// Kadr fayli uchun kalit — qaysi video va QAYSI MILLISEKUND.
   ///
@@ -138,12 +166,14 @@ class HistoryItem {
         'anime_id': animeId,
         'season_id': seasonId,
         'bolim_id': bolimId,
+        'epizod_id': epizodId,
         'epizod_number': epizodNumber,
         'anime_name': animeName,
         'season_name': seasonName,
         'anime_photo': animePhoto,
         'season_photo': seasonPhoto,
         'video_url': videoUrl,
+        'last_quality': lastQuality,
         'position_ms': positionMs,
         'duration_ms': durationMs,
         'watched_ms': watchedMs,
@@ -161,12 +191,14 @@ class HistoryItem {
       animeId: intOf('anime_id'),
       seasonId: intOf('season_id'),
       bolimId: intOf('bolim_id'),
+      epizodId: intOf('epizod_id'),
       epizodNumber: intOf('epizod_number'),
       animeName: strOf('anime_name'),
       seasonName: strOf('season_name'),
       animePhoto: strOf('anime_photo'),
       seasonPhoto: strOf('season_photo'),
       videoUrl: strOf('video_url'),
+      lastQuality: strOf('last_quality'),
       positionMs: intOf('position_ms'),
       durationMs: intOf('duration_ms'),
       watchedMs: intOf('watched_ms'),
@@ -236,21 +268,23 @@ class WatchHistory extends ChangeNotifier {
   void startEpisode({
     required int animeId,
     required int seasonId,
+    required int epizodId,
     required int epizodNumber,
     required String videoUrl,
+    String quality = '',
     int bolimId = 0,
     String animeName = '',
     String seasonName = '',
     String animePhoto = '',
     String seasonPhoto = '',
   }) {
-    if (animeId <= 0 || epizodNumber <= 0) return;
+    if (animeId <= 0 || epizodId <= 0) return;
     // Oldingi qism yozuvi hali yuborilmagan bo'lsa — avval o'sha
     // yuboriladi, aks holda u yo'qolib ketardi.
     final prev = _pending;
     if (prev != null &&
         (prev['anime_id'] != animeId ||
-            prev['epizod_number'] != epizodNumber ||
+            prev['epizod_id'] != epizodId ||
             prev['season_id'] != seasonId)) {
       unawaited(flush());
     }
@@ -258,7 +292,7 @@ class WatchHistory extends ChangeNotifier {
     //
     // Serverga JAMI vaqt yuboriladi (shu odam shu qismni qancha
     // ko'rgani), shu sabab avvalgi yozuvdan davom etamiz.
-    final before = findEpisode(animeId, seasonId, epizodNumber);
+    final before = findEpisode(animeId, seasonId, epizodId);
 
     // ── QAYSI HOLAT "YANGI KO'RISH" ─────────────────────
     //
@@ -268,7 +302,7 @@ class WatchHistory extends ChangeNotifier {
     final sameEpisode = prev != null &&
         prev['anime_id'] == animeId &&
         prev['season_id'] == seasonId &&
-        prev['epizod_number'] == epizodNumber;
+        prev['epizod_id'] == epizodId;
     if (!sameEpisode) _pendingNewView = true;
 
     // Sifat almashtirilganda shu seansda yig'ilgan vaqt
@@ -279,7 +313,11 @@ class WatchHistory extends ChangeNotifier {
       'anime_id': animeId,
       'season_id': seasonId,
       'bolim_id': bolimId,
+      'epizod_id': epizodId,
       'epizod_number': epizodNumber,
+      // Sifat almashtirilsa oxirgisi yoziladi — keyingi safar
+      // aynan shundan davom etadi.
+      'last_quality': quality,
       'watched_ms': carried > saved ? carried : saved,
       'anime_name': animeName,
       'season_name': seasonName,
@@ -373,11 +411,12 @@ class WatchHistory extends ChangeNotifier {
 
     final animeId = intOf('anime_id');
     final seasonId = intOf('season_id');
-    final epizod = intOf('epizod_number');
-    if (animeId <= 0 || epizod <= 0) return;
+    final epizodId = intOf('epizod_id');
+    if (animeId <= 0 || epizodId <= 0) return;
 
     final list = List<HistoryItem>.from(_items);
-    final at = list.indexWhere((e) => e.sameEpisode(animeId, seasonId, epizod));
+    final at =
+        list.indexWhere((e) => e.sameEpisode(animeId, seasonId, epizodId));
     // Eski yozuvdagi ma'lumot (nom, rasm) yo'qolmasin: pleyer
     // ularning hammasini bilmasligi mumkin.
     final old = at >= 0 ? list[at] : _anyOf(animeId, seasonId);
@@ -388,12 +427,15 @@ class WatchHistory extends ChangeNotifier {
       animeId: animeId,
       seasonId: seasonId,
       bolimId: intOf('bolim_id') > 0 ? intOf('bolim_id') : (old?.bolimId ?? 0),
-      epizodNumber: epizod,
+      epizodId: epizodId,
+      epizodNumber:
+          intOf('epizod_number') > 0 ? intOf('epizod_number') : (old?.epizodNumber ?? 0),
       animeName: pick(strOf('anime_name'), old?.animeName),
       seasonName: pick(strOf('season_name'), old?.seasonName),
       animePhoto: pick(strOf('anime_photo'), old?.animePhoto),
       seasonPhoto: pick(strOf('season_photo'), old?.seasonPhoto),
       videoUrl: pick(strOf('video_url'), old?.videoUrl),
+      lastQuality: pick(strOf('last_quality'), old?.lastQuality),
       positionMs: intOf('position_ms'),
       durationMs: intOf('duration_ms'),
       watchedMs: intOf('watched_ms'),
@@ -472,7 +514,7 @@ class WatchHistory extends ChangeNotifier {
     box.removeWhere((e) =>
         e['anime_id'] == row['anime_id'] &&
         e['season_id'] == row['season_id'] &&
-        e['epizod_number'] == row['epizod_number']);
+        e['epizod_id'] == row['epizod_id']);
     box.add(row);
     // Navbat cheksiz o'smasin.
     final trimmed = box.length > 200 ? box.sublist(box.length - 200) : box;
@@ -576,7 +618,7 @@ class WatchHistory extends ChangeNotifier {
     if (fresh == null) {
       final cached = RustCore.instance.getCachedList(_listKey);
       if (cached != null) {
-        fresh = cached.map(HistoryItem.fromJson).toList();
+        fresh = _fromRows(cached);
       }
     }
 
@@ -584,6 +626,9 @@ class WatchHistory extends ChangeNotifier {
       fresh.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
       _items = fresh;
       _loadedForUser = userId;
+      // Kadrlar fon'da xotiraga ko'chiriladi — ro'yxat ochilganda
+      // ular allaqachon tayyor bo'ladi.
+      unawaited(_warmThumbs());
     }
     _loading = false;
     notifyListeners();
@@ -603,20 +648,51 @@ class WatchHistory extends ChangeNotifier {
     try {
       final cached = RustCore.instance.getCachedList(_listKey);
       if (cached == null || cached.isEmpty) return;
-      final rows = cached.map(HistoryItem.fromJson).toList()
+      final rows = _fromRows(cached)
         ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+      if (rows.isEmpty) return;
       _items = rows;
       _loadedForUser = userId;
+      unawaited(_warmThumbs());
       notifyListeners();
     } catch (_) {
       // Nusxa o'qilmadi — ro'yxat keyin serverdan keladi.
     }
   }
 
+  /// Diskdagi qatorlardan ro'yxat yasaydi.
+  ///
+  /// ── ESKI YOZUVLAR TASHLANADI ───────────────────────────────
+  ///
+  /// Tarix endi `epizod_id` bo'yicha saqlanadi. Ilovaning eski
+  /// versiyasi yozgan qatorlarda bu maydon yo'q (ya'ni 0) —
+  /// ularni qoldirsak hammasi BITTA kalitga (0) tushib,
+  /// bir-birining ustiga yozilardi. Server tomonidagi tarix
+  /// baribir yangi kalit bilan qaytadan to'ldiriladi, shu sabab
+  /// bunday qatorlar shunchaki o'tkazib yuboriladi.
+  List<HistoryItem> _fromRows(List<Map<String, dynamic>> rows) {
+    final out = <HistoryItem>[];
+    for (final r in rows) {
+      final item = HistoryItem.fromJson(r);
+      if (item.epizodId > 0) out.add(item);
+    }
+    return out;
+  }
+
+  /// Shu qism oxirgi marta qaysi sifatda ko'rilgan ('' — noma'lum).
+  ///
+  /// Pleyer video ochishdan oldin shu yerdan so'raydi: foydalanuvchi
+  /// oxirgi marta 720p ko'rgan bo'lsa, keyingi safar ham 720p
+  /// ochiladi (foydalanuvchi talabi).
+  String qualityOf(int animeId, int seasonId, int epizodId) =>
+      findEpisode(animeId, seasonId, epizodId)?.lastQuality ?? '';
+
   /// Aniq bir qismning tarixdagi yozuvi (yo'q — `null`).
-  HistoryItem? findEpisode(int animeId, int seasonId, int epizodNumber) {
+  ///
+  /// Qism RAQAMI bilan emas, o'zgarmas `epizodId` bilan izlanadi.
+  HistoryItem? findEpisode(int animeId, int seasonId, int epizodId) {
     for (final e in _items) {
-      if (e.sameEpisode(animeId, seasonId, epizodNumber)) return e;
+      if (e.sameEpisode(animeId, seasonId, epizodId)) return e;
     }
     return null;
   }
@@ -640,7 +716,7 @@ class WatchHistory extends ChangeNotifier {
   Future<void> remove(HistoryItem item) async {
     _items = _items
         .where((e) =>
-            !e.sameEpisode(item.animeId, item.seasonId, item.epizodNumber))
+            !e.sameEpisode(item.animeId, item.seasonId, item.epizodId))
         .toList();
     _saveDisk();
     notifyListeners();
@@ -651,7 +727,7 @@ class WatchHistory extends ChangeNotifier {
       '_op': 'delete',
       'anime_id': item.animeId,
       'season_id': item.seasonId,
-      'epizod_number': item.epizodNumber,
+      'epizod_id': item.epizodId,
     };
     final token = AuthService.instance.sessionToken;
     if (token == null) return;
@@ -768,6 +844,80 @@ class WatchHistory extends ChangeNotifier {
     return '$dir/thumb_$key.rustbin';
   }
 
+  // ══════════════════════════════════════════════════════════
+  //  KADRLAR OLDINDAN XOTIRAGA OLINADI
+  // ══════════════════════════════════════════════════════════
+  //
+  // Ikki xato ketma-ket tuzatildi va yechim AYNAN shu:
+  //
+  // 1) "Anime bo'yicha oynasidan Qism bo'yicha oynasiga surib
+  //    o'tkazganda birozga qotib turib keyin o'tyabdi."
+  //
+  //    Sabab: qo'shni oyna surish boshlangan zahoti quriladi
+  //    (`allowImplicitScrolling`) va o'sha damda ro'yxatdagi har
+  //    bir qator kadr so'rardi. Kadr esa diskdan SINXRON o'qilib
+  //    shifri ochilardi (`secureLoad` — FFI), ya'ni bu ish UI
+  //    oqimida, aynan surish boshlangan kadrda bajarilardi.
+  //
+  // 2) Birinchi yechim — surish davom etayotganda kadr
+  //    so'rovlarini KUTDIRISH — qotishni oldini oldi, lekin
+  //    rasmlar KECHIKIB chiqadigan bo'ldi ("juda sekin
+  //    yangilanyapti"). Chunki kutish barmoq ko'tarilgunicha
+  //    (fling bilan bir-ikki soniya) davom etardi.
+  //
+  // ── HOZIRGI YECHIM: KUTISH YO'Q, OLDINDAN TAYYOR ──────────
+  //
+  // Ro'yxat o'qilishi bilan diskdagi kadrlar FON'DA xotiraga
+  // ko'chiriladi (`_warmThumbs`) — har bir fayldan keyin kadrga
+  // yo'l beriladi, ya'ni UI qotmaydi. Ro'yxat qurilganda esa
+  // qatorlar kadrni XOTIRADAN oladi (`peekThumb`) — na disk, na
+  // kutish, ya'ni rasm o'sha zahoti chiqadi.
+  //
+  // Shu sabab surish paytidagi qulf endi KERAK EMAS va olib
+  // tashlandi: qulf bo'lmasa ham surish silliq, chunki surish
+  // paytida bajariladigan ish umuman qolmadi.
+
+  /// Xotiraga ko'chirish ketyaptimi (ikki marta boshlanmasin).
+  bool _warming = false;
+
+  /// Diskdagi kadrlarni fon'da xotiraga ko'chiradi.
+  ///
+  /// Ro'yxat o'zgargan sayin chaqiriladi; allaqachon xotirada
+  /// bo'lganlari o'tkazib yuboriladi, ya'ni takroriy chaqiruv
+  /// arzon.
+  Future<void> _warmThumbs() async {
+    if (_warming) return;
+    _warming = true;
+    try {
+      var added = 0;
+      // Ro'yxat ish davomida o'zgarishi mumkin — nusxa olamiz.
+      for (final item in List<HistoryItem>.from(_items)) {
+        final key = item.thumbKey;
+        if (_thumbMemory.containsKey(key)) continue;
+        final path = _thumbPath(key);
+        if (path == null) continue;
+        // Har bir fayldan OLDIN kadrga yo'l beramiz: o'qish
+        // sinxron (FFI + shifr ochish), ya'ni bir yo'la o'nlab
+        // fayl o'qilsa ekran qotardi.
+        await Future<void>.delayed(Duration.zero);
+        try {
+          final saved = RustCore.instance.secureLoad(path, 'thumb:$key');
+          if (saved.isEmpty) continue;
+          _rememberThumb(key, base64Decode(saved));
+          added++;
+          // Har bir kadr tayyor bo'lishi bilan ro'yxat
+          // yangilanadi — foydalanuvchi kutib turmaydi.
+          notifyListeners();
+        } catch (_) {
+          // Buzilgan yozuv — qator posterni ko'rsatadi.
+        }
+      }
+      if (added > 0) notifyListeners();
+    } finally {
+      _warming = false;
+    }
+  }
+
   /// Kadrni beradi: avval xotiradan, keyin diskdan, bo'lmasa
   /// yasaydi. Hech qanday holatda xato tashlamaydi — `null`
   /// qaytsa, ro'yxat posterni ko'rsatadi.
@@ -791,6 +941,20 @@ class WatchHistory extends ChangeNotifier {
   Future<Uint8List?> _makeThumb(HistoryItem item, String key) async {
     final path = _thumbPath(key);
     if (path == null) return null;
+
+    // ── DISKKA QURILISH PAYTIDA CHIQILMAYDI ──────────────────
+    //
+    // Bu metod ro'yxat qurilayotganda (`initState` -> `_load`)
+    // chaqiriladi. Birinchi `await` gacha bo'lgan hamma narsa
+    // SHU ZAHOTI, o'sha kadrning ichida bajariladi — pastdagi
+    // sinxron `secureLoad` esa aynan shu yerda qotishga olib
+    // kelardi. Shu sabab avval kadr yakunlanadi, keyin diskka
+    // chiqiladi.
+    //
+    // Bu bitta kadrlik kechikish, xolos: kadrlarning KO'PCHILIGI
+    // bu yergacha yetib kelmaydi — ular allaqachon xotirada
+    // bo'ladi (`_warmThumbs`).
+    await Future<void>.delayed(Duration.zero);
 
     // 1) Diskda bormi?
     final saved = RustCore.instance.secureLoad(path, 'thumb:$key');

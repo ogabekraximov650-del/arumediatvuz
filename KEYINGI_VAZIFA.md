@@ -13,6 +13,15 @@
 - Foydalanuvchi bilan **faqat o'zbek tilida** gaplashing; texnik
   tushunchalarni oddiy tilda tushuntiring, taxmin qilmang — kodni
   o'qib tasdiqlang.
+- **ISH DAVOMIDA XABAR YOZMANG.** Foydalanuvchi talabi (aynan
+  shunday): "vazifani to'liq tugatmagunincha menga umuman xabar
+  yozma, shunchaki vazifani bajar va oxirida vazifani to'liq
+  tugatgach xabar ber — sababi sen har safar xabar yuborganingda
+  limit kamayadi".
+
+  Ya'ni: "hozir buni qilyapman", "endi buni boshladim", oraliq
+  hisobot — **YO'Q**. Hamma vazifa bajarilib, tekshirilib,
+  push qilingandan keyin BITTA to'liq xabar.
 - Ishni **alohida branch**da qiling, `main`ga to'g'ridan-to'g'ri push
   qilmang. **Istisno:** foydalanuvchi aniq so'rasa (masalan worker
   o'zgarishi darhol deploy bo'lishi kerak bo'lsa) — `main`ga.
@@ -58,6 +67,66 @@ shu sabab har qatorda to'liq manzil (~90 belgi) o'rniga faqat
 fayl nomi (~35 belgi) saqlanadi. Manzil ilovaga berishdan oldin
 `resolve_list` bilan yig'iladi — `epizod_db.url_*` bilan bir xil
 qoida. Yon foyda: domen o'zgarsa eski yozuvlar ishlayveradi.
+
+### KALIT `epizod_id`, RAQAM EMAS (2026-09, TOPILGAN XATO)
+
+TALAB (foydalanuvchi): "watch history jurnaliga epizod raqami
+emas idsi yozilsin — sababi qism raqamini o'zgartirganda tomosha
+tarixidagi kadrlar qotib qoldi, ya'ni ishlamadi".
+
+Sabab aniq edi: `watch_history_db` ning birlamchi kaliti
+`(user_id, anime_id, season_id, epizod_number)` edi. Admin
+"5-qism"ni "6-qism" qilib qo'ysa, tarixdagi yozuv HECH QAYSI
+qismga tegmay qolardi — kadr ham, "davom ettirish" ham ishlamasdi.
+
+Endi kalit `epizod_id` (qism qo'shilganda bir marta beriladi va
+hech qachon o'zgarmaydi). `epizod_number` ustun sifatida qoladi,
+lekin faqat KO'RSATISH uchun; ro'yxatda esa u `epizod_db` dan
+`LEFT JOIN` bilan olinadi, ya'ni raqam o'zgarsa tarixda ham
+darhol yangisi ko'rinadi.
+
+Qo'shilgan ustun: **`last_quality`** — foydalanuvchi shu qismni
+oxirgi marta qaysi sifatda ko'rgani ("720p"). Pleyer qismni
+ochishda shu sifatni tiklaydi (`_restoreQuality`), ya'ni keyingi
+safar internet yoqilganda video AYNAN o'sha sifatdan davom etadi.
+Foydalanuvchi sifatni qo'lda tanlasa — uning tanlovi ustun
+(`_qualityChosenByUser`).
+
+Ilovadagi eski (diskda qolgan) yozuvlarda `epizod_id` yo'q. Ular
+o'qishda TASHLAB YUBORILADI (`WatchHistory._fromRows`) — aks
+holda hammasi bitta kalitga (0) tushib, bir-birining ustiga
+yozilardi.
+
+### JANRLAR: BITTA BO'LIM — BITTA QATOR (2026-09)
+
+TALAB (foydalanuvchi): "hozir tursoda bitta bo'lim uchun 4 yoki
+5 ta qator yozilyabdi, bu esa harajatni oshiradi".
+
+To'g'ri edi: `season_janr` BOG'LOVCHI jadval edi va har bir janr
+uchun alohida qator + alohida `INSERT` ketardi.
+
+Endi u `PRIMARY KEY (anime_id, season_id)` va **`janr_1 ...
+janr_10`** ustunlaridan iborat: bitta bo'lim = bitta qator,
+bitta `INSERT ... ON CONFLICT` so'rovi. Bo'sh ustun = janr yo'q.
+Janr tanlanganda birinchi bo'sh ustunga tushadi (`save_janrs`
+qatorni qaytadan yozadi, ya'ni bu o'z-o'zidan hal bo'ladi).
+
+Nega 10 ta: ro'yxatda jami 37 janr bor, bitta bo'limga odatda
+3-6 tasi qo'yiladi; bo'sh TEXT ustun SQLite'da bir baytdan
+oshmaydi.
+
+**`idx_janr` indeksi OLIB TASHLANDI** — janr 10 ta ustunning
+istalganida bo'lishi mumkin va bitta indeks ularni qamrab
+ololmaydi. Janr bo'yicha filtr bo'limlar ro'yxatini to'liq ko'rib
+chiqadi, lekin bo'limlar soni KICHIK (kontent, foydalanuvchi
+emas) — ya'ni bu arzon, yutuq esa har bo'limga bitta yozuv.
+
+### `epizod_db`: `intro_1 ... intro_10`
+
+Openingni o'tkazib yuborish oraliqlari — 5 ta JUFTLIK
+(`intro_1`/`intro_2` — 1-oraliq boshi va oxiri, ... `intro_9`/
+`intro_10` — 5-oraliq). Qiymat SONIYADA (matn emas): pleyer har
+kadrda solishtiradi. 0 — oraliq belgilanmagan.
 
 ## VAQT MINTAQASI — UTC+5 (TOSHKENT)
 
@@ -130,14 +199,58 @@ Ikki marta tuzatildi, ikkinchisi yakuniy:
 Hech qanday `X-U` sarlavhasi ham yo'q (yadrodan ham, pleyerdan
 ham olib tashlangan) — manzil ham, kesh kalitlari ham toza.
 
-Sanoq ilovada:
+### UCHINCHI URINISH — YADRO HISOBLAGICHI HAM OLIB TASHLANDI
 
-* `android-template/MainActivity.kt` -> `aru/net` kanali ->
-  `TrafficStats.getUidRxBytes(Process.myUid())`. Bu — tizim
-  yadrosining hisoblagichi, ya'ni ilova HAQIQATAN qabul qilgan
-  bayt: pleyer oqimi, yuklab olish, rasmlar, API — hammasi.
-  Mahalliy `127.0.0.1` uzatmasi bunga KIRMAYDI.
-* `lib/services/traffic_service.dart` — har 60 soniyada (va
+Bir muddat hisob Android yadrosidan olindi
+(`TrafficStats.getUidRxBytes`). U ham NOTO'G'RI chiqdi.
+
+TOPILGAN XATO (foydalanuvchi: "ilova trafikni xato hisoblayapti —
+ilova ICHIDA aylanayotgan trafikni ham hisoblayapti").
+
+`getUidRxBytes` ilovaning UID'i ostidagi HAMMA soketni sanaydi,
+shu jumladan MAHALLIY (`127.0.0.1`) uzatmani ham. Pleyer esa
+videoni tarmoqdan emas, ilovaning O'Z kesh-serveridan oladi.
+Natija:
+
+* bitta video IKKI MARTA sanalardi — bir marta Rust yadrosi uni
+  workerdan tortib olganda, ikkinchi marta o'sha baytlar pleyerga
+  mahalliy uzatilganda;
+* ALLAQACHON yuklab olingan videoni oflayn qayta ko'rganda ham
+  trafik o'sardi — hech qanday bayt tarmoqdan kelmagan bo'lsa ham.
+
+`aru/net` kanali OLIB TASHLANDI (`MainActivity.kt` da endi uning
+o'rnida `aru/storage` — telefon xotirasi uchun).
+
+### HOZIRGI QOIDA: FAQAT TARMOQQA CHIQADIGAN IKKI JOY
+
+TALAB (foydalanuvchi): "ilova faqatgina internet yoniq vaqtda
+worker orqali kelgan baytlarni hisoblashi kerak, ilova
+ichidagilarni emas".
+
+| Manba | Nima sanaladi |
+|---|---|
+| `rust_video_cache_net_bytes` | Rust yadrosi workerdan HAQIQATAN tortib olgan video baytlari |
+| `NetMeter` (`lib/services/net_meter.dart`) | http klienti qabul qilgan bayt: API javoblari, posterlar, avatarlar |
+
+Diskdan o'qish, `127.0.0.1`, keshdan olingan rasm — UMUMAN
+sanalmaydi, chunki ular bu ikki joydan o'tmaydi.
+
+**HAMMA SO'ROV QANDAY QILIB SANOVCHI KLIENTDAN O'TADI.** Ilovada
+14 ta faylda `http.get(...)` bor. Ularni birma-bir o'zgartirish
+qarz bo'lardi (yangi so'rov yozilganda hisobga qo'shishni unutish
+oson), shu sabab `main()` butun ilovani `http.runWithClient`
+zonasida ishga tushiradi — o'shanda `http.get`, `http.post` va
+umuman `Client()` chaqiruvlarining HAMMASI `CountingClient` ni
+oladi. `cached_network_image` ham oddiy `http.Client()` yaratadi,
+ya'ni posterlar ham shu hisobga tushadi.
+
+**MUHIM:** `CountingClient` ning ICHKI klienti `Zone.root.run`
+bilan yaratiladi. Aks holda u o'zini o'zi chaqirib, cheksiz
+rekursiyaga tushadi.
+
+Qolgani o'zgarmadi:
+
+* `lib/services/traffic_service.dart` — har 30 soniyada (va
   ilova fon'ga o'tganda) o'lchov oladi, FARQNI yig'indiga
   qo'shadi va diskka yozadi (`list_traffic.rustbin`, shifrlangan).
   Yozuvda hisob raqami ham bor: hisob almashsa eski yig'indi
@@ -146,15 +259,9 @@ Sanoq ilovada:
   bitta so'rov. Worker `note_traffic` bilan umumiy chelaklarga
   va `users_db.traffic_bytes` ga qo'shadi. Javob 200 bo'lsa
   ilova yuborilgan miqdorni ayiradi va qaytadan sanay boshlaydi.
-* Telefon o'chib yonganda tizim hisoblagichi nolga tushadi —
-  bu aniqlanadi (yangi qiymat eskisidan kichik) va o'sha
-  qiymatning o'zi farq sifatida olinadi.
-
-**Har qanday bayt sanaladi.** `getUidRxBytes` — ilovaning UID'i
-ostidagi HAMMA soket: video oqimi, yuklab olish, posterlar,
-avatarlar, baza/API so'rovlari, TCP va UDP, sarlavhalari bilan.
-Yadro hisoblagichi bo'lmagan qurilmada zaxira yo'l ishlaydi
-(Rust yadrosining video hisobi).
+* Ilova qayta ishga tushganda ikkala hisoblagich ham nolga
+  tushadi — bu aniqlanadi (yangi qiymat eskisidan kichik) va
+  o'sha qiymatning o'zi farq sifatida olinadi.
 
 **Profil sahifasidagi "Trafik" = Turso'dagi raqam + ilovada
 hozircha yuborilmagan yig'indi.** Talab: hisobot sutkada bir
@@ -300,8 +407,277 @@ bilan qaytariladi ("2-bo'lim allaqachon mavjud").
 
 Janrlar `lib/data/janrlar.dart` da (37 ta, alifbo tartibida) va
 bo'lim qo'shish oynasida **tugma** ko'rinishida. Bazada
-`season_janr` bog'lovchi jadvalida saqlanadi; `season_db.janri`
-esa faqat ko'rsatish uchun matn nusxasi.
+`season_janr` jadvalining `janr_1 ... janr_10` ustunlarida
+saqlanadi (bitta bo'lim — bitta qator, yuqoridagi "JANRLAR"
+bo'limiga qarang); `season_db.janri` esa faqat ko'rsatish uchun
+matn nusxasi.
+
+## OPENINGNI O'TKAZIB YUBORISH (2026-09)
+
+TALAB (foydalanuvchi): qism qo'shishda `5:14  6:44` deb yozilsa,
+video 5:14 ga kelganda "O'tkazib yuborish" tugmasi chiqsin;
+bosilsa video 6:44 ga sakrasin.
+
+| Qayerda | Nima |
+|---|---|
+| Baza | `epizod_db.intro_1 ... intro_10` — 5 juftlik, MATN (`"5:14"`) |
+| Qoida | `lib/services/intro_times.dart` — matn <-> millisekund |
+| Admin | `add_epizod_screen.dart` — video yuklash oynalari tagida 2 ustun × 5 qator |
+| Pleyer | `video_player_screen.dart` -> `_updateIntro` / `_skipIntro` |
+
+### VAQT MATN BO'LIB SAQLANADI (soniya EMAS)
+
+TALAB (foydalanuvchi): "intro vaqtini 5:14 va 6:44 qilib
+yoziladigan qil, soniya bilan emas".
+
+Ilgari bazada SONIYA turardi va admin oynasi uni ikki marta
+o'girardi (yozishda matn -> soniya, ochishda soniya -> matn).
+Bitta ortiqcha qatlam, bitta ortiqcha xato manbai.
+
+Endi bazada ham, ekranda ham AYNAN bir xil matn. Pleyer uni qism
+ochilganda BIR MARTA millisekundga o'giradi (`introRangesOf`) va
+keyin tayyor songa qaraydi — ya'ni tezlikka ta'sir qilmaydi.
+
+O'girish qoidasi IKKI joyda kerak (admin oynasi va pleyer), shu
+sabab u alohida faylda: `lib/services/intro_times.dart`
+(`test/intro_times_test.dart` bilan qo'riqlanadi). Nusxa
+ko'chirmang — ikkovi bir kun ajralib qoladi.
+
+Tushuniladigan yozuvlar: `5:14`, `05:14`, `1:02:03`, `314`
+(yalang soniya — eski yozuvlar). Xato yozuv oraliqni shunchaki
+"belgilanmagan" qiladi, PLEYERNI YIQITMAYDI.
+
+### TOPILGAN XATO: INTRO CHIQMASDI
+
+Foydalanuvchi: "pleyerda intro chiqmayapti".
+
+Sabab intro kodida emas edi. Pleyer qismlar ro'yxatini AVVAL
+diskdagi keshdan o'qiydi va darhol qism ochadi; keyin serverdan
+yangi ro'yxat keladi va `_episodes` almashtiriladi — LEKIN
+`_currentEp` ESKI (kesh) obyekt bo'lib qolardi.
+
+Ya'ni admin qismga endi qo'shgan intro vaqtlari ochiq qismda
+ko'rinmasdi. Xuddi shu narsa yangi qo'shilgan sifat yoki
+o'zgargan nom uchun ham amal qilardi.
+
+Yechim: `_adoptFreshEpisode()` — yangi ro'yxat kelganda ochiq
+qism AYNAN o'sha qismning yangi qatori bilan almashtiriladi
+(`epizod_id` bo'yicha) va intro oraliqlari qaytadan o'qiladi.
+
+### TUGMANING KO'RINISHI VA JOYI
+
+TALAB (foydalanuvchi): "intro tugmasi HQ tugmasi bilan BIR XIL
+darajadagi shaffoflikda bo'lsin va intro vaqti kelganda chap
+tarafdan video cheti va play/pause ning TENG O'RTASIDAN chiqsin".
+
+* ko'rinishi pastki paneldagi `HQ` tugmasidan AYNAN ko'chirilgan:
+  fon oq 15%, chekkasi `white30`, burchagi 7. **Ikkovini birga
+  o'zgartiring** — aks holda ular ajralib qoladi;
+* joyi — `Alignment(-0.5, 0)`: -1 videoning chap cheti, 0 markaz
+  (play/pause), ya'ni -0.5 ikkovining o'rtasi. Chekka bo'shliq
+  (`Padding`) ISHLATILMAYDI — u tugmani o'rtadan siljitardi.
+
+Ko'rinish qoidasi (foydalanuvchi aniq aytgan):
+
+* tugma vaqti kelganda chiqadi va **5 soniyadan** keyin o'zi
+  yashirinadi — ekranni to'sib turmaydi;
+* video ustiga bosilsa pleyer tugmalari bilan BIRGA qayta
+  chiqadi (`_onTapVideo` -> `_showIntroButton`).
+
+Tugma Stack'ning ENG USTIDA, sek gesture qatlamidan KEYIN
+turadi — aks holda unga bosilgan tap sek qatlamiga tushib,
+video oldinga sakrab ketardi.
+
+## PLEYERDAGI VAQT — FAQAT DAQIQA VA SONIYA
+
+TALAB (foydalanuvchi): "pleyerdagi vaqt faqat daqiqa va
+soniyalarda ko'rsatilsin; agar video 2 soat bo'lsa pleyer
+`120:00` qilib ko'rsatishi kerak".
+
+Soat AJRATILMAYDI — daqiqa 60 dan oshib ketaveradi. Ikki joyda
+bir xil qoida: `video_player_screen.dart` -> `_fmt` va
+`history_screen.dart` -> `_clock` (tarix oynasidagi vaqt ham
+shunday — foydalanuvchi so'ragan).
+
+## AYLANMA HALQA — BITTA, BITTA JOYDA
+
+TOPILGAN XATO (foydalanuvchi: "pleyerda sek qilganda aylanadigan
+progress chizig'idan IKKITA chiqib qolyapti").
+
+Sabab: halqa IKKI joyda chizilardi — kontrollar ichidagi tugma
+atrofida (`_centerButton`) va kontrollar yashiringandagi alohida
+qatlamda (`_busyRingOverlay`). Ular `_showControls` bo'yicha
+almashardi, LEKIN kontrollar `AnimatedOpacity` bilan 200 ms
+so'nadi: bayroq o'zgargan zahoti ikkinchi halqa chiqar,
+birinchisi esa hali so'nib ulgurmagan bo'lardi. Ustiga ikkovi
+har xil joyda turardi (biri kontrollar ustunining o'rtasida,
+ikkinchisi ekran markazida) — shu sabab ustma-ust ham tushmasdi.
+
+Endi play/pause tugmasi ham, halqa ham Stack'dagi BITTA
+qatlamda (ekran markazida), `_busyRingOverlay` va `_spinnerOnly`
+OLIB TASHLANGAN. Kontrollar ichida tugma yo'q — u yerda faqat
+tugma egallaydigan bo'sh joy (`SizedBox`) qoldi.
+
+| kutish | ikonka | ekranda |
+|---|---|---|
+| ha | ha | aylanma halqa + ikonka |
+| ha | yo'q | faqat aylanma halqa |
+| yo'q | ha | progress halqasi + ikonka |
+| yo'q | yo'q | hech nima |
+
+**Bu tuzilishni buzmang:** halqani yana ikkinchi joyda chizsangiz
+muammo o'sha zahoti qaytadi.
+
+## OFLAYNDA — FAQAT YUKLAB OLINGANLARI
+
+TALAB (foydalanuvchi):
+
+* bosh sahifada faqat yuklab olingan qismi bor anime kartochkasi;
+* tomosha tarixi va sevimlilardan ham faqat yuklab olingan
+  epizodi borlari ko'rinsin, **qolganlari yashirilsin LEKIN
+  XOTIRADA TURSIN**.
+
+Ya'ni hech narsa O'CHIRILMAYDI — ro'yxat faqat filtrlanadi va
+internet yoqilishi bilan hammasi qaytadi.
+
+`lib/services/offline_library.dart` — bitta indeks, uchta ekran:
+
+1. diskdagi bo'limlar ro'yxatidan har bir bo'limning qismlari
+   o'qiladi (`eps_<anime>_<season>`);
+2. hamma sifat manzillari BITTA ro'yxatga yig'iladi;
+3. `videoStats` bitta chaqiruvda hammasining holatini beradi —
+   u faqat XOTIRADAGI hisobni o'qiydi, diskka chiqmaydi.
+
+**NEGA HAR QATORDA `videoIsComplete` CHAQIRILMAYDI:** u DISKKA
+chiqadi (bir marta skanerlaydi) va ro'yxat chizilayotganda buni
+qilish kadrlarni tashlab yuborardi.
+
+**NEGA `videoStats` IKKI MARTA SO'RALADI:** Rust tomoni diskni
+fon oqimida skanerlaydi, ya'ni ilova endi ochilganda birinchi
+javob bo'sh bo'lishi mumkin. Bo'sh javobni "hech narsa
+yuklanmagan" deb qabul qilsak, oflayn bosh sahifa bir zumga
+bo'm-bo'sh ko'rinardi.
+
+Internet bor-yo'qligi ham SHU YERDA (`isOffline`) — uchta ekran
+bir xil haqiqatga qaraydi, uchta alohida obuna ochilmaydi.
+
+**Indeks hali yig'ilmagan bo'lsa (`ready == false`) hech narsa
+yashirilmaydi** — aks holda oflaynda ochilgan ilova bir lahzaga
+bo'm-bo'sh ko'rinardi.
+
+## OFLAYNDA PLEYER
+
+Ikki xato tuzatildi:
+
+1. **"Ma'lumot" oynasi bo'sh turardi.** `SeasonService.load` da
+   disk keshi yo'q edi. Endi javob diskka yoziladi
+   (`season_<a>_<s>`) va oflaynda o'sha ko'rsatiladi; pleyer uni
+   tarmoq kutmasdan, DARHOL o'qiydi (`SeasonService.fromDisk`).
+   Ustiga ekrandagi maydonlar avval `_info` dan olinadi
+   (`_seasonStr` / `_seasonNum`): tarixdan ochilganda
+   `widget.season` da atigi bir necha maydon bo'ladi.
+2. **Tarixdagi kadr bosilganda qism ochilmasdi.**
+   `_autoOpenEpisode` ichida to'g'ridan-to'g'ri
+   `if (_offline) return;` turardi. Endi oflaynda ham ochiladi;
+   ochib bo'lmaydigan qism (hech bir sifati to'liq emas)
+   `_getUrl` bo'sh qaytargani uchun o'zi chetlab o'tiladi.
+
+Tarixdan ochish endi qism RAQAMI bilan emas, `startEpizodId`
+bilan bo'ladi.
+
+## TARIX KADRLARI: DARHOL VA QOTISHSIZ
+
+Ikki xato ketma-ket tuzatildi va yechim AYNAN hozirgisi.
+
+**1-xato.** "Anime bo'yicha oynasidan Qism bo'yicha oynasiga surib
+o'tkazganda birozga qotib turib keyin o'tyabdi."
+
+Sabab: qo'shni oyna surish BOSHLANGAN zahoti quriladi
+(`allowImplicitScrolling`) va o'sha kadrda ro'yxatdagi har bir
+qator kadr so'rardi. Kadr esa diskdan SINXRON o'qilib shifri
+ochilardi (`secureLoad` — FFI), ya'ni bu ish UI oqimida, aynan
+surish boshlangan kadrda bajarilardi.
+
+**2-xato (birinchi yechim keltirib chiqargan).** Birinchi yechim
+surish davom etayotganda kadr so'rovlarini KUTDIRARDI
+(`holdThumbs` / `releaseThumbs`). Qotish yo'qoldi, lekin rasmlar
+kechikib chiqadigan bo'ldi — foydalanuvchi: "juda sekin
+yangilanyapti, tez va real-time'da yangilanishi kerak". Chunki
+kutish barmoq ko'tarilgunicha (fling bilan bir-ikki soniya)
+davom etardi.
+
+**HOZIRGI YECHIM: KUTISH YO'Q, OLDINDAN TAYYOR.**
+
+Ro'yxat o'qilishi bilan diskdagi kadrlar FON'DA xotiraga
+ko'chiriladi (`WatchHistory._warmThumbs`) — har bir fayldan oldin
+kadrga yo'l beriladi, ya'ni UI qotmaydi, va har bir kadr tayyor
+bo'lishi bilan ro'yxat yangilanadi. Ro'yxat qurilganda esa
+qatorlar kadrni XOTIRADAN oladi (`peekThumb`): na disk, na
+kutish.
+
+Shu sabab surish paytidagi qulf endi KERAK EMAS va OLIB
+TASHLANDI — qulfsiz ham surish silliq, chunki surish paytida
+bajariladigan ish umuman qolmadi.
+
+**Bu tartibni buzmang:** kadrni ro'yxat qurilayotganda diskdan
+sinxron o'qishga qaytsangiz 1-xato, kutdirish qulfini
+qaytarsangiz 2-xato o'sha zahoti qaytadi.
+
+## PROFIL: XOTIRA OYNASI
+
+TALAB (foydalanuvchi): "ilovada qanaqa ma'lumot bo'lsa hammasi
+tartib bilan bo'lib yozib chiqilsin, masalan `video 2MB 50%`;
+yoki anime kartochkasi, tomosha tarixi, database ma'lumotlari va
+hokazolar hajmi va jami hajmdan egallab turgan foizi bilan
+ko'rsatilsin".
+
+Oynada: o'ng yuqorida JAMI hajm, tagida bitta ko'p rangli chiziq
+va toifalar ro'yxati (kattasidan kichigiga):
+
+```
+● Videolar             120,4 MB   93.10%
+● Posterlar              6,2 MB    4.79%
+● Tarix kadrlari         1,9 MB    1.47%
+...
+```
+
+### OLIB TASHLANGANLAR (foydalanuvchi talabi)
+
+* "video + rasm" yozuvi — endi toifalar o'zi aytib turadi;
+* **"Tozalash" tugmasi** — "endi keragi yo'q";
+* **"Telefon xotirasi 0.00% band"** — "endi keragi yo'q".
+
+Shu sabab `storage_usage.dart` da telefon xotirasini o'qiydigan
+kanal ham (`aru/storage`, `MainActivity.kt`), tozalash ham YO'Q.
+Kerak bo'lsa ular git tarixidan olinadi.
+
+### QAYSI FAYL QAYSI TOIFAGA KIRADI
+
+Ilova uchta papkadan foydalanadi: `<support>` (video bo'laklari),
+`<temp>` (posterlar keshi va vaqtinchalik nusxalar) va
+`<hujjatlar>` (hisob papkalari — ro'yxat keshlari, tarix
+kadrlari).
+
+Fayl nomi qoidasi (`rust_bridge.dart`):
+
+| Nom | Toifa |
+|---|---|
+| `video_byte_cache/**` | Videolar |
+| `libCachedImageData/**` | Posterlar |
+| `thumb_*.rustbin` | Tarix kadrlari |
+| `anime_cache.rustbin`, `list_seasons_*`, `list_season_*` | Anime kartochkalari |
+| `list_eps_*` | Qismlar ro'yxati |
+| `list_watch_history*`, `list_watch_positions*` | Tomosha tarixi |
+| `list_favorites` | Sevimlilar |
+| `list_app_stats`, `list_my_stats`, `list_traffic` | Statistika |
+| `<temp>` dagi qolgani | Vaqtinchalik fayllar |
+| qolgani | Boshqa |
+
+Yangi kesh kaliti qo'shsangiz `_labelOfDocFile` ga ham qo'shing —
+aks holda u "Boshqa" ga tushib qoladi.
+
+Papkalarni sanash mingga yaqin fayl statistikasi — shu sabab u
+`Isolate.run` ichida bajariladi va UI oqimi qotmaydi.
 
 ## BREND: ARU / AniRaxUz
 
@@ -452,9 +828,10 @@ holatga o'tadi.
 iloji boricha kamroq so'rov bilan").
 
 Jadval `watch_history_db`: `user_id + anime_id + season_id +
-epizod_number` birlamchi kalit, ya'ni bitta qism uchun HAR DOIM
-bitta qator. `(user_id, updated_at DESC)` indeksi — ro'yxat aynan
-shu tartibda so'raladi.
+epizod_id` birlamchi kalit (RAQAM emas — yuqoridagi "KALIT
+`epizod_id`" bo'limiga qarang), ya'ni bitta qism uchun HAR DOIM
+bitta qator. `(user_id, deleted_at, updated_at DESC)` indeksi —
+ro'yxat aynan shu tartibda so'raladi.
 
 ### KIRMAGAN FOYDALANUVCHI ANIMENI OCHOLMAYDI
 
@@ -690,15 +1067,21 @@ vaqt tomosha qilingani va qachon qo'shilgani.
 `_autoOpenEpisode` / `_resumeTarget` (`video_player_screen.dart`):
 
 1. tarixdan kelingan bo'lsa — AYNAN o'sha qism, o'sha vaqtdan
-   (`startEpizodNumber` / `startAt`);
+   (`startEpizodId` / `startAt`);
 2. shu bo'limning tarixda yozuvi bo'lsa — o'sha qism, to'xtagan
    joyidan;
 3. aks holda — eng birinchi qism.
 
-**Oflaynda pleyer UMUMAN ochilmaydi** (foydalanuvchi talabi):
-o'rnida "Ko'rmoqchi bo'lgan qismni tanlang" yozuvi turadi.
-Shu sabab avtomatik ochish internet holati ANIQLANGUNCHA
-kutadi (`_connectivityKnown`).
+Sifat ham tiklanadi: tarixdagi `last_quality` shu qismda mavjud
+bo'lsa, video aynan o'sha sifatdan ochiladi (`_restoreQuality`).
+
+**OFLAYNDA HAM OCHILADI (2026-09 da o'zgardi).** Ilgari bu yerda
+`if (_offline) return;` turardi va tarixdagi kadr bosilganda
+oflaynda hech nima ochilmasdi. Endi qism to'liq yuklab olingan
+bo'lsa ochiladi; aks holda `_getUrl` bo'sh qaytaradi va pleyer
+o'rnida "Ko'rmoqchi bo'lgan qismni tanlang" yozuvi qoladi.
+Avtomatik ochish internet holati ANIQLANGUNCHA baribir kutadi
+(`_connectivityKnown`) — qaysi sifat ochilishi shunga bog'liq.
 
 Qism qo'lda tanlanganda ham nuqta `_savedPositionOf` orqali
 topiladi: avval `WatchProgress` (aniqroq), bo'lmasa tarixdagi
