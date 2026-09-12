@@ -516,6 +516,10 @@ o'tkazib yuboriladi, agar o'chiq bo'lsa qo'lda o'tkazishi kerak".
   ochiq bo'lganda ko'rinadi (video ko'rilayotganda ekran toza
   qolishi kerak). Fullscreen sarlavhasi uning tagiga kirmasin
   deb yuqori qatorda 44 px joy qoldirilgan;
+* bosilganda uch nuqta ostida KICHIK OYNA ochiladi va ichida
+  yoqib-o'chiradigan tugma turadi (`toggle_on` / `toggle_off`
+  ko'rinishida): bir marta bosilsa yonadi, yana bir marta
+  bosilsa o'chadi — foydalanuvchi aynan shunday so'ragan;
 * menyu ochiq turganda kontrollar YASHIRINMAYDI (`onOpened` ->
   `_hideTimer.cancel()`) — aks holda tugma daraxtdan olib
   tashlanib, ochiq menyu "muallaq" qolardi;

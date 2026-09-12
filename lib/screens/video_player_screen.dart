@@ -5555,19 +5555,22 @@ class _PlayerMenuButton extends StatelessWidget {
           value: 0,
           child: Row(
             children: [
-              Icon(
-                autoSkipIntro
-                    ? Icons.check_box_rounded
-                    : Icons.check_box_outline_blank_rounded,
-                size: 20,
-                color: autoSkipIntro ? AppColors.accent : Colors.white54,
-              ),
-              const SizedBox(width: 10),
               const Expanded(
                 child: Text(
                   'Introni avtomatik o\'tkazish',
                   style: TextStyle(color: Colors.white, fontSize: 13.5),
                 ),
+              ),
+              const SizedBox(width: 10),
+              // YOQIB-O'CHIRADIGAN tugma ko'rinishida (foydalanuvchi
+              // aynan shunday so'ragan): bir marta bosilsa yonadi,
+              // yana bir marta bosilsa o'chadi.
+              Icon(
+                autoSkipIntro
+                    ? Icons.toggle_on_rounded
+                    : Icons.toggle_off_rounded,
+                size: 30,
+                color: autoSkipIntro ? AppColors.accent : Colors.white38,
               ),
             ],
           ),
