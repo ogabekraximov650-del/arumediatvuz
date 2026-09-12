@@ -358,13 +358,21 @@ async fn init_db(env: &Env) {
         //   intro_3 / intro_4   — 2-oraliq,
         //   ... intro_9 / intro_10 — 5-oraliq.
         //
-        // Qiymat — videoning BOSHIDAN hisoblangan SONIYA (butun
-        // son). Matn (`"1:23"`) emas: pleyer har kadrda solishtirib
-        // turadi, ya'ni tayyor son eng tez yo'l. Admin oynasida
-        // baribir `1:23` ko'rinishida yoziladi va shunday
-        // ko'rsatiladi — matnga aylantirish faqat ekranda bo'ladi.
+        // Qiymat — AYNAN admin yozgan MATN: `5:14`, `6:44`
+        // (foydalanuvchi talabi: "intro vaqtini 5:14 va 6:44 qilib
+        // yoziladigan qil, soniya bilan emas").
         //
-        // 0 — "bu oraliq belgilanmagan".
+        // Ilgari bu yerda soniya saqlanardi va admin oynasi uni
+        // ikki marta o'girardi (yozishda -> soniya, ochishda ->
+        // matn). Bitta ortiqcha qatlam, bitta ortiqcha xato
+        // manbai: endi bazada ham, ekranda ham bir xil matn
+        // turadi.
+        //
+        // Pleyer matnni qism ochilganda BIR MARTA millisekundga
+        // o'giradi (`_introsOf`) va keyin tayyor songa qaraydi —
+        // ya'ni bu tezlikka ta'sir qilmaydi.
+        //
+        // Bo'sh satr — "bu oraliq belgilanmagan".
         ("CREATE TABLE IF NOT EXISTS epizod_db (
             anime_id INTEGER, season_id INTEGER, epizod_id INTEGER,
             epizod_number INTEGER, epizod_name TEXT,
@@ -372,11 +380,9 @@ async fn init_db(env: &Env) {
             url_480p TEXT, size_480p TEXT,
             url_720p TEXT, size_720p TEXT,
             url_1080p TEXT, size_1080p TEXT,
-            intro_1 INTEGER DEFAULT 0, intro_2 INTEGER DEFAULT 0,
-            intro_3 INTEGER DEFAULT 0, intro_4 INTEGER DEFAULT 0,
-            intro_5 INTEGER DEFAULT 0, intro_6 INTEGER DEFAULT 0,
-            intro_7 INTEGER DEFAULT 0, intro_8 INTEGER DEFAULT 0,
-            intro_9 INTEGER DEFAULT 0, intro_10 INTEGER DEFAULT 0,
+            intro_1 TEXT, intro_2 TEXT, intro_3 TEXT, intro_4 TEXT,
+            intro_5 TEXT, intro_6 TEXT, intro_7 TEXT, intro_8 TEXT,
+            intro_9 TEXT, intro_10 TEXT,
             views_total INTEGER DEFAULT 0,
             watch_ms_total INTEGER DEFAULT 0,
             created_at INTEGER,
@@ -2290,8 +2296,9 @@ struct EpizodFields {
     name: String,
     /// `url_360p`, `size_360p`, `url_480p`, ... — jadvaldagi tartibda.
     media: [String; 8],
-    /// `intro_1 ... intro_10` — SONIYADA (0 = belgilanmagan).
-    intros: [i64; INTRO_SLOTS],
+    /// `intro_1 ... intro_10` — admin yozgan MATN (`"5:14"`).
+    /// Bo'sh satr = belgilanmagan.
+    intros: [String; INTRO_SLOTS],
 }
 
 /// `epizod_db` dagi intro ustunlari soni — 5 ta juftlik.
@@ -2299,16 +2306,15 @@ const INTRO_SLOTS: usize = 10;
 
 fn epizod_fields(b: &Value) -> EpizodFields {
     let s = |k: &str| b[k].as_str().unwrap_or("").to_string();
-    let mut intros = [0i64; INTRO_SLOTS];
+    // Ilova matn yuboradi (`"5:14"`). Eski versiya son yuborgan
+    // bo'lsa ham yiqilmaydi — u ham matnga aylantiriladi.
+    let mut intros: [String; INTRO_SLOTS] = Default::default();
     for (i, slot) in intros.iter_mut().enumerate() {
-        // Ilova soniyani son sifatida yuboradi. Eski/qo'lda
-        // yuborilgan matn (`"83"`) ham qabul qilinadi.
         let v = &b[format!("intro_{}", i + 1)];
-        *slot = v
-            .as_i64()
-            .or_else(|| v.as_str().and_then(|t| t.trim().parse::<i64>().ok()))
-            .unwrap_or(0)
-            .max(0);
+        *slot = match v.as_str() {
+            Some(t) => t.trim().to_string(),
+            None => v.as_i64().map(|n| n.to_string()).unwrap_or_default(),
+        };
     }
     EpizodFields {
         number: b["epizod_number"].as_i64().unwrap_or(0),
@@ -4463,7 +4469,7 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
                 TursoArg::int(ef.number), TursoArg::text(&ef.name),
             ];
             for m in &ef.media { args.push(TursoArg::text(m)); }
-            for v in &ef.intros { args.push(TursoArg::int(*v)); }
+            for v in &ef.intros { args.push(TursoArg::text(v)); }
             args.push(TursoArg::int(now_ms()));
             let res = turso_exec(&env,
                 "INSERT INTO epizod_db (anime_id,season_id,epizod_id,epizod_number,epizod_name,url_360p,size_360p,url_480p,size_480p,url_720p,size_720p,url_1080p,size_1080p,intro_1,intro_2,intro_3,intro_4,intro_5,intro_6,intro_7,intro_8,intro_9,intro_10,created_at)
@@ -4534,7 +4540,7 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
                                 TursoArg::int(ef.number), TursoArg::text(&ef.name),
                             ];
                             for m in &ef.media { args.push(TursoArg::text(m)); }
-                            for v in &ef.intros { args.push(TursoArg::int(*v)); }
+                            for v in &ef.intros { args.push(TursoArg::text(v)); }
                             args.push(TursoArg::int(aid));
                             args.push(TursoArg::int(sid));
                             args.push(TursoArg::int(eid));

@@ -593,21 +593,20 @@ class _MyStatsGridState extends State<_MyStatsGrid> {
 //  XOTIRA OYNASI
 // ══════════════════════════════════════════════════════════════
 //
-// TALAB (foydalanuvchi): "profil sahifasidagi shaxsiy 4 ta
-// statistika tagiga eniga cho'zilgan oyna qo'sh. Oynaning o'ng
-// yuqori qismida ilovadagi videolar va rasmlar hajmi
-// ko'rsatilsin, tagida tozalash tugmasi bo'lsin — supurgili
-// tozalash tugmasini bossa bir marta so'rasin rostdan ham
-// tozalamoqchiligi haqida.
+// TALAB (foydalanuvchi): "ilovada qanaqa ma'lumot bo'lsa hammasi
+// tartib bilan bo'lib yozib chiqilsin, masalan `video 2MB 50%`;
+// yoki anime kartochkasi, tomosha tarixi, database ma'lumotlari
+// va hokazolar hajmi va jami hajmdan egallab turgan foizi bilan
+// ko'rsatilsin".
 //
-// Chap tarafda ikkita progress chizig'i bo'lsin: bittasi
-// 100.00% foizdan necha foizini video va necha foizi rasm
-// egallab turgani ikki xil rangda ko'rsatilsin. Va tagida
-// telefonning jami xotirasidan 0.00% necha foizidan
-// foydalanayotgani ko'rsatilsin."
+// ── OLIB TASHLANGANLAR (foydalanuvchi talabi) ────────────────
 //
-// Tozalashda TARIX KADRLARIGA tegilmaydi (foydalanuvchi aniq
-// aytgan) — `storage_usage.dart` izohiga qarang.
+//   * "video + rasm" yozuvi;
+//   * "Tozalash" tugmasi;
+//   * "Telefon xotirasi 0.00% band" qatori.
+//
+// Ularning o'rnida FAQAT jami hajm (o'ng yuqorida) va toifalar
+// ro'yxati qoldi. Toifalar `storage_usage.dart` da aniqlanadi.
 
 class _StorageBox extends StatefulWidget {
   const _StorageBox();
@@ -625,66 +624,6 @@ class _StorageBoxState extends State<_StorageBox> {
     unawaited(StorageUsageService.instance.refresh());
   }
 
-  Future<void> _confirmClear() async {
-    final ok = await showDialog<bool>(
-      context: context,
-      barrierColor: Colors.black54,
-      builder: (ctx) => Dialog(
-        backgroundColor: Colors.transparent,
-        insetPadding: const EdgeInsets.symmetric(horizontal: 28),
-        child: Glass(
-          borderRadius: 22,
-          padding: const EdgeInsets.fromLTRB(22, 22, 22, 16),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.cleaning_services_rounded,
-                  size: 42, color: Colors.white70),
-              const SizedBox(height: 12),
-              const Text(
-                'Rostdan ham tozalamoqchimisiz?',
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                    color: Colors.white, fontSize: 15.5, height: 1.4),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'Yuklab olingan videolar va rasmlar keshi o\'chiriladi.\n'
-                'Tomosha tarixidagi kadrlar saqlanib qoladi.',
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                    color: Colors.white.withValues(alpha: 0.6),
-                    fontSize: 12.5,
-                    height: 1.4),
-              ),
-              const SizedBox(height: 18),
-              Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton(
-                      onPressed: () => Navigator.of(ctx).pop(false),
-                      child: const Text('Yo\'q'),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: FilledButton(
-                      onPressed: () => Navigator.of(ctx).pop(true),
-                      style: FilledButton.styleFrom(
-                          backgroundColor: Colors.red.shade600),
-                      child: const Text('Ha, tozalansin'),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-    if (ok == true) await StorageUsageService.instance.clear();
-  }
-
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
@@ -692,141 +631,71 @@ class _StorageBoxState extends State<_StorageBox> {
       builder: (context, _) {
         final svc = StorageUsageService.instance;
         final u = svc.usage;
+        final total = u.totalBytes;
         return Glass(
           borderRadius: 18,
           blur: 14,
-          padding: const EdgeInsets.fromLTRB(14, 14, 14, 14),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
+          padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // ── CHAP TARAF: PROGRESS CHIZIQLARI ───────────
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Row(
-                      children: [
-                        Icon(Icons.sd_storage_rounded,
-                            size: 15, color: AppColors.accent),
-                        const SizedBox(width: 6),
-                        Text(
-                          'Xotira',
-                          style: TextStyle(
-                            color: Colors.white.withValues(alpha: 0.55),
-                            fontSize: 12,
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 12),
-                    // 1-chiziq: ilova hajmining ichida video va
-                    // rasm ulushi (ikki xil rang, bitta chiziq).
-                    _SplitBar(
-                      videoShare: u.videoShare,
-                      imageShare: u.imageShare,
-                    ),
-                    const SizedBox(height: 7),
-                    Wrap(
-                      spacing: 12,
-                      runSpacing: 3,
-                      children: [
-                        _ShareTag(
-                          color: _kVideoColor,
-                          label: 'Video',
-                          value: _pct(u.videoShare),
-                        ),
-                        _ShareTag(
-                          color: _kImageColor,
-                          label: 'Rasm',
-                          value: _pct(u.imageShare),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 12),
-                    // 2-chiziq: TELEFONNING jami xotirasidan
-                    // qanchasi band.
-                    _SplitBar(
-                      videoShare: u.deviceShare,
-                      imageShare: 0,
-                      fillColor: _kDeviceColor,
-                    ),
-                    const SizedBox(height: 7),
-                    Text(
-                      u.deviceTotal > 0
-                          ? 'Telefon xotirasi: ${_pct(u.deviceShare)} band '
-                              '(${formatBytes(u.deviceTotal)} dan)'
-                          : 'Telefon xotirasi: noma\'lum',
-                      style: TextStyle(
-                        color: Colors.white.withValues(alpha: 0.45),
-                        fontSize: 11,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 14),
-              // ── O'NG TARAF: HAJM VA TOZALASH ──────────────
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                mainAxisSize: MainAxisSize.min,
+              // ── SARLAVHA + JAMI HAJM ──────────────────────
+              Row(
                 children: [
+                  Icon(Icons.sd_storage_rounded,
+                      size: 15, color: AppColors.accent),
+                  const SizedBox(width: 6),
                   Text(
-                    svc.measured ? formatBytes(u.totalBytes) : '—',
+                    'Xotira',
+                    style: TextStyle(
+                      color: Colors.white.withValues(alpha: 0.55),
+                      fontSize: 12,
+                    ),
+                  ),
+                  const Spacer(),
+                  Text(
+                    svc.measured ? formatBytes(total) : '—',
                     style: const TextStyle(
                       color: Colors.white,
                       fontSize: 17,
                       fontWeight: FontWeight.w800,
                     ),
                   ),
-                  const SizedBox(height: 2),
-                  Text(
-                    'video + rasm',
-                    style: TextStyle(
-                      color: Colors.white.withValues(alpha: 0.45),
-                      fontSize: 10.5,
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  GestureDetector(
-                    onTap: svc.isBusy ? null : _confirmClear,
-                    behavior: HitTestBehavior.opaque,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 12, vertical: 8),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.07),
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(
-                            color: Colors.white.withValues(alpha: 0.12)),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          if (svc.isBusy)
-                            const SizedBox(
-                              width: 14,
-                              height: 14,
-                              child: CircularProgressIndicator(
-                                  strokeWidth: 2, color: Colors.white70),
-                            )
-                          else
-                            const Icon(Icons.cleaning_services_rounded,
-                                size: 15, color: Colors.white70),
-                          const SizedBox(width: 6),
-                          const Text(
-                            'Tozalash',
-                            style: TextStyle(
-                                color: Colors.white70,
-                                fontSize: 12,
-                                fontWeight: FontWeight.w600),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
                 ],
               ),
+              const SizedBox(height: 12),
+
+              // ── HAMMA TOIFA BITTA CHIZIQDA ────────────────
+              _StackedBar(usage: u),
+              const SizedBox(height: 12),
+
+              // ── TOIFALAR RO'YXATI ─────────────────────────
+              if (!svc.measured)
+                Text(
+                  'Hisoblanmoqda...',
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.4),
+                    fontSize: 12,
+                  ),
+                )
+              else if (u.slices.isEmpty)
+                Text(
+                  'Ilovada saqlangan ma\'lumot yo\'q',
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.4),
+                    fontSize: 12,
+                  ),
+                )
+              else
+                for (final slice in u.slices) ...[
+                  _StorageRow(
+                    color: storageColorOf(slice.label),
+                    label: slice.label,
+                    size: formatBytes(slice.bytes),
+                    percent: _pct(u.shareOf(slice)),
+                  ),
+                  if (slice != u.slices.last) const SizedBox(height: 7),
+                ],
             ],
           ),
         );
@@ -835,94 +704,121 @@ class _StorageBoxState extends State<_StorageBox> {
   }
 }
 
-/// `12,34%` — ikki kasr xona (foydalanuvchi ko'rsatgan ko'rinish:
-/// `100.00%` / `0.00%`).
+/// `12,34%` — ikki kasr xona (foydalanuvchi ko'rsatgan ko'rinish).
 String _pct(double share) {
   final v = (share.isNaN ? 0.0 : share * 100).clamp(0.0, 100.0);
   return '${v.toStringAsFixed(2)}%';
 }
 
-const Color _kVideoColor = Color(0xFF4CC2FF);
-const Color _kImageColor = Color(0xFFFFC83D);
-const Color _kDeviceColor = Color(0xFF7BD88F);
-
-/// Ikki rangli progress chizig'i.
+/// Toifalar ranglari — `kStorageLabels` tartibida.
 ///
-/// Ikkita alohida chiziq emas, BITTA chiziq ikki rangga
-/// bo'lingan: foydalanuvchi "100.00% foizdan necha foizini video
-/// va necha foizi rasm egallab turgani" deb aynan shuni so'ragan.
-class _SplitBar extends StatelessWidget {
-  final double videoShare;
-  final double imageShare;
-  final Color? fillColor;
+/// Ro'yxat va chiziq AYNAN bir xil rangdan foydalanadi, shu sabab
+/// rang bitta joydan olinadi.
+const List<Color> _kStorageColors = [
+  Color(0xFF4CC2FF), // Videolar
+  Color(0xFFFFC83D), // Posterlar
+  Color(0xFF7BD88F), // Tarix kadrlari
+  Color(0xFFE94560), // Anime kartochkalari
+  Color(0xFFB388FF), // Qismlar ro'yxati
+  Color(0xFF4DD0E1), // Tomosha tarixi
+  Color(0xFFFF8A65), // Sevimlilar
+  Color(0xFF9FA8DA), // Statistika
+  Color(0xFF8D9498), // Vaqtinchalik fayllar
+  Color(0xFF5C6368), // Boshqa
+];
 
-  const _SplitBar({
-    required this.videoShare,
-    required this.imageShare,
-    this.fillColor,
-  });
+Color storageColorOf(String label) {
+  final i = kStorageLabels.indexOf(label);
+  if (i < 0) return _kStorageColors.last;
+  return _kStorageColors[i % _kStorageColors.length];
+}
+
+/// Hamma toifa bitta chiziqda, har biri o'z rangida.
+class _StackedBar extends StatelessWidget {
+  final StorageUsage usage;
+
+  const _StackedBar({required this.usage});
 
   @override
   Widget build(BuildContext context) {
-    final a = videoShare.isNaN ? 0.0 : videoShare.clamp(0.0, 1.0);
-    final b = imageShare.isNaN ? 0.0 : imageShare.clamp(0.0, 1.0 - a);
+    final total = usage.totalBytes;
     return ClipRRect(
       borderRadius: BorderRadius.circular(4),
       child: SizedBox(
         height: 7,
-        child: Row(
-          children: [
-            if (a > 0)
-              Expanded(
-                flex: (a * 1000).round(),
-                child: ColoredBox(color: fillColor ?? _kVideoColor),
+        child: total <= 0
+            ? ColoredBox(color: Colors.white.withValues(alpha: 0.10))
+            : Row(
+                children: [
+                  for (final slice in usage.slices)
+                    Expanded(
+                      // Juda kichik toifa ham ko'rinib tursin
+                      // (aks holda chiziq "bo'sh" bo'lib qolardi).
+                      flex: (usage.shareOf(slice) * 1000).round().clamp(1, 1000),
+                      child: ColoredBox(color: storageColorOf(slice.label)),
+                    ),
+                ],
               ),
-            if (b > 0)
-              Expanded(
-                flex: (b * 1000).round(),
-                child: const ColoredBox(color: _kImageColor),
-              ),
-            // Qolgan bo'sh qism.
-            if (1 - a - b > 0)
-              Expanded(
-                flex: ((1 - a - b) * 1000).round(),
-                child: ColoredBox(color: Colors.white.withValues(alpha: 0.10)),
-              ),
-          ],
-        ),
       ),
     );
   }
 }
 
-/// Chiziq ostidagi rangli yorliq: "● Video 63,40%".
-class _ShareTag extends StatelessWidget {
+/// Bitta qator: "● Videolar        2,0 MB   50.00%".
+class _StorageRow extends StatelessWidget {
   final Color color;
   final String label;
-  final String value;
+  final String size;
+  final String percent;
 
-  const _ShareTag({
+  const _StorageRow({
     required this.color,
     required this.label,
-    required this.value,
+    required this.size,
+    required this.percent,
   });
 
   @override
   Widget build(BuildContext context) {
     return Row(
-      mainAxisSize: MainAxisSize.min,
       children: [
         Container(
           width: 7,
           height: 7,
           decoration: BoxDecoration(color: color, shape: BoxShape.circle),
         ),
-        const SizedBox(width: 5),
+        const SizedBox(width: 7),
+        Expanded(
+          child: Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.72),
+              fontSize: 12.5,
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
         Text(
-          '$label $value',
-          style: TextStyle(
-            color: Colors.white.withValues(alpha: 0.55),
-            fontSize: 11,
+          size,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 12.5,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        const SizedBox(width: 10),
+        SizedBox(
+          // Foizlar bir tekis turadi — ro'yxat "sakramaydi".
+          width: 58,
+          child: Text(
+            percent,
+            textAlign: TextAlign.right,
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.5),
+              fontSize: 12,
+            ),
           ),
         ),
       ],

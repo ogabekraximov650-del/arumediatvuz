@@ -220,41 +220,29 @@ class _HistoryTabState extends State<HistoryTab> {
       children: [
         _Switcher(page: _page, onChanged: _goTo),
         Expanded(
-          // ── SURISH PAYTIDA KADR YUKLANMAYDI ─────────────────
+          // ── SURISH SILLIQ, KADRLAR ESA DARHOL ───────────────
           //
-          // TOPILGAN XATO (foydalanuvchi: "Anime bo'yicha
-          // oynasidan Qism bo'yicha oynasiga surib o'tkazganda
-          // birozga qotib turib keyin o'tyabdi").
+          // Bu yerda ilgari "surish paytida kadr yuklanmasin"
+          // degan qulf bor edi. U qotishni oldini oldi, lekin
+          // rasmlar kechikib chiqadigan bo'ldi (foydalanuvchi:
+          // "juda sekin yangilanyapti").
           //
-          // Sabab: qo'shni oyna surish boshlangan zahoti quriladi
-          // va o'sha kadrda ro'yxatdagi har bir qator kadrini
-          // diskdan SINXRON o'qib, shifrini ochardi.
-          //
-          // Endi surish davom etayotganda kadr so'rovlari kutadi
-          // va barmoq ko'tarilishi bilan davom etadi — xuddi
-          // yuklab olish holati kabi (`WatchHistory.holdThumbs`).
-          child: NotificationListener<ScrollNotification>(
-            onNotification: (n) {
-              if (n.depth != 0) return false; // ichki ro'yxat emas
-              if (n is ScrollStartNotification) {
-                WatchHistory.instance.holdThumbs();
-              } else if (n is ScrollEndNotification) {
-                WatchHistory.instance.releaseThumbs();
-              }
-              return false;
-            },
-            child: PageView(
-              controller: _pages,
-              physics: const BouncingScrollPhysics(),
-              // Qo'shni oyna OLDINDAN quriladi — surish paytida
-              // qurish ishi qolmaydi.
-              allowImplicitScrolling: true,
-              onPageChanged: (i) => setState(() => _page = i),
-              children: const [
-                _HistoryList(byAnime: true),
-                _HistoryList(byAnime: false),
-              ],
-            ),
+          // Endi qulf YO'Q: kadrlar ro'yxat o'qilishi bilan
+          // fon'da xotiraga ko'chiriladi
+          // (`WatchHistory._warmThumbs`), ya'ni surish paytida
+          // bajariladigan ish umuman qolmaydi — ham silliq, ham
+          // darhol.
+          child: PageView(
+            controller: _pages,
+            physics: const BouncingScrollPhysics(),
+            // Qo'shni oyna OLDINDAN quriladi — surish paytida
+            // qurish ishi qolmaydi.
+            allowImplicitScrolling: true,
+            onPageChanged: (i) => setState(() => _page = i),
+            children: const [
+              _HistoryList(byAnime: true),
+              _HistoryList(byAnime: false),
+            ],
           ),
         ),
       ],

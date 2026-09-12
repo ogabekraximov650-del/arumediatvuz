@@ -7,6 +7,7 @@ import 'package:dio/dio.dart';
 import '../services/storage_janitor.dart';
 import '../services/ui_state.dart';
 import '../theme/app_background.dart';
+import '../services/intro_times.dart';
 import '../widgets/glass.dart';
 
 const String _apiBase = 'https://aniraxuzapp.ogabekraximov650.workers.dev';
@@ -78,10 +79,14 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
   //
   // 5 ta qator — o'tkazib yuboriladigan joyi ko'p animelar uchun.
   //
-  // Ekranda vaqt `1:23` ko'rinishida yoziladi, bazaga esa SONIYA
-  // bo'lib ketadi (`intro_1 ... intro_10`): pleyer har kadrda
-  // solishtirib turadi, ya'ni tayyor son eng tez yo'l.
-  static const int _introRows = 5;
+  // Vaqt AYNAN yozilgan ko'rinishida saqlanadi (`5:14`, `6:44`) —
+  // foydalanuvchi talabi: "intro vaqtini 5:14 va 6:44 qilib
+  // yoziladigan qil, soniya bilan emas".
+  //
+  // Ilgari bu yerda ikki marta o'girish bor edi (yozishda matn ->
+  // soniya, ochishda soniya -> matn). Endi u qatlam YO'Q: bazada
+  // ham, ekranda ham bir xil matn turadi. Pleyer matnni qism
+  // ochilganda bir marta millisekundga o'giradi.
   late final List<TextEditingController> _introFrom;
   late final List<TextEditingController> _introTo;
 
@@ -101,15 +106,15 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
     ];
 
     _introFrom =
-        List.generate(_introRows, (_) => TextEditingController());
-    _introTo = List.generate(_introRows, (_) => TextEditingController());
+        List.generate(kIntroRows, (_) => TextEditingController());
+    _introTo = List.generate(kIntroRows, (_) => TextEditingController());
 
     final ep = widget.initialEpizod;
     if (ep != null) {
-      for (var i = 0; i < _introRows; i++) {
+      for (var i = 0; i < kIntroRows; i++) {
         // `intro_1`/`intro_2` — 1-oraliq, `intro_3`/`intro_4` — 2-si...
-        _introFrom[i].text = _clockOf(ep['intro_${i * 2 + 1}']);
-        _introTo[i].text = _clockOf(ep['intro_${i * 2 + 2}']);
+        _introFrom[i].text = introText(ep['intro_${i * 2 + 1}']);
+        _introTo[i].text = introText(ep['intro_${i * 2 + 2}']);
       }
       _numberCtrl.text = (ep['epizod_number'] ?? '').toString();
       _nameCtrl.text = ep['epizod_name'] ?? '';
@@ -135,32 +140,7 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
     super.dispose();
   }
 
-  // ── VAQT: EKRANDA `1:23`, BAZADA 83 ──────────────────────────
 
-  /// Bazadagi soniyani `1:23` ko'rinishiga o'giradi (0 — bo'sh).
-  static String _clockOf(Object? raw) {
-    final sec = int.tryParse('${raw ?? ''}') ?? 0;
-    if (sec <= 0) return '';
-    final m = sec ~/ 60;
-    final s = sec % 60;
-    return '$m:${s.toString().padLeft(2, '0')}';
-  }
-
-  /// `1:23` (yoki `83`) yozuvini SONIYAGA o'giradi.
-  ///
-  /// Noto'g'ri yozilgan bo'lsa 0 — ya'ni oraliq "belgilanmagan"
-  /// bo'lib qoladi va pleyer uni e'tiborsiz qoldiradi.
-  static int _secondsOf(String text) {
-    final t = text.trim();
-    if (t.isEmpty) return 0;
-    if (!t.contains(':')) return (int.tryParse(t) ?? 0).clamp(0, 1 << 30);
-    final parts = t.split(':');
-    if (parts.length != 2) return 0;
-    final m = int.tryParse(parts[0].trim()) ?? 0;
-    final s = int.tryParse(parts[1].trim()) ?? 0;
-    if (m < 0 || s < 0) return 0;
-    return m * 60 + s;
-  }
 
   // ── Fayl tanlash va B2'ga yuklash (Dio — real progress) ─────────
   Future<void> _pickAndUpload(_QualityState q) async {
@@ -384,10 +364,11 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
         'size_720p': _qualities[2].size ?? '',
         'url_1080p': _qualities[3].url ?? '',
         'size_1080p': _qualities[3].size ?? '',
-        // Intro oraliqlari — soniyada, juftlik bo'lib.
-        for (var i = 0; i < _introRows; i++) ...{
-          'intro_${i * 2 + 1}': _secondsOf(_introFrom[i].text),
-          'intro_${i * 2 + 2}': _secondsOf(_introTo[i].text),
+        // Intro oraliqlari — YOZILGAN KO'RINISHIDA (`"5:14"`),
+        // juftlik bo'lib.
+        for (var i = 0; i < kIntroRows; i++) ...{
+          'intro_${i * 2 + 1}': _introFrom[i].text.trim(),
+          'intro_${i * 2 + 2}': _introTo[i].text.trim(),
         },
       });
 
@@ -592,8 +573,8 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
           ),
           const SizedBox(height: 4),
           Text(
-            'Chapga boshlanish, o\'ngga tugash vaqti: 1:23 va 2:12.\n'
-            'Video 1:23 ga kelganda pleyerda "O\'tkazib yuborish" '
+            'Chapga boshlanish, o\'ngga tugash vaqti: 5:14 va 6:44.\n'
+            'Video 5:14 ga kelganda pleyerda "O\'tkazib yuborish" '
             'tugmasi chiqadi. Bo\'sh qatorlar e\'tiborga olinmaydi.',
             style: TextStyle(
               color: Colors.white.withValues(alpha: 0.45),
@@ -602,7 +583,7 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
             ),
           ),
           const SizedBox(height: 12),
-          for (var i = 0; i < _introRows; i++) ...[
+          for (var i = 0; i < kIntroRows; i++) ...[
             Row(
               children: [
                 SizedBox(
@@ -620,7 +601,7 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
                 Expanded(child: _introField(_introTo[i], 'oxiri')),
               ],
             ),
-            if (i != _introRows - 1) const SizedBox(height: 8),
+            if (i != kIntroRows - 1) const SizedBox(height: 8),
           ],
         ],
       ),

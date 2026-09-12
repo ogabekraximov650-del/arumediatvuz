@@ -626,6 +626,9 @@ class WatchHistory extends ChangeNotifier {
       fresh.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
       _items = fresh;
       _loadedForUser = userId;
+      // Kadrlar fon'da xotiraga ko'chiriladi — ro'yxat ochilganda
+      // ular allaqachon tayyor bo'ladi.
+      unawaited(_warmThumbs());
     }
     _loading = false;
     notifyListeners();
@@ -650,6 +653,7 @@ class WatchHistory extends ChangeNotifier {
       if (rows.isEmpty) return;
       _items = rows;
       _loadedForUser = userId;
+      unawaited(_warmThumbs());
       notifyListeners();
     } catch (_) {
       // Nusxa o'qilmadi — ro'yxat keyin serverdan keladi.
@@ -841,67 +845,77 @@ class WatchHistory extends ChangeNotifier {
   }
 
   // ══════════════════════════════════════════════════════════
-  //  SURISH PAYTIDA KADR YUKLANMAYDI
+  //  KADRLAR OLDINDAN XOTIRAGA OLINADI
   // ══════════════════════════════════════════════════════════
   //
-  // TOPILGAN XATO (foydalanuvchi: "Anime bo'yicha oynasidan Qism
-  // bo'yicha oynasiga surib o'tkazganda birozga qotib turib keyin
-  // o'tyabdi").
+  // Ikki xato ketma-ket tuzatildi va yechim AYNAN shu:
   //
-  // Sabab: qo'shni oyna surish BOSHLANGAN zahoti quriladi
-  // (`allowImplicitScrolling`), va o'sha damda ro'yxatdagi har bir
-  // qator kadr so'raydi. Kadr esa diskdan SINXRON o'qiladi va
-  // shifri ochiladi (`secureLoad` — FFI chaqiruvi), ya'ni bu ish
-  // UI oqimida, aynan surish boshlangan kadrda bajarilardi. Necha
-  // qator bo'lsa — shuncha marta.
+  // 1) "Anime bo'yicha oynasidan Qism bo'yicha oynasiga surib
+  //    o'tkazganda birozga qotib turib keyin o'tyabdi."
   //
-  // Yechim ikki qismdan iborat:
+  //    Sabab: qo'shni oyna surish boshlangan zahoti quriladi
+  //    (`allowImplicitScrolling`) va o'sha damda ro'yxatdagi har
+  //    bir qator kadr so'rardi. Kadr esa diskdan SINXRON o'qilib
+  //    shifri ochilardi (`secureLoad` — FFI), ya'ni bu ish UI
+  //    oqimida, aynan surish boshlangan kadrda bajarilardi.
   //
-  //   1. surish davom etayotganda kadr so'rovlari KUTADI
-  //      (`holdThumbs` / `releaseThumbs` — yuklab olish holati
-  //      bilan bir xil qoida);
-  //   2. diskdan o'qish hech qachon qurilish (build) paytida
-  //      bajarilmaydi — `_makeThumb` avval kadrni yakunlaydi
-  //      (pastdagi `await`).
+  // 2) Birinchi yechim — surish davom etayotganda kadr
+  //    so'rovlarini KUTDIRISH — qotishni oldini oldi, lekin
+  //    rasmlar KECHIKIB chiqadigan bo'ldi ("juda sekin
+  //    yangilanyapti"). Chunki kutish barmoq ko'tarilgunicha
+  //    (fling bilan bir-ikki soniya) davom etardi.
   //
-  // Barmoq ko'tarilishi bilan kutayotgan so'rovlar davom etadi,
-  // ya'ni rasm kechikmaydi — shunchaki surishga xalaqit bermaydi.
+  // ── HOZIRGI YECHIM: KUTISH YO'Q, OLDINDAN TAYYOR ──────────
+  //
+  // Ro'yxat o'qilishi bilan diskdagi kadrlar FON'DA xotiraga
+  // ko'chiriladi (`_warmThumbs`) — har bir fayldan keyin kadrga
+  // yo'l beriladi, ya'ni UI qotmaydi. Ro'yxat qurilganda esa
+  // qatorlar kadrni XOTIRADAN oladi (`peekThumb`) — na disk, na
+  // kutish, ya'ni rasm o'sha zahoti chiqadi.
+  //
+  // Shu sabab surish paytidagi qulf endi KERAK EMAS va olib
+  // tashlandi: qulf bo'lmasa ham surish silliq, chunki surish
+  // paytida bajariladigan ish umuman qolmadi.
 
-  bool _thumbsPaused = false;
-  Timer? _thumbGateTimer;
-  final List<Completer<void>> _thumbWaiters = [];
+  /// Xotiraga ko'chirish ketyaptimi (ikki marta boshlanmasin).
+  bool _warming = false;
 
-  /// Surish boshlandi — kadr yuklash to'xtaydi.
+  /// Diskdagi kadrlarni fon'da xotiraga ko'chiradi.
   ///
-  /// Hisoblagich EMAS, oddiy bayroq: bir vaqtda bitta surish
-  /// bo'ladi, hisoblagich esa "tugadi" xabari kelmay qolsa
-  /// abadiy musbat bo'lib qolardi. Qo'shimcha himoya sifatida
-  /// 3 soniyadan keyin qulf O'ZI ochiladi.
-  void holdThumbs() {
-    _thumbsPaused = true;
-    _thumbGateTimer?.cancel();
-    _thumbGateTimer = Timer(const Duration(seconds: 3), releaseThumbs);
-  }
-
-  /// Surish tugadi — kutayotganlar davom etadi.
-  void releaseThumbs() {
-    _thumbGateTimer?.cancel();
-    _thumbGateTimer = null;
-    if (!_thumbsPaused) return;
-    _thumbsPaused = false;
-    final waiting = List<Completer<void>>.from(_thumbWaiters);
-    _thumbWaiters.clear();
-    for (final c in waiting) {
-      if (!c.isCompleted) c.complete();
+  /// Ro'yxat o'zgargan sayin chaqiriladi; allaqachon xotirada
+  /// bo'lganlari o'tkazib yuboriladi, ya'ni takroriy chaqiruv
+  /// arzon.
+  Future<void> _warmThumbs() async {
+    if (_warming) return;
+    _warming = true;
+    try {
+      var added = 0;
+      // Ro'yxat ish davomida o'zgarishi mumkin — nusxa olamiz.
+      for (final item in List<HistoryItem>.from(_items)) {
+        final key = item.thumbKey;
+        if (_thumbMemory.containsKey(key)) continue;
+        final path = _thumbPath(key);
+        if (path == null) continue;
+        // Har bir fayldan OLDIN kadrga yo'l beramiz: o'qish
+        // sinxron (FFI + shifr ochish), ya'ni bir yo'la o'nlab
+        // fayl o'qilsa ekran qotardi.
+        await Future<void>.delayed(Duration.zero);
+        try {
+          final saved = RustCore.instance.secureLoad(path, 'thumb:$key');
+          if (saved.isEmpty) continue;
+          _rememberThumb(key, base64Decode(saved));
+          added++;
+          // Har bir kadr tayyor bo'lishi bilan ro'yxat
+          // yangilanadi — foydalanuvchi kutib turmaydi.
+          notifyListeners();
+        } catch (_) {
+          // Buzilgan yozuv — qator posterni ko'rsatadi.
+        }
+      }
+      if (added > 0) notifyListeners();
+    } finally {
+      _warming = false;
     }
-  }
-
-  /// Surish tugashini kutadi (surilmayotgan bo'lsa darhol qaytadi).
-  Future<void> _awaitThumbGate() {
-    if (!_thumbsPaused) return Future<void>.value();
-    final c = Completer<void>();
-    _thumbWaiters.add(c);
-    return c.future;
   }
 
   /// Kadrni beradi: avval xotiradan, keyin diskdan, bo'lmasa
@@ -936,7 +950,10 @@ class WatchHistory extends ChangeNotifier {
     // sinxron `secureLoad` esa aynan shu yerda qotishga olib
     // kelardi. Shu sabab avval kadr yakunlanadi, keyin diskka
     // chiqiladi.
-    await _awaitThumbGate();
+    //
+    // Bu bitta kadrlik kechikish, xolos: kadrlarning KO'PCHILIGI
+    // bu yergacha yetib kelmaydi — ular allaqachon xotirada
+    // bo'ladi (`_warmThumbs`).
     await Future<void>.delayed(Duration.zero);
 
     // 1) Diskda bormi?

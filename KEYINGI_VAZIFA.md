@@ -13,6 +13,15 @@
 - Foydalanuvchi bilan **faqat o'zbek tilida** gaplashing; texnik
   tushunchalarni oddiy tilda tushuntiring, taxmin qilmang — kodni
   o'qib tasdiqlang.
+- **ISH DAVOMIDA XABAR YOZMANG.** Foydalanuvchi talabi (aynan
+  shunday): "vazifani to'liq tugatmagunincha menga umuman xabar
+  yozma, shunchaki vazifani bajar va oxirida vazifani to'liq
+  tugatgach xabar ber — sababi sen har safar xabar yuborganingda
+  limit kamayadi".
+
+  Ya'ni: "hozir buni qilyapman", "endi buni boshladim", oraliq
+  hisobot — **YO'Q**. Hamma vazifa bajarilib, tekshirilib,
+  push qilingandan keyin BITTA to'liq xabar.
 - Ishni **alohida branch**da qiling, `main`ga to'g'ridan-to'g'ri push
   qilmang. **Istisno:** foydalanuvchi aniq so'rasa (masalan worker
   o'zgarishi darhol deploy bo'lishi kerak bo'lsa) — `main`ga.
@@ -405,29 +414,75 @@ matn nusxasi.
 
 ## OPENINGNI O'TKAZIB YUBORISH (2026-09)
 
-TALAB (foydalanuvchi): qism qo'shishda `1:23  2:12` deb yozilsa,
-video 1:23 ga kelganda ekranning O'RTA CHAP chetida "O'tkazib
-yuborish" tugmasi chiqsin; bosilsa video 2:12 ga sakrasin.
+TALAB (foydalanuvchi): qism qo'shishda `5:14  6:44` deb yozilsa,
+video 5:14 ga kelganda "O'tkazib yuborish" tugmasi chiqsin;
+bosilsa video 6:44 ga sakrasin.
 
 | Qayerda | Nima |
 |---|---|
-| Baza | `epizod_db.intro_1 ... intro_10` — 5 juftlik, SONIYADA |
+| Baza | `epizod_db.intro_1 ... intro_10` — 5 juftlik, MATN (`"5:14"`) |
+| Qoida | `lib/services/intro_times.dart` — matn <-> millisekund |
 | Admin | `add_epizod_screen.dart` — video yuklash oynalari tagida 2 ustun × 5 qator |
 | Pleyer | `video_player_screen.dart` -> `_updateIntro` / `_skipIntro` |
 
-Ekranda vaqt `1:23` ko'rinishida yoziladi, bazaga SONIYA bo'lib
-ketadi (`_secondsOf` / `_clockOf`). Matn saqlanmaydi: pleyer har
-kadrda solishtirib turadi, tayyor son eng tez yo'l. Noto'g'ri
-yozilgan yoki bo'sh qator 0 bo'ladi va e'tiborga olinmaydi
-(oxiri boshidan katta bo'lishi SHART).
+### VAQT MATN BO'LIB SAQLANADI (soniya EMAS)
+
+TALAB (foydalanuvchi): "intro vaqtini 5:14 va 6:44 qilib
+yoziladigan qil, soniya bilan emas".
+
+Ilgari bazada SONIYA turardi va admin oynasi uni ikki marta
+o'girardi (yozishda matn -> soniya, ochishda soniya -> matn).
+Bitta ortiqcha qatlam, bitta ortiqcha xato manbai.
+
+Endi bazada ham, ekranda ham AYNAN bir xil matn. Pleyer uni qism
+ochilganda BIR MARTA millisekundga o'giradi (`introRangesOf`) va
+keyin tayyor songa qaraydi — ya'ni tezlikka ta'sir qilmaydi.
+
+O'girish qoidasi IKKI joyda kerak (admin oynasi va pleyer), shu
+sabab u alohida faylda: `lib/services/intro_times.dart`
+(`test/intro_times_test.dart` bilan qo'riqlanadi). Nusxa
+ko'chirmang — ikkovi bir kun ajralib qoladi.
+
+Tushuniladigan yozuvlar: `5:14`, `05:14`, `1:02:03`, `314`
+(yalang soniya — eski yozuvlar). Xato yozuv oraliqni shunchaki
+"belgilanmagan" qiladi, PLEYERNI YIQITMAYDI.
+
+### TOPILGAN XATO: INTRO CHIQMASDI
+
+Foydalanuvchi: "pleyerda intro chiqmayapti".
+
+Sabab intro kodida emas edi. Pleyer qismlar ro'yxatini AVVAL
+diskdagi keshdan o'qiydi va darhol qism ochadi; keyin serverdan
+yangi ro'yxat keladi va `_episodes` almashtiriladi — LEKIN
+`_currentEp` ESKI (kesh) obyekt bo'lib qolardi.
+
+Ya'ni admin qismga endi qo'shgan intro vaqtlari ochiq qismda
+ko'rinmasdi. Xuddi shu narsa yangi qo'shilgan sifat yoki
+o'zgargan nom uchun ham amal qilardi.
+
+Yechim: `_adoptFreshEpisode()` — yangi ro'yxat kelganda ochiq
+qism AYNAN o'sha qismning yangi qatori bilan almashtiriladi
+(`epizod_id` bo'yicha) va intro oraliqlari qaytadan o'qiladi.
+
+### TUGMANING KO'RINISHI VA JOYI
+
+TALAB (foydalanuvchi): "intro tugmasi HQ tugmasi bilan BIR XIL
+darajadagi shaffoflikda bo'lsin va intro vaqti kelganda chap
+tarafdan video cheti va play/pause ning TENG O'RTASIDAN chiqsin".
+
+* ko'rinishi pastki paneldagi `HQ` tugmasidan AYNAN ko'chirilgan:
+  fon oq 15%, chekkasi `white30`, burchagi 7. **Ikkovini birga
+  o'zgartiring** — aks holda ular ajralib qoladi;
+* joyi — `Alignment(-0.5, 0)`: -1 videoning chap cheti, 0 markaz
+  (play/pause), ya'ni -0.5 ikkovining o'rtasi. Chekka bo'shliq
+  (`Padding`) ISHLATILMAYDI — u tugmani o'rtadan siljitardi.
 
 Ko'rinish qoidasi (foydalanuvchi aniq aytgan):
 
 * tugma vaqti kelganda chiqadi va **5 soniyadan** keyin o'zi
   yashirinadi — ekranni to'sib turmaydi;
 * video ustiga bosilsa pleyer tugmalari bilan BIRGA qayta
-  chiqadi (`_onTapVideo` -> `_showIntroButton`);
-* tugma SHAFFOF (fon `black 32%`, chekkasi `white 22%`).
+  chiqadi (`_onTapVideo` -> `_showIntroButton`).
 
 Tugma Stack'ning ENG USTIDA, sek gesture qatlamidan KEYIN
 turadi — aks holda unga bosilgan tap sek qatlamiga tushib,
@@ -530,56 +585,99 @@ Ikki xato tuzatildi:
 Tarixdan ochish endi qism RAQAMI bilan emas, `startEpizodId`
 bilan bo'ladi.
 
-## TARIX OYNALARI ORASIDA SURISH — QOTMAYDI
+## TARIX KADRLARI: DARHOL VA QOTISHSIZ
 
-TOPILGAN XATO (foydalanuvchi: "Anime bo'yicha oynasidan Qism
-bo'yicha oynasiga surib o'tkazganda birozga qotib turib keyin
-o'tyabdi").
+Ikki xato ketma-ket tuzatildi va yechim AYNAN hozirgisi.
+
+**1-xato.** "Anime bo'yicha oynasidan Qism bo'yicha oynasiga surib
+o'tkazganda birozga qotib turib keyin o'tyabdi."
 
 Sabab: qo'shni oyna surish BOSHLANGAN zahoti quriladi
-(`allowImplicitScrolling`), va o'sha kadrda ro'yxatdagi har bir
-qator kadr so'rardi. Kadr esa diskdan SINXRON o'qilib, shifri
+(`allowImplicitScrolling`) va o'sha kadrda ro'yxatdagi har bir
+qator kadr so'rardi. Kadr esa diskdan SINXRON o'qilib shifri
 ochilardi (`secureLoad` — FFI), ya'ni bu ish UI oqimida, aynan
 surish boshlangan kadrda bajarilardi.
 
-Yechim ikki qismdan:
+**2-xato (birinchi yechim keltirib chiqargan).** Birinchi yechim
+surish davom etayotganda kadr so'rovlarini KUTDIRARDI
+(`holdThumbs` / `releaseThumbs`). Qotish yo'qoldi, lekin rasmlar
+kechikib chiqadigan bo'ldi — foydalanuvchi: "juda sekin
+yangilanyapti, tez va real-time'da yangilanishi kerak". Chunki
+kutish barmoq ko'tarilgunicha (fling bilan bir-ikki soniya)
+davom etardi.
 
-* `WatchHistory.holdThumbs()` / `releaseThumbs()` — surish
-  davom etayotganda kadr so'rovlari KUTADI (yuklab olish holati
-  bilan bir xil qoida). `PageView` ustidagi
-  `NotificationListener` `depth == 0` bo'lgan hodisalarni
-  ushlaydi, ya'ni ichki ro'yxatning sirg'alishi bunga kirmaydi.
-  Qulf 3 soniyadan keyin O'ZI ochiladi — "surish tugadi" xabari
-  kelmay qolsa ham tizim to'xtab qolmaydi;
-* `_makeThumb` diskka QURILISH paytida chiqmaydi: birinchi
-  `await` gacha bo'lgan hamma narsa o'sha kadrning ichida
-  bajariladi, shu sabab u yerda avval kadr yakunlanadi.
+**HOZIRGI YECHIM: KUTISH YO'Q, OLDINDAN TAYYOR.**
+
+Ro'yxat o'qilishi bilan diskdagi kadrlar FON'DA xotiraga
+ko'chiriladi (`WatchHistory._warmThumbs`) — har bir fayldan oldin
+kadrga yo'l beriladi, ya'ni UI qotmaydi, va har bir kadr tayyor
+bo'lishi bilan ro'yxat yangilanadi. Ro'yxat qurilganda esa
+qatorlar kadrni XOTIRADAN oladi (`peekThumb`): na disk, na
+kutish.
+
+Shu sabab surish paytidagi qulf endi KERAK EMAS va OLIB
+TASHLANDI — qulfsiz ham surish silliq, chunki surish paytida
+bajariladigan ish umuman qolmadi.
+
+**Bu tartibni buzmang:** kadrni ro'yxat qurilayotganda diskdan
+sinxron o'qishga qaytsangiz 1-xato, kutdirish qulfini
+qaytarsangiz 2-xato o'sha zahoti qaytadi.
 
 ## PROFIL: XOTIRA OYNASI
 
-TALAB (foydalanuvchi): shaxsiy 4 ta statistika tagida eniga
-cho'zilgan oyna — o'ng yuqorida videolar va rasmlar hajmi, tagida
-supurgili "Tozalash" (bir marta tasdiq so'raydi); chapda ikkita
-progress chizig'i (video/rasm ulushi va telefon xotirasining
-band ulushi, `0.00%` ko'rinishida).
+TALAB (foydalanuvchi): "ilovada qanaqa ma'lumot bo'lsa hammasi
+tartib bilan bo'lib yozib chiqilsin, masalan `video 2MB 50%`;
+yoki anime kartochkasi, tomosha tarixi, database ma'lumotlari va
+hokazolar hajmi va jami hajmdan egallab turgan foizi bilan
+ko'rsatilsin".
 
-`lib/services/storage_usage.dart`:
+Oynada: o'ng yuqorida JAMI hajm, tagida bitta ko'p rangli chiziq
+va toifalar ro'yxati (kattasidan kichigiga):
 
-| Nima | Qayerda |
+```
+● Videolar             120,4 MB   93.10%
+● Posterlar              6,2 MB    4.79%
+● Tarix kadrlari         1,9 MB    1.47%
+...
+```
+
+### OLIB TASHLANGANLAR (foydalanuvchi talabi)
+
+* "video + rasm" yozuvi — endi toifalar o'zi aytib turadi;
+* **"Tozalash" tugmasi** — "endi keragi yo'q";
+* **"Telefon xotirasi 0.00% band"** — "endi keragi yo'q".
+
+Shu sabab `storage_usage.dart` da telefon xotirasini o'qiydigan
+kanal ham (`aru/storage`, `MainActivity.kt`), tozalash ham YO'Q.
+Kerak bo'lsa ular git tarixidan olinadi.
+
+### QAYSI FAYL QAYSI TOIFAGA KIRADI
+
+Ilova uchta papkadan foydalanadi: `<support>` (video bo'laklari),
+`<temp>` (posterlar keshi va vaqtinchalik nusxalar) va
+`<hujjatlar>` (hisob papkalari — ro'yxat keshlari, tarix
+kadrlari).
+
+Fayl nomi qoidasi (`rust_bridge.dart`):
+
+| Nom | Toifa |
 |---|---|
-| Videolar | `<support>/video_byte_cache` (Rust yadrosi) |
-| Posterlar | `<temp>/libCachedImageData` |
-| Tarix kadrlari | `<hujjatlar>/accountid_*/thumb_*.rustbin` |
+| `video_byte_cache/**` | Videolar |
+| `libCachedImageData/**` | Posterlar |
+| `thumb_*.rustbin` | Tarix kadrlari |
+| `anime_cache.rustbin`, `list_seasons_*`, `list_season_*` | Anime kartochkalari |
+| `list_eps_*` | Qismlar ro'yxati |
+| `list_watch_history*`, `list_watch_positions*` | Tomosha tarixi |
+| `list_favorites` | Sevimlilar |
+| `list_app_stats`, `list_my_stats`, `list_traffic` | Statistika |
+| `<temp>` dagi qolgani | Vaqtinchalik fayllar |
+| qolgani | Boshqa |
 
-Papkani sanash mingga yaqin fayl statistikasi — shu sabab u
-`Isolate.run` ichida bajariladi va UI oqimi qotmaydi. Telefonning
-jami/bo'sh xotirasi `aru/storage` kanalidan (`StatFs`).
+Yangi kesh kaliti qo'shsangiz `_labelOfDocFile` ga ham qo'shing —
+aks holda u "Boshqa" ga tushib qoladi.
 
-**TOZALASHDA TARIX KADRLARIGA TEGILMAYDI** (foydalanuvchi aniq
-aytgan): faqat videolar (`videoCacheWipe`) va posterlar keshi
-(`DefaultCacheManager().emptyCache()`) o'chadi. Posterlar
-papkasini QO'LDA o'chirmang — kesh yozuvlari alohida bazada
-turadi va fayllar yo'q bo'lsa ham "rasm bor" deb ko'rsatilardi.
+Papkalarni sanash mingga yaqin fayl statistikasi — shu sabab u
+`Isolate.run` ichida bajariladi va UI oqimi qotmaydi.
 
 ## BREND: ARU / AniRaxUz
 

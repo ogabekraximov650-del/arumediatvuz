@@ -19,11 +19,6 @@ dependencies:
   connectivity_plus: ^7.3.1
   path_provider: ^2.1.4
   cached_network_image: ^3.4.1
-  # Posterlar keshini O'LCHASH va TOZALASH uchun (profil
-  # sahifasidagi "Xotira" oynasi). `cached_network_image` uni
-  # ichida ishlatadi, lekin biz ham to'g'ridan-to'g'ri
-  # chaqiramiz — shu sabab bog'liqlik ANIQ yozilgan.
-  flutter_cache_manager: ^3.4.1
   # Video yuklashda real-time progress uchun
   dio: ^5.4.0
   # ── VIDEO PLEYER ────────────────────────────────────────────

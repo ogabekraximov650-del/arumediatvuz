@@ -119,6 +119,7 @@ import '../services/download_manager.dart';
 import '../services/rust_bridge.dart';
 import '../services/video_cache_server.dart';
 import '../services/format.dart';
+import '../services/intro_times.dart';
 import '../services/season_info.dart';
 import '../services/watch_history.dart';
 import '../services/watch_progress.dart';
@@ -430,6 +431,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
             _episodes = fresh;
             _loadingEps = false;
           });
+          _adoptFreshEpisode();
           _syncWatchedUrls();
           _autoOpenEpisode();
         }
@@ -439,6 +441,38 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       // Tarmoq yo'q/xato — keshdagi ro'yxat (agar bo'lsa) saqlanib qoladi.
     }
     if (mounted && _loadingEps) setState(() => _loadingEps = false);
+  }
+
+  /// ── OCHILGAN QISM YANGI RO'YXATDAN QAYTA OLINADI ───────────
+  ///
+  /// TOPILGAN XATO (foydalanuvchi: "pleyerda intro chiqmayapti").
+  ///
+  /// Pleyer qismlar ro'yxatini AVVAL diskdagi keshdan o'qiydi va
+  /// darhol qism ochadi. Keyin serverdan yangi ro'yxat keladi va
+  /// `_episodes` almashtiriladi — LEKIN `_currentEp` eski (kesh)
+  /// obyekt bo'lib qolardi.
+  ///
+  /// Ya'ni admin qismga endi qo'shgan intro vaqtlari ochiq qismda
+  /// KO'RINMASDI: ular faqat yangi ro'yxatda bor edi, pleyer esa
+  /// eskisiga qarab turardi. Xuddi shu narsa yangi qo'shilgan
+  /// sifat yoki o'zgargan nom uchun ham amal qilardi.
+  ///
+  /// Shu sabab yangi ro'yxat kelganda ochiq qism AYNAN o'sha
+  /// qismning yangi qatori bilan almashtiriladi (`epizod_id`
+  /// bo'yicha) va intro oraliqlari qaytadan o'qiladi.
+  void _adoptFreshEpisode() {
+    final cur = _currentEp;
+    if (cur == null) return;
+    final id = _epIdOf(cur);
+    if (id <= 0) return;
+    for (final e in _episodes) {
+      if (_epIdOf(e) != id) continue;
+      _currentEp = e;
+      _introRanges = introRangesOf(e);
+      // Hozir qaysi oraliqdaligi endi boshqacha bo'lishi mumkin.
+      _introIndex = -1;
+      return;
+    }
   }
 
   /// Bo'lim ma'lumoti — BITTA so'rov.
@@ -793,7 +827,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // Yangi qism — intro oraliqlari qaytadan o'qiladi.
     _introTimer?.cancel();
     _introIndex = -1;
-    _introRanges = _introsOf(ep);
+    _introRanges = introRangesOf(ep);
 
     setState(() {
       _currentEp = ep;
@@ -2319,23 +2353,6 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   /// ya'ni uni har safar qaytadan yig'ish bekorga axlat yig'ardi.
   List<(int, int)> _introRanges = const [];
 
-  /// Qismdan intro oraliqlarini o'qiydi.
-  ///
-  /// Faqat to'g'ri juftliklar olinadi: oxiri boshidan katta
-  /// bo'lishi shart, aks holda juftlik to'ldirilmagan yoki xato
-  /// yozilgan. Bazada qiymat SONIYADA turadi.
-  static List<(int, int)> _introsOf(Map<String, dynamic>? ep) {
-    if (ep == null) return const [];
-    final out = <(int, int)>[];
-    for (var i = 1; i <= 9; i += 2) {
-      final from = int.tryParse('${ep['intro_$i'] ?? ''}') ?? 0;
-      final to = int.tryParse('${ep['intro_${i + 1}'] ?? ''}') ?? 0;
-      if (from <= 0 || to <= from) continue;
-      out.add((from * 1000, to * 1000));
-    }
-    return out;
-  }
-
   /// Shu nuqta qaysi intro oralig'iga tushadi (-1 — hech qaysi).
   int _introAt(Duration pos) {
     final ms = pos.inMilliseconds;
@@ -3136,12 +3153,20 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
           // qatlamiga tushib, video o'tkazish o'rniga oldinga
           // sakrab ketardi.
           if (_currentEp != null && _playerError == null && _introVisible)
+            // ── JOYI: CHAP CHET BILAN TUGMA ORASIDA ─────────────
+            //
+            // TALAB (foydalanuvchi): "intro vaqti kelganda chap
+            // tarafdan video cheti va play/pause ning TENG
+            // O'RTASIDAN chiqsin".
+            //
+            // `Alignment(-0.5, 0)` aynan shu nuqta: -1 — videoning
+            // chap cheti, 0 — markaz (play/pause), ya'ni -0.5
+            // ikkovining o'rtasi. Chekka bo'shliq (`Padding`)
+            // ishlatilmaydi — u tugmani markazdan siljitib
+            // yuborardi.
             Align(
-              alignment: Alignment.centerLeft,
-              child: Padding(
-                padding: EdgeInsets.only(left: isFullscreen ? 28 : 14),
-                child: _SkipIntroButton(onTap: _skipIntro),
-              ),
+              alignment: const Alignment(-0.5, 0),
+              child: _SkipIntroButton(onTap: _skipIntro),
             ),
         ],
       ),
@@ -5364,11 +5389,12 @@ class _RatingSheetState extends State<_RatingSheet> {
 //  "O'TKAZIB YUBORISH" TUGMASI
 // ══════════════════════════════════════════════════════════════
 //
-// TALAB (foydalanuvchi): tugma SHAFFOFROQ bo'lsin — video uning
-// ostidan ko'rinib tursin.
+// TALAB (foydalanuvchi): "intro tugmasi HQ tugmasi bilan BIR XIL
+// darajadagi shaffoflikda bo'lsin".
 //
-// Shu sabab fon qora emas, yarim shaffof; chekkasi ham yupqa oq
-// chiziq. Matn esa to'liq oq — o'qilishi kerak.
+// Shu sabab ko'rinishi pastki paneldagi `HQ` tugmasidan AYNAN
+// ko'chirilgan: fon oq 15%, chekkasi `white30`, burchagi 7.
+// Ikkovini birga o'zgartiring — aks holda ular ajralib qoladi.
 class _SkipIntroButton extends StatelessWidget {
   final VoidCallback onTap;
 
@@ -5382,23 +5408,23 @@ class _SkipIntroButton extends StatelessWidget {
       // barmoq bilan tushish oson bo'lsin.
       behavior: HitTestBehavior.opaque,
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
         decoration: BoxDecoration(
-          color: Colors.black.withValues(alpha: 0.32),
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: Colors.white.withValues(alpha: 0.22)),
+          // HQ tugmasi bilan bir xil (`_BottomBarState` ga qarang).
+          color: Colors.white.withValues(alpha: 0.15),
+          borderRadius: BorderRadius.circular(7),
+          border: Border.all(color: Colors.white30),
         ),
-        child: Row(
+        child: const Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.fast_forward_rounded,
-                size: 16, color: Colors.white.withValues(alpha: 0.85)),
-            const SizedBox(width: 6),
+            Icon(Icons.fast_forward_rounded, size: 15, color: Colors.white),
+            SizedBox(width: 5),
             Text(
               'O\'tkazib yuborish',
               style: TextStyle(
-                color: Colors.white.withValues(alpha: 0.9),
-                fontSize: 12.5,
+                color: Colors.white,
+                fontSize: 12,
                 fontWeight: FontWeight.w700,
               ),
             ),

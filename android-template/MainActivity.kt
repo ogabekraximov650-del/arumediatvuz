@@ -34,7 +34,6 @@ package __PKG__
 
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
-import android.os.StatFs
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -61,55 +60,24 @@ class MainActivity : FlutterActivity() {
                 }
             }
 
-        // ═══════════════════════════════════════════════════════
-        //  TELEFON XOTIRASI
-        // ═══════════════════════════════════════════════════════
-        //
-        // TALAB (foydalanuvchi): profil sahifasida "telefonning
-        // jami xotirasidan necha foizidan foydalanilayotgani"
-        // ko'rsatilsin.
-        //
-        // Buni Flutter o'zi bilmaydi — Android'dan so'rash kerak:
-        // `StatFs` ilova ma'lumotlari yotgan bo'limning JAMI va
-        // BO'SH hajmini beradi (bayt).
-        //
-        // ── NEGA ESKI TRAFIK KANALI OLIB TASHLANDI ────────────
+        // ── TRAFIK KANALI OLIB TASHLANGAN ──────────────────────
         //
         // Bu yerda ilgari `TrafficStats.getUidRxBytes` bor edi.
         // U ilovaning UID'i ostidagi HAMMA soketni sanardi —
         // shu jumladan MAHALLIY (`127.0.0.1`) uzatmani ham:
         // pleyer videoni ilovaning o'z kesh-serveridan oladi,
-        // ya'ni bitta video IKKI MARTA sanalardi (bir marta
-        // tarmoqdan, bir marta ilova ichidan), yuklab olingan
-        // videoni oflayn qayta ko'rganda esa trafik umuman
-        // yo'q joydan o'sardi.
+        // ya'ni bitta video IKKI MARTA sanalardi, yuklab olingan
+        // videoni oflayn qayta ko'rganda esa trafik yo'q joydan
+        // o'sardi.
         //
-        // TALAB: "ilova faqatgina internet yoniq vaqtda worker
-        // orqali kelgan baytlarni hisoblashi kerak, ilova
-        // ichidagilarni emas". Shu sabab hisob endi AYNAN
-        // tarmoqqa chiqadigan ikki joyda olinadi (Rust yadrosi va
-        // ilovaning http klienti) — `traffic_service.dart` ga
-        // qarang.
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "aru/storage")
-            .setMethodCallHandler { call, result ->
-                if (call.method != "disk") {
-                    result.notImplemented()
-                } else {
-                    try {
-                        val fs = StatFs(filesDir.absolutePath)
-                        result.success(
-                            mapOf(
-                                "total" to fs.totalBytes,
-                                "free" to fs.availableBytes
-                            )
-                        )
-                    } catch (e: Throwable) {
-                        // O'qib bo'lmadi — ilova foizni ko'rsatmaydi,
-                        // xato chiqarmaydi.
-                        result.success(mapOf("total" to 0L, "free" to 0L))
-                    }
-                }
-            }
+        // Hisob endi AYNAN tarmoqqa chiqadigan ikki joyda olinadi
+        // (Rust yadrosi va ilovaning http klienti) —
+        // `lib/services/traffic_service.dart` ga qarang.
+        //
+        // Keyinroq shu yerda telefon xotirasini o'qiydigan
+        // `aru/storage` kanali ham bor edi; profil sahifasidan
+        // "telefon xotirasi N% band" qatori olib tashlangach
+        // (foydalanuvchi talabi) u ham keraksiz bo'lib qoldi.
     }
 
     /// Manzildagi videodan OXIRGI kadrni JPEG qilib qaytaradi.
