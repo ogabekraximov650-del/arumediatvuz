@@ -2,16 +2,39 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
 import 'screens/root_screen.dart';
 import 'services/app_keys.dart';
 import 'services/auth_service.dart';
+import 'services/net_meter.dart';
+import 'services/offline_library.dart';
 import 'services/rust_bridge.dart';
 import 'services/storage_janitor.dart';
 import 'services/traffic_service.dart';
 import 'services/video_cache_server.dart';
 import 'services/watch_history.dart';
 
-Future<void> main() async {
+// ── HAMMA SO'ROV SANALADI ───────────────────────────────────────
+//
+// TALAB (foydalanuvchi): trafik faqat tarmoqdan kelgan baytdan
+// hisoblansin.
+//
+// `runWithClient` — `package:http` ning o'z vositasi: shu zona
+// ichida bajarilgan HAR QANDAY `http.get` / `http.post` va umuman
+// `Client()` chaqiruvi bizning sanovchi klientimizni oladi. Ya'ni
+// ilovadagi 14 ta fayldagi so'rovlarni birma-bir o'zgartirish ham,
+// keyinchalik yangi so'rovni hisobga qo'shishni eslab qolish ham
+// shart emas.
+//
+// Rasm keshi (`cached_network_image` -> `flutter_cache_manager`)
+// ham oddiy `http.Client()` yaratadi — ya'ni posterlar va
+// avatarlar ham shu hisobga tushadi.
+//
+// Video bunga kirmaydi: uni Rust yadrosi oladi va o'z hisoblagichi
+// bor (`traffic_service.dart` ikkovini qo'shadi).
+Future<void> main() => http.runWithClient(_main, CountingClient.new);
+
+Future<void> _main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   // Tizim navigatsiya panelini shaffof qilamiz — aks holda pleyer
@@ -50,10 +73,18 @@ Future<void> main() async {
   WatchHistory.instance.loadFromDisk();
 
   // ── TRAFIK HISOBI ───────────────────────────────────────────
-  // Qurilma darajasidagi hisoblagichdan o'qiladi va sutkada bir
+  // Faqat TARMOQDAN kelgan baytlar sanaladi (Rust yadrosining
+  // video hisobi + yuqoridagi sanovchi klient) va sutkada bir
   // marta serverga yuboriladi (traffic_service.dart izohiga
   // qarang). Kutilmaydi — ilova ochilishini sekinlashtirmasin.
   unawaited(TrafficService.instance.start());
+
+  // ── OFLAYN RO'YXATLARI ──────────────────────────────────────
+  // Internet bor-yo'qligini BITTA joyda kuzatadi va "qaysi qism
+  // telefonda to'liq bor" indeksini yuritadi. Bosh sahifa, tomosha
+  // tarixi va sevimlilar oflaynda shu indeksdan filtrlanadi
+  // (offline_library.dart izohiga qarang).
+  OfflineLibrary.instance.start();
 
   // ── VAQTINCHALIK FAYLLAR ────────────────────────────────────
   // Admin panelida tanlangan rasm/video ilovaning vaqtinchalik

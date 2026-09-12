@@ -55,6 +55,9 @@ void main() {
           'anime_id': 3,
           'season_id': seasonId,
           'bolim_id': bolimId,
+          // Kalit — qismning O'ZGARMAS IDsi; raqam faqat
+          // ko'rsatish uchun.
+          'epizod_id': 42,
           'epizod_number': 2,
           'anime_name': animeName,
           'season_name': seasonName,
@@ -97,10 +100,29 @@ void main() {
       expect(a.videoKey, b.videoKey);
     });
 
-    test('bir xil qism tanib olinadi', () {
-      expect(item().sameEpisode(3, 7, 2), isTrue);
-      expect(item().sameEpisode(3, 7, 3), isFalse);
-      expect(item().sameEpisode(4, 7, 2), isFalse);
+    test('bir xil qism RAQAM emas, ID bo\'yicha tanib olinadi', () {
+      expect(item().sameEpisode(3, 7, 42), isTrue);
+      expect(item().sameEpisode(3, 7, 43), isFalse);
+      expect(item().sameEpisode(4, 7, 42), isFalse);
+      // Qism RAQAMI bilan izlash endi topmaydi — aynan shu
+      // tuzatildi: admin raqamni o'zgartirsa yozuv yo'qolmasin.
+      expect(item().sameEpisode(3, 7, 2), isFalse);
+    });
+
+    test('oxirgi ko\'rilgan sifat o\'qiladi', () {
+      expect(item().lastQuality, '');
+      final withQ = HistoryItem.fromJson({
+        'anime_id': 3,
+        'season_id': 7,
+        'epizod_id': 42,
+        'epizod_number': 2,
+        'last_quality': '720p',
+        'video_url': '',
+        'position_ms': 0,
+        'duration_ms': 1,
+        'updated_at': 1,
+      });
+      expect(withQ.lastQuality, '720p');
     });
   });
 }

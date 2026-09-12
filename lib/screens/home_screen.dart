@@ -8,6 +8,7 @@ import '../widgets/aru_logo.dart';
 import '../widgets/glass.dart';
 import '../widgets/stats_banner.dart';
 import '../services/auth_service.dart';
+import '../services/offline_library.dart';
 import '../services/rust_bridge.dart';
 import '../services/watch_history.dart';
 import 'video_player_screen.dart';
@@ -114,6 +115,8 @@ class _HomeScreenState extends State<HomeScreen> {
       final isOnline = results.any((r) => r != ConnectivityResult.none);
       if (!isOnline) {
         _wasOffline = true;
+        // Ro'yxat darhol to'g'ri filtrlansin.
+        unawaited(OfflineLibrary.instance.refresh(_seasons));
         if (mounted) setState(() => _isOffline = true);
       } else if (_wasOffline) {
         _wasOffline = false;
@@ -121,6 +124,31 @@ class _HomeScreenState extends State<HomeScreen> {
         _fetchFromApi(force: true);
       }
     });
+  }
+
+  // ══════════════════════════════════════════════════════════
+  //  OFLAYNDA — FAQAT YUKLAB OLINGANLARI
+  // ══════════════════════════════════════════════════════════
+  //
+  // TALAB (foydalanuvchi): "oflayn vaqtda ilovaning bosh
+  // sahifasida faqat yuklab olingan qismlari bor anime
+  // kartochkasi ko'rinishi kerak".
+  //
+  // Ro'yxatning O'ZI tegilmaydi — u keshda to'liq turaveradi va
+  // internet yoqilishi bilan hammasi qaytadi. Bu yerda faqat
+  // KO'RSATILADIGANI ajratiladi.
+  //
+  // Indeks hali yig'ilmagan bo'lsa (`ready == false`) hech narsa
+  // yashirilmaydi: aks holda ilova oflaynda ochilganda ekran bir
+  // lahzaga bo'm-bo'sh ko'rinardi.
+  List<Map<String, dynamic>> get _visibleSeasons {
+    final lib = OfflineLibrary.instance;
+    if (!_isOffline || !lib.ready) return _seasons;
+    return _seasons.where((s) {
+      final a = int.tryParse('${s['anime_id'] ?? ''}') ?? 0;
+      final sid = int.tryParse('${s['season_id'] ?? ''}') ?? 0;
+      return lib.hasSeason(a, sid);
+    }).toList();
   }
 
   // MUHIM: kesh MUDDATIDAN QAT'IY NAZAR har doim darhol ko'rsatiladi.
@@ -131,6 +159,7 @@ class _HomeScreenState extends State<HomeScreen> {
         _seasons = cached;
         _isLoading = false;
       });
+      unawaited(OfflineLibrary.instance.refresh(cached));
       if (!RustCore.instance.isCacheFresh()) {
         _fetchFromApi();
       }
@@ -155,6 +184,8 @@ class _HomeScreenState extends State<HomeScreen> {
           _isLoading = false;
           _isOffline = false;
         });
+        // Yangi ro'yxat — oflayn indeksi ham yangilanadi.
+        unawaited(OfflineLibrary.instance.refresh(data));
       }
     } catch (_) {
       if (mounted)
@@ -172,6 +203,15 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Oflayn indeksi yangilanganda ro'yxat qayta chizilsin.
+    return AnimatedBuilder(
+      animation: OfflineLibrary.instance,
+      builder: (context, _) => _buildList(context),
+    );
+  }
+
+  Widget _buildList(BuildContext context) {
+    final visible = _visibleSeasons;
     return RefreshIndicator(
       onRefresh: _onRefresh,
       color: AppColors.accent,
@@ -283,7 +323,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               ),
             )
-          else if (_seasons.isEmpty)
+          else if (visible.isEmpty)
             SliverToBoxAdapter(
               child: SizedBox(
                 height: 260,
@@ -301,7 +341,9 @@ class _HomeScreenState extends State<HomeScreen> {
                       const SizedBox(height: 12),
                       Text(
                         _isOffline
-                            ? 'Internet yo\'q · yuqoriga torting'
+                            ? (_seasons.isEmpty
+                                ? 'Internet yo\'q · yuqoriga torting'
+                                : 'Yuklab olingan qism yo\'q')
                             : 'Anime topilmadi',
                         style: TextStyle(color: Colors.white.withValues(alpha: 0.4)),
                       ),
@@ -323,11 +365,11 @@ class _HomeScreenState extends State<HomeScreen> {
                 delegate: SliverChildBuilderDelegate(
                   (context, index) => RepaintBoundary(
                     child: SeasonCard(
-                      season: _seasons[index],
-                      onTap: () => _openSeason(_seasons[index]),
+                      season: visible[index],
+                      onTap: () => _openSeason(visible[index]),
                     ),
                   ),
-                  childCount: _seasons.length,
+                  childCount: visible.length,
                   addRepaintBoundaries: false,
                   addAutomaticKeepAlives: false,
                 ),

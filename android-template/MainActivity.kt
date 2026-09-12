@@ -34,8 +34,7 @@ package __PKG__
 
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
-import android.net.TrafficStats
-import android.os.Process
+import android.os.StatFs
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -63,45 +62,52 @@ class MainActivity : FlutterActivity() {
             }
 
         // ═══════════════════════════════════════════════════════
-        //  TRAFIK HISOBLAGICHI
+        //  TELEFON XOTIRASI
         // ═══════════════════════════════════════════════════════
         //
-        // TALAB (foydalanuvchi): trafikni endi ILOVA sanasin —
-        // worker noto'g'ri sanardi va ijroni buzardi.
+        // TALAB (foydalanuvchi): profil sahifasida "telefonning
+        // jami xotirasidan necha foizidan foydalanilayotgani"
+        // ko'rsatilsin.
         //
-        // Android'ning o'zida shu uchun tayyor hisoblagich bor:
-        // `TrafficStats.getUidRxBytes(uid)` — shu ilovaning UID'i
-        // ostida ochilgan HAMMA soket bo'yicha QABUL QILINGAN
-        // umumiy bayt. U tizim yadrosidan olinadi, ya'ni ilova
-        // qabul qilgan HAR QANDAY bayt kiradi:
+        // Buni Flutter o'zi bilmaydi — Android'dan so'rash kerak:
+        // `StatFs` ilova ma'lumotlari yotgan bo'limning JAMI va
+        // BO'SH hajmini beradi (bayt).
         //
-        //   * pleyer (ExoPlayer) video oqimi,
-        //   * yuklab olish (Rust yadrosi),
-        //   * posterlar va avatar rasmlari,
-        //   * baza/API so'rovlari (tarix, statistika, kirish),
-        //   * TCP va UDP, sarlavhalar bilan birga.
+        // ── NEGA ESKI TRAFIK KANALI OLIB TASHLANDI ────────────
         //
-        // Hisob HAQIQATAN qabul qilingan baytdan olinadi (javobda
-        // e'lon qilingan uzunlikdan emas — eski xatoning sababi
-        // aynan shu edi). Mahalliy 127.0.0.1 uzatmasi KIRMAYDI,
-        // ya'ni diskdan o'qib pleyerga berilgan video trafik
-        // sifatida hisoblanmaydi.
+        // Bu yerda ilgari `TrafficStats.getUidRxBytes` bor edi.
+        // U ilovaning UID'i ostidagi HAMMA soketni sanardi —
+        // shu jumladan MAHALLIY (`127.0.0.1`) uzatmani ham:
+        // pleyer videoni ilovaning o'z kesh-serveridan oladi,
+        // ya'ni bitta video IKKI MARTA sanalardi (bir marta
+        // tarmoqdan, bir marta ilova ichidan), yuklab olingan
+        // videoni oflayn qayta ko'rganda esa trafik umuman
+        // yo'q joydan o'sardi.
         //
-        // Son qurilma yoqilganidan beri o'sib boradi va telefon
-        // o'chirilganda nolga tushadi — Dart tomoni buni farqlar
-        // (`traffic_service.dart`) orqali hal qiladi.
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "aru/net")
+        // TALAB: "ilova faqatgina internet yoniq vaqtda worker
+        // orqali kelgan baytlarni hisoblashi kerak, ilova
+        // ichidagilarni emas". Shu sabab hisob endi AYNAN
+        // tarmoqqa chiqadigan ikki joyda olinadi (Rust yadrosi va
+        // ilovaning http klienti) — `traffic_service.dart` ga
+        // qarang.
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "aru/storage")
             .setMethodCallHandler { call, result ->
-                if (call.method != "rx") {
+                if (call.method != "disk") {
                     result.notImplemented()
                 } else {
-                    val rx = try {
-                        TrafficStats.getUidRxBytes(Process.myUid())
+                    try {
+                        val fs = StatFs(filesDir.absolutePath)
+                        result.success(
+                            mapOf(
+                                "total" to fs.totalBytes,
+                                "free" to fs.availableBytes
+                            )
+                        )
                     } catch (e: Throwable) {
-                        -1L
+                        // O'qib bo'lmadi — ilova foizni ko'rsatmaydi,
+                        // xato chiqarmaydi.
+                        result.success(mapOf("total" to 0L, "free" to 0L))
                     }
-                    // -1 = qurilma qo'llab-quvvatlamaydi.
-                    result.success(rx)
                 }
             }
     }

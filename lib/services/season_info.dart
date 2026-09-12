@@ -75,8 +75,38 @@ class SeasonService {
     };
   }
 
-  /// Bo'lim ma'lumoti. Xato bo'lsa `null` — ekran baribir
-  /// ochilaveradi, shunchaki raqamlar ko'rinmaydi.
+  // ── OFLAYN: MA'LUMOT OYNASI BO'SH QOLMASIN ─────────────────
+  //
+  // TOPILGAN XATO (foydalanuvchi: "oflayn vaqtda pleyer pastidagi
+  // anime ma'lumotlari ko'rinmayapti").
+  //
+  // Sabab: bu yerda disk keshi YO'Q edi. Internet bo'lmasa so'rov
+  // yiqilib `null` qaytardi va "Ma'lumot" oynasi bo'sh turardi —
+  // studiya, tarjimon, janr, tavsif, raqamlar, hech nima.
+  //
+  // Endi muvaffaqiyatli javob diskka (shifrlangan holda)
+  // yoziladi va oflaynda AYNAN o'sha ko'rsatiladi. Yozuv bitta
+  // bo'lim uchun bitta kichik qator — bosh sahifa va qismlar
+  // ro'yxati keshi bilan bir xil qoida.
+
+  static String _cacheKey(int animeId, int seasonId) =>
+      'season_${animeId}_$seasonId';
+
+  /// Diskdagi nusxa — TARMOQSIZ o'qiladi.
+  ///
+  /// `null` bo'lsa bu bo'lim hech qachon onlayn ochilmagan.
+  static SeasonInfo? fromDisk(int animeId, int seasonId) {
+    try {
+      final rows = RustCore.instance.getCachedList(_cacheKey(animeId, seasonId));
+      if (rows == null || rows.isEmpty) return null;
+      return SeasonInfo.fromJson(rows.first);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Bo'lim ma'lumoti. Xato bo'lsa DISKDAGI nusxa, u ham bo'lmasa
+  /// `null` — ekran baribir ochilaveradi.
   static Future<SeasonInfo?> load(int animeId, int seasonId) async {
     try {
       final r = await http
@@ -85,10 +115,14 @@ class SeasonService {
             headers: _headers(),
           )
           .timeout(const Duration(seconds: 12));
-      if (r.statusCode != 200) return null;
-      return SeasonInfo.fromJson(jsonDecode(r.body) as Map<String, dynamic>);
+      if (r.statusCode != 200) return fromDisk(animeId, seasonId);
+      final j = jsonDecode(r.body) as Map<String, dynamic>;
+      try {
+        RustCore.instance.saveListCache(_cacheKey(animeId, seasonId), [j]);
+      } catch (_) {}
+      return SeasonInfo.fromJson(j);
     } catch (_) {
-      return null;
+      return fromDisk(animeId, seasonId);
     }
   }
 

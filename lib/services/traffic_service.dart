@@ -14,17 +14,32 @@
 //   2) IJRO BUZILDI. O'ralgan oqim ba'zan uzilib, pleyerda
 //      "yuklanmadi" xatosi chiqardi.
 //
-// Endi worker javobga UMUMAN tegmaydi, hisobni esa ilova yuritadi.
+// Keyin hisob Android yadrosidan olindi
+// (`TrafficStats.getUidRxBytes`) va UCHINCHI xato chiqdi: u
+// ilovaning UID'i ostidagi HAMMA soketni sanaydi, shu jumladan
+// MAHALLIY (`127.0.0.1`) uzatmani ham. Pleyer videoni ilovaning
+// o'z kesh-serveridan oladi, ya'ni har bir video ikki marta
+// sanalardi va oflayn ko'rilgan video ham trafik qo'shardi.
+//
+// TALAB (foydalanuvchi): "ilova faqatgina internet yoniq vaqtda
+// worker orqali kelgan baytlarni hisoblashi kerak, ilova
+// ichidagilarni emas."
+//
+// Endi hisob AYNAN tarmoqqa chiqadigan ikki joydan olinadi —
+// `net_meter.dart` izohiga qarang.
 //
 // ═══════════════════════════════════════════════════════════════
 //  QANDAY ISHLAYDI
 // ═══════════════════════════════════════════════════════════════
 //
-//   1. Android yadrosining hisoblagichi o'qiladi
-//      (`TrafficStats.getUidRxBytes` — MainActivity.kt dagi
-//      "aru/net" kanali). Bu — shu ilova HAQIQATAN qabul qilgan
-//      bayt: pleyer oqimi, yuklab olish, rasm, API — hammasi.
-//      Mahalliy 127.0.0.1 uzatmasi bunga kirmaydi.
+//   1. Ilovaning IKKITA tarmoq hisoblagichi qo'shiladi:
+//
+//        * Rust yadrosi workerdan tortib olgan VIDEO baytlari
+//          (`rust_video_cache_net_bytes`),
+//        * ilovaning http klienti qabul qilgan baytlar — API,
+//          posterlar, avatarlar (`NetMeter`, net_meter.dart).
+//
+//      Ikkovi ham AYNAN tarmoqdan kelgan baytni sanaydi.
 //   2. Ikki o'lchov orasidagi FARQ yig'indiga qo'shiladi va
 //      diskka (shifrlangan holda) yoziladi — ilova yopilsa ham
 //      yo'qolmaydi.
@@ -37,27 +52,25 @@
 // Trafik raqami real vaqtda kerak emas, shu sabab kuniga bitta
 // so'rov yetarli — bu ham arzon, ham aniq.
 //
-// TELEFON O'CHIB YOQILSA: tizim hisoblagichi nolga tushadi. Bu
-// holat aniqlanadi (yangi o'lchov eskisidan KICHIK) va o'sha
-// o'lchovning o'zi farq sifatida olinadi — ya'ni hisob hech
-// qachon manfiy bo'lmaydi va sakrab ketmaydi.
+// ILOVA QAYTA ISHGA TUSHSA: ikkala hisoblagich ham noldan
+// boshlanadi. Bu holat aniqlanadi (yangi o'lchov eskisidan
+// KICHIK) va o'sha o'lchovning o'zi farq sifatida olinadi — ya'ni
+// hisob hech qachon manfiy bo'lmaydi va sakrab ketmaydi.
 
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:http/http.dart' as http;
 
 import 'auth_service.dart';
+import 'net_meter.dart';
 import 'rust_bridge.dart';
 import 'stats_service.dart';
 
 class TrafficService extends ChangeNotifier with WidgetsBindingObserver {
   TrafficService._();
   static final TrafficService instance = TrafficService._();
-
-  static const MethodChannel _channel = MethodChannel('aru/net');
 
   /// Diskdagi yozuv kaliti (Rust yadrosining ro'yxat keshi).
   static const String _key = 'traffic';
@@ -145,10 +158,9 @@ class TrafficService extends ChangeNotifier with WidgetsBindingObserver {
     // Hali ishga tushmagan bo'lsa o'lchov nuqtasi yo'q — bir
     // o'lchovlik farq butun hisoblagichga teng bo'lib ketardi.
     if (!_started) return;
-    final now = await _readCounter();
-    if (now < 0) return; // qurilma qo'llab-quvvatlamaydi
-    // Telefon o'chib yonganda hisoblagich nolga tushadi — o'shanda
-    // yangi qiymatning O'ZI farq bo'ladi.
+    final now = _readCounter();
+    // Ilova qayta ishga tushganda hisoblagich nolga tushadi —
+    // o'shanda yangi qiymatning O'ZI farq bo'ladi.
     final delta = now >= _lastSample ? now - _lastSample : now;
     _lastSample = now;
     if (delta > 0) _pending += delta;
@@ -161,57 +173,37 @@ class TrafficService extends ChangeNotifier with WidgetsBindingObserver {
     if (delta > 0) notifyListeners();
   }
 
-  /// Qurilma hisoblagichi qo'llab-quvvatlanmaydi (bir marta
-  /// aniqlanadi va o'zgarmaydi).
-  bool _kernelCounterMissing = false;
-
-  /// ── QABUL QILINGAN BARCHA BAYTLAR ──────────────────────────
+  /// ── FAQAT TARMOQDAN KELGAN BAYTLAR ────────────────────────
   ///
-  /// TALAB (foydalanuvchi): "ilova qabul qilgan HAR QANDAY baytni
-  /// hisoblashi kerak — video, rasm, database ma'lumotlari va
-  /// hokazo".
+  /// TALAB (foydalanuvchi): "ilova faqatgina internet yoniq
+  /// vaqtda worker orqali kelgan baytlarni hisoblashi kerak,
+  /// ilova ichidagilarni emas".
   ///
-  /// Aynan shuning uchun raqam ilovaning O'Z hisoblagichlaridan
-  /// emas, TIZIM YADROSIDAN olinadi:
-  /// `TrafficStats.getUidRxBytes(Process.myUid())` — shu ilovaning
-  /// UID'i ostida ochilgan HAMMA soket bo'yicha qabul qilingan
-  /// bayt. Ya'ni:
+  /// Ikkita manba qo'shiladi va ikkovi ham AYNAN tarmoqdan
+  /// kelgan baytni sanaydi:
   ///
-  ///   * pleyer oqimi (ExoPlayer),
-  ///   * yuklab olish (Rust yadrosi),
-  ///   * posterlar va avatarlar (`/api/image/...`),
-  ///   * har qanday API so'rovi (tarix, statistika, kirish),
-  ///   * hatto Telegram havolasi tekshiruvi
+  ///   * `videoCacheNetBytes` — Rust yadrosi workerdan tortib
+  ///     olgan video baytlari. Diskdagi bo'lakdan o'qilgani
+  ///     (ya'ni oflayn ko'rish) bunga KIRMAYDI;
+  ///   * `NetMeter.bytes` — ilovaning http klienti qabul qilgan
+  ///     baytlar: API javoblari, posterlar, avatarlar. Keshdan
+  ///     olingan rasm tarmoqqa chiqmaydi, ya'ni sanalmaydi.
   ///
-  /// — hammasi bir joyda, TCP va UDP bilan birga. Sarlavhalar va
-  /// qayta yuborilgan paketlar ham kiradi, ya'ni raqam operator
-  /// hisoblaydigan trafikka eng yaqin.
+  /// Mahalliy `127.0.0.1` uzatmasi (pleyer <- kesh-serveri) hech
+  /// qaysi hisobga kirmaydi — aynan shu "ilova ichidagi trafik"
+  /// edi va aynan shu xato tuzatildi.
   ///
-  /// Mahalliy `127.0.0.1` uzatmasi bunga KIRMAYDI — diskdan o'qib
-  /// pleyerga berilgan video trafik sifatida sanalmaydi.
-  ///
-  /// ── ZAXIRA YO'L ────────────────────────────────────────────
-  ///
-  /// Juda eski yoki g'alati qurilmada yadro hisoblagichi `-1`
-  /// qaytarishi mumkin. Bunday holda hech bo'lmaganda video
-  /// trafigi sanaladi (Rust yadrosining o'z hisobi). U ilova
-  /// ishga tushganda noldan boshlanadi — quyidagi farq qoidasi
+  /// Ikkala son ham ILOVA ishga tushganidan beri o'sadi va qayta
+  /// ishga tushganda nolga tushadi — `_sample` dagi farq qoidasi
   /// buni o'zi hal qiladi.
-  Future<int> _readCounter() async {
-    if (!_kernelCounterMissing) {
-      try {
-        final v = await _channel.invokeMethod<int>('rx');
-        if (v != null && v >= 0) return v;
-      } catch (_) {
-        // Kanal yo'q (masalan Android bo'lmagan tizim).
-      }
-      _kernelCounterMissing = true;
-    }
+  int _readCounter() {
+    var total = NetMeter.instance.bytes;
     try {
-      return RustCore.instance.videoCacheNetBytes;
+      total += RustCore.instance.videoCacheNetBytes;
     } catch (_) {
-      return -1;
+      // Yadro hali yuklanmagan — keyingi o'lchovda qo'shiladi.
     }
+    return total;
   }
 
   // ── Hisobot ──────────────────────────────────────────────────
@@ -342,10 +334,9 @@ class TrafficService extends ChangeNotifier with WidgetsBindingObserver {
     _reportedAt = 0;
     _lastSample = 0;
     _load();
-    final now = await _readCounter();
     // O'lchov nuqtasi HOZIRGI qiymat: almashish paytidagi baytlar
     // allaqachon eski hisobga yozilgan.
-    _lastSample = now < 0 ? 0 : now;
+    _lastSample = _readCounter();
     _save();
     notifyListeners();
   }
