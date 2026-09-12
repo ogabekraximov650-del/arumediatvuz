@@ -346,6 +346,25 @@ async fn init_db(env: &Env) {
         // Indeks yo'q: "anime bo'limlari" so'rovi PK boshidagi
         // `anime_id` bilan ishlaydi, umumiy ro'yxat esa kichik.
 
+        // ── INTRO (OPENING) VAQTLARI ──────────────────────────
+        //
+        // TALAB (foydalanuvchi): pleyer openingni o'tkazib
+        // yuboradigan tugma ko'rsatsin, bitta qismda bunday joy
+        // bir nechta bo'lishi mumkin.
+        //
+        // Shu sabab 5 ta JUFTLIK ustun bor:
+        //
+        //   intro_1 / intro_2   — 1-oraliqning boshi va oxiri,
+        //   intro_3 / intro_4   — 2-oraliq,
+        //   ... intro_9 / intro_10 — 5-oraliq.
+        //
+        // Qiymat — videoning BOSHIDAN hisoblangan SONIYA (butun
+        // son). Matn (`"1:23"`) emas: pleyer har kadrda solishtirib
+        // turadi, ya'ni tayyor son eng tez yo'l. Admin oynasida
+        // baribir `1:23` ko'rinishida yoziladi va shunday
+        // ko'rsatiladi — matnga aylantirish faqat ekranda bo'ladi.
+        //
+        // 0 — "bu oraliq belgilanmagan".
         ("CREATE TABLE IF NOT EXISTS epizod_db (
             anime_id INTEGER, season_id INTEGER, epizod_id INTEGER,
             epizod_number INTEGER, epizod_name TEXT,
@@ -353,21 +372,47 @@ async fn init_db(env: &Env) {
             url_480p TEXT, size_480p TEXT,
             url_720p TEXT, size_720p TEXT,
             url_1080p TEXT, size_1080p TEXT,
+            intro_1 INTEGER DEFAULT 0, intro_2 INTEGER DEFAULT 0,
+            intro_3 INTEGER DEFAULT 0, intro_4 INTEGER DEFAULT 0,
+            intro_5 INTEGER DEFAULT 0, intro_6 INTEGER DEFAULT 0,
+            intro_7 INTEGER DEFAULT 0, intro_8 INTEGER DEFAULT 0,
+            intro_9 INTEGER DEFAULT 0, intro_10 INTEGER DEFAULT 0,
             views_total INTEGER DEFAULT 0,
             watch_ms_total INTEGER DEFAULT 0,
             created_at INTEGER,
             PRIMARY KEY (anime_id, season_id, epizod_id)
         )", vec![]),
 
-        // Janrlar — BOG'LOVCHI jadval. Bitta bo'limda bir nechta
-        // janr bo'ladi; `season_db.janri` esa faqat KO'RSATISH
-        // uchun saqlanadigan matn nusxasi.
+        // ── JANRLAR: BITTA BO'LIM — BITTA QATOR ───────────────
+        //
+        // TALAB (foydalanuvchi): "hozir tursoda bitta bo'lim uchun
+        // 4 yoki 5 ta qator yozilyabdi, bu esa harajatni oshiradi".
+        //
+        // To'g'ri: ilgari bu BOG'LOVCHI jadval edi va har bir janr
+        // uchun alohida qator yozilardi. Endi bo'limning hamma
+        // janri BITTA qatorga sig'adi — `janr_1 ... janr_10`.
+        // Bo'sh ustun = janr yo'q.
+        //
+        // NEGA 10 TA: ro'yxatda jami 37 janr bor va bitta bo'limga
+        // odatda 3-6 tasi qo'yiladi. Bo'sh TEXT ustun SQLite'da
+        // bir baytdan oshmaydi, ya'ni zaxira ustunlar deyarli
+        // bepul.
+        //
+        // ── INDEKS OLIB TASHLANDI ─────────────────────────────
+        //
+        // `idx_janr(janr)` endi ma'nosiz: janr 10 ta ustunning
+        // istalganida bo'lishi mumkin va bitta indeks ularni
+        // qamrab ololmaydi. Janr bo'yicha filtr — bo'limlar
+        // ro'yxati bo'yicha to'liq ko'rib chiqish, lekin bo'limlar
+        // soni KICHIK (foydalanuvchilar emas, kontent), shu sabab
+        // bu arzon. Yutuq esa katta: har bo'limga bitta qator va
+        // bitta yozuv so'rovi.
         ("CREATE TABLE IF NOT EXISTS season_janr (
-            anime_id INTEGER, season_id INTEGER, janr TEXT,
-            PRIMARY KEY (anime_id, season_id, janr)
+            anime_id INTEGER, season_id INTEGER,
+            janr_1 TEXT, janr_2 TEXT, janr_3 TEXT, janr_4 TEXT, janr_5 TEXT,
+            janr_6 TEXT, janr_7 TEXT, janr_8 TEXT, janr_9 TEXT, janr_10 TEXT,
+            PRIMARY KEY (anime_id, season_id)
         )", vec![]),
-        // Janr bo'yicha filtr uchun (PK bu tartibda yordam bermaydi).
-        ("CREATE INDEX IF NOT EXISTS idx_janr ON season_janr(janr)", vec![]),
     ]).await;
 
     // ── 2. FOYDALANUVCHI ───────────────────────────────────────
@@ -449,19 +494,41 @@ async fn init_db(env: &Env) {
         //     `epizod_db.url_*` bilan bir xil qoida.
         //   * `created_at` OLIB TASHLANDI — u yozilar, lekin
         //     hech qayerda o'qilmasdi.
+        //
+        // ── KALIT `epizod_id`, RAQAM EMAS (TOPILGAN XATO) ─────
+        //
+        // TALAB (foydalanuvchi): "watch history jurnaliga epizod
+        // raqami emas idsi yozilsin — qism raqamini o'zgartirganda
+        // tomosha tarixidagi kadrlar qotib qoldi".
+        //
+        // Sabab aniq: kalit `epizod_number` edi, ya'ni admin
+        // "5-qism"ni "6-qism" qilib qo'ysa, tarixdagi yozuv HECH
+        // QAYSI qismga tegmay qolardi — kadr ham, davom ettirish
+        // ham ishlamasdi.
+        //
+        // `epizod_id` esa qism qo'shilganda bir marta beriladi va
+        // HECH QACHON o'zgarmaydi. `epizod_number` ustun sifatida
+        // qoladi, lekin faqat KO'RSATISH uchun ("3-qism") —
+        // qidiruvda ishlatilmaydi.
+        //
+        // `last_quality` — foydalanuvchi shu qismni oxirgi marta
+        // qaysi sifatda ko'rgani ("720p"). Keyingi safar internet
+        // yoqilganda video AYNAN o'sha sifatdan davom etadi.
         ("CREATE TABLE IF NOT EXISTS watch_history_db (
             user_id INTEGER,
             anime_id INTEGER,
             season_id INTEGER,
+            epizod_id INTEGER,
             epizod_number INTEGER,
             video_url TEXT,
+            last_quality TEXT,
             position_ms INTEGER,
             duration_ms INTEGER,
             watched_ms INTEGER DEFAULT 0,
             view_count INTEGER DEFAULT 0,
             deleted_at INTEGER DEFAULT 0,
             updated_at INTEGER,
-            PRIMARY KEY (user_id, anime_id, season_id, epizod_number)
+            PRIMARY KEY (user_id, anime_id, season_id, epizod_id)
         )", vec![]),
         // Tarix ro'yxati AYNAN shu tartibda so'raladi:
         // WHERE user_id=? AND deleted_at=0 ORDER BY updated_at DESC
@@ -2179,39 +2246,81 @@ fn janr_list(b: &Value, janri_text: &str) -> Vec<String> {
     }
     // Alifbo tartibida — ilovadagi tugmalar bilan bir xil ko'rinsin.
     out.sort();
-    out.truncate(12);
+    // Jadvalda 10 ta ustun bor, ortig'i sig'maydi.
+    out.truncate(JANR_SLOTS);
     out
 }
 
-/// Bo'limning janrlarini bog'lovchi jadvalga yozadi (eskisi
-/// o'chiriladi). Bitta so'rovda ketadi.
+/// `season_janr` dagi janr ustunlari soni.
+const JANR_SLOTS: usize = 10;
+
+/// Bo'limning janrlarini BITTA qatorga yozadi.
+///
+/// Ilgari bu bog'lovchi jadval edi va har janr uchun alohida qator
+/// yozilardi (bitta bo'lim = 4-5 qator, 5-6 so'rov). Endi bitta
+/// bo'lim = BITTA qator va BITTA so'rov: tanlangan janrlar
+/// `janr_1 ... janr_10` ustunlariga ketma-ket joylashadi, qolgani
+/// bo'sh qoladi. Janr olib tashlansa qator qaytadan yoziladi —
+/// ya'ni "bo'sh ustunga yozish" o'zi-o'zidan hal bo'ladi.
 async fn save_janrs(env: &Env, anime_id: i64, season_id: i64, janrs: &[String]) {
-    let mut stmts: Vec<(&str, Vec<TursoArg>)> = vec![(
-        "DELETE FROM season_janr WHERE anime_id=? AND season_id=?",
-        vec![TursoArg::int(anime_id), TursoArg::int(season_id)],
-    )];
-    for j in janrs {
-        stmts.push((
-            "INSERT OR IGNORE INTO season_janr (anime_id,season_id,janr) VALUES (?,?,?)",
-            vec![TursoArg::int(anime_id), TursoArg::int(season_id), TursoArg::text(j)],
-        ));
+    let mut args = vec![TursoArg::int(anime_id), TursoArg::int(season_id)];
+    for i in 0..JANR_SLOTS {
+        args.push(TursoArg::text(janrs.get(i).map(|s| s.as_str()).unwrap_or("")));
     }
-    let _ = turso_batch(env, &stmts).await;
+    let _ = turso_exec(env,
+        "INSERT INTO season_janr
+            (anime_id,season_id,janr_1,janr_2,janr_3,janr_4,janr_5,
+             janr_6,janr_7,janr_8,janr_9,janr_10)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+         ON CONFLICT(anime_id,season_id) DO UPDATE SET
+            janr_1=excluded.janr_1, janr_2=excluded.janr_2,
+            janr_3=excluded.janr_3, janr_4=excluded.janr_4,
+            janr_5=excluded.janr_5, janr_6=excluded.janr_6,
+            janr_7=excluded.janr_7, janr_8=excluded.janr_8,
+            janr_9=excluded.janr_9, janr_10=excluded.janr_10",
+        args).await;
 }
 
-fn epizod_fields(b: &Value) -> (i64, String, String, String, String, String, String, String, String, String) {
-    (
-        b["epizod_number"].as_i64().unwrap_or(0),
-        b["epizod_name"].as_str().unwrap_or("").to_string(),
-        b["url_360p"].as_str().unwrap_or("").to_string(),
-        b["size_360p"].as_str().unwrap_or("").to_string(),
-        b["url_480p"].as_str().unwrap_or("").to_string(),
-        b["size_480p"].as_str().unwrap_or("").to_string(),
-        b["url_720p"].as_str().unwrap_or("").to_string(),
-        b["size_720p"].as_str().unwrap_or("").to_string(),
-        b["url_1080p"].as_str().unwrap_or("").to_string(),
-        b["size_1080p"].as_str().unwrap_or("").to_string(),
-    )
+/// `epizod_db` ga yoziladigan maydonlar.
+///
+/// Tuple emas, STRUKTURA: ustunlar soni 20 dan oshdi (4 sifat x 2 +
+/// 10 ta intro) va tartibda adashish oson bo'lardi.
+struct EpizodFields {
+    number: i64,
+    name: String,
+    /// `url_360p`, `size_360p`, `url_480p`, ... — jadvaldagi tartibda.
+    media: [String; 8],
+    /// `intro_1 ... intro_10` — SONIYADA (0 = belgilanmagan).
+    intros: [i64; INTRO_SLOTS],
+}
+
+/// `epizod_db` dagi intro ustunlari soni — 5 ta juftlik.
+const INTRO_SLOTS: usize = 10;
+
+fn epizod_fields(b: &Value) -> EpizodFields {
+    let s = |k: &str| b[k].as_str().unwrap_or("").to_string();
+    let mut intros = [0i64; INTRO_SLOTS];
+    for (i, slot) in intros.iter_mut().enumerate() {
+        // Ilova soniyani son sifatida yuboradi. Eski/qo'lda
+        // yuborilgan matn (`"83"`) ham qabul qilinadi.
+        let v = &b[format!("intro_{}", i + 1)];
+        *slot = v
+            .as_i64()
+            .or_else(|| v.as_str().and_then(|t| t.trim().parse::<i64>().ok()))
+            .unwrap_or(0)
+            .max(0);
+    }
+    EpizodFields {
+        number: b["epizod_number"].as_i64().unwrap_or(0),
+        name: s("epizod_name"),
+        media: [
+            s("url_360p"), s("size_360p"),
+            s("url_480p"), s("size_480p"),
+            s("url_720p"), s("size_720p"),
+            s("url_1080p"), s("size_1080p"),
+        ],
+        intros,
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -3087,8 +3196,16 @@ async fn history_route(
         // bazada qoladi: qism qayta ko'rilsa o'sha qator tiriladi
         // va statistika ham buzilmaydi.
         (Method::Get, "/api/history") => {
+            // `epizod_number` ENDI `epizod_db` DAN OLINADI.
+            //
+            // Tarix qatoridagi nusxa faqat zaxira: admin qism
+            // raqamini o'zgartirsa, ro'yxatda DARHOL yangi raqam
+            // ko'rinishi kerak (foydalanuvchi talabi — aynan shu
+            // "kadrlar qotib qoldi" muammosining ikkinchi yarmi).
             let res = turso_exec(env,
-                "SELECT h.anime_id, h.season_id, h.epizod_number, h.video_url,
+                "SELECT h.anime_id, h.season_id, h.epizod_id,
+                        COALESCE(e.epizod_number, h.epizod_number) AS epizod_number,
+                        h.video_url, h.last_quality,
                         h.position_ms, h.duration_ms, h.watched_ms, h.view_count,
                         h.updated_at,
                         a.name AS anime_name, a.photo_url AS anime_photo,
@@ -3098,6 +3215,9 @@ async fn history_route(
                    LEFT JOIN anime_db a ON a.id = h.anime_id
                    LEFT JOIN season_db s
                           ON s.anime_id = h.anime_id AND s.season_id = h.season_id
+                   LEFT JOIN epizod_db e
+                          ON e.anime_id = h.anime_id AND e.season_id = h.season_id
+                         AND e.epizod_id = h.epizod_id
                   WHERE h.user_id = ? AND h.deleted_at = 0
                   ORDER BY h.updated_at DESC
                   LIMIT 300",
@@ -3137,9 +3257,15 @@ async fn history_route(
 
             let anime_id = b["anime_id"].as_i64().unwrap_or(0);
             let season_id = b["season_id"].as_i64().unwrap_or(0);
-            let epizod = b["epizod_number"].as_i64().unwrap_or(0);
+            // KALIT — `epizod_id` (hech qachon o'zgarmaydi).
+            let epizod_id = b["epizod_id"].as_i64().unwrap_or(0);
+            // Raqam faqat ko'rsatish uchun saqlanadi.
+            let epizod_num = b["epizod_number"].as_i64().unwrap_or(0);
             // Bazaga YALANG fayl nomi yoziladi (`bare_name` izohi).
             let video_url = bare_name(b["video_url"].as_str().unwrap_or(""));
+            // Oxirgi ko'rilgan sifat ("720p") — keyingi safar
+            // internet yoqilganda AYNAN shundan davom etadi.
+            let last_quality = b["last_quality"].as_str().unwrap_or("").to_string();
             let position = b["position_ms"].as_i64().unwrap_or(0).max(0);
             let duration = b["duration_ms"].as_i64().unwrap_or(0).max(0);
             // Ilova yuborgan JAMI tomosha vaqti (shu odam, shu qism).
@@ -3147,21 +3273,21 @@ async fn history_route(
             // Shu ochilishda yangi ko'rish bo'ldimi (ilova belgilaydi).
             let new_view = b["new_view"].as_bool().unwrap_or(false);
 
-            if anime_id <= 0 || epizod <= 0 || duration <= 0 {
+            if anime_id <= 0 || epizod_id <= 0 || duration <= 0 {
                 return json_resp(&json!({"error": "to'liq bo'lmagan yozuv"}), 400);
             }
 
             let now = now_ms();
             let key = vec![
                 TursoArg::int(me), TursoArg::int(anime_id),
-                TursoArg::int(season_id), TursoArg::int(epizod),
+                TursoArg::int(season_id), TursoArg::int(epizod_id),
             ];
 
             // 1) Eski holat — bitta qator (birlamchi kalit bo'yicha).
             let old = turso_exec(env,
                 "SELECT watched_ms, view_count, updated_at
                    FROM watch_history_db
-                  WHERE user_id=? AND anime_id=? AND season_id=? AND epizod_number=?",
+                  WHERE user_id=? AND anime_id=? AND season_id=? AND epizod_id=?",
                 key.clone()).await?;
             let old_row = first_row(&old);
             let old_watched = old_row.as_ref()
@@ -3198,12 +3324,14 @@ async fn history_route(
             let mut stmts: Vec<(&str, Vec<TursoArg>)> = Vec::with_capacity(8);
             stmts.push((
                 "INSERT INTO watch_history_db
-                    (user_id,anime_id,season_id,epizod_number,video_url,
-                     position_ms,duration_ms,watched_ms,view_count,deleted_at,
-                     updated_at)
-                 VALUES (?,?,?,?,?,?,?,?,?,0,?)
-                 ON CONFLICT(user_id,anime_id,season_id,epizod_number) DO UPDATE SET
+                    (user_id,anime_id,season_id,epizod_id,epizod_number,video_url,
+                     last_quality,position_ms,duration_ms,watched_ms,view_count,
+                     deleted_at,updated_at)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,0,?)
+                 ON CONFLICT(user_id,anime_id,season_id,epizod_id) DO UPDATE SET
+                    epizod_number=excluded.epizod_number,
                     video_url=excluded.video_url,
+                    last_quality=excluded.last_quality,
                     position_ms=excluded.position_ms,
                     duration_ms=excluded.duration_ms,
                     watched_ms=excluded.watched_ms,
@@ -3212,7 +3340,8 @@ async fn history_route(
                     updated_at=excluded.updated_at",
                 vec![
                     TursoArg::int(me), TursoArg::int(anime_id), TursoArg::int(season_id),
-                    TursoArg::int(epizod), TursoArg::text(&video_url),
+                    TursoArg::int(epizod_id), TursoArg::int(epizod_num),
+                    TursoArg::text(&video_url), TursoArg::text(&last_quality),
                     TursoArg::int(position), TursoArg::int(duration),
                     TursoArg::int(capped), TursoArg::int(old_views + view_inc),
                     TursoArg::int(now),
@@ -3222,10 +3351,10 @@ async fn history_route(
             if view_inc > 0 || delta > 0 {
                 stmts.push((
                     "UPDATE epizod_db SET views_total=views_total+?, watch_ms_total=watch_ms_total+?
-                      WHERE anime_id=? AND season_id=? AND epizod_number=?",
+                      WHERE anime_id=? AND season_id=? AND epizod_id=?",
                     vec![
                         TursoArg::int(view_inc), TursoArg::int(delta),
-                        TursoArg::int(anime_id), TursoArg::int(season_id), TursoArg::int(epizod),
+                        TursoArg::int(anime_id), TursoArg::int(season_id), TursoArg::int(epizod_id),
                     ],
                 ));
                 stmts.push((
@@ -3260,13 +3389,13 @@ async fn history_route(
             let b: Value = req.json().await.unwrap_or(json!({}));
             turso_exec(env,
                 "UPDATE watch_history_db SET deleted_at=?
-                  WHERE user_id=? AND anime_id=? AND season_id=? AND epizod_number=?",
+                  WHERE user_id=? AND anime_id=? AND season_id=? AND epizod_id=?",
                 vec![
                     TursoArg::int(now_ms()),
                     TursoArg::int(me),
                     TursoArg::int(b["anime_id"].as_i64().unwrap_or(0)),
                     TursoArg::int(b["season_id"].as_i64().unwrap_or(0)),
-                    TursoArg::int(b["epizod_number"].as_i64().unwrap_or(0)),
+                    TursoArg::int(b["epizod_id"].as_i64().unwrap_or(0)),
                 ]).await?;
             ok_nostore(json!({"ok": true}))
         }
@@ -4327,18 +4456,19 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
                 .or_else(|| b["anime_id"].as_i64().map(|n| n.to_string())).unwrap_or_default();
             let season_id = b["season_id"].as_str().map(|s| s.to_string())
                 .or_else(|| b["season_id"].as_i64().map(|n| n.to_string())).unwrap_or_default();
-            let (ep_num, ep_name, u360, s360, u480, s480, u720, s720, u1080, s1080) = epizod_fields(&b);
+            let ef = epizod_fields(&b);
             let new_id = next_epizod_id(&env).await?;
+            let mut args = vec![
+                TursoArg::text(&anime_id), TursoArg::text(&season_id), TursoArg::int(new_id),
+                TursoArg::int(ef.number), TursoArg::text(&ef.name),
+            ];
+            for m in &ef.media { args.push(TursoArg::text(m)); }
+            for v in &ef.intros { args.push(TursoArg::int(*v)); }
+            args.push(TursoArg::int(now_ms()));
             let res = turso_exec(&env,
-                "INSERT INTO epizod_db (anime_id,season_id,epizod_id,epizod_number,epizod_name,url_360p,size_360p,url_480p,size_480p,url_720p,size_720p,url_1080p,size_1080p,created_at)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING *",
-                vec![
-                    TursoArg::text(&anime_id), TursoArg::text(&season_id), TursoArg::int(new_id),
-                    TursoArg::int(ep_num), TursoArg::text(&ep_name),
-                    TursoArg::text(&u360), TursoArg::text(&s360), TursoArg::text(&u480), TursoArg::text(&s480),
-                    TursoArg::text(&u720), TursoArg::text(&s720), TursoArg::text(&u1080), TursoArg::text(&s1080),
-                    TursoArg::int(now_ms()),
-                ],
+                "INSERT INTO epizod_db (anime_id,season_id,epizod_id,epizod_number,epizod_name,url_360p,size_360p,url_480p,size_480p,url_720p,size_720p,url_1080p,size_1080p,intro_1,intro_2,intro_3,intro_4,intro_5,intro_6,intro_7,intro_8,intro_9,intro_10,created_at)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING *",
+                args,
             ).await?;
             let cols = res["cols"].as_array().cloned().unwrap_or_default();
             let rows = res["rows"].as_array().cloned().unwrap_or_default();
@@ -4399,16 +4529,20 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
                         if method == Method::Put {
                             let mut req = req;
                             let b: Value = req.json().await?;
-                            let (en, ename, u360, s360, u480, s480, u720, s720, u1080, s1080) = epizod_fields(&b);
+                            let ef = epizod_fields(&b);
+                            let mut args = vec![
+                                TursoArg::int(ef.number), TursoArg::text(&ef.name),
+                            ];
+                            for m in &ef.media { args.push(TursoArg::text(m)); }
+                            for v in &ef.intros { args.push(TursoArg::int(*v)); }
+                            args.push(TursoArg::int(aid));
+                            args.push(TursoArg::int(sid));
+                            args.push(TursoArg::int(eid));
                             let res = turso_exec(&env,
-                                "UPDATE epizod_db SET epizod_number=?,epizod_name=?,url_360p=?,size_360p=?,url_480p=?,size_480p=?,url_720p=?,size_720p=?,url_1080p=?,size_1080p=?
+                                "UPDATE epizod_db SET epizod_number=?,epizod_name=?,url_360p=?,size_360p=?,url_480p=?,size_480p=?,url_720p=?,size_720p=?,url_1080p=?,size_1080p=?,
+                                        intro_1=?,intro_2=?,intro_3=?,intro_4=?,intro_5=?,intro_6=?,intro_7=?,intro_8=?,intro_9=?,intro_10=?
                                  WHERE anime_id=? AND season_id=? AND epizod_id=? RETURNING *",
-                                vec![
-                                    TursoArg::int(en), TursoArg::text(&ename),
-                                    TursoArg::text(&u360), TursoArg::text(&s360), TursoArg::text(&u480), TursoArg::text(&s480),
-                                    TursoArg::text(&u720), TursoArg::text(&s720), TursoArg::text(&u1080), TursoArg::text(&s1080),
-                                    TursoArg::int(aid), TursoArg::int(sid), TursoArg::int(eid),
-                                ],
+                                args,
                             ).await?;
                             let cols = res["cols"].as_array().cloned().unwrap_or_default();
                             let rows = res["rows"].as_array().cloned().unwrap_or_default();
