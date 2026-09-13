@@ -91,7 +91,6 @@ class TrafficService extends ChangeNotifier with WidgetsBindingObserver {
   /// Yozuv juda kichik (bir necha o'nlab bayt), shu sabab arzon.
   static const int _saveAfterBytes = 8 * 1024 * 1024;
 
-  Timer? _timer;
   bool _started = false;
 
   /// Har bir toifa uchun oxirgi o'lchov (ilova ishga tushganidan
@@ -143,7 +142,9 @@ class TrafficService extends ChangeNotifier with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     // Birinchi o'lchov — shu paytdan boshlab sanaymiz.
     await _sample(save: true);
-    _timer = Timer.periodic(_sampleEvery, (_) => _tick());
+    // Xizmat ilova bilan birga yashaydi — taymer to'xtatilmaydi,
+    // shu sabab uni ushlab turadigan maydon ham kerak emas.
+    Timer.periodic(_sampleEvery, (_) => _tick());
   }
 
   void _tick() {

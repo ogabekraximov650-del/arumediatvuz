@@ -3479,29 +3479,243 @@ async fn traffic_route(mut req: Request, env: &Env) -> Result<Response> {
     ok_nostore(json!({"ok": true, "bytes": bytes}))
 }
 
-/// Trafikni hisobga qo'shadi (javob yuborilgandan keyin, fon'da).
+/// Trafikni faqat SHAXSIY hisobga qo'shadi.
 ///
-/// O'lchovni ILOVA beradi (`POST /api/traffic`): u qurilma
-/// darajasida haqiqatan qabul qilingan baytlarni sanaydi, worker
-/// esa faqat qo'shib qo'yadi — umumiy chelaklarga va o'sha
-/// odamning shaxsiy hisobiga.
+/// ── NEGA UMUMIY CHELAKKA QO'SHILMAYDI ────────────────────────
+///
+/// TALAB (foydalanuvchi): "bosh sahifadagi trafik statistikasi
+/// Cloudflare dashboarddagi Analytics'dan olinsin, shaxsiy
+/// statistika qo'shilmasin; shaxsiy statistika esa faqat
+/// foydalanuvchining o'ziga ko'rinsin va o'zi uchun hisoblansin".
+///
+/// Ya'ni ikki hisob BIR-BIRIDAN BUTUNLAY AJRATILDI:
+///
+///   * UMUMIY (bosh sahifadagi banner, `/api/stats`) — endi faqat
+///     Cloudflare Analytics'dan keladi (`cf_traffic_sync`);
+///   * SHAXSIY (`/api/me/stats`, profil sahifasi) — shu yerda,
+///     `users_db.traffic_bytes` ustunida. Uni faqat egasi ko'radi.
+///
+/// Ilgari bitta son ikkala joyga ham qo'shilardi — shu sabab
+/// umumiy raqam ham noto'g'ri edi (ilova o'zi sanagan taxminiy
+/// baytlar), ham ikki manba aralashib ketardi.
 async fn note_traffic(env: &Env, bytes: i64, user: i64) {
-    if bytes <= 0 { return; }
+    if bytes <= 0 || user <= 0 { return; }
     ensure_db(env).await;
+    let _ = turso_exec(env,
+        "UPDATE users_db SET traffic_bytes=COALESCE(traffic_bytes,0)+? WHERE id=?",
+        vec![TursoArg::int(bytes), TursoArg::int(user)]).await;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  UMUMIY TRAFIK — CLOUDFLARE ANALYTICS'DAN
+// ═══════════════════════════════════════════════════════════════
+//
+// TALAB (foydalanuvchi): "bosh sahifadagi trafik statistikasi
+// Cloudflare dashboarddagi Analytics'dan olinsin".
+//
+// ── QAYSI MANBA ───────────────────────────────────────────────
+//
+// Cloudflare'ning GraphQL Analytics API'sida `workersInvocations
+// Adaptive` to'plami bor va uning `sum { responseBodySize }`
+// maydoni — worker HAQIQATAN uzatgan javob tanalarining baytlari.
+// Bu AYNAN dashboarddagi raqamning manbasi, ya'ni endi ilova
+// taxmin qilmaydi — Cloudflare o'zi o'lchaganini beradi.
+//
+// To'plam HISOB (account) darajasida ishlaydi, shu sabab domen
+// (zone) shart emas — worker `*.workers.dev` da tursa ham
+// raqam keladi.
+//
+// ── QANDAY ISHLAYDI ───────────────────────────────────────────
+//
+// `GET /api/stats` chaqirilganda (chekka keshi bo'shagach) shu
+// funksiya ishga tushadi, lekin HAR SAFAR emas — oxirgi
+// sinxronizatsiyadan 30 daqiqa o'tgan bo'lsa. Vaqt belgisi
+// `app_config` da turadi.
+//
+// Har sinxronizatsiyada faqat OXIRGI 50 SOAT so'raladi (soatlik
+// bo'laklarda). Sabab: eski kunlar allaqachon `stats_daily` da
+// saqlangan — ularni qayta so'rashning hojati yo'q va Cloudflare
+// analitikasining saqlash muddati ham cheklangan. Shu tarzda
+// "jami" ko'rsatkich vaqt o'tishi bilan to'planib boradi.
+//
+// Qiymatlar QO'SHILMAYDI, ALMASHTIRILADI (`value=excluded.value`):
+// bir soat necha marta sinxronlansa ham raqam ikkilanmaydi.
+//
+// ── KALITLAR ──────────────────────────────────────────────────
+//
+// Ikki sir kerak: `CF_ACCOUNT_ID` va `CF_ANALYTICS_TOKEN`
+// (tokenda "Account Analytics: Read" ruxsati bo'lishi shart).
+// Ular yo'q bo'lsa funksiya JIM qaytadi — ilova ishlashda davom
+// etadi, faqat umumiy trafik yangilanmaydi.
+
+const CF_GRAPHQL_URL: &str = "https://api.cloudflare.com/client/v4/graphql";
+
+/// Ikki sinxronizatsiya orasidagi eng qisqa muddat.
+const CF_SYNC_EVERY_MS: i64 = 30 * 60 * 1000;
+
+/// Har safar so'raladigan oyna (soat). 50 soat — kechagi kun
+/// TO'LIQ, bugungisi esa hozirgi soatgacha qamrab olinadi.
+const CF_WINDOW_HOURS: i64 = 50;
+
+/// Oxirgi sinxronizatsiya vaqti (`app_config` kaliti).
+const CF_SYNC_KEY: &str = "cf_traffic_synced_at";
+
+/// Eski (ilova sanagan) trafik qatorlari tozalanganini bildiradi.
+const CF_PURGE_KEY: &str = "cf_traffic_purged";
+
+/// Chelak qiymatini QO'SHMAYDI, ALMASHTIRADI.
+const STAT_HOUR_SET_SQL: &str =
+    "INSERT INTO stats_hourly (hour,metric,value) VALUES (?,?,?)
+     ON CONFLICT(hour,metric) DO UPDATE SET value=excluded.value";
+const STAT_DAY_SET_SQL: &str =
+    "INSERT INTO stats_daily (day,metric,value) VALUES (?,?,?)
+     ON CONFLICT(day,metric) DO UPDATE SET value=excluded.value";
+
+/// Sana -> 1970-01-01 dan beri o'tgan kunlar (Howard Hinnant algoritmi).
+/// `ymdhm` ning teskarisi.
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+/// UTC vaqtini GraphQL kutgan ko'rinishga aylantiradi.
+fn iso_utc(ms: i64) -> String {
+    let (y, m, d, h, mi) = ymdhm(ms);
+    format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:00Z")
+}
+
+/// "2026-09-13T06:00:00Z" -> epoch ms (UTC).
+fn parse_iso_ms(s: &str) -> Option<i64> {
+    let num = |a: usize, z: usize| -> Option<i64> {
+        s.get(a..z).and_then(|p| p.parse::<i64>().ok())
+    };
+    let (y, m, d, h) = (num(0, 4)?, num(5, 7)?, num(8, 10)?, num(11, 13)?);
+    Some((days_from_civil(y, m, d) * 86_400 + h * 3_600) * 1000)
+}
+
+/// Cloudflare Analytics'dan umumiy trafikni olib, chelaklarga yozadi.
+async fn cf_traffic_sync(env: &Env) {
+    let (Ok(account), Ok(token)) =
+        (env.secret("CF_ACCOUNT_ID"), env.secret("CF_ANALYTICS_TOKEN"))
+    else {
+        return;
+    };
+    let (account, token) = (account.to_string(), token.to_string());
+    if account.is_empty() || token.is_empty() { return; }
+
     let now = now_ms();
-    let mut stmts: Vec<(&str, Vec<TursoArg>)> = vec![
-        (STAT_HOUR_SQL, stat_args(&hour_key(now), "traffic", bytes)),
-        (STAT_DAY_SQL, stat_args(&day_key(now), "traffic", bytes)),
-    ];
-    // Kim sarflagani ma'lum bo'lsa — profil sahifasidagi shaxsiy
-    // hisobga ham qo'shiladi.
-    if user > 0 {
-        stmts.push((
-            "UPDATE users_db SET traffic_bytes=COALESCE(traffic_bytes,0)+? WHERE id=?",
-            vec![TursoArg::int(bytes), TursoArg::int(user)],
-        ));
+    ensure_db(env).await;
+
+    // Juda tez-tez so'ralmasin.
+    if let Some(prev) = config_get(env, CF_SYNC_KEY).await {
+        if let Ok(p) = prev.parse::<i64>() {
+            if now - p < CF_SYNC_EVERY_MS && now >= p { return; }
+        }
     }
-    let _ = turso_batch(env, &stmts).await;
+    // Belgi DARHOL yangilanadi — bir vaqtda kelgan bir necha so'rov
+    // Cloudflare'ga birdaniga urilmasin.
+    config_put(env, CF_SYNC_KEY, &now.to_string()).await;
+
+    let script = env.var("CF_SCRIPT_NAME")
+        .map(|v| v.to_string())
+        .unwrap_or_else(|_| "aniraxuzapp".to_string());
+    let since = now - CF_WINDOW_HOURS * 3_600_000;
+
+    let query = "query($a:string!,$s:string!,$since:Time!,$until:Time!){\
+        viewer{accounts(filter:{accountTag:$a}){\
+        workersInvocationsAdaptive(limit:10000,filter:{\
+        scriptName:$s,datetime_geq:$since,datetime_leq:$until}){\
+        dimensions{datetimeHour}sum{responseBodySize}}}}}";
+
+    let body = json!({
+        "query": query,
+        "variables": {
+            "a": account,
+            "s": script,
+            "since": iso_utc(since),
+            "until": iso_utc(now),
+        }
+    });
+
+    let Ok(h) = (|| -> Result<Headers> {
+        let h = Headers::new();
+        h.set("Authorization", &format!("Bearer {token}"))?;
+        h.set("Content-Type", "application/json")?;
+        Ok(h)
+    })() else { return; };
+
+    let Ok(req) = Request::new_with_init(
+        CF_GRAPHQL_URL,
+        RequestInit::new().with_method(Method::Post).with_headers(h)
+            .with_body(Some(body.to_string().into())),
+    ) else { return; };
+
+    let Ok(mut resp) = Fetch::Request(req).send().await else { return; };
+    let Ok(data): Result<Value> = resp.json().await else { return; };
+
+    // Xato bo'lsa — hech nima yozilmaydi (eski raqamlar qoladi).
+    if data["errors"].is_array()
+        && !data["errors"].as_array().map(|a| a.is_empty()).unwrap_or(true)
+    {
+        return;
+    }
+    let Some(rows) = data["data"]["viewer"]["accounts"][0]
+        ["workersInvocationsAdaptive"].as_array()
+    else {
+        return;
+    };
+
+    // Soatlik va kunlik yig'indilar (chelak kaliti — UTC+5).
+    let mut hourly: std::collections::HashMap<String, i64> =
+        std::collections::HashMap::new();
+    let mut dayly: std::collections::HashMap<String, i64> =
+        std::collections::HashMap::new();
+    for r in rows {
+        let Some(stamp) = r["dimensions"]["datetimeHour"].as_str() else { continue };
+        let Some(ms) = parse_iso_ms(stamp) else { continue };
+        let bytes = r["sum"]["responseBodySize"].as_f64().unwrap_or(0.0) as i64;
+        if bytes <= 0 { continue; }
+        *hourly.entry(hour_key(ms)).or_insert(0) += bytes;
+        *dayly.entry(day_key(ms)).or_insert(0) += bytes;
+    }
+
+    let mut stmts: Vec<(&str, Vec<TursoArg>)> = Vec::new();
+
+    // ── BIR MARTALIK TOZALASH ─────────────────────────────────
+    //
+    // Chelaklarda ilgari ILOVA sanagan (endi ishlatilmaydigan)
+    // trafik qatorlari qolgan bo'lishi mumkin. Cloudflare manbasi
+    // birinchi marta ishlaganda ular o'chiriladi — aks holda ikki
+    // xil manba qo'shilib ketardi.
+    let purged = config_get(env, CF_PURGE_KEY).await.is_some();
+    if !purged {
+        stmts.push(("DELETE FROM stats_hourly WHERE metric='traffic'", vec![]));
+        stmts.push(("DELETE FROM stats_daily WHERE metric='traffic'", vec![]));
+    }
+
+    for (k, v) in &hourly {
+        stmts.push((STAT_HOUR_SET_SQL, stat_args(k, "traffic", *v)));
+    }
+    // Kunlik chelakka FAQAT to'liq qamrab olingan kunlar yoziladi:
+    // oynadan tashqarida qolgan kun yarim qiymat bilan ustiga
+    // yozilib, hisobni kamaytirib yuborardi. Kalit formati
+    // saralanadigan bo'lgani uchun oddiy solishtirish yetarli.
+    let edge = hour_key(since);
+    for (k, v) in &dayly {
+        if format!("{k}T00").as_str() >= edge.as_str() {
+            stmts.push((STAT_DAY_SET_SQL, stat_args(k, "traffic", *v)));
+        }
+    }
+
+    if stmts.is_empty() { return; }
+    if turso_batch(env, &stmts).await.is_ok() && !purged {
+        config_put(env, CF_PURGE_KEY, "1").await;
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -3514,6 +3728,10 @@ async fn note_traffic(env: &Env, bytes: i64, user: i64) {
 // Kunlik ko'rsatkich — "oxirgi 24 soat" (soatlik chelaklardan),
 // qolganlari esa kunlik chelaklardan yig'iladi.
 async fn stats_route(env: &Env) -> Result<Response> {
+    // Umumiy trafik Cloudflare Analytics'dan yangilanadi (kerak
+    // bo'lsa — funksiyaning o'zi 30 daqiqada bir marta ishlaydi).
+    cf_traffic_sync(env).await;
+
     let now = now_ms();
     let day_ms = 86_400_000i64;
     let h24 = hour_key(now - 23 * 3_600_000);

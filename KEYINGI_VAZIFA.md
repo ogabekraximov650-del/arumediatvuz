@@ -184,6 +184,10 @@ ma'lum holat ko'rinadi.
 | Trafik | oxirgi 24 soat | kunlik chelaklar | jami |
 | Tomosha vaqti | oxirgi 24 soat | kunlik chelaklar | jami |
 
+Trafik chelaklari **Cloudflare Analytics**'dan to'ldiriladi
+(pastdagi "UMUMIY TRAFIK" bo'limiga qarang) — ilova yuborgan
+shaxsiy hisob ularga QO'SHILMAYDI.
+
 **YILLIK ko'rsatkich ATAYLAB YO'Q** (foydalanuvchi talabi):
 kunlik, haftalik, oylik va umumiy yetarli.
 
@@ -267,8 +271,9 @@ Qolgani o'zgarmadi:
   Yozuvda hisob raqami ham bor: hisob almashsa eski yig'indi
   tashlab yuboriladi.
 * **SUTKADA BIR MARTA** `POST /api/traffic {"bytes": N}` —
-  bitta so'rov. Worker `note_traffic` bilan umumiy chelaklarga
-  va `users_db.traffic_bytes` ga qo'shadi. Javob 200 bo'lsa
+  bitta so'rov. Worker `note_traffic` bilan uni FAQAT o'sha
+  odamning `users_db.traffic_bytes` ustuniga qo'shadi (umumiy
+  chelaklarga EMAS — umumiy raqam Cloudflare'dan keladi). Javob 200 bo'lsa
   ilova yuborilgan miqdorni ayiradi va qaytadan sanay boshlaydi.
 * Ilova qayta ishga tushganda ikkala hisoblagich ham nolga
   tushadi — bu aniqlanadi (yangi qiymat eskisidan kichik) va
@@ -586,21 +591,42 @@ pleyer oxirida pauza bo'lib turadi. "Play" bosilsa
 `_togglePlayPause` uni BOSHIDAN boshlaydi (aks holda `play()`
 oxirda turgan videoda hech narsa qilmasdi).
 
-### HALQA: FAQAT QIZIL NUQTA
+### HALQA: FAQAT AYLANMA YOY
 
-TALAB (foydalanuvchi): "pleyer o'rtasida aylanadigan progress
-chizig'i orqasida bitta kichkina chiziq bor — olib tashla; va
-progress chizig'i mutlaqo shaffof bo'lsin, faqat qizil nuqta
-ko'rinib tursin".
+TALAB (foydalanuvchi, aniqlashtirilgan): "play/pause atrofida
+aylanadigan chiziq qolsin va avvalgidek aylansin, faqat orqasida
+kichkina qizil chiziq bor — shuni olib tashla".
 
-Kutish holatidan tashqarida `_PlayerRingPainter`:
+Ya'ni play/pause tugmasi atrofida:
 
-* orqadagi xira halqani (`trackColor`) CHIZMAYDI;
-* o'tilgan yo'l yoyini ham CHIZMAYDI;
-* faqat hozirgi nuqtada kichik doira chizadi.
+* KUTISH paytida (buferlash, sek, tayyorlash) — avvalgidek
+  aylanma yoy. Unga TEGILMAGAN;
+* qolgan HAMMA vaqtda — hech nima. Videoning qayeridaligini
+  ko'rsatadigan qizil yoy ham, uning orqasidagi xira halqa ham
+  OLIB TASHLANDI (vaqt pastdagi chiziqda ko'rinib turibdi).
 
-Kutish (buferlash, sek, tayyorlash) paytida esa avvalgidek
-aylanma yoy qoladi — u "kutilmoqda" degan yagona belgi.
+Kod soddalashdi: `_PlayerRing` va `_PlayerRingPainter` dan
+`busy`, `progress`, `trackColor` maydonlari butunlay olindi —
+halqa endi FAQAT kutish holatida yaratiladi (`_centerButton`
+ichida `if (busy)`), shu sabab u har doim aylanib turadi.
+
+### PASTKI (QO'LDA SURILADIGAN) PROGRESS — FAQAT QIZIL NUQTA
+
+TALAB (foydalanuvchi): "progress chizig'ida faqat qizil nuqta
+qolsin deganda PASTDAGI videoni boshqa vaqtga o'tkazadigan,
+ya'ni qo'lda suriladigan progressni aytgandim".
+
+`_VideoProgressBar` endi hech qanday chiziq chizmaydi:
+
+* orqa (yuklanmagan) qism — yo'q;
+* diskka yuklab olingan oq qism — yo'q (shu sabab
+  `downloadedRatio` va `_readyRatio()` ham olib tashlandi);
+* o'tilgan qizil qism — yo'q.
+
+Qoladigan yagona ko'rinadigan narsa — hozirgi joydagi QIZIL
+NUQTA. Stack ichidagi shaffof `SizedBox(width: w)` faqat kenglik
+beradi; bosish zonasi (`thumb + 20` balandlik) avvalgidek keng
+qoldi, ya'ni surish qulayligi kamaymadi.
 
 ## PLEYERDAGI VAQT — FAQAT DAQIQA VA SONIYA
 
@@ -636,7 +662,7 @@ tugma egallaydigan bo'sh joy (`SizedBox`) qoldi.
 |---|---|---|
 | ha | ha | aylanma halqa + ikonka |
 | ha | yo'q | faqat aylanma halqa |
-| yo'q | ha | progress halqasi + ikonka |
+| yo'q | ha | faqat ikonka (halqa yo'q) |
 | yo'q | yo'q | hech nima |
 
 **Bu tuzilishni buzmang:** halqani yana ikkinchi joyda chizsangiz
@@ -778,30 +804,87 @@ Xotira o'lchovi (`storage_usage.dart`) o'z holicha qoldi — u endi
 faqat JAMI raqam sifatida ko'rsatiladi. Toifalarga bo'lish kodi
 saqlanib turibdi: kerak bo'lsa oyna qaytariladi.
 
-## CLOUDFLARE ANALYTICS — HOZIRCHA MUMKIN EMAS
+## UMUMIY TRAFIK — CLOUDFLARE ANALYTICS'DAN
 
-TALAB (foydalanuvchi): bosh sahifadagi trafik statistikasi
-Cloudflare Analytics dashboardidan olinsin — "o'sha yerda aniq
-trafikni ko'rsatarkan".
+TALAB (foydalanuvchi): "bosh sahifadagi trafik statistikasi
+Cloudflare dashboarddagi Analytics'dan olinsin, shaxsiy
+statistika qo'shilmasin; shaxsiy statistika esa faqat
+foydalanuvchining o'ziga ko'rinsin va o'zi uchun hisoblansin".
 
-Tekshirildi, **hozirgi sozlamada mumkin emas**:
+### IKKI HISOB BUTUNLAY AJRATILDI
 
-* worker `*.workers.dev` da ishlaydi, ya'ni Cloudflare ZONASI
-  yo'q. Aniq bayt (`bytes`) beradigan `httpRequests*Groups`
-  datasetlari esa faqat zonaga (o'z domeniga) tegishli;
-* workers.dev uchun mavjud dataset —
-  `workersInvocationsAdaptive` — so'rovlar soni, xatolar,
-  CPU vaqtini beradi, LEKIN javob tanasining hajmini bermaydi;
-* ustiga GraphQL Analytics API Cloudflare API TOKENI talab
-  qiladi (yangi secret), va u har so'rovda tashqi API ga
-  chiqishni anglatadi.
+| Qayerda | Manba | Kim ko'radi |
+|---|---|---|
+| Bosh sahifa banneri, `/api/stats` | **Cloudflare Analytics** | hamma |
+| Profil sahifasi, `/api/me/stats` | `users_db.traffic_bytes` | faqat egasi |
 
-Ya'ni buning uchun avval **o'z domeni** ulanishi kerak. Domen
-ulangach `httpRequests1dGroups { sum { bytes } }` bilan aniq
-egress olinadi — o'shanda bu bo'lim qaytadan ko'rib chiqiladi.
+`note_traffic` endi umumiy chelaklarga (`stats_hourly`,
+`stats_daily`) UMUMAN tegmaydi — u faqat o'sha odamning
+`users_db.traffic_bytes` ustunini oshiradi. Ilgari bitta son
+ikkala joyga ham qo'shilardi.
 
-Shu paytgacha hisob ilovada qolaveradi. U endi aniq: faqat
-tarmoqqa chiqadigan ikki joydan olinadi va toifalarga bo'linadi.
+### QAYSI DATASET (avval "mumkin emas" deb yozilgandi — noto'g'ri)
+
+Ilgari bu bo'limda "workers.dev da bayt olib bo'lmaydi" deb
+yozilgan edi. Cloudflare GraphQL sxemasi tekshirilgach ma'lum
+bo'ldiki, **mumkin ekan**:
+
+```
+AccountWorkersInvocationsAdaptiveSum {
+  responseBodySize: uint64!   # Sum of Response Body Sizes
+  requests, errors, cpuTimeUs, subrequests, wallTime, ...
+}
+```
+
+`workersInvocationsAdaptive` — HISOB (account) darajasidagi
+to'plam, ya'ni ZONA (o'z domeni) SHART EMAS: worker
+`*.workers.dev` da tursa ham ishlaydi. `responseBodySize` esa
+aynan dashboarddagi raqamning manbasi.
+
+### QANDAY ISHLAYDI (`cf_traffic_sync`, `worker/src/lib.rs`)
+
+* `GET /api/stats` chaqirilganda ishga tushadi, lekin har safar
+  emas — oxirgi sinxronizatsiyadan **30 daqiqa** o'tgan bo'lsa
+  (belgi `app_config.cf_traffic_synced_at` da);
+* har safar faqat **oxirgi 50 soat** so'raladi, soatlik
+  bo'laklarda (`dimensions { datetimeHour }`). Eski kunlar
+  allaqachon `stats_daily` da — ya'ni "jami" ko'rsatkich vaqt
+  o'tishi bilan to'planib boradi va Cloudflare'ning saqlash
+  muddati cheklovi to'sqinlik qilmaydi;
+* qiymatlar QO'SHILMAYDI, **ALMASHTIRILADI**
+  (`value=excluded.value`) — bir soat necha marta sinxronlansa
+  ham raqam ikkilanmaydi. Shuning uchun alohida
+  `STAT_HOUR_SET_SQL` / `STAT_DAY_SET_SQL` bor;
+* kunlik chelakka faqat oynaga TO'LIQ sig'gan kunlar yoziladi,
+  aks holda yarim qiymat kunlik hisobni kamaytirib yuborardi;
+* BIR MARTALIK tozalash: birinchi muvaffaqiyatli
+  sinxronizatsiyada eski (ilova sanagan) `traffic` qatorlari
+  o'chiriladi (`app_config.cf_traffic_purged`).
+
+Cloudflare vaqti UTC bo'lgani uchun soat satri
+(`2026-09-13T06:00:00Z`) `parse_iso_ms` bilan ms ga o'giriladi,
+keyin `hour_key`/`day_key` uni UTC+5 chelagiga soladi —
+qolgan statistika bilan bir xil mintaqada.
+
+### KERAKLI KALITLAR
+
+| Secret | Nima |
+|---|---|
+| `CF_ACCOUNT_ID` | Cloudflare hisob ID si |
+| `CF_ANALYTICS_TOKEN` | **Account Analytics: Read** ruxsatli API token |
+| `CF_SCRIPT_NAME` (var) | skript nomi, `wrangler.toml` da: `aniraxuzapp` |
+
+`deploy-worker.yml` ularni o'zi qo'yadi: `CF_ACCOUNT_ID` —
+mavjud `CLOUDFLARE_ACCOUNT_ID` sirdan; `CF_ANALYTICS_TOKEN` —
+agar GitHub'da shu nomli alohida secret bo'lsa o'shandan, aks
+holda deploy tokenidan (`CLOUDFLARE_API_TOKEN`).
+
+**AGAR RAQAM 0 BO'LIB TURSA** — deploy tokenida "Account
+Analytics: Read" ruxsati yo'q. Cloudflare dashboard -> My
+Profile -> API Tokens da shu ruxsatli token yasab, uni GitHub
+Actions secret'iga `CF_ANALYTICS_TOKEN` nomi bilan qo'shish
+kifoya (kodni o'zgartirish shart emas). Kalitlar yo'q bo'lsa
+funksiya JIM qaytadi — ilovaning qolgan hamma joyi ishlayveradi.
 
 ## KUTUBXONA: YUKLANMALAR
 

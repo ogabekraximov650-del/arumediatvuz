@@ -3450,7 +3450,6 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
         child: _centerButton(
           playing: false,
           busy: true,
-          progress: 0,
           showIcon: showIcon,
         ),
       );
@@ -3466,16 +3465,11 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
             // "kutish" holati — halqa aylanib turishi kerak.
             _windowWaiting ||
             _pendingTarget != null;
-        final dur = value.duration.inMilliseconds;
-        final shown = _pendingTarget ?? value.position;
-        final progress =
-            dur > 0 ? (shown.inMilliseconds / dur).clamp(0.0, 1.0) : 0.0;
         return GestureDetector(
           onTap: _togglePlayPause,
           child: _centerButton(
             playing: busy ? _intendedPlaying : value.isPlaying,
             busy: busy,
-            progress: progress,
             showIcon: showIcon,
           ),
         );
@@ -3485,16 +3479,24 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
 
   /// Halqa + ikonka. HALQANI CHIZADIGAN YAGONA JOY.
   ///
+  /// TALAB (foydalanuvchi): "play/pause atrofida aylanadigan chiziq
+  /// qolsin va avvalgidek aylansin, faqat orqasida kichkina qizil
+  /// chiziq bor — shuni olib tashla".
+  ///
+  /// Ya'ni halqa ENDI FAQAT kutish paytida (aylanma yoy sifatida)
+  /// chiziladi. Videoning qayeridaligini ko'rsatadigan qizil yoy
+  /// (va uning orqasidagi xira halqa) butunlay olib tashlandi —
+  /// vaqt pastdagi progress chizig'ida ko'rinib turibdi.
+  ///
   /// | kutish | ikonka | ekranda                        |
   /// |--------|--------|--------------------------------|
   /// | ha     | ha     | aylanma halqa + ikonka         |
   /// | ha     | yo'q   | faqat aylanma halqa            |
-  /// | yo'q   | ha     | progress halqasi + ikonka      |
+  /// | yo'q   | ha     | faqat ikonka                   |
   /// | yo'q   | yo'q   | hech nima (bo'sh joy)          |
   Widget _centerButton({
     required bool playing,
     required bool busy,
-    required double progress,
     required bool showIcon,
   }) {
     const iconSize = 40.0;
@@ -3506,19 +3508,13 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       child: Stack(
         alignment: Alignment.center,
         children: [
-          if (busy || showIcon)
+          // Halqa faqat kutish paytida bor — aks holda ikonka
+          // atrofida hech nima chizilmaydi.
+          if (busy)
             _PlayerRing(
               size: ringSize,
               strokeWidth: 2.6,
               color: AppColors.accent,
-              // Orqadagi xira halqa OLIB TASHLANDI (foydalanuvchi
-              // talabi) — shu sabab har doim shaffof.
-              trackColor: Colors.transparent,
-              // Kutish paytida halqa AYLANADI; aks holda u
-              // videoning qayeridaligini kichik nuqta bilan
-              // ko'rsatadi.
-              busy: busy,
-              progress: showIcon ? progress : 0,
             ),
           if (showIcon) _playPauseIcon(playing: playing, size: iconSize),
         ],
@@ -3554,19 +3550,6 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   ///   * worker'dan ijro etilyaptimi — pleyerning O'Z buferi.
   ///     Diskda hech narsa saqlanmagani uchun DownloadManager'ning
   ///     hisobi bu yerda 0 bo'lardi va chiziq bo'sh ko'rinardi.
-  double _readyRatio(VideoPlayerValue? value) {
-    if (_playViaLocal) {
-      return DownloadManager.instance.statOf(_currentUrl).ratio;
-    }
-    if (value == null) return 0;
-    final dur = value.duration;
-    if (dur <= Duration.zero) return 0;
-    var end = Duration.zero;
-    for (final r in value.buffered) {
-      if (r.end > end) end = r.end;
-    }
-    return (end.inMilliseconds / dur.inMilliseconds).clamp(0.0, 1.0);
-  }
 
   // Faqat slayder/vaqtni eng tor ko'lamda yangilaydi.
   Widget _bottomBarReactive({required bool isFullscreen}) {
@@ -3591,7 +3574,6 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
           // darhol ko'radi.
           position: _pendingTarget ?? value?.position ?? Duration.zero,
           duration: value?.duration ?? Duration.zero,
-          downloadedRatio: _readyRatio(value),
           fmt: _fmt,
           onSeek: (d) {
             // MUHIM: progress chizig'idan kelgan sek ham DEBOUNCE
@@ -4858,17 +4840,11 @@ class _PlayerRing extends StatefulWidget {
   final double size;
   final double strokeWidth;
   final Color color;
-  final Color trackColor;
-  final bool busy;
-  final double progress;
 
   const _PlayerRing({
     required this.size,
     required this.strokeWidth,
     required this.color,
-    required this.trackColor,
-    required this.busy,
-    required this.progress,
   });
 
   @override
@@ -4885,20 +4861,7 @@ class _PlayerRingState extends State<_PlayerRing>
     _spin = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1400),
-    );
-    if (widget.busy) _spin.repeat();
-  }
-
-  @override
-  void didUpdateWidget(covariant _PlayerRing oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    // Kutish tugagach animatsiya to'xtaydi — bekorga kadr
-    // chizilmaydi (batareya tejaladi).
-    if (widget.busy && !_spin.isAnimating) {
-      _spin.repeat();
-    } else if (!widget.busy && _spin.isAnimating) {
-      _spin.stop();
-    }
+    )..repeat();
   }
 
   @override
@@ -4918,10 +4881,7 @@ class _PlayerRingState extends State<_PlayerRing>
           builder: (_, __) => CustomPaint(
             painter: _PlayerRingPainter(
               t: _spin.value,
-              busy: widget.busy,
-              progress: widget.progress,
               color: widget.color,
-              trackColor: widget.trackColor,
               strokeWidth: widget.strokeWidth,
             ),
           ),
@@ -4933,18 +4893,12 @@ class _PlayerRingState extends State<_PlayerRing>
 
 class _PlayerRingPainter extends CustomPainter {
   final double t;
-  final bool busy;
-  final double progress;
   final Color color;
-  final Color trackColor;
   final double strokeWidth;
 
   const _PlayerRingPainter({
     required this.t,
-    required this.busy,
-    required this.progress,
     required this.color,
-    required this.trackColor,
     required this.strokeWidth,
   });
 
@@ -4977,37 +4931,6 @@ class _PlayerRingPainter extends CustomPainter {
       ..strokeCap = StrokeCap.round
       ..color = color;
 
-    if (!busy) {
-      // ── FAQAT NUQTA, CHIZIQ YO'Q ────────────────────────────
-      //
-      // TALAB (foydalanuvchi): "pleyer o'rtasida aylanadigan
-      // progress chizig'i orqasida bitta kichkina chiziq bor —
-      // olib tashla; va progress chizig'i mutlaqo shaffof
-      // bo'lsin, faqat qizil nuqta ko'rinib tursin".
-      //
-      // Ya'ni kutish holatidan tashqarida:
-      //   * orqadagi xira halqa (`trackColor`) CHIZILMAYDI;
-      //   * o'tilgan yo'l yoyi ham CHIZILMAYDI;
-      //   * faqat hozirgi nuqtada kichik doira turadi.
-      final p = progress.clamp(0.0, 1.0);
-      if (p <= 0) return;
-      final angle = -math.pi / 2 + 2 * math.pi * p;
-      final dot = Offset(
-        center.dx + r * math.cos(angle),
-        center.dy + r * math.sin(angle),
-      );
-      canvas.drawCircle(
-        dot,
-        // Chiziq qalinligiga bog'langan — o'lcham o'zgarsa nuqta
-        // ham moslashadi.
-        strokeWidth * 1.6,
-        Paint()
-          ..style = PaintingStyle.fill
-          ..color = color,
-      );
-      return;
-    }
-
     // Boshi — davrning birinchi yarmida yuguradi (yoy uzayadi).
     final head = _seg(t, 0.0, 0.55);
     // Dumi — ikkinchi yarmida quvib yetadi (yoy qisqaradi).
@@ -5021,12 +4944,7 @@ class _PlayerRingPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_PlayerRingPainter old) =>
-      old.t != t ||
-      old.busy != busy ||
-      old.progress != progress ||
-      old.color != color ||
-      old.trackColor != trackColor ||
-      old.strokeWidth != strokeWidth;
+      old.t != t || old.color != color || old.strokeWidth != strokeWidth;
 }
 
 class _SeekBadge extends StatefulWidget {
@@ -5141,9 +5059,6 @@ class _BottomBar extends StatefulWidget {
   final Duration position;
   final Duration duration;
 
-  /// Diskka yuklab olingan ulush (0..1) — oq qismning uzunligi.
-  final double downloadedRatio;
-
   final String Function(Duration) fmt;
   final ValueChanged<Duration> onSeek;
   final VoidCallback onQualityTap;
@@ -5157,7 +5072,6 @@ class _BottomBar extends StatefulWidget {
   const _BottomBar({
     required this.position,
     required this.duration,
-    required this.downloadedRatio,
     required this.fmt,
     required this.onSeek,
     required this.onQualityTap,
@@ -5233,7 +5147,6 @@ class _BottomBarState extends State<_BottomBar> {
           Expanded(
             child: _VideoProgressBar(
               played: ratio,
-              downloaded: widget.downloadedRatio,
               trackHeight: trackHeight,
               thumbRadius: thumbRadius,
               onDragStart: () {
@@ -5296,9 +5209,6 @@ class _VideoProgressBar extends StatefulWidget {
   /// Ijro etilgan ulush (0..1).
   final double played;
 
-  /// Diskka yuklab olingan ulush (0..1).
-  final double downloaded;
-
   /// Chiziq qalinligi va tutqich radiusi — oddiy rejimda kattaroq,
   /// fullscreen'da jamroq (chaqiruvchi hal qiladi).
   final double trackHeight;
@@ -5311,7 +5221,6 @@ class _VideoProgressBar extends StatefulWidget {
 
   const _VideoProgressBar({
     required this.played,
-    required this.downloaded,
     required this.trackHeight,
     required this.thumbRadius,
     required this.onDragStart,
@@ -5339,20 +5248,6 @@ class _VideoProgressBarState extends State<_VideoProgressBar> {
         final w = c.maxWidth;
         double ratioAt(double dx) => w <= 0 ? 0.0 : (dx / w).clamp(0.0, 1.0);
 
-        Widget layer(double value, Color color) => Align(
-              alignment: Alignment.centerLeft,
-              child: SizedBox(
-                width: (w * value.clamp(0.0, 1.0)),
-                child: Container(
-                  height: track,
-                  decoration: BoxDecoration(
-                    color: color,
-                    borderRadius: BorderRadius.circular(track / 2),
-                  ),
-                ),
-              ),
-            );
-
         return GestureDetector(
           behavior: HitTestBehavior.opaque,
           onTapDown: (d) => widget.onTapSeek(ratioAt(d.localPosition.dx)),
@@ -5377,12 +5272,19 @@ class _VideoProgressBarState extends State<_VideoProgressBar> {
             child: Stack(
               alignment: Alignment.centerLeft,
               children: [
-                // Yuklanmagan qism ATAYLAB shaffof qoldirilgan.
-                layer(1.0, Colors.transparent),
-                // Diskda tayyor turgan qism — real vaqtda o'sib boradi.
-                layer(widget.downloaded, Colors.white.withValues(alpha: 0.85)),
-                // Ijro etilgan qism.
-                layer(played, AppColors.accent),
+                // ── CHIZIQ MUTLAQO SHAFFOF ──────────────────────
+                //
+                // TALAB (foydalanuvchi): "progress chizig'ida faqat
+                // qizil nuqta qolsin — pastdagi videoni boshqa
+                // vaqtga o'tkazadigan, ya'ni qo'lda suriladigan
+                // progressni aytgandim".
+                //
+                // Shu sabab na orqa chiziq, na yuklab olingan oq
+                // qism, na o'tilgan qizil qism chizilmaydi. Bu
+                // shaffof yo'lak faqat KENGLIK beradi (Stack
+                // o'lchamini belgilaydi) va bosish zonasini ushlab
+                // turadi — ko'zga ko'rinmaydi.
+                SizedBox(width: w, height: track),
                 Positioned(
                   left: (w * played.clamp(0.0, 1.0) - thumb / 2)
                       .clamp(0.0, w > thumb ? w - thumb : 0.0),
