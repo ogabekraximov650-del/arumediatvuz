@@ -879,7 +879,25 @@ mavjud `CLOUDFLARE_ACCOUNT_ID` sirdan; `CF_ANALYTICS_TOKEN` —
 agar GitHub'da shu nomli alohida secret bo'lsa o'shandan, aks
 holda deploy tokenidan (`CLOUDFLARE_API_TOKEN`).
 
-**AGAR RAQAM 0 BO'LIB TURSA** — deploy tokenida "Account
+### QANDAY TEKSHIRILADI
+
+`GET /api/stats` javobida `traffic_src` maydoni bor:
+
+| Qiymat | Ma'nosi |
+|---|---|
+| `cloudflare` | ishlayapti, raqam Cloudflare'dan |
+| `error` | so'rov yiqildi — ko'pincha tokenda "Account Analytics: Read" ruxsati yo'q |
+| `off` | `CF_ACCOUNT_ID` / `CF_ANALYTICS_TOKEN` qo'yilmagan |
+
+```
+curl https://aniraxuzapp.ogabekraximov650.workers.dev/api/stats
+```
+
+(javob chekkada 5 daqiqa keshlanadi, sinxronizatsiyaning o'zi esa
+30 daqiqada bir marta ishlaydi — o'zgarishni shuncha kutish
+kerak).
+
+**AGAR `traffic_src` = `error` BO'LSA** — deploy tokenida "Account
 Analytics: Read" ruxsati yo'q. Cloudflare dashboard -> My
 Profile -> API Tokens da shu ruxsatli token yasab, uni GitHub
 Actions secret'iga `CF_ANALYTICS_TOKEN` nomi bilan qo'shish

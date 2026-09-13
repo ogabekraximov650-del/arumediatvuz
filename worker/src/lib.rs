@@ -3564,6 +3564,17 @@ const CF_SYNC_KEY: &str = "cf_traffic_synced_at";
 /// Eski (ilova sanagan) trafik qatorlari tozalanganini bildiradi.
 const CF_PURGE_KEY: &str = "cf_traffic_purged";
 
+/// Oxirgi urinish natijasi — `/api/stats` javobida `traffic_src`
+/// bo'lib chiqadi. Kalitlar to'g'ri qo'yilganini TASHQARIDAN
+/// tekshirish uchun kerak: aks holda sinxronizatsiya jimgina
+/// yiqilib, raqam qotib qolgani bilinmasdi.
+///
+///   `cloudflare` — ishladi;
+///   `off`        — kalitlar qo'yilmagan;
+///   `error`      — Cloudflare so'rovi yiqildi (ko'pincha
+///                  tokenda "Account Analytics: Read" yo'q).
+const CF_STATUS_KEY: &str = "cf_traffic_status";
+
 /// Chelak qiymatini QO'SHMAYDI, ALMASHTIRADI.
 const STAT_HOUR_SET_SQL: &str =
     "INSERT INTO stats_hourly (hour,metric,value) VALUES (?,?,?)
@@ -3643,6 +3654,10 @@ async fn cf_traffic_sync(env: &Env) {
         }
     });
 
+    // Bundan keyingi har bir yiqilish "error" deb belgilanadi;
+    // muvaffaqiyat oxirida "cloudflare" ga almashtiriladi.
+    config_put(env, CF_STATUS_KEY, "error").await;
+
     let Ok(h) = (|| -> Result<Headers> {
         let h = Headers::new();
         h.set("Authorization", &format!("Bearer {token}"))?;
@@ -3713,9 +3728,15 @@ async fn cf_traffic_sync(env: &Env) {
         }
     }
 
-    if stmts.is_empty() { return; }
-    if turso_batch(env, &stmts).await.is_ok() && !purged {
-        config_put(env, CF_PURGE_KEY, "1").await;
+    // Bo'sh javob ham to'g'ri javob: demak o'sha 50 soatda
+    // umuman trafik bo'lmagan.
+    if stmts.is_empty() {
+        config_put(env, CF_STATUS_KEY, "cloudflare").await;
+        return;
+    }
+    if turso_batch(env, &stmts).await.is_ok() {
+        config_put(env, CF_STATUS_KEY, "cloudflare").await;
+        if !purged { config_put(env, CF_PURGE_KEY, "1").await; }
     }
 }
 
@@ -3768,6 +3789,9 @@ async fn stats_route(env: &Env) -> Result<Response> {
         // Eski soatlik chelaklar kerak emas (3 kundan oshgani).
         ("DELETE FROM stats_hourly WHERE hour < ?",
          vec![TursoArg::text(&day_key(now - 3 * day_ms))]),
+        // Trafik raqami qaysi manbadan kelayotgani.
+        ("SELECT cfg_value FROM app_config WHERE cfg_key=?",
+         vec![TursoArg::text(CF_STATUS_KEY)]),
     ]).await?;
 
     let urow = &res[0]["rows"][0];
@@ -3807,6 +3831,10 @@ async fn stats_route(env: &Env) -> Result<Response> {
         }));
     }
     out.insert("tz".into(), json!("UTC+5"));
+    // Trafik manbasi: "cloudflare" | "error" | "off".
+    out.insert("traffic_src".into(), json!(
+        res[5]["rows"][0][0]["value"].as_str().unwrap_or("off")
+    ));
     ok(Value::Object(out))
 }
 
