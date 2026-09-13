@@ -4819,11 +4819,15 @@ class _MiniIconButton extends StatelessWidget {
 //  AYLANMA HALQA (play/pause tugmasi atrofidagi chiziq)
 // ══════════════════════════════════════════════════════════════
 //
-// Ikki vazifasi bor:
-//   * `busy == false` — ijro qay darajada o'tganini ko'rsatadi
-//     (to'liq aylana = video oxiri);
-//   * `busy == true`  — GOOGLE USLUBIDA aylanadi: yoy avval
-//     uzayadi va boshi tez yuguradi, keyin qisqaradi va sekinlashadi.
+// Bitta vazifasi bor: GOOGLE USLUBIDA aylanish — yoy avval
+// uzayadi va boshi tez yuguradi, keyin qisqaradi va sekinlashadi.
+//
+// TALAB (foydalanuvchi): "play/pause atrofida aylanadigan chiziq
+// qolsin va avvalgidek aylansin, faqat orqasida kichkina qizil
+// chiziq bor — shuni olib tashla". Shu sabab bu halqa FAQAT
+// kutish paytida yaratiladi va hech qachon "progress" ko'rinishiga
+// o'tmaydi — `busy`, `progress`, `trackColor` maydonlari olib
+// tashlangan.
 //
 // NEGA O'Z VIDJETIMIZ (Flutter'ning `CircularProgressIndicator`
 // o'rniga): standart vidjetdagi aylanish juda tekis va sust
