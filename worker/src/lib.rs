@@ -3572,7 +3572,8 @@ const CF_PURGE_KEY: &str = "cf_traffic_purged";
 ///   `cloudflare` — ishladi;
 ///   `off`        — kalitlar qo'yilmagan;
 ///   `error`      — Cloudflare so'rovi yiqildi (ko'pincha
-///                  tokenda "Account Analytics: Read" yo'q).
+///                  tokenda "Account Analytics: Read" yo'q);
+///   `?`          — hali birorta urinish bo'lmagan (qator yo'q).
 const CF_STATUS_KEY: &str = "cf_traffic_status";
 
 /// Chelak qiymatini QO'SHMAYDI, ALMASHTIRADI.
@@ -3612,16 +3613,23 @@ fn parse_iso_ms(s: &str) -> Option<i64> {
 
 /// Cloudflare Analytics'dan umumiy trafikni olib, chelaklarga yozadi.
 async fn cf_traffic_sync(env: &Env) {
-    let (Ok(account), Ok(token)) =
-        (env.secret("CF_ACCOUNT_ID"), env.secret("CF_ANALYTICS_TOKEN"))
-    else {
-        return;
-    };
-    let (account, token) = (account.to_string(), token.to_string());
-    if account.is_empty() || token.is_empty() { return; }
+    let account = env.secret("CF_ACCOUNT_ID")
+        .map(|v| v.to_string()).unwrap_or_default();
+    let token = env.secret("CF_ANALYTICS_TOKEN")
+        .map(|v| v.to_string()).unwrap_or_default();
 
     let now = now_ms();
     ensure_db(env).await;
+
+    // Kalitlar yo'q — buni ATAYLAB yozib qo'yamiz. Aks holda
+    // "hali urinilmagan" bilan "kalit yo'q" holati bir xil
+    // ko'rinardi va nima bo'layotganini bilib bo'lmasdi.
+    if account.is_empty() || token.is_empty() {
+        if config_get(env, CF_STATUS_KEY).await.as_deref() != Some("off") {
+            config_put(env, CF_STATUS_KEY, "off").await;
+        }
+        return;
+    }
 
     // Juda tez-tez so'ralmasin.
     if let Some(prev) = config_get(env, CF_SYNC_KEY).await {
@@ -3833,7 +3841,7 @@ async fn stats_route(env: &Env) -> Result<Response> {
     out.insert("tz".into(), json!("UTC+5"));
     // Trafik manbasi: "cloudflare" | "error" | "off".
     out.insert("traffic_src".into(), json!(
-        res[5]["rows"][0][0]["value"].as_str().unwrap_or("off")
+        res[5]["rows"][0][0]["value"].as_str().unwrap_or("?")
     ));
     ok(Value::Object(out))
 }

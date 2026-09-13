@@ -888,6 +888,7 @@ holda deploy tokenidan (`CLOUDFLARE_API_TOKEN`).
 | `cloudflare` | ishlayapti, raqam Cloudflare'dan |
 | `error` | so'rov yiqildi — ko'pincha tokenda "Account Analytics: Read" ruxsati yo'q |
 | `off` | `CF_ACCOUNT_ID` / `CF_ANALYTICS_TOKEN` qo'yilmagan |
+| `?` | hali birorta urinish bo'lmagan |
 
 ```
 curl https://aniraxuzapp.ogabekraximov650.workers.dev/api/stats
