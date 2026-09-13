@@ -286,11 +286,18 @@ async fn ensure_db(env: &Env) {
     if DB_READY.load(Ordering::Relaxed) {
         return;
     }
-    init_db(env).await;
-    DB_READY.store(true, Ordering::Relaxed);
+    // ── BELGI FAQAT MUVAFFAQIYATDA QO'YILADI ──────────────────
+    //
+    // Ilgari `init_db` yiqilsa ham belgi qo'yilardi va izolyat
+    // umrining OXIRIGACHA jadvallar yaratilmagan holda ishlayverardi
+    // — keyingi har bir so'rov "no such table" bilan yiqilardi va
+    // sababi hech qayerda ko'rinmasdi.
+    if init_db(env).await {
+        DB_READY.store(true, Ordering::Relaxed);
+    }
 }
 
-async fn init_db(env: &Env) {
+async fn init_db(env: &Env) -> bool {
     // ═══════════════════════════════════════════════════════════
     //  SXEMA — BITTA JOYDA, TOZA HOLDA
     // ═══════════════════════════════════════════════════════════
@@ -319,7 +326,7 @@ async fn init_db(env: &Env) {
     // ishlaydi.
 
     // ── 1. KONTENT ─────────────────────────────────────────────
-    let _ = turso_batch(env, &[
+    let mut ok = turso_batch(env, &[
         // `created_at` YO'Q: anime qachon qo'shilgani hech qayerda
         // ko'rsatilmaydi (pleyerdagi "qo'shilgan sana" BO'LIMniki).
         ("CREATE TABLE IF NOT EXISTS anime_db (
@@ -419,10 +426,10 @@ async fn init_db(env: &Env) {
             janr_6 TEXT, janr_7 TEXT, janr_8 TEXT, janr_9 TEXT, janr_10 TEXT,
             PRIMARY KEY (anime_id, season_id)
         )", vec![]),
-    ]).await;
+    ]).await.is_ok();
 
     // ── 2. FOYDALANUVCHI ───────────────────────────────────────
-    let _ = turso_batch(env, &[
+    ok &= turso_batch(env, &[
         ("CREATE TABLE IF NOT EXISTS users_db (
             id INTEGER PRIMARY KEY,
             telegram_id INTEGER UNIQUE,
@@ -476,10 +483,10 @@ async fn init_db(env: &Env) {
         // bo'lgani AYNAN shu indeks bilan sanaladi.
         ("CREATE INDEX IF NOT EXISTS idx_sessions_seen
             ON sessions_db(last_seen_at)", vec![]),
-    ]).await;
+    ]).await.is_ok();
 
     // ── 3. TOMOSHA, BAHO, SEVIMLILAR, STATISTIKA ───────────────
-    let _ = turso_batch(env, &[
+    ok &= turso_batch(env, &[
         // Bitta qism uchun HAR DOIM bitta qator.
         //
         //   watched_ms — shu odam shu qismni JAMI qancha ko'rgani
@@ -602,7 +609,38 @@ async fn init_db(env: &Env) {
             cfg_key TEXT PRIMARY KEY,
             cfg_value TEXT
         )", vec![]),
-    ]).await;
+
+        // B2'da yetim qolgan fayllar (pastdagi izohga qarang).
+        ("CREATE TABLE IF NOT EXISTS orphan_files (
+            file_name TEXT PRIMARY KEY,
+            noted_at INTEGER
+        )", vec![]),
+
+        // ── ESKI TRAFIK RAQAMI BIR MARTA TOZALANADI ───────────
+        //
+        // TALAB (foydalanuvchi): "bosh sahifadagi eski soxta
+        // trafikni tozalab tashla".
+        //
+        // Bir muddat umumiy trafik Cloudflare Analytics'dan
+        // olindi va chelaklarga yozildi. O'sha raqam telefon
+        // qabul qilganidan ~10 barobar katta edi (pleyer
+        // `Range: bytes=0-` bilan so'rab ulanishni uzadi —
+        // Cloudflare esa yo'lga chiqqan baytni sanaydi). Endi
+        // manba faqat ILOVA, shu sabab eski qatorlar o'chiriladi
+        // — aks holda yangi (to'g'ri) raqam eskisining ustiga
+        // qo'shilib, hech qachon haqiqatga kelmasdi.
+        //
+        // Belgi qo'yilgani uchun bu FAQAT BIR MARTA bajariladi.
+        ("DELETE FROM stats_hourly WHERE metric='traffic'
+            AND NOT EXISTS (SELECT 1 FROM app_config
+                             WHERE cfg_key='traffic_reset_v2')", vec![]),
+        ("DELETE FROM stats_daily WHERE metric='traffic'
+            AND NOT EXISTS (SELECT 1 FROM app_config
+                             WHERE cfg_key='traffic_reset_v2')", vec![]),
+        ("INSERT OR IGNORE INTO app_config (cfg_key,cfg_value)
+          VALUES ('traffic_reset_v2','1')", vec![]),
+    ]).await.is_ok();
+    ok
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -4294,12 +4332,22 @@ async fn auth_route(req: Request, env: &Env, origin: &str, path: &str, method: M
                 return err500("Hisob aniqlanmadi");
             }
 
+            // ── PROFIL RASMI: URINAMIZ, LEKIN BLOKLAMAYMIZ ────
+            //
+            // TOPILGAN XATO (foydalanuvchi: "accountni umuman
+            // o'chirib bo'lmayapti").
+            //
+            // Ilgari rasm o'chmasa BUTUN amal to'xtardi va 502
+            // qaytardi. B2 bir zumga javob bermasa yoki kalit
+            // muddati o'tsa, foydalanuvchi hisobini UMUMAN
+            // o'chira olmasdi — bu esa eng yomon holat.
+            //
+            // Endi rasm o'chmasa ham hisob o'chadi, fayl nomi esa
+            // `orphan_files` ga yoziladi. Ya'ni fayl "yo'qolib"
+            // ketmaydi: uni keyin topib o'chirish mumkin.
             let avatar = u["avatar_file"].as_str().unwrap_or("").to_string();
-            if !avatar.is_empty() && !b2_delete_checked(env, &avatar).await {
-                return json_resp(&json!({
-                    "error": "Profil rasmini o'chirib bo'lmadi — qaytadan urinib ko'ring"
-                }), 502);
-            }
+            let avatar_gone = avatar.is_empty()
+                || b2_delete_checked(env, &avatar).await;
 
             // ── NIMA O'CHADI, NIMA QOLADI ─────────────────────
             //
@@ -4345,13 +4393,14 @@ async fn auth_route(req: Request, env: &Env, origin: &str, path: &str, method: M
             // kamayadi.
             let mut fix: std::collections::HashMap<(i64, i64), (i64, i64, i64)> =
                 std::collections::HashMap::new();
-            for r in rows_of(&mine[0]) {
+            let empty = json!({});
+            for r in rows_of(mine.first().unwrap_or(&empty)) {
                 let k = (r["anime_id"].as_i64().unwrap_or(0), r["season_id"].as_i64().unwrap_or(0));
                 let e = fix.entry(k).or_insert((0, 0, 0));
                 e.0 -= r["stars"].as_i64().unwrap_or(0);
                 e.1 -= 1;
             }
-            for r in rows_of(&mine[1]) {
+            for r in rows_of(mine.get(1).unwrap_or(&empty)) {
                 let k = (r["anime_id"].as_i64().unwrap_or(0), r["season_id"].as_i64().unwrap_or(0));
                 fix.entry(k).or_insert((0, 0, 0)).2 -= 1;
             }
@@ -4370,20 +4419,46 @@ async fn auth_route(req: Request, env: &Env, origin: &str, path: &str, method: M
                     ],
                 ));
             }
+            if !avatar_gone {
+                stmts.push((
+                    "INSERT OR IGNORE INTO orphan_files (file_name,noted_at)
+                     VALUES (?,?)",
+                    vec![TursoArg::text(&avatar), TursoArg::int(now_ms())],
+                ));
+            }
             for sql in [
                 "DELETE FROM ratings_db WHERE user_id=?",
                 "DELETE FROM favorites_db WHERE user_id=?",
                 "DELETE FROM watch_history_db WHERE user_id=?",
                 "DELETE FROM sync_batches WHERE user_id=?",
-                "DELETE FROM sessions_db WHERE user_id=?",
-                "DELETE FROM login_tokens WHERE user_id=?",
-                "DELETE FROM users_db WHERE id=?",
             ] {
                 stmts.push((sql, vec![TursoArg::int(me)]));
             }
-            turso_batch(env, &stmts).await?;
+            // ── IKKI BOSQICH: BIRINCHISI YIQILSA HAM HISOB O'CHADI ──
+            //
+            // Turso quvurida bitta buyruq yiqilsa BUTUN quvur
+            // to'xtaydi. Agar hisoblagichlarni tuzatish yiqilsa
+            // (masalan bo'lim allaqachon o'chirilgan bo'lsa),
+            // hisobning O'ZI ham o'chmay qolardi — foydalanuvchi
+            // esa hisobidan abadiy qutula olmasdi.
+            //
+            // Shu sabab: 1) tuzatish va shaxsiy yozuvlar —
+            // XOHISHGA KO'RA (xatosi yutiladi); 2) hisobning
+            // o'zi — MAJBURIY.
+            let _ = turso_batch(env, &stmts).await;
 
-            ok_nostore(json!({"success": true}))
+            let must: Vec<(&str, Vec<TursoArg>)> = [
+                "DELETE FROM sessions_db WHERE user_id=?",
+                "DELETE FROM login_tokens WHERE user_id=?",
+                "DELETE FROM users_db WHERE id=?",
+            ].iter().map(|sql| (*sql, vec![TursoArg::int(me)])).collect();
+            if let Err(e) = turso_batch(env, &must).await {
+                return json_resp(&json!({
+                    "error": format!("Hisobni o'chirib bo'lmadi: {e}")
+                }), 500);
+            }
+
+            ok_nostore(json!({"success": true, "orphan_avatar": !avatar_gone}))
         }
 
         // ── PROFIL RASMINI ALMASHTIRISH ────────────────────────

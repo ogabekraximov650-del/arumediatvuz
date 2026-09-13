@@ -34,6 +34,7 @@
 // Ya'ni bitta telefondagi ikki hisob bir xil faylni ikki marta
 // yuklab olmaydi.
 
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -54,7 +55,7 @@ class AccountData {
   /// Hisob almashdi (kirildi, chiqildi yoki boshqasiga o'tildi).
   ///
   /// `userId` 0 bo'lsa — mehmon (`accountid_0`).
-  static Future<void> switchTo(int userId) async {
+  static Future<void> switchTo(int userId, {int telegramId = 0}) async {
     // ── 1. ESKI PAPKA YOPILADI ────────────────────────────────
     // Yozilmagan o'zgarishlar AYNAN eski hisobning papkasiga
     // tushishi kerak, shu sabab papka almashtirilishidan OLDIN.
@@ -72,6 +73,7 @@ class AccountData {
     // ── 2. PAPKA ALMASHADI ────────────────────────────────────
     RustCore.instance.setAccount(userId);
     RustCore.instance.setUserId(userId);
+    guardOwner(userId, telegramId);
 
     // Xotiradagi ro'yxatlar — endi yangi hisobniki (hech narsa
     // O'CHIRILMAYDI, faqat bo'shatiladi).
@@ -108,6 +110,48 @@ class AccountData {
     try {
       SyncQueue.instance.attach();
     } catch (_) {}
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  //  PAPKA BOSHQA ODAMGA O'TIB KETMASLIGI
+  // ═══════════════════════════════════════════════════════════
+  //
+  // TOPILGAN XAVF: ilovadagi raqam (`users_db.id`) QAYTA
+  // ISHLATILADI. Server yangi hisobga "band bo'lmagan eng kichik
+  // raqam" ni beradi (`next_user_slot`) — ya'ni 1-raqamli hisob
+  // o'chirilsa, keyingi ro'yxatdan o'tgan odam ham 1 ni oladi.
+  //
+  // Papka nomi esa aynan shu raqamdan yasaladi (`accountid_1`).
+  // Demak eski egasining telefonida qolgan papka YANGI odamga
+  // ochilib qolishi mumkin edi: tomosha tarixi, sevimlilar,
+  // trafik hisobi — hammasi begona odamga ko'rinardi.
+  //
+  // Himoya oddiy: papkaga egasining TELEGRAM raqami yozib
+  // qo'yiladi (u hech qachon qayta ishlatilmaydi). Kirganda raqam
+  // mos kelmasa papka tozalanadi.
+  static const String _ownerFile = 'owner.json';
+
+  static void guardOwner(int userId, int telegramId) {
+    if (userId <= 0 || telegramId <= 0) return;
+    final dir = RustCore.instance.dataDirPath;
+    final root = RustCore.instance.rootDirPath;
+    // Papka ochilmagan (eski qurilma) — umumiy kesh, tegilmaydi.
+    if (dir == null || dir == root) return;
+    try {
+      final f = File('$dir/$_ownerFile');
+      if (f.existsSync()) {
+        final prev =
+            ((jsonDecode(f.readAsStringSync()) as Map)['tg'] as num?)?.toInt() ??
+                0;
+        if (prev != 0 && prev != telegramId) {
+          // Papka BOSHQA odamniki — tozalanadi.
+          _wipeDir(Directory(dir));
+        }
+      }
+      f.writeAsStringSync(jsonEncode({'tg': telegramId}));
+    } catch (e) {
+      debugPrint('Papka egasi tekshirilmadi: $e');
+    }
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -169,7 +213,7 @@ class AccountData {
         } catch (_) {}
       }
     } catch (e) {
-      debugPrint('Rasm keshi tozalanmadi: \$e');
+      debugPrint('Rasm keshi tozalanmadi: $e');
     }
 
     onStep?.call('Tayyor', 1.0);
@@ -201,7 +245,7 @@ class AccountData {
         }
       }
     } catch (e) {
-      debugPrint('Hisob papkasi tozalanmadi: \$e');
+      debugPrint('Hisob papkasi tozalanmadi: $e');
     }
   }
 }

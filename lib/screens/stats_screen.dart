@@ -113,7 +113,7 @@ class _StatsScreenState extends State<StatsScreen> {
                             icon: Icons.cloud_download_rounded,
                             block: s.stats.traffic,
                             format: formatBytes,
-                            note: 'Serverdan foydalanuvchilarga berilgan hajm',
+                            note: 'Foydalanuvchilar qabul qilgan hajm',
                           ),
                           const SizedBox(height: 12),
                           _StatCard(

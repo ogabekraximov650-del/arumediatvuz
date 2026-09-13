@@ -588,15 +588,22 @@ class _TaskDialogState extends State<_TaskDialog> {
       _progress = 0;
       _step = '';
     });
-    final err = await widget.run((step, p) {
-      if (!mounted) return;
-      setState(() {
-        _step = step;
-        // Chiziq ORQAGA ketmaydi — bu "nimadir buzildi" degan
-        // taassurot beradi.
-        if (p > _progress) _progress = p.clamp(0.0, 1.0);
+    String? err;
+    try {
+      err = await widget.run((step, p) {
+        if (!mounted) return;
+        setState(() {
+          _step = step;
+          // Chiziq ORQAGA ketmaydi — bu "nimadir buzildi" degan
+          // taassurot beradi.
+          if (p > _progress) _progress = p.clamp(0.0, 1.0);
+        });
       });
-    });
+    } catch (e) {
+      // Kutilmagan xato oynani ABADIY qotirib qo'ymasligi kerak:
+      // foydalanuvchi hech bo'lmasa bekor qila olsin.
+      err = 'Kutilmagan xato: $e';
+    }
     if (!mounted) return;
     setState(() {
       _busy = false;

@@ -115,17 +115,21 @@ class _TelegramLoginScreenState extends State<TelegramLoginScreen>
       }
     });
 
-    // TELEGRAMNI OCHISHDAN OLDIN BIR MARTA SO'RAYMIZ.
+    // ── TELEGRAM O'ZI OCHILMAYDI ──────────────────────────
     //
-    // Token diskda saqlanadi, ya'ni bu ekran ilova yopilib
-    // qaytgandan keyin ham AVVALGI token bilan ochilishi mumkin.
-    // Foydalanuvchi Telegramda START'ni allaqachon bosgan bo'lsa,
-    // uni yana Telegramga uzatishning hojati yo'q — darhol
-    // kirgizamiz.
+    // TALAB (foydalanuvchi): "Telegram orqali kirish tugmasini
+    // bosganda Telegram avtomatik ochilmasin, shunchaki
+    // 'Telegramni ochish' degan tugma chiqib tursin".
+    //
+    // Ilgari ekran ochilishi bilan ilova o'zi Telegramga sakrab
+    // ketardi — foydalanuvchi nima bo'layotganini tushunmasdan
+    // boshqa ilovada paydo bo'lardi. Endi qaror foydalanuvchida.
+    //
+    // Faqat bitta so'rov qilamiz: token diskda saqlanadi, ya'ni
+    // bu ekran ilova yopilib qaytgandan keyin AVVALGI token
+    // bilan ochilishi mumkin. Foydalanuvchi Telegramda START'ni
+    // allaqachon bosgan bo'lsa, uni bekorga kutkazmaymiz.
     await _check();
-    if (!mounted || _stage != _Stage.waiting) return;
-
-    await _openTelegram();
   }
 
   /// TELEGRAMNI OCHISH — QAYSI ILOVA BILAN, FOYDALANUVCHI HAL QILADI.
@@ -310,31 +314,34 @@ class _TelegramLoginScreenState extends State<TelegramLoginScreen>
       case _Stage.waiting:
         return [
           const Text(
-            'Telegramda START tugmasini bosing',
+            'Telegram orqali kirish',
             textAlign: TextAlign.center,
             style: TextStyle(
                 color: Colors.white, fontSize: 19, fontWeight: FontWeight.w600),
           ),
           const SizedBox(height: 10),
           const Text(
-            'Bosganingizdan so\'ng ilovaga qayting — hisobingiz '
+            'Quyidagi tugmani bosing, Telegramda START'
+            ' tugmasini bosing va ilovaga qayting — hisobingiz '
             'avtomatik ochiladi.',
             textAlign: TextAlign.center,
             style: TextStyle(color: Colors.white60, fontSize: 14, height: 1.45),
           ),
-          const SizedBox(height: 28),
+          const SizedBox(height: 26),
+          // ASOSIY TUGMA — Telegram faqat SHUNI bosganda ochiladi
+          // (foydalanuvchi talabi).
+          _button('Telegramni ochish', Icons.open_in_new_rounded,
+              _openTelegram),
+          const SizedBox(height: 20),
           const SizedBox(
-            width: 22,
-            height: 22,
-            child: CircularProgressIndicator(strokeWidth: 2.2, color: Colors.white54),
+            width: 20,
+            height: 20,
+            child: CircularProgressIndicator(strokeWidth: 2.0, color: Colors.white38),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 12),
           Text('Kutilmoqda · $_timeLeft',
               style: const TextStyle(color: Colors.white38, fontSize: 13)),
-          const SizedBox(height: 28),
-          _button('Telegramni qayta ochish', Icons.open_in_new_rounded,
-              _openTelegram),
-          const SizedBox(height: 8),
+          const SizedBox(height: 10),
           // Tanlangan ilova noto'g'ri bo'lsa — tanlovni qaytadan
           // so'rash uchun.
           TextButton(

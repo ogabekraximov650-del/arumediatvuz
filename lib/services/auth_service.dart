@@ -170,6 +170,9 @@ class AuthService extends ChangeNotifier {
       // shu papkadan o'qilishi kerak.
       RustCore.instance.setAccount(_user?.id ?? 0);
       RustCore.instance.setUserId(_user?.id ?? 0);
+      // Papka haqiqatan SHU odamniki ekanini tekshiramiz
+      // (`AccountData.guardOwner` izohiga qarang).
+      AccountData.guardOwner(_user?.id ?? 0, _user?.telegramId ?? 0);
     } catch (_) {
       // Xavfsiz ombor ishlamadi — mehmon sifatida davom etamiz.
       _session = null;
@@ -350,11 +353,29 @@ class AuthService extends ChangeNotifier {
         case 'ok':
           final session = (d['session'] ?? '').toString();
           if (session.isEmpty) return LoginStatus.error;
+          // ── TOPILGAN XATO: TARTIB MUHIM ──────────────────
+          //
+          // Foydalanuvchi: "chiqib ketib qayta kirmoqchi bo'lsam
+          // Telegramni ochish tugmasi chiqmasdan accountga qaytib
+          // kirib ketyapti".
+          //
+          // Sabab: kutilayotgan kirish tokeni HISOB PAPKASIDA
+          // saqlanadi (`_pendingPath` -> `dataDirPath`). `_save`
+          // esa papkani `accountid_0` dan `accountid_<id>` ga
+          // almashtiradi. Ya'ni `clearPending()` `_save` dan
+          // KEYIN chaqirilganda YANGI papkadagi (mavjud bo'lmagan)
+          // faylni o'chirardi — asl token mehmon papkasida
+          // qolaverardi.
+          //
+          // Chiqilgandan keyin ilova yana mehmon papkasiga
+          // tushadi, o'sha eski tokenni topadi va o'zini o'zi
+          // qaytadan kirgizib yuborardi.
+          //
+          // Endi token papka almashishidan OLDIN o'chiriladi.
+          clearPending();
           await _save(
               session,
               AppUser.fromJson(d['user'] as Map<String, dynamic>));
-          // Kirildi — saqlangan token endi keraksiz.
-          clearPending();
           return LoginStatus.ok;
         case 'expired':
           clearPending();
@@ -587,7 +608,16 @@ class AuthService extends ChangeNotifier {
         Uri.parse('$kApiBase/api/auth/delete-account'),
         headers: {'Authorization': 'Bearer $s'},
       ).timeout(const Duration(seconds: 30));
-      if (r.statusCode != 200) return 'O\'chirib bo\'lmadi';
+      if (r.statusCode != 200) {
+        // Server nima deganini KO'RSATAMIZ — "o'chirib bo'lmadi"
+        // degan quruq xabar bilan sababni topib bo'lmasdi.
+        try {
+          final j = jsonDecode(r.body) as Map<String, dynamic>;
+          final msg = (j['error'] ?? '').toString();
+          if (msg.isNotEmpty) return msg;
+        } catch (_) {}
+        return 'O\'chirib bo\'lmadi (${r.statusCode})';
+      }
     } catch (_) {
       return 'Tarmoq xatosi — qaytadan urinib ko\'ring';
     }
@@ -703,7 +733,7 @@ class AuthService extends ChangeNotifier {
     // Boshqa hisobga o'tilgan bo'lsa — papka ham almashadi
     // (`AccountData` izohiga qarang). Hech narsa o'chirilmaydi.
     if (switched) {
-      await AccountData.switchTo(u.id);
+      await AccountData.switchTo(u.id, telegramId: u.telegramId);
     } else {
       RustCore.instance.setUserId(u.id);
     }
@@ -729,6 +759,11 @@ class AuthService extends ChangeNotifier {
   /// Yuklab olingan videolar va posterlar esa umuman
   /// hisobga bog'liq emas — ular bitta joyda turadi.
   Future<void> _clear() async {
+    // Kutilayotgan kirish tokeni — hisob papkasida. Papka
+    // almashishidan OLDIN ham, KEYIN ham tozalanadi: qaysi
+    // papkada qolgan bo'lsa ham yo'qolsin, aks holda ilova
+    // o'zini o'zi qaytadan kirgizib yuborardi.
+    clearPending();
     _session = null;
     _user = null;
     try {
@@ -737,6 +772,7 @@ class AuthService extends ChangeNotifier {
     } catch (_) {}
     notifyListeners();
     await AccountData.switchTo(0);
+    clearPending();
     notifyListeners();
   }
 

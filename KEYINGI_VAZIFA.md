@@ -950,20 +950,105 @@ Shu sabab `WatchHistory._mergeLocal` va
 
 Bir muddat bosh sahifadagi trafik Cloudflare'ning
 `workersInvocationsAdaptive.sum.responseBodySize` maydonidan
-olindi. Texnik jihatdan **ishladi** (`traffic_src: cloudflare`
-bilan tekshirildi), lekin raqam telefon qabul qilganidan **~10
-barobar katta** chiqdi: pleyer `Range: bytes=0-` bilan so'rab, bir
-necha megabaytdan keyin ulanishni uzadi — Cloudflare esa yo'lga
-chiqqan baytni sanaydi.
+olindi. Texnik jihatdan **ishladi**, lekin raqam telefon qabul
+qilganidan **~10 barobar katta** chiqdi: pleyer
+`Range: bytes=0-` bilan so'rab, bir necha megabaytdan keyin
+ulanishni uzadi — Cloudflare esa yo'lga chiqqan baytni sanaydi.
 
 Foydalanuvchi bunga "bu soxta" dedi, shu sabab **butun Cloudflare
 manbasi olib tashlandi** (`cf_traffic_sync`, `traffic_src`,
-`CF_*` sirlar). Endi yagona manba — ilova: u paket bilan bir marta
-yuboradi, `note_traffic` esa uni HAM umumiy chelaklarga, HAM
-`users_db.traffic_bytes` ga qo'shadi.
+`CF_*` sirlar). Endi yagona manba — ilova.
 
-**Agar kelajakda server xarajatini bilish kerak bo'lsa** — uni
-Cloudflare dashboardidan qarash kerak, ilovaga qo'shish emas.
+**Eski qatorlar BIR MARTA o'chirildi.** `init_db` ichida
+`traffic_reset_v2` belgisi bilan: belgi yo'q bo'lsa
+`stats_hourly` va `stats_daily` dagi `metric='traffic'` qatorlari
+o'chiriladi va belgi qo'yiladi. Aks holda yangi (to'g'ri) raqam
+eskisining ustiga qo'shilib, hech qachon haqiqatga kelmasdi.
+Kelajakda yana tozalash kerak bo'lsa — belgi nomini
+`traffic_reset_v3` ga o'zgartiring.
+
+**Agar server xarajatini bilish kerak bo'lsa** — uni Cloudflare
+dashboardidan qarash kerak, ilovaga qo'shish emas
+(foydalanuvchi talabi: admin paneliga ham qo'shilmasin).
+
+## TOPILGAN XATOLAR: KIRISH, CHIQISH VA HISOBNI O'CHIRISH
+
+Uchtasi ham 2026-09 da foydalanuvchi topgan va tuzatilgan.
+
+### 1. CHIQQANDAN KEYIN ILOVA O'ZINI O'ZI QAYTA KIRGIZARDI
+
+**Belgi:** hisobdan chiqib, qaytadan kirmoqchi bo'lsa
+"Telegramni ochish" tugmasi umuman chiqmasdan hisobga qaytib
+kirib ketardi.
+
+**Sabab:** kutilayotgan kirish tokeni HISOB PAPKASIDA saqlanadi
+(`_pendingPath` -> `dataDirPath`). `check()` kirish
+muvaffaqiyatli bo'lganda avval `_save()` ni chaqirardi, u esa
+papkani `accountid_0` (mehmon) dan `accountid_<id>` ga
+almashtirardi. Keyingi `clearPending()` YANGI papkadagi mavjud
+bo'lmagan faylni o'chirardi — asl token mehmon papkasida
+qolaverardi. Chiqilgandan keyin ilova yana mehmon papkasiga
+tushar, o'sha tokenni topar va o'zini o'zi kirgizib yuborardi.
+
+**Tuzatish:** `clearPending()` endi `_save()` dan OLDIN
+chaqiriladi; ustiga `_clear()` (chiqish) papka almashishidan
+oldin ham, keyin ham tozalaydi. **Tartibni buzmang.**
+
+### 2. HISOBNI UMUMAN O'CHIRIB BO'LMASDI
+
+**Sabab (ikkitasi):**
+
+1. Profil rasmi B2'dan o'chmasa BUTUN amal to'xtardi va 502
+   qaytardi. B2 bir zumga javob bermasa foydalanuvchi hisobidan
+   abadiy qutula olmasdi;
+2. hamma o'chirish BITTA Turso quvurida edi — bitta buyruq
+   yiqilsa hisobning o'zi ham o'chmay qolardi.
+
+**Tuzatish:**
+
+* rasm o'chmasa ham hisob o'chadi, fayl nomi `orphan_files`
+  jadvaliga yoziladi (fayl "yo'qolib" ketmaydi, keyin topib
+  o'chirsa bo'ladi);
+* ikki bosqich: 1) hisoblagichlarni tuzatish va shaxsiy
+  yozuvlar — xatosi yutiladi; 2) `sessions_db`, `login_tokens`,
+  `users_db` — MAJBURIY, yiqilsa aniq xabar qaytadi;
+* ilova endi serverning xabarini KO'RSATADI ("O'chirib bo'lmadi"
+  degan quruq matn o'rniga).
+
+### 3. HISOB PAPKASI BOSHQA ODAMGA O'TIB KETISHI MUMKIN EDI
+
+**Xavf:** `users_db.id` QAYTA ISHLATILADI — server yangi hisobga
+"band bo'lmagan eng kichik raqam" ni beradi (`next_user_slot`,
+`user_1` / `User 1` nomlari uchun). Papka nomi esa aynan shu
+raqamdan yasaladi (`accountid_1`). Ya'ni 1-raqamli hisob
+o'chirilib, keyingi odam ham 1 ni olsa, eski egasining
+telefonidagi papka yangi odamga ochilib qolardi.
+
+**Tuzatish:** papkaga `owner.json` yoziladi — ichida egasining
+TELEGRAM raqami (u hech qachon qayta ishlatilmaydi). Kirganda
+raqam mos kelmasa papka tozalanadi
+(`AccountData.guardOwner`, `switchTo` va `restore` da
+chaqiriladi).
+
+### 4. `ensure_db` YIQILSA HAM "TAYYOR" DEB BELGILARDI
+
+`init_db` xatosi yutilardi, lekin `DB_READY` baribir
+qo'yilardi — izolyat umrining oxirigacha jadvallar yaratilmagan
+holda ishlayverardi va har bir so'rov "no such table" bilan
+yiqilardi. Endi belgi FAQAT uchala quvur ham muvaffaqiyatli
+bo'lganda qo'yiladi.
+
+## TELEGRAM O'ZI OCHILMAYDI
+
+TALAB (foydalanuvchi): "Telegram orqali kirish tugmasini
+bosganda Telegram avtomatik ochilmasin — shunchaki 'Telegramni
+ochish' degan tugma chiqib tursin".
+
+Ilgari kirish ekrani ochilishi bilan ilova o'zi Telegramga
+sakrab ketardi. Endi ekran ochilganda faqat BITTA holat so'rovi
+yuboriladi (token diskda saqlangani uchun foydalanuvchi START'ni
+allaqachon bosgan bo'lishi mumkin), Telegram esa FAQAT
+"Telegramni ochish" tugmasi bosilganda ochiladi.
 
 ## KUTUBXONA: YUKLANMALAR
 
