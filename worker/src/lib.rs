@@ -4066,9 +4066,29 @@ async fn billing_subscribe(mut req: Request, env: &Env) -> Result<Response> {
     let base = sub_until(env, me).await.max(now);
     let until = base + days * 86_400_000;
 
+    // ── PUL AVVAL YECHILADI, KEYIN OBUNA BERILADI ─────────────
+    //
+    // Tartib MUHIM. Ilgari ikkovi bitta quvurda edi: balansdan
+    // yechish SHARTLI (`balance>=?`) bo'lgani uchun u ba'zan
+    // qatorga TEGMASLIGI mumkin (ayni damda boshqa qurilmadan
+    // ham sotib olingan bo'lsa), obuna esa BARIBIR uzayardi —
+    // ya'ni odam pulsiz obuna olardi.
+    //
+    // Endi avval yechiladi va natija TEKSHIRILADI: qator
+    // qaytmasa — mablag' yetmagan, obunaga umuman tegilmaydi.
+    let paid = turso_exec(env,
+        "UPDATE users_db SET balance=COALESCE(balance,0)-?
+          WHERE id=? AND COALESCE(balance,0)>=? RETURNING balance",
+        vec![TursoArg::int(price), TursoArg::int(me), TursoArg::int(price)],
+    ).await?;
+    let Some(row) = first_row(&paid) else {
+        return json_resp(&json!({
+            "error": "Balansda mablag' yetarli emas",
+        }), 402);
+    };
+    let left = row["balance"].as_i64().unwrap_or(balance - price);
+
     turso_batch(env, &[
-        ("UPDATE users_db SET balance=COALESCE(balance,0)-? WHERE id=? AND balance>=?",
-         vec![TursoArg::int(price), TursoArg::int(me), TursoArg::int(price)]),
         ("INSERT INTO subs_db (user_id,expires_at,updated_at) VALUES (?,?,?)
           ON CONFLICT(user_id) DO UPDATE SET
              expires_at=excluded.expires_at, updated_at=excluded.updated_at",
@@ -4085,7 +4105,7 @@ async fn billing_subscribe(mut req: Request, env: &Env) -> Result<Response> {
 
     ok_nostore(json!({
         "ok": true,
-        "balance": balance - price,
+        "balance": left,
         "subscription_until": until,
     }))
 }
