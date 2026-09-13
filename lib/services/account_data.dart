@@ -109,6 +109,11 @@ class AccountData {
     try {
       MyStatsService.instance.loadFromDisk();
     } catch (_) {}
+    // Obuna muddati — tarmoqsiz ham ma'lum bo'lishi kerak
+    // (`billing_service.dart` -> `restore` izohiga qarang).
+    try {
+      BillingService.instance.restore();
+    } catch (_) {}
     try {
       await TrafficService.instance.attach();
     } catch (_) {}

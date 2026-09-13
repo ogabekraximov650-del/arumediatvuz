@@ -677,6 +677,46 @@ async fn init_db(env: &Env) -> bool {
                              WHERE cfg_key='traffic_reset_v2')", vec![]),
         ("INSERT OR IGNORE INTO app_config (cfg_key,cfg_value)
           VALUES ('traffic_reset_v2','1')", vec![]),
+
+        // ── HAMMA STATISTIKA BIR MARTA NOLLANADI ──────────────
+        //
+        // TALAB (foydalanuvchi): "Barcha statistikalarni tozalab
+        // tashla, mening profilimga tegishlilarini ham — umuman
+        // statistika qolmasin".
+        //
+        // Ilova sinovda bo'lgan davrda yig'ilgan raqamlar
+        // haqiqatni ko'rsatmaydi: trafik ikki xil manbadan
+        // sanalgan, ko'rishlar esa sinov hisoblaridan yig'ilgan.
+        // Shu sabab HAMMASI noldan boshlanadi.
+        //
+        // Nima o'chadi:
+        //   * `stats_hourly` / `stats_daily` — umumiy chelaklar;
+        //   * `season_db` dagi ko'rish va tomosha vaqti yig'indisi;
+        //   * `watch_history_db` dagi shaxsiy hisoblagichlar
+        //     (tarixning O'ZI qoladi — faqat raqamlar nollanadi);
+        //   * `users_db.traffic_bytes` — profildagi shaxsiy trafik.
+        //
+        // Baho va sevimlilar TEGILMAYDI: ular statistika emas,
+        // foydalanuvchining o'z tanlovi.
+        //
+        // Belgi qo'yilgani uchun bu FAQAT BIR MARTA bajariladi.
+        ("DELETE FROM stats_hourly
+            WHERE NOT EXISTS (SELECT 1 FROM app_config
+                               WHERE cfg_key='stats_reset_v3')", vec![]),
+        ("DELETE FROM stats_daily
+            WHERE NOT EXISTS (SELECT 1 FROM app_config
+                               WHERE cfg_key='stats_reset_v3')", vec![]),
+        ("UPDATE season_db SET views_total=0, watch_ms_total=0
+            WHERE NOT EXISTS (SELECT 1 FROM app_config
+                               WHERE cfg_key='stats_reset_v3')", vec![]),
+        ("UPDATE watch_history_db SET watched_ms=0, view_count=0
+            WHERE NOT EXISTS (SELECT 1 FROM app_config
+                               WHERE cfg_key='stats_reset_v3')", vec![]),
+        ("UPDATE users_db SET traffic_bytes=0
+            WHERE NOT EXISTS (SELECT 1 FROM app_config
+                               WHERE cfg_key='stats_reset_v3')", vec![]),
+        ("INSERT OR IGNORE INTO app_config (cfg_key,cfg_value)
+          VALUES ('stats_reset_v3','1')", vec![]),
     ]).await.is_ok();
     ok
 }
@@ -3879,9 +3919,29 @@ fn plan_price(days: i64) -> Option<i64> {
     PLANS.iter().find(|(d, _)| *d == days).map(|(_, p)| *p)
 }
 
+/// Tezchek xatosini odam o'qiydigan matnga aylantiradi.
+///
+/// Sayt xatoni bir necha xil ko'rinishda qaytaradi: ba'zan
+/// `{"error":"..."}` satr, ba'zan `{"error":{"message":"..."}}`
+/// obyekt, ba'zan esa `{"message":"..."}`. Ilgari faqat bittasi
+/// o'qilardi va qolganida ekranda "noma'lum xato" chiqardi.
+fn tezchek_why(resp: &Value) -> String {
+    for v in [&resp["error"]["message"], &resp["error"], &resp["message"],
+              &resp["reason"], &resp["detail"]] {
+        if let Some(s) = v.as_str() {
+            if !s.is_empty() { return s.to_string(); }
+        }
+    }
+    "noma'lum xato".to_string()
+}
+
 /// Tezchek'ga POST so'rovi.
 async fn tezchek(env: &Env, path: &str, mut body: Value) -> Result<Value> {
-    let key = env.secret("TEZCHEK_API_KEY")?.to_string();
+    // `wrangler secret put` ba'zan oxiriga qator tashlashni ham
+    // qo'shib yuboradi. O'sha ko'rinmas belgi tufayli tezchek.uz
+    // "Invalid shop api_key" deb javob berardi — shuning uchun
+    // kalitni ishlatishdan oldin chetlarini albatta tozalaymiz.
+    let key = env.secret("TEZCHEK_API_KEY")?.to_string().trim().to_string();
     if key.is_empty() {
         return Err(Error::RustError("TEZCHEK_API_KEY qo'yilmagan".into()));
     }
@@ -3925,8 +3985,9 @@ async fn billing_create(mut req: Request, env: &Env) -> Result<Response> {
 
     let resp = tezchek(env, "/create_invoice", json!({"amount": amount})).await?;
     if resp["ok"] != json!(true) {
-        let why = resp["error"]["message"].as_str().unwrap_or("noma'lum xato");
-        return json_resp(&json!({"error": format!("To'lov yaratilmadi: {why}")}), 502);
+        return json_resp(&json!({
+            "error": format!("To'lov yaratilmadi: {}", tezchek_why(&resp))
+        }), 502);
     }
     // `order_id` son ham, satr ham kelishi mumkin.
     let order_id = match &resp["order_id"] {
@@ -4062,9 +4123,23 @@ async fn billing_subscribe(mut req: Request, env: &Env) -> Result<Response> {
     }
 
     let now = now_ms();
-    // Obuna hali tugamagan bo'lsa — USTIGA qo'shiladi.
-    let base = sub_until(env, me).await.max(now);
-    let until = base + days * 86_400_000;
+
+    // ── OBUNASI BOR ODAM YANGISINI OLA OLMAYDI ────────────────
+    //
+    // Foydalanuvchi talabi: "Obuna sotib olgan odam obunasi
+    // tugamaguncha obuna sotib ola olmaydi". Shuning uchun bu
+    // yerda obuna faol bo'lsa — pul umuman yechilmaydi.
+    let cur = sub_until(env, me).await;
+    if cur > now {
+        let left = ((cur - now) as f64 / 86_400_000.0).ceil() as i64;
+        return json_resp(&json!({
+            "error": format!(
+                "Sizda faol obuna bor. Yangisini obuna tugagach olasiz \
+                 (yana {left} kun qoldi)."),
+            "subscription_until": cur,
+        }), 409);
+    }
+    let until = now + days * 86_400_000;
 
     // ── PUL AVVAL YECHILADI, KEYIN OBUNA BERILADI ─────────────
     //

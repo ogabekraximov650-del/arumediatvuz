@@ -117,6 +117,7 @@ import 'package:http/http.dart' as http;
 import 'package:video_player/video_player.dart';
 
 import '../services/app_settings.dart';
+import '../services/billing_service.dart';
 import '../services/download_manager.dart';
 import '../services/rust_bridge.dart';
 import '../services/video_cache_server.dart';
@@ -126,6 +127,7 @@ import '../services/season_info.dart';
 import '../services/watch_history.dart';
 import '../services/watch_progress.dart';
 import '../theme/app_background.dart';
+import 'billing_screen.dart';
 import '../widgets/glass.dart';
 
 const String _apiBase = 'https://aniraxuzapp.ogabekraximov650.workers.dev';
@@ -352,14 +354,55 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // va ochilganda MA'LUMOT oynasi turadi.
     _tabCtrl = TabController(length: 3, vsync: this);
     _tabPages = PageController();
+
+    // ── OBUNASIZ HECH NARSA YUKLANMAYDI ──────────────────────
+    //
+    // Obunasi yo'q odamga "Obuna kerak" ekrani ko'rsatiladi
+    // (`build` izohiga qarang). Shu holatda qismlar ro'yxatini,
+    // bo'limlarni va bo'lim ma'lumotini SO'RASHNING ma'nosi yo'q
+    // — ular ekranga umuman chiqmaydi, lekin tarmoq va trafik
+    // behuda sarflanardi.
+    //
+    // Holat serverdan bir marta yangilanadi: odam boshqa
+    // qurilmada obuna olgan bo'lsa, shu yerda darhol bilinadi.
+    unawaited(BillingService.instance.load(force: true));
+    if (BillingService.instance.active) {
+      _startLoading();
+    } else {
+      // Obuna SHU EKRANDA turib olinishi mumkin ("Obuna olish"
+      // tugmasi). O'sha payt yuklashni boshlash kerak — aks holda
+      // pleyer ochiladi-yu, qismlar ro'yxati bo'sh qolardi.
+      BillingService.instance.addListener(_onBillingChanged);
+    }
+  }
+
+  /// Qismlar, bo'limlar va bo'lim ma'lumoti — BIR MARTA.
+  bool _loadingStarted = false;
+
+  void _startLoading() {
+    if (_loadingStarted) return;
+    _loadingStarted = true;
     _watchConnectivity();
     _loadEpisodes();
     _loadSeasons();
     _loadSeasonInfo();
   }
 
+  void _onBillingChanged() {
+    if (!mounted || !BillingService.instance.active) return;
+    BillingService.instance.removeListener(_onBillingChanged);
+    // Xabar KADR CHIZILAYOTGAN paytda kelishi mumkin. Yuklash
+    // esa `setState` chaqiradi — shu sabab kadr tugagach
+    // boshlanadi, aks holda Flutter "setState during build"
+    // deb xato berardi.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _startLoading();
+    });
+  }
+
   @override
   void dispose() {
+    BillingService.instance.removeListener(_onBillingChanged);
     WidgetsBinding.instance.removeObserver(this);
     // Tarixga BITTA so'rov aynan shu yerda ketadi. Javob
     // kutilmaydi: ekran allaqachon yopilyapti, yozuv esa
@@ -2672,13 +2715,36 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // `PopScope` esa rasmiy o'rinbosar: `canPop: false` bo'lganda
     // tizim orqaga qaytishni BAJARMAYDI va bizga xabar beradi —
     // biz esa avval fullscreen'dan chiqamiz.
-    return PopScope(
-      canPop: !_isFullscreen,
-      onPopInvokedWithResult: (didPop, _) {
-        if (didPop) return;
-        if (_isFullscreen) _toggleFullscreen();
+    // ── OBUNASIZ ODAM ANIME KO'RA OLMAYDI ──────────────────────
+    //
+    // TALAB (foydalanuvchi): "Obunasi yo'q odam anime ko'ra
+    // olmaydi".
+    //
+    // To'siq AYNAN shu yerda, pleyerning O'ZIDA turadi — chunki
+    // pleyerga beshta joydan kiriladi (bosh sahifa, sevimlilar,
+    // tarix, yuklanmalar va pleyerning ichidagi "keyingi bo'lim").
+    // Har bir joyga alohida tekshiruv qo'yilsa, bittasi esdan
+    // chiqsa to'siq ochilib qolardi. Bu yerda esa bitta nuqta.
+    //
+    // Obuna muddati telefonda ham saqlanadi, ya'ni interneti
+    // uzilgan, PUL TO'LAGAN odam yuklab olgan animesini bemalol
+    // ko'ra oladi (`billing_service.dart` -> `restore` izohi).
+    return AnimatedBuilder(
+      animation: BillingService.instance,
+      builder: (context, _) {
+        if (!BillingService.instance.active) {
+          return const _SubRequiredScreen();
+        }
+        return PopScope(
+          canPop: !_isFullscreen,
+          onPopInvokedWithResult: (didPop, _) {
+            if (didPop) return;
+            if (_isFullscreen) _toggleFullscreen();
+          },
+          child:
+              _isFullscreen ? _buildFullscreenPlayer() : _buildNormalScreen(),
+        );
       },
-      child: _isFullscreen ? _buildFullscreenPlayer() : _buildNormalScreen(),
     );
   }
 
@@ -5663,3 +5729,122 @@ class _KeepAlivePageState extends State<_KeepAlivePage>
     return RepaintBoundary(child: widget.child);
   }
 }
+
+// ══════════════════════════════════════════════════════════════
+//  OBUNA KERAK
+// ══════════════════════════════════════════════════════════════
+//
+// Obunasi yo'q odam pleyer o'rniga SHU ekranni ko'radi. Bu yerda
+// video umuman yuklanmaydi va hech qanday tarmoq so'rovi yo'q.
+class _SubRequiredScreen extends StatelessWidget {
+  const _SubRequiredScreen();
+
+  @override
+  Widget build(BuildContext context) {
+    return AppBackground(
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        appBar: AppBar(
+          backgroundColor: Colors.transparent,
+          elevation: 0,
+          iconTheme: const IconThemeData(color: Colors.white),
+        ),
+        body: SafeArea(
+          top: false,
+          child: Center(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(24, 0, 24, 40),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 88,
+                    height: 88,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      gradient: const LinearGradient(
+                        colors: [Color(0xFFFFC93C), Color(0xFFFF8A3D)],
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: const Color(0xFFFFC93C)
+                              .withValues(alpha: 0.30),
+                          blurRadius: 26,
+                          offset: const Offset(0, 10),
+                        ),
+                      ],
+                    ),
+                    child: const Icon(Icons.workspace_premium_rounded,
+                        size: 44, color: Color(0xFF2A1800)),
+                  ),
+                  const SizedBox(height: 22),
+                  const Text(
+                    'Obuna kerak',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 22,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    'Anime ko\'rish uchun obuna bo\'lishi kerak. '
+                    'Tariflar 1 kundan 30 kungacha — profil '
+                    'sahifasidan yoki quyidagi tugmadan tanlang.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: Colors.white.withValues(alpha: 0.62),
+                      fontSize: 13.5,
+                      height: 1.55,
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton(
+                      style: FilledButton.styleFrom(
+                        backgroundColor: AppColors.accent,
+                        minimumSize: const Size(0, 48),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                      ),
+                      onPressed: () {
+                        Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) => const BillingScreen(),
+                          ),
+                        );
+                      },
+                      child: const Text(
+                        'Obuna olish',
+                        style: TextStyle(
+                            fontSize: 15, fontWeight: FontWeight.w800),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  TextButton(
+                    onPressed: () =>
+                        BillingService.instance.load(force: true),
+                    child: Text(
+                      'Obunani yangilash',
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.55),
+                        fontSize: 13,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+

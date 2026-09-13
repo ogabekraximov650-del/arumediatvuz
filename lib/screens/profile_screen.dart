@@ -375,14 +375,35 @@ class _ProfileBody extends StatelessWidget {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            Text(
-                              user.fullName,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 21,
-                                  fontWeight: FontWeight.w700),
+                            // ── ISM VA PREMIUM BELGISI ────
+                            //
+                            // TALAB (foydalanuvchi): "Obuna sotib
+                            // olgan odamning profilida premiumga
+                            // o'xshagan belgi bo'lishi kerak".
+                            //
+                            // Belgi ismning YONIDA turadi va
+                            // faqat obuna FAOL bo'lgandagina
+                            // ko'rinadi. Ism uzun bo'lsa belgi
+                            // siqilib qolmasligi uchun u
+                            // `Flexible` emas — ism qisqaradi.
+                            Row(
+                              crossAxisAlignment:
+                                  CrossAxisAlignment.center,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Flexible(
+                                  child: Text(
+                                    user.fullName,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 21,
+                                        fontWeight: FontWeight.w700),
+                                  ),
+                                ),
+                                const _PremiumBadge(),
+                              ],
                             ),
                             if (user.username.isNotEmpty) ...[
                               const SizedBox(height: 4),
@@ -726,6 +747,88 @@ class _TaskDialogState extends State<_TaskDialog> {
 ///
 /// Shu sabab tugma bosilganda `BillingScreen` qaysi oynadan
 /// boshlanishini balans hal qiladi.
+// ══════════════════════════════════════════════════════════════
+//  PREMIUM BELGISI
+// ══════════════════════════════════════════════════════════════
+//
+// Obunasi FAOL bo'lgan odamning ismi yonida turadigan kichik
+// belgi. Obuna yo'q bo'lsa umuman joy egallamaydi.
+//
+// Manba — `BillingService`: u serverdan kelgan obuna tugash
+// vaqtini saqlaydi, ya'ni belgi ilovada "o'ylab topilmaydi".
+class _PremiumBadge extends StatefulWidget {
+  const _PremiumBadge();
+
+  @override
+  State<_PremiumBadge> createState() => _PremiumBadgeState();
+}
+
+class _PremiumBadgeState extends State<_PremiumBadge> {
+  @override
+  void initState() {
+    super.initState();
+    // Profil ochilganda obuna holati bir marta so'raladi.
+    // `force` YO'Q: holat allaqachon olingan bo'lsa qayta
+    // so'ralmaydi (`billing_service.dart` -> `load`).
+    unawaited(BillingService.instance.load());
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: BillingService.instance,
+      builder: (context, _) {
+        if (!BillingService.instance.active) {
+          return const SizedBox.shrink();
+        }
+        final left = BillingService.instance.daysLeft;
+        return Padding(
+          padding: const EdgeInsets.only(left: 7),
+          child: Tooltip(
+            message: left > 0 ? 'Obuna: yana $left kun' : 'Obuna faol',
+            child: Container(
+              padding: const EdgeInsets.symmetric(
+                  horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                gradient: const LinearGradient(
+                  colors: [Color(0xFFFFC93C), Color(0xFFFF8A3D)],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+                borderRadius: BorderRadius.circular(20),
+                boxShadow: [
+                  BoxShadow(
+                    color: const Color(0xFFFFC93C).withValues(alpha: 0.35),
+                    blurRadius: 10,
+                    offset: const Offset(0, 3),
+                  ),
+                ],
+              ),
+              child: const Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.workspace_premium_rounded,
+                      size: 13, color: Color(0xFF2A1800)),
+                  SizedBox(width: 3),
+                  Text(
+                    'PREMIUM',
+                    style: TextStyle(
+                      color: Color(0xFF2A1800),
+                      fontSize: 9.5,
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: 0.4,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
 class _BillingButton extends StatefulWidget {
   const _BillingButton();
 

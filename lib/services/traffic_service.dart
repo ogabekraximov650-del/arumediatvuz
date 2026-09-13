@@ -71,7 +71,20 @@ class TrafficService extends ChangeNotifier with WidgetsBindingObserver {
   static final TrafficService instance = TrafficService._();
 
   /// Diskdagi yozuv kaliti (Rust yadrosining ro'yxat keshi).
-  static const String _key = 'traffic';
+  // ── HISOB NOLDAN BOSHLANADI ──────────────────────────────────
+  //
+  // TALAB (foydalanuvchi): "Barcha statistikalarni tozalab tashla,
+  // mening profilimga tegishlilarini ham — umuman statistika
+  // qolmasin".
+  //
+  // Telefondagi eski yig'indini o'chirishning eng ishonchli yo'li
+  // — kalitni ALMASHTIRISH. Yangi kalit ostida hech narsa yo'q,
+  // ya'ni hisob o'z-o'zidan noldan boshlanadi va eski blob
+  // keyingi saqlashda ustiga yozilib yo'q bo'ladi.
+  //
+  // Serverdagi raqamlar ham SHU bilan birga nollangan
+  // (`worker/src/lib.rs` -> `stats_reset_v3`).
+  static const String _key = 'traffic_v3';
 
   /// Yadro hisoblagichini shuncha vaqtda bir marta o'qiymiz.
   /// Arzon chaqiruv (bitta tizim fayli), lekin tez-tez qilishning
@@ -275,6 +288,8 @@ class TrafficService extends ChangeNotifier with WidgetsBindingObserver {
 
   void _load() {
     try {
+      // Eski (nollanishdan oldingi) yozuv endi kerak emas.
+      RustCore.instance.saveListCache('traffic', const []);
       final rows = RustCore.instance.getCachedList(_key);
       if (rows == null || rows.isEmpty) return;
       final m = rows.first;

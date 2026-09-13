@@ -92,10 +92,16 @@ class _BillingScreenState extends State<BillingScreen> {
                 child: PageView(
                   controller: _pages,
                   onPageChanged: (i) => setState(() => _page = i),
-                  children: const [
-                    _SubscribePage(),
-                    _TopUpPage(),
-                    _HistoryPage(),
+                  children: [
+                    const _SubscribePage(),
+                    // To'lov tasdiqlangan zahoti Tarix oynasiga
+                    // o'tiladi: havola ro'yxatdan yo'qoladi va
+                    // yozuv tarixda ko'rinadi (foydalanuvchi
+                    // talabi: "to'lov tekshiruvdan o'tganda
+                    // to'lov oynasidan olib tashlanib tarix
+                    // oynasiga yozilishi kerak").
+                    _TopUpPage(onPaid: () => _goTo(2)),
+                    const _HistoryPage(),
                   ],
                 ),
               ),
@@ -281,19 +287,34 @@ class _SubscribePage extends StatelessWidget {
             text: b.error ?? 'Tariflar yuklanmoqda...',
           );
         }
+        // ── OBUNASI BOR ODAM YANGISINI OLA OLMAYDI ────────────
+        //
+        // TALAB (foydalanuvchi): "Obuna sotib olgan odam obunasi
+        // tugamaguncha obuna sotib ola olmaydi".
+        //
+        // Tugmalar shunchaki o'chiriladi va sababi yoziladi —
+        // foydalanuvchi nega bosa olmayotganini ko'rib tursin.
+        // Haqiqiy to'siq SERVERDA (`billing_subscribe`), bu yer
+        // faqat tushuntirish uchun.
+        final locked = b.active;
         return ListView(
           physics: const BouncingScrollPhysics(
               parent: AlwaysScrollableScrollPhysics()),
           padding: const EdgeInsets.fromLTRB(16, 0, 16, 28),
           children: [
+            if (locked) ...[
+              const _ActiveSubNote(),
+              const SizedBox(height: 12),
+            ],
             for (final p in b.plans) ...[
-              _PlanTile(plan: p),
+              _PlanTile(plan: p, locked: locked),
               const SizedBox(height: 10),
             ],
             const SizedBox(height: 4),
             Text(
-              'Obuna balansdan yechiladi. Muddati tugamagan obuna '
-              'ustiga yangi tarif qo\'shiladi.',
+              locked
+                  ? 'Obunangiz tugagach yangi tarif tanlay olasiz.'
+                  : 'Obuna balansdan yechiladi.',
               style: TextStyle(
                 color: Colors.white.withValues(alpha: 0.45),
                 fontSize: 11.5,
@@ -307,9 +328,62 @@ class _SubscribePage extends StatelessWidget {
   }
 }
 
+/// "Sizda faol obuna bor" izohi.
+class _ActiveSubNote extends StatelessWidget {
+  const _ActiveSubNote();
+
+  @override
+  Widget build(BuildContext context) {
+    final left = BillingService.instance.daysLeft;
+    return Glass(
+      borderRadius: 16,
+      blur: 12,
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+      child: Row(
+        children: [
+          const Icon(Icons.verified_rounded,
+              color: AppColors.accent, size: 20),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'Obunangiz faol',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  left > 0
+                      ? 'Yana $left kun qoldi. Tugagach yangi tarif '
+                          'tanlay olasiz.'
+                      : 'Bugun tugaydi.',
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.62),
+                    fontSize: 12,
+                    height: 1.4,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _PlanTile extends StatefulWidget {
   final SubPlan plan;
-  const _PlanTile({required this.plan});
+
+  /// Obuna hali faol — tugma bosilmaydi.
+  final bool locked;
+  const _PlanTile({required this.plan, this.locked = false});
 
   @override
   State<_PlanTile> createState() => _PlanTileState();
@@ -320,6 +394,10 @@ class _PlanTileState extends State<_PlanTile> {
 
   Future<void> _buy() async {
     final b = BillingService.instance;
+    if (widget.locked) {
+      _say('Sizda faol obuna bor — u tugagach yangisini olasiz');
+      return;
+    }
     if (b.balance < widget.plan.price) {
       _say('Balansda mablag\' yetarli emas — avval to\'ldiring');
       return;
@@ -407,7 +485,7 @@ class _PlanTileState extends State<_PlanTile> {
               minimumSize: const Size(0, 40),
               padding: const EdgeInsets.symmetric(horizontal: 16),
             ),
-            onPressed: _busy ? null : _buy,
+            onPressed: (_busy || widget.locked) ? null : _buy,
             child: _busy
                 ? const SizedBox(
                     width: 16,
@@ -430,7 +508,9 @@ class _PlanTileState extends State<_PlanTile> {
 // ══════════════════════════════════════════════════════════════
 
 class _TopUpPage extends StatefulWidget {
-  const _TopUpPage();
+  /// To'lov tasdiqlanganda chaqiriladi (Tarix oynasiga o'tish).
+  final VoidCallback onPaid;
+  const _TopUpPage({required this.onPaid});
 
   @override
   State<_TopUpPage> createState() => _TopUpPageState();
@@ -576,7 +656,7 @@ class _TopUpPageState extends State<_TopUpPage> {
               )
             else
               for (final l in links) ...[
-                _LinkTile(link: l),
+                _LinkTile(link: l, onPaid: widget.onPaid),
                 const SizedBox(height: 10),
               ],
           ],
@@ -589,7 +669,8 @@ class _TopUpPageState extends State<_TopUpPage> {
 /// Bitta to'lov havolasi: summa, qolgan vaqt va ikkita tugma.
 class _LinkTile extends StatefulWidget {
   final PayLink link;
-  const _LinkTile({required this.link});
+  final VoidCallback onPaid;
+  const _LinkTile({required this.link, required this.onPaid});
 
   @override
   State<_LinkTile> createState() => _LinkTileState();
@@ -624,9 +705,15 @@ class _LinkTileState extends State<_LinkTile> {
       _say(r.error!);
       return;
     }
-    _say(r.paid
-        ? 'To\'lov qabul qilindi — balans yangilandi'
-        : 'Hozircha to\'lov ko\'rinmadi');
+    if (!r.paid) {
+      _say('Hozircha to\'lov ko\'rinmadi');
+      return;
+    }
+    // Havola SERVERDA `paid` ga o'tdi, ya'ni `load()` dan keyin u
+    // faol havolalar ro'yxatida umuman qaytmaydi va o'rniga
+    // tarixda "Balans to'ldirildi" yozuvi paydo bo'ladi.
+    _say('To\'lov qabul qilindi — balans yangilandi');
+    widget.onPaid();
   }
 
   void _say(String text) {

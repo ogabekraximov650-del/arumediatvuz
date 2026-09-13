@@ -35,6 +35,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import 'auth_service.dart';
+import 'rust_bridge.dart';
 
 /// Bitta obuna tarifi.
 @immutable
@@ -138,7 +139,13 @@ class BillingService extends ChangeNotifier {
     };
   }
 
-  /// Hisob almashganda yoki chiqilganda.
+  /// Hisob almashganda yoki chiqilganda — XOTIRA bo'shatiladi.
+  ///
+  /// Diskka HECH NARSA yozilmaydi. Sabab: bu chaqiruv papka
+  /// allaqachon YANGI hisobga almashtirilgandan keyin sodir
+  /// bo'ladi (`account_data.dart` -> `switchTo`), ya'ni bu yerda
+  /// saqlash yangi hisobning obunasini nolga tushirib yuborardi.
+  /// Yangi hisobning yozuvi keyin `restore()` bilan o'qiladi.
   void clear() {
     _balance = 0;
     _until = 0;
@@ -147,6 +154,40 @@ class BillingService extends ChangeNotifier {
     _loaded = false;
     _error = null;
     notifyListeners();
+  }
+
+  // ── OBUNA MUDDATI TELEFONDA HAM SAQLANADI ───────────────────
+  //
+  // NEGA KERAK: obunasi yo'q odam anime ko'ra olmaydi. Agar
+  // obuna muddati FAQAT serverdan kelsa, interneti uzilgan
+  // PUL TO'LAGAN odam ham yuklab olingan animesini ocha olmay
+  // qolardi — ya'ni to'siq noto'g'ri odamga tushardi.
+  //
+  // Shu sabab muddat oxirgi marta serverdan kelgan holida
+  // hisobning o'z papkasiga yoziladi va ilova ochilganda darhol
+  // o'qiladi. Bu xavfsizlikni bo'shashtirmaydi: muddat baribir
+  // SERVER bergan sana, ilova uni o'zi cho'za olmaydi, va
+  // o'tib ketgan sana hech qanday holatda faol hisoblanmaydi.
+  static const String _cacheKey = 'billing';
+
+  /// Diskdagi oxirgi ma'lum holatni o'qiydi (tarmoqsiz).
+  void restore() {
+    try {
+      final rows = RustCore.instance.getCachedList(_cacheKey);
+      if (rows == null || rows.isEmpty) return;
+      final m = rows.first;
+      _balance = ((m['balance'] as num?) ?? 0).toInt();
+      _until = ((m['until'] as num?) ?? 0).toInt();
+      notifyListeners();
+    } catch (_) {}
+  }
+
+  void _saveLocal() {
+    try {
+      RustCore.instance.saveListCache(_cacheKey, [
+        {'balance': _balance, 'until': _until},
+      ]);
+    } catch (_) {}
   }
 
   Future<void> load({bool force = false}) async {
@@ -201,6 +242,7 @@ class BillingService extends ChangeNotifier {
               createdAt: ((e['created_at'] as num?) ?? 0).toInt(),
             ))
         .toList();
+    _saveLocal();
   }
 
   /// To'lov havolasi yaratadi. Xato bo'lsa matn qaytadi.

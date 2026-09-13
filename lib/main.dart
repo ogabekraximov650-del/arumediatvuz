@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'screens/root_screen.dart';
 import 'services/app_keys.dart';
 import 'services/auth_service.dart';
+import 'services/billing_service.dart';
 import 'services/net_meter.dart';
 import 'services/offline_library.dart';
 import 'services/rust_bridge.dart';
@@ -67,6 +68,12 @@ Future<void> _main() async {
   // o'qish tez — tarmoq kutilmaydi: sessiya haqiqiyligi keyin,
   // fon'da tekshiriladi.
   await AuthService.instance.restore();
+
+  // Obuna muddati diskdan o'qiladi — TARMOQSIZ. Obunasi yo'q
+  // odam anime ko'ra olmaydi, shu sabab bu ma'lumot ilova
+  // ochilishi bilan ma'lum bo'lishi kerak, aks holda pul
+  // to'lagan odam ham bir lahza to'sib qo'yilardi.
+  BillingService.instance.restore();
 
   // Diskdagi tomosha tarixi — TARMOQSIZ o'qiladi (shifrlangan
   // nusxadan). Bosh sahifadan anime bosilganda "oxirgi ko'rilgan

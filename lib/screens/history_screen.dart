@@ -415,6 +415,7 @@ class _DownloadsListState extends State<DownloadsList>
   @override
   void dispose() {
     _tick?.cancel();
+    DownloadManager.instance.unwatch(this);
     super.dispose();
   }
 
@@ -427,12 +428,23 @@ class _DownloadsListState extends State<DownloadsList>
       // (foydalanuvchi: "kadr tarix oynasidagidek tez
       // yangilanmayapti"). Ilgari faqat `DownloadsIndex`
       // eshitilardi, shu sabab kadr eskirib turardi.
-      animation: Listenable.merge(
-        [DownloadsIndex.instance, WatchHistory.instance],
-      ),
+      // `DownloadManager` ham tinglanadi: progress chizig'i va
+      // tezlik AYNAN o'sha yerdan keladi va yuklash ketayotganda
+      // u har 0.5 soniyada yangilanadi — ya'ni chiziq soniyalik
+      // taymerni kutib turmaydi.
+      animation: Listenable.merge([
+        DownloadsIndex.instance,
+        WatchHistory.instance,
+        DownloadManager.instance,
+      ]),
       builder: (context, _) {
         final idx = DownloadsIndex.instance;
         final rows = idx.items;
+        // Ro'yxatdagi hamma sifat kuzatuvga qo'yiladi — tezlik va
+        // chiziq uchun holat kerak.
+        DownloadManager.instance.watch(this, {
+          for (final r in rows) ...r.allUrls,
+        });
         return RefreshIndicator(
           color: AppColors.accent,
           backgroundColor: AppColors.card,
@@ -562,65 +574,19 @@ class _DownloadRow extends StatelessWidget {
     unawaited(DownloadsIndex.instance.refresh());
   }
 
+  /// Tozalash oynasi — har bir sifat alohida yoki hammasi birdan.
+  ///
+  /// TALAB (foydalanuvchi): "Tozalash tugmasini bosganda har bitta
+  /// sifatni alohida tozalaydigan va hammasini bittada
+  /// tozalaydigan qilib yasab ber".
   Future<void> _confirmDelete(BuildContext context) async {
-    final ok = await showDialog<bool>(
+    await showModalBottomSheet<void>(
       context: context,
-      barrierColor: Colors.black54,
-      builder: (ctx) => Dialog(
-        backgroundColor: Colors.transparent,
-        insetPadding: const EdgeInsets.symmetric(horizontal: 28),
-        child: Glass(
-          borderRadius: 22,
-          padding: const EdgeInsets.fromLTRB(22, 22, 22, 16),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.cleaning_services_rounded,
-                  size: 42, color: Colors.white70),
-              const SizedBox(height: 12),
-              const Text(
-                'Rostdan ham o\'chirib tashlaysizmi?',
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                    color: Colors.white, fontSize: 15, height: 1.4),
-              ),
-              const SizedBox(height: 6),
-              Text(
-                '${item.title} · ${item.bolimNumber}-bo\'lim '
-                '${item.epizodNumber}-qism',
-                textAlign: TextAlign.center,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                    color: Colors.white.withValues(alpha: 0.6),
-                    fontSize: 12.5),
-              ),
-              const SizedBox(height: 18),
-              Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton(
-                      onPressed: () => Navigator.of(ctx).pop(false),
-                      child: const Text('Yo\'q'),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: FilledButton(
-                      onPressed: () => Navigator.of(ctx).pop(true),
-                      style: FilledButton.styleFrom(
-                          backgroundColor: Colors.red.shade600),
-                      child: const Text('Ha, o\'chirilsin'),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      constraints: const BoxConstraints(),
+      builder: (_) => _ClearSheet(item: item),
     );
-    if (ok == true) await DownloadsIndex.instance.remove(item);
   }
 
   @override
@@ -802,16 +768,52 @@ class _DownloadRow extends StatelessWidget {
                     ),
                   ],
                 ),
-                const SizedBox(height: 5),
-                Text(
-                  _percent(item.ratio * 100),
-                  style: TextStyle(
-                    color: item.complete
-                        ? const Color(0xFF7BD88F)
-                        : AppColors.accent,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w800,
+                const SizedBox(height: 6),
+                // ── PROGRESS CHIZIG'I ─────────────────────────
+                //
+                // TALAB (foydalanuvchi): "foizni admin panelidagi
+                // video yuklashdagidek real vaqt rejimida aniq va
+                // progress chizig'i bilan ko'rsatsin".
+                //
+                // Tugagan qismda chiziq ko'rsatilmaydi — u yerda
+                // yashil foiz o'zi yetarli.
+                if (!item.complete) ...[
+                  _ProgressBar(
+                    value: item.total > 0 ? item.ratio : null,
+                    color: AppColors.accent,
                   ),
+                  const SizedBox(height: 5),
+                ],
+                Row(
+                  children: [
+                    Text(
+                      _percent(item.ratio * 100),
+                      style: TextStyle(
+                        color: item.complete
+                            ? const Color(0xFF7BD88F)
+                            : AppColors.accent,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const Spacer(),
+                    if (!item.complete) ...[
+                      Builder(builder: (context) {
+                        final st = DownloadManager.instance.statOf(item.url);
+                        final label = st.retrying
+                            ? 'qayta ulanmoqda...'
+                            : st.speedLabel;
+                        if (label.isEmpty) return const SizedBox.shrink();
+                        return Text(
+                          label,
+                          style: TextStyle(
+                            color: Colors.white.withValues(alpha: 0.5),
+                            fontSize: 10.5,
+                          ),
+                        );
+                      }),
+                    ],
+                  ],
                 ),
               ],
             ),
@@ -826,7 +828,13 @@ class _DownloadRow extends StatelessWidget {
     await showModalBottomSheet<void>(
       context: context,
       backgroundColor: Colors.transparent,
+      // `isScrollControlled` — oyna ekranning 85 foizigacha
+      // cho'zila olsin; balandlik va surish `_SheetShell` da
+      // (o'sha yerdagi "80 foizi chiqdi" izohiga qarang).
       isScrollControlled: true,
+      // Standart chegara oynani ekranning 9/16 qismiga siqadi —
+      // aynan shu tarkibni kesardi.
+      constraints: const BoxConstraints(),
       builder: (_) => _QualitySheet(item: item),
     );
   }
@@ -875,21 +883,41 @@ class _QualitySheet extends StatefulWidget {
 class _QualitySheetState extends State<_QualitySheet> {
   /// manzil -> hajm (bayt). Yo'q bo'lsa hali o'lchanmagan.
   final Map<String, int> _sizes = {};
-  Timer? _tick;
+
+  /// Foydalanuvchi endigina bosgan, lekin yadro hali xabar
+  /// bermagan sifatlar. Tugma SHU ZAHOTI o'zgarishi uchun.
+  final Set<String> _justStarted = {};
 
   @override
   void initState() {
     super.initState();
     _measure();
-    // Yuklash borayotgan bo'lsa foiz jonli ko'rinsin.
-    _tick = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (mounted) DownloadsIndex.instance.refreshStats();
-    });
+    // ── FOIZ REAL VAQTDA YANGILANADI ────────────────────────
+    //
+    // TOPILGAN XATO (foydalanuvchi: "har bitta sifat yonidagi
+    // yuklab olish tugmasini bosganda sekin ishlayapti va foiz
+    // real vaqtda yangilanmayapti").
+    //
+    // SABAB: bu oyna `DownloadsIndex` ni tinglardi, foizni esa
+    // `DownloadManager` dan o'qirdi. Ya'ni tugma bosilganda
+    // `DownloadManager.notifyListeners()` bu oynaga UMUMAN
+    // yetib kelmasdi — ekran faqat sekundlik taymer
+    // `DownloadsIndex` ni qo'zg'atgandagina yangilanardi. Shundan
+    // "sekin ishlayapti" degan tuyg'u chiqqan.
+    //
+    // Ustiga oyna hech qachon `watch()` chaqirmasdi, ya'ni
+    // yadrodan bu manzillarning holati so'ralmasligi ham mumkin
+    // edi.
+    //
+    // Endi ikkovi ham to'g'ri: oyna `DownloadManager` ni
+    // BEVOSITA tinglaydi va shu manzillarni kuzatuvga qo'yadi —
+    // yuklash ketayotganda holat har 0.5 soniyada yangilanadi.
+    DownloadManager.instance.watch(this, widget.item.allUrls.toSet());
   }
 
   @override
   void dispose() {
-    _tick?.cancel();
+    DownloadManager.instance.unwatch(this);
     super.dispose();
   }
 
@@ -903,75 +931,187 @@ class _QualitySheetState extends State<_QualitySheet> {
 
   @override
   Widget build(BuildContext context) {
-    final urls = [...widget.item.allUrls]..sort((a, b) {
-        int px(String u) =>
-            int.tryParse(qualityOf(u).replaceAll('p', '')) ?? 0;
-        return px(b).compareTo(px(a));
-      });
-    return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(14, 0, 14, 14),
-        child: Glass(
-          borderRadius: 22,
-          blur: 18,
-          padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
-          child: AnimatedBuilder(
-            animation: DownloadsIndex.instance,
-            builder: (context, _) => Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Center(
-                  child: Container(
-                    width: 38,
-                    height: 4,
-                    decoration: BoxDecoration(
-                      color: Colors.white24,
-                      borderRadius: BorderRadius.circular(2),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 14),
-                Text(
-                  widget.item.title.isEmpty ? 'Anime' : widget.item.title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                Text(
-                  '${widget.item.bolimNumber}-bo\'lim '
-                  '${widget.item.epizodNumber}-qism',
-                  style: TextStyle(
-                    color: Colors.white.withValues(alpha: 0.55),
-                    fontSize: 12,
-                  ),
-                ),
-                const SizedBox(height: 14),
-                for (final url in urls) ...[
-                  _QualityRow(
-                    url: url,
-                    size: _sizes[url] ?? 0,
-                    onDownload: () => _start(url),
-                  ),
-                  if (url != urls.last) const SizedBox(height: 8),
-                ],
-                const SizedBox(height: 4),
-              ],
-            ),
-          ),
+    final urls = _sortedQualities(widget.item);
+    return _SheetShell(
+      title: widget.item.title.isEmpty ? 'Anime' : widget.item.title,
+      subtitle: '${widget.item.bolimNumber}-bo\'lim '
+          '${widget.item.epizodNumber}-qism',
+      child: AnimatedBuilder(
+        // IKKALA manba ham tinglanadi (yuqoridagi izohga qarang).
+        animation: Listenable.merge(
+            [DownloadsIndex.instance, DownloadManager.instance]),
+        builder: (context, _) => Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            for (final url in urls) ...[
+              _QualityRow(
+                url: url,
+                size: _sizes[url] ?? 0,
+                starting: _justStarted.contains(url),
+                onDownload: () => _start(url),
+              ),
+              if (url != urls.last) const SizedBox(height: 10),
+            ],
+          ],
         ),
       ),
     );
   }
 
   void _start(String url) {
+    // Tugma DARHOL o'zgaradi — yadrodan javob kutilmaydi.
+    setState(() => _justStarted.add(url));
     DownloadManager.instance.download(url);
     DownloadsIndex.instance.refreshStats();
     unawaited(DownloadsIndex.instance.refresh());
+  }
+}
+
+/// Sifatlarni yuqori sifatdan pastga qarab tartiblaydi.
+List<String> _sortedQualities(DownloadItem item) {
+  int px(String u) => int.tryParse(qualityOf(u).replaceAll('p', '')) ?? 0;
+  return [...item.allUrls]..sort((a, b) => px(b).compareTo(px(a)));
+}
+
+/// ── PASTDAN CHIQADIGAN OYNANING UMUMIY QOBIG'I ──────────────
+///
+/// TOPILGAN XATO (foydalanuvchi: "pastdan chiqadigan oyna to'liq
+/// chiqmay qoldi, 80 foizi chiqdi").
+///
+/// Oyna tarkibi `Column(mainAxisSize: min)` edi va hech qanday
+/// balandlik chegarasi yo'q edi. Tarkib ekranga sig'masa (uzun
+/// nom, to'rtta sifat, ustiga tizim paneli chekinishi) pastki
+/// qismi shunchaki KESILARDI — ekranda esa oyna "to'liq
+/// chiqmagandek" ko'rinardi.
+///
+/// Endi:
+///   * balandlik ekranning 85 foizi bilan CHEGARALANGAN;
+///   * tarkib `SingleChildScrollView` ichida — sig'masa suriladi,
+///     ya'ni pastki tugmalar HAR DOIM ochib olinadi;
+///   * pastdagi chekinish tizim tugmalari balandligidan olinadi,
+///     shu sabab oxirgi qator telefon tugmalari ortida qolmaydi.
+class _SheetShell extends StatelessWidget {
+  final String title;
+  final String subtitle;
+  final Widget child;
+
+  const _SheetShell({
+    required this.title,
+    required this.subtitle,
+    required this.child,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final mq = MediaQuery.of(context);
+    final bottom = mq.viewPadding.bottom > mq.padding.bottom
+        ? mq.viewPadding.bottom
+        : mq.padding.bottom;
+    return Padding(
+      padding: EdgeInsets.fromLTRB(14, 0, 14, bottom + 14),
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxHeight: mq.size.height * 0.85),
+        child: Glass(
+          borderRadius: 22,
+          blur: 18,
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 14),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Center(
+                child: Container(
+                  width: 38,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: Colors.white24,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 14),
+              Text(
+                title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              Text(
+                subtitle,
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.55),
+                  fontSize: 12,
+                ),
+              ),
+              const SizedBox(height: 14),
+              // Sig'magan tarkib suriladi — kesilmaydi.
+              Flexible(
+                child: SingleChildScrollView(
+                  physics: const BouncingScrollPhysics(
+                      parent: AlwaysScrollableScrollPhysics()),
+                  child: child,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// ── YUKLAB OLISH CHIZIG'I ───────────────────────────────────
+///
+/// TALAB (foydalanuvchi): "foizni admin panelidagi video
+/// yuklashdagidek real vaqt rejimida aniq va progress chizig'i
+/// bilan ko'rsatsin".
+///
+/// Chiziq `LinearProgressIndicator` emas: unda burchaklar to'g'ri
+/// va balandlikni boshqarish noqulay. Bu yerda ikkita `Container`
+/// — orqa fon va ustidagi o'sib boruvchi qism.
+class _ProgressBar extends StatelessWidget {
+  /// 0..1 oralig'ida. Umumiy hajm hali noma'lum bo'lsa `null` —
+  /// u holda cheksiz (aylanuvchi) ko'rinish beriladi.
+  final double? value;
+  final Color color;
+
+  const _ProgressBar({required this.value, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(4),
+      child: SizedBox(
+        height: 6,
+        child: value == null
+            ? LinearProgressIndicator(
+                backgroundColor: Colors.white.withValues(alpha: 0.12),
+                color: color,
+                minHeight: 6,
+              )
+            : LayoutBuilder(
+                builder: (context, c) => Stack(
+                  children: [
+                    Container(color: Colors.white.withValues(alpha: 0.12)),
+                    AnimatedContainer(
+                      duration: const Duration(milliseconds: 220),
+                      curve: Curves.easeOut,
+                      width: c.maxWidth * value!.clamp(0.0, 1.0),
+                      decoration: BoxDecoration(
+                        color: color,
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+      ),
+    );
   }
 }
 
@@ -979,11 +1119,15 @@ class _QualitySheetState extends State<_QualitySheet> {
 class _QualityRow extends StatelessWidget {
   final String url;
   final int size;
+
+  /// Tugma endigina bosildi — yadro hali javob bermadi.
+  final bool starting;
   final VoidCallback onDownload;
 
   const _QualityRow({
     required this.url,
     required this.size,
+    required this.starting,
     required this.onDownload,
   });
 
@@ -991,72 +1135,345 @@ class _QualityRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final st = DownloadManager.instance.statOf(url);
     final done = st.total > 0 && st.downloaded >= st.total;
-    final started = st.downloaded > 0;
+    final started = st.downloaded > 0 || st.downloading || starting;
     final total = st.total > 0 ? st.total : size;
-    return Row(
+    final busy = !done && (st.downloading || starting);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
       children: [
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-          decoration: BoxDecoration(
-            color: Colors.white.withValues(alpha: 0.10),
-            borderRadius: BorderRadius.circular(6),
-            border: Border.all(color: Colors.white24),
-          ),
-          child: Text(
-            qualityOf(url).isEmpty ? '—' : qualityOf(url),
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 12,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-        ),
-        const SizedBox(width: 10),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                total > 0 ? formatBytes(total) : 'hajmi aniqlanmoqda...',
+        Row(
+          children: [
+            _QualityChip(url: url),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                // Yuklash ketayotganda "qancha / qancha" ko'rinadi
+                // — foydalanuvchi talabi: "qancha MB yuklab
+                // olgani yozilib turilsin".
+                started && total > 0
+                    ? '${formatBytes(st.downloaded)} / ${formatBytes(total)}'
+                    : (total > 0
+                        ? formatBytes(total)
+                        : 'hajmi aniqlanmoqda...'),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
                 style: TextStyle(
                   color: Colors.white.withValues(alpha: 0.75),
                   fontSize: 12,
                 ),
               ),
-              if (started && !done)
-                Text(
-                  _percent(st.ratio * 100),
+            ),
+            const SizedBox(width: 8),
+            if (done)
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 8),
+                child: Icon(Icons.check_circle_rounded,
+                    size: 22, color: Color(0xFF7BD88F)),
+              )
+            else
+              FilledButton(
+                style: FilledButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(horizontal: 14),
+                  minimumSize: const Size(0, 38),
+                  backgroundColor: AppColors.accent,
+                ),
+                // Yuklash ketayotganda tugma bosilmaydi — ikki
+                // marta bosish hech narsani tezlashtirmaydi.
+                onPressed: busy ? null : onDownload,
+                child: Text(
+                  busy
+                      ? 'Yuklanmoqda'
+                      : (started ? 'Davom ettirish' : 'Yuklab olish'),
                   style: const TextStyle(
-                    color: AppColors.accent,
+                      fontSize: 12.5, fontWeight: FontWeight.w700),
+                ),
+              ),
+          ],
+        ),
+        // ── CHIZIQ VA ANIQ FOIZ ────────────────────────────────
+        if (started && !done) ...[
+          const SizedBox(height: 7),
+          _ProgressBar(
+            // Umumiy hajm hali noma'lum bo'lsa cheksiz ko'rinish:
+            // soxta foiz ko'rsatmaymiz.
+            value: st.total > 0 ? st.ratio : null,
+            color: AppColors.accent,
+          ),
+          const SizedBox(height: 5),
+          Row(
+            children: [
+              Text(
+                st.total > 0 ? _percent(st.ratio * 100) : 'boshlanmoqda...',
+                style: const TextStyle(
+                  color: AppColors.accent,
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const Spacer(),
+              if (st.retrying)
+                Text(
+                  'qayta ulanmoqda...',
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.5),
                     fontSize: 11,
-                    fontWeight: FontWeight.w700,
+                  ),
+                )
+              else if (st.speedLabel.isNotEmpty)
+                Text(
+                  st.speedLabel,
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.5),
+                    fontSize: 11,
                   ),
                 ),
             ],
           ),
+        ],
+      ],
+    );
+  }
+}
+
+/// "720p" yorlig'i.
+class _QualityChip extends StatelessWidget {
+  final String url;
+  const _QualityChip({required this.url});
+
+  @override
+  Widget build(BuildContext context) {
+    final q = qualityOf(url);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: Colors.white24),
+      ),
+      child: Text(
+        q.isEmpty ? '—' : q,
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 12,
+          fontWeight: FontWeight.w700,
         ),
-        const SizedBox(width: 8),
-        if (done)
-          const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 8),
-            child: Icon(Icons.check_circle_rounded,
-                size: 22, color: Color(0xFF7BD88F)),
-          )
-        else
-          FilledButton(
-            style: FilledButton.styleFrom(
-              padding: const EdgeInsets.symmetric(horizontal: 14),
-              minimumSize: const Size(0, 38),
-              backgroundColor: AppColors.accent,
-            ),
-            onPressed: onDownload,
-            child: Text(
-              started ? 'Davom ettirish' : 'Yuklab olish',
-              style: const TextStyle(
-                  fontSize: 12.5, fontWeight: FontWeight.w700),
+      ),
+    );
+  }
+}
+
+/// ── TOZALASH OYNASI ─────────────────────────────────────────
+///
+/// TALAB (foydalanuvchi): "Tozalash tugmasini bosganda har bitta
+/// sifatni alohida tozalaydigan va hammasini bittada tozalaydigan
+/// qilib yasab ber".
+///
+/// Ro'yxatda FAQAT telefonda biror qismi bor sifatlar chiqadi —
+/// yuklab olinmagan sifatni "tozalash"ning ma'nosi yo'q.
+class _ClearSheet extends StatefulWidget {
+  final DownloadItem item;
+  const _ClearSheet({required this.item});
+
+  @override
+  State<_ClearSheet> createState() => _ClearSheetState();
+}
+
+class _ClearSheetState extends State<_ClearSheet> {
+  @override
+  void initState() {
+    super.initState();
+    DownloadManager.instance.watch(this, widget.item.allUrls.toSet());
+  }
+
+  @override
+  void dispose() {
+    DownloadManager.instance.unwatch(this);
+    super.dispose();
+  }
+
+  /// Telefonda biror bayti bor sifatlar.
+  List<String> get _present {
+    final out = <String>[];
+    for (final u in _sortedQualities(widget.item)) {
+      if (DownloadManager.instance.statOf(u).downloaded > 0) out.add(u);
+    }
+    return out;
+  }
+
+  Future<void> _ask(String text, Future<void> Function() run) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      barrierColor: Colors.black54,
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.transparent,
+        insetPadding: const EdgeInsets.symmetric(horizontal: 28),
+        child: Glass(
+          borderRadius: 22,
+          padding: const EdgeInsets.fromLTRB(22, 22, 22, 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.cleaning_services_rounded,
+                  size: 42, color: Colors.white70),
+              const SizedBox(height: 12),
+              Text(
+                text,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                    color: Colors.white, fontSize: 15, height: 1.4),
+              ),
+              const SizedBox(height: 18),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: () => Navigator.of(ctx).pop(false),
+                      child: const Text('Yo\'q'),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: FilledButton(
+                      onPressed: () => Navigator.of(ctx).pop(true),
+                      style: FilledButton.styleFrom(
+                          backgroundColor: Colors.red.shade600),
+                      child: const Text('Ha'),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (ok != true) return;
+    await run();
+    if (!mounted) return;
+    setState(() {});
+    // Hech narsa qolmagan bo'lsa oyna o'zi yopiladi.
+    if (_present.isEmpty && mounted) Navigator.of(context).pop();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return _SheetShell(
+      title: widget.item.title.isEmpty ? 'Anime' : widget.item.title,
+      subtitle: '${widget.item.bolimNumber}-bo\'lim '
+          '${widget.item.epizodNumber}-qism',
+      child: AnimatedBuilder(
+        animation: Listenable.merge(
+            [DownloadsIndex.instance, DownloadManager.instance]),
+        builder: (context, _) {
+          final present = _present;
+          if (present.isEmpty) {
+            return Padding(
+              padding: const EdgeInsets.symmetric(vertical: 18),
+              child: Text(
+                'Bu qismdan telefonda hech narsa qolmadi.',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.6),
+                  fontSize: 13,
+                ),
+              ),
+            );
+          }
+          return Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              for (final url in present) ...[
+                _ClearRow(
+                  url: url,
+                  onClear: () => _ask(
+                    '${qualityOf(url)} sifati o\'chirilsinmi?',
+                    () async {
+                      DownloadManager.instance.delete(url);
+                      await DownloadsIndex.instance.refresh();
+                    },
+                  ),
+                ),
+                const SizedBox(height: 8),
+              ],
+              const SizedBox(height: 6),
+              // ── HAMMASINI BITTADA ──────────────────────────
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: Colors.red.shade600,
+                    minimumSize: const Size(0, 46),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(13),
+                    ),
+                  ),
+                  onPressed: () => _ask(
+                    'Bu qismning hamma sifatlari o\'chirilsinmi?',
+                    () => DownloadsIndex.instance.remove(widget.item),
+                  ),
+                  icon: const Icon(Icons.delete_sweep_rounded, size: 20),
+                  label: const Text(
+                    'Hammasini tozalash',
+                    style:
+                        TextStyle(fontSize: 14, fontWeight: FontWeight.w800),
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// Tozalash oynasidagi bitta sifat qatori.
+class _ClearRow extends StatelessWidget {
+  final String url;
+  final VoidCallback onClear;
+
+  const _ClearRow({required this.url, required this.onClear});
+
+  @override
+  Widget build(BuildContext context) {
+    final st = DownloadManager.instance.statOf(url);
+    return Row(
+      children: [
+        _QualityChip(url: url),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Text(
+            st.total > 0
+                ? '${formatBytes(st.downloaded)} / ${formatBytes(st.total)}'
+                : formatBytes(st.downloaded),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.75),
+              fontSize: 12,
             ),
           ),
+        ),
+        const SizedBox(width: 8),
+        OutlinedButton(
+          style: OutlinedButton.styleFrom(
+            padding: const EdgeInsets.symmetric(horizontal: 14),
+            minimumSize: const Size(0, 38),
+            side: BorderSide(color: Colors.red.shade400),
+          ),
+          onPressed: onClear,
+          child: Text(
+            'Tozalash',
+            style: TextStyle(
+              fontSize: 12.5,
+              color: Colors.red.shade300,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ),
       ],
     );
   }

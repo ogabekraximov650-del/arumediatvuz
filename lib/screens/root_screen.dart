@@ -309,7 +309,7 @@ class _RootScreenState extends State<RootScreen>
 
 // ── Yangi tezkor pastki navigatsiya ───────────────────────────
 // Blur yo'q — faqat Container + BoxShadow. 60fps+ istalgan qurilmada.
-class _BottomNav extends StatelessWidget {
+class _BottomNav extends StatefulWidget {
   final int currentIndex;
 
   /// Suzuvchi tugmaning joriy o'rni (0..4 oralig'idagi kasr son).
@@ -322,6 +322,74 @@ class _BottomNav extends StatelessWidget {
     required this.onTap,
   });
 
+  @override
+  State<_BottomNav> createState() => _BottomNavState();
+}
+
+class _BottomNavState extends State<_BottomNav>
+    with WidgetsBindingObserver {
+  // ── TIZIM CHEKINISHI QURILMADAN TO'G'RIDAN O'QILADI ───────
+  //
+  // TOPILGAN SABAB (foydalanuvchi: "sahifa tugmalari yana telefon
+  // tugmasining orqasiga o'tib qoldi").
+  //
+  // `MediaQuery.of(context)` — bu DARAXTDAN meros qolgan qiymat.
+  // Uni yo'l-yo'lakay har qanday `SafeArea`, `Scaffold` yoki
+  // `MediaQuery.removePadding` KESIB tashlashi mumkin, va o'sha
+  // holatda pastki chekinish NOL bo'lib keladi. Pleyer
+  // `immersiveSticky` dan qaytganda esa qiymat bir necha kadr
+  // ESKI bo'lib turadi.
+  //
+  // `View.of(context)` esa meros emas — u qurilmaning O'ZIDAN
+  // keladi va hech kim uni kesa olmaydi. Shuning uchun endi
+  // asosiy o'lchov shundan olinadi, `MediaQuery` esa faqat
+  // qo'shimcha tekshiruv sifatida qoladi.
+  //
+  // `didChangeMetrics` — tizim paneli ko'rinishi o'zgargan
+  // zahoti qayta chizadi, ya'ni pleyerdan qaytilganda panel
+  // o'z joyiga darhol ko'tariladi.
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeMetrics() {
+    if (mounted) setState(() {});
+  }
+
+  /// Pastda tizim tugmalari egallagan jismoniy balandlik (nuqtada).
+  double _systemInset(BuildContext context) {
+    var best = 0.0;
+    void take(double v) {
+      if (v.isFinite && v > best) best = v;
+    }
+
+    // 1) Qurilmadan to'g'ridan — eng ishonchli manba.
+    final view = View.of(context);
+    final dpr = view.devicePixelRatio <= 0 ? 1.0 : view.devicePixelRatio;
+    take(view.viewPadding.bottom / dpr);
+    take(view.padding.bottom / dpr);
+    take(view.systemGestureInsets.bottom / dpr);
+
+    // 2) `MediaQuery` — shu bilan birga QAYTA CHIZISHGA obuna
+    //    bo'lamiz (tizim o'lchovi o'zgarsa widget yangilanadi).
+    final mq = MediaQuery.maybeOf(context);
+    if (mq != null) {
+      take(mq.viewPadding.bottom);
+      take(mq.padding.bottom);
+    }
+    return best;
+  }
+
   static const _items = [
     (icon: Icons.home_rounded, label: 'Bosh sahifa'),
     (icon: Icons.search_rounded, label: 'Qidiruv'),
@@ -332,42 +400,13 @@ class _BottomNav extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // ── PANEL TIZIM TUGMALARI ORTIDA QOLMASLIGI KERAK ─────────
+    // Chekinish qurilmadan olinadi (`_systemInset` izohiga qarang).
     //
-    // TOPILGAN SABAB (foydalanuvchi: "ko'pincha pleyerga kirib
-    // chiqqandan keyin shunaqa bo'lyapti"). Pleyer to'liq ekranga
-    // o'tganda `immersiveSticky` rejimini yoqadi va O'SHA PAYTDA
-    // `MediaQuery.padding.bottom` NOLGA tushadi — tizim paneli
-    // yashiringani uchun. Pleyerdan chiqilganda rejim qaytariladi,
-    // lekin MIUI yangilangan `padding` qiymatini kechikib
-    // yuboradi. `SafeArea` esa aynan `padding` ga tayanadi — shu
-    // sabab panel tizim tugmalari ortida qolib ketardi.
-    //
-    // `viewPadding` bunday emas: u tizim paneli YASHIRINGAN
-    // bo'lsa ham JISMONIY chekinishni ko'rsatib turadi, ya'ni
-    // immersive rejimdan qaytishda nolga tushmaydi.
-    //
-    // Ustiga 14 nuqta bo'sh joy qo'shiladi (foydalanuvchi talabi:
-    // "biroz yuqoriga ko'tar"), pastki chegara esa 16 — chekinish
-    // umuman kelmagan qurilmada ham panel yopishib qolmasin.
-    // ── IKKALA O'LCHOV HAM OLINADI ────────────────────────────
-    //
-    // TOPILGAN XATO (foydalanuvchi: "sahifa almashtirish tugmalari
-    // pastga tushib ketyapti").
-    //
-    // Faqat `viewPadding` ga tayanish yetarli emas: ba'zi
-    // qurilmalarda (va pleyerdan qaytgan zahoti) u NOL keladi va
-    // panel 16 nuqtaga tushib, tizim tugmalari ustiga chiqib
-    // qolardi. `padding` esa immersive rejimda nolga tushadi.
-    //
-    // Shu sabab IKKALASINING KATTASI olinadi va eng kam chekinish
-    // 24 nuqtaga ko'tarildi — hech qanday holatda panel pastga
-    // yopishib qolmaydi.
-    final mq = MediaQuery.of(context);
-    final raw = mq.viewPadding.bottom > mq.padding.bottom
-        ? mq.viewPadding.bottom
-        : mq.padding.bottom;
-    final inset = raw < 24 ? 24.0 : raw + 14;
+    // Eng kam 26 nuqta — chekinish umuman kelmagan qurilmada ham
+    // panel ekran chetiga yopishib qolmasin. Ustiga 12 nuqta
+    // qo'shiladi: foydalanuvchi talabi "biroz yuqoriga ko'tar".
+    final raw = _systemInset(context);
+    final inset = (raw < 26 ? 26.0 : raw) + 12;
     return Padding(
       padding: EdgeInsets.only(bottom: inset),
       child: Container(
@@ -386,7 +425,7 @@ class _BottomNav extends StatelessWidget {
           ],
         ),
         child: ValueListenableBuilder<double>(
-          valueListenable: position,
+          valueListenable: widget.position,
           builder: (context, page, _) {
             return LayoutBuilder(
               builder: (context, constraints) {
@@ -434,7 +473,7 @@ class _BottomNav extends StatelessWidget {
 
                         return Expanded(
                           child: GestureDetector(
-                            onTap: () => onTap(i),
+                            onTap: () => widget.onTap(i),
                             behavior: HitTestBehavior.opaque,
                             child: SizedBox(
                               height: 52,
