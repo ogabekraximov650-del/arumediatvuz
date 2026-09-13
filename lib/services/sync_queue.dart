@@ -510,10 +510,7 @@ class SyncQueue extends ChangeNotifier with WidgetsBindingObserver {
       _saveState();
 
       if (r.statusCode == 200) {
-        // AYNAN yuborilgan yozuvlar o'chiriladi: so'rov ketayotgan
-        // paytda qo'shilgan yangi yozuv yo'qolmaydi.
-        final sentKeys = batch.map((e) => e['key']).toSet();
-        _rows.removeWhere((e) => sentKeys.contains(e['key']));
+        _dropSent(batch);
         _saveQueue();
         if (trafficBytes > 0) {
           TrafficService.instance.markReported(trafficBytes);
@@ -531,8 +528,7 @@ class SyncQueue extends ChangeNotifier with WidgetsBindingObserver {
       if (r.statusCode >= 400 && r.statusCode < 500) {
         // Server yozuvni rad etdi (masalan to'liq emas). Uni
         // abadiy qayta yuborib o'tirmaymiz.
-        final sentKeys = batch.map((e) => e['key']).toSet();
-        _rows.removeWhere((e) => sentKeys.contains(e['key']));
+        _dropSent(batch);
         _saveQueue();
         notifyListeners();
         return false;
@@ -542,6 +538,31 @@ class SyncQueue extends ChangeNotifier with WidgetsBindingObserver {
       // Tarmoq yo'q — navbat joyida qoladi.
       return false;
     }
+  }
+
+  /// Yuborilgan yozuvlarni navbatdan olib tashlaydi.
+  ///
+  /// ── NEGA KALITNING O'ZI YETARLI EMAS ───────────────────────
+  ///
+  /// So'rov ketayotgan paytda foydalanuvchi O'SHA qismni ko'rishda
+  /// davom etishi mumkin: `putHistory` bir xil kalit bilan YANGI
+  /// yozuv qo'yadi (kattaroq `watched_ms`). Faqat kalit bo'yicha
+  /// o'chirsak, hali yuborilmagan o'sha yangi yozuv ham o'chib
+  /// ketardi.
+  ///
+  /// Shu sabab yozuvning VAQTI (`at`) ham solishtiriladi:
+  /// almashtirilgan yozuv navbatda qoladi va keyingi paketda
+  /// yuboriladi.
+  void _dropSent(List<Map<String, dynamic>> batch) {
+    final sent = <String, int>{};
+    for (final e in batch) {
+      sent['${e['key']}'] = (e['at'] as num?)?.toInt() ?? 0;
+    }
+    _rows.removeWhere((e) {
+      final at = sent['${e['key']}'];
+      if (at == null) return false;
+      return ((e['at'] as num?)?.toInt() ?? 0) <= at;
+    });
   }
 
   /// Bir martalik paket raqami: vaqt + tasodifiy son.
