@@ -1,9 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import '../services/auth_service.dart';
 import '../services/season_info.dart';
 import '../services/ui_state.dart';
+import '../services/downloads_index.dart';
 import '../services/watch_history.dart';
 import '../theme/app_background.dart';
 import '../widgets/glass.dart';
@@ -226,6 +229,9 @@ class _RootScreenState extends State<RootScreen>
       // Sevimlilar ro'yxati ham shu yerda — oyna ochilganda emas,
       // aynan tugma bosilganda (ortiqcha so'rov ketmasin).
       FavoritesService.instance.load();
+      // Yuklanmalar ro'yxati DISKDAN yig'iladi (tarmoq kerak emas),
+      // lekin u ham faqat kerak bo'lganda yangilanadi.
+      unawaited(DownloadsIndex.instance.refresh());
     }
 
     // ── 2. TUGMA ESA SEKIN SUZIB BORADI ─────────────────────

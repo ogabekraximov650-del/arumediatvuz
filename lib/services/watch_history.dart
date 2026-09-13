@@ -63,9 +63,16 @@ class HistoryItem {
   /// qachon o'zgarmaydi.
   final int epizodId;
 
-  /// Ko'rsatish uchun qism raqami ("3-qism"). Server buni har
-  /// safar `epizod_db` dan yangilab beradi, ya'ni raqam
-  /// o'zgarsa ro'yxatda ham darhol yangisi ko'rinadi.
+  /// Ko'rsatish uchun qism raqami ("3-qism").
+  ///
+  /// Bazaning tarix jadvalida bunday ustun YO'Q (foydalanuvchi
+  /// talabi: "jurnaldan epizod number'ni olib tashla, epizod id
+  /// yetadi") — server uni har safar `epizod_db` dan qo'shib
+  /// beradi. Ya'ni admin raqamni o'zgartirsa ro'yxatda darhol
+  /// yangisi ko'rinadi.
+  ///
+  /// Diskdagi nusxada esa saqlanadi: oflaynda "N-qism" deb
+  /// yozish uchun boshqa manba yo'q.
   final int epizodNumber;
   final String animeName;
 
@@ -314,6 +321,8 @@ class WatchHistory extends ChangeNotifier {
       'season_id': seasonId,
       'bolim_id': bolimId,
       'epizod_id': epizodId,
+      // Serverga BORMAYDI (u raqamni `epizod_db` dan oladi) —
+      // faqat diskdagi nusxa va ro'yxat uchun.
       'epizod_number': epizodNumber,
       // Sifat almashtirilsa oxirgisi yoziladi — keyingi safar
       // aynan shundan davom etadi.

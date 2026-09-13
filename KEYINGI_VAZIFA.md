@@ -80,10 +80,21 @@ Sabab aniq edi: `watch_history_db` ning birlamchi kaliti
 qismga tegmay qolardi — kadr ham, "davom ettirish" ham ishlamasdi.
 
 Endi kalit `epizod_id` (qism qo'shilganda bir marta beriladi va
-hech qachon o'zgarmaydi). `epizod_number` ustun sifatida qoladi,
-lekin faqat KO'RSATISH uchun; ro'yxatda esa u `epizod_db` dan
-`LEFT JOIN` bilan olinadi, ya'ni raqam o'zgarsa tarixda ham
-darhol yangisi ko'rinadi.
+hech qachon o'zgarmaydi).
+
+**`epizod_number` USTUNI YO'Q** (foydalanuvchi talabi:
+"jurnaldan epizod number'ni olib tashla, epizod id yetadi").
+Raqam baribir `epizod_db` dan `LEFT JOIN` bilan olinardi — bu
+ustun faqat o'qilmagan nusxa edi. Jadval eng tez o'sadigani,
+har qatordan bitta ustun tejash arziydi.
+
+Diskdagi NUSXADA raqam saqlanaveradi: oflaynda "N-qism" deb
+yozish uchun boshqa manba yo'q.
+
+ESLATMA: `CREATE TABLE IF NOT EXISTS` mavjud jadvalni
+o'zgartirmaydi, ya'ni bazada ustunning O'ZI keyingi tozalashgacha
+qolib turadi (unga endi hech narsa yozilmaydi va o'qilmaydi).
+`ALTER TABLE` yamog'i ATAYLAB qo'shilmadi — bu yerdagi qoida.
 
 Qo'shilgan ustun: **`last_quality`** — foydalanuvchi shu qismni
 oxirgi marta qaysi sifatda ko'rgani ("720p"). Pleyer qismni
@@ -483,8 +494,7 @@ birga `:` chiqadi). Ustiga ikki qavat himoya:
 
 ### TUGMANING KO'RINISHI, NOMI VA JOYI
 
-* **nomi** — "Introni o'tkazish" (foydalanuvchi aniq shunday
-  so'ragan);
+* **nomi** — "O'tkazish" (foydalanuvchi aniq shunday so'ragan);
 * **joyi** — videoning CHAP YUQORI burchagi. Fullscreen'da
   kontrollar ochiq bo'lsa yuqori qatorda "orqaga" tugmasi
   turadi, shu sabab intro tugmasi o'sha qatorning TAGIGA
@@ -494,12 +504,13 @@ birga `:` chiqadi). Ustiga ikki qavat himoya:
   **Ikkovini birga o'zgartiring** — aks holda ular ajralib
   qoladi.
 
-Ko'rinish qoidasi (foydalanuvchi aniq aytgan):
+Ko'rinish qoidasi:
 
-* tugma vaqti kelganda chiqadi va **5 soniyadan** keyin o'zi
-  yashirinadi — ekranni to'sib turmaydi;
-* video ustiga bosilsa pleyer tugmalari bilan BIRGA qayta
-  chiqadi (`_onTapVideo` -> `_showIntroButton`).
+* tugma intro oralig'i **TUGAGUNCHA** turadi (foydalanuvchi
+  talabi). Ilgari 5 soniyalik taymer bor edi va tugma o'zi
+  yashirinardi — o'sha payt ekranga qaralmasa o'tkazib yuborish
+  imkoni yo'qolardi. Endi u faqat oraliq tugaganda yoki bosilgach
+  yo'qoladi.
 
 Tugma Stack'ning ENG USTIDA, sek gesture qatlamidan KEYIN
 turadi — aks holda unga bosilgan tap sek qatlamiga tushib,
@@ -513,16 +524,23 @@ o'chiradigan tugma bo'lsin: yoqib qo'ysa intro avtomatik
 o'tkazib yuboriladi, agar o'chiq bo'lsa qo'lda o'tkazishi kerak".
 
 * uch nuqta — videoning O'NG YUQORI burchagida, faqat kontrollar
-  ochiq bo'lganda ko'rinadi (video ko'rilayotganda ekran toza
-  qolishi kerak). Fullscreen sarlavhasi uning tagiga kirmasin
-  deb yuqori qatorda 44 px joy qoldirilgan;
-* bosilganda uch nuqta ostida KICHIK OYNA ochiladi va ichida
-  yoqib-o'chiradigan tugma turadi (`toggle_on` / `toggle_off`
-  ko'rinishida): bir marta bosilsa yonadi, yana bir marta
-  bosilsa o'chadi — foydalanuvchi aynan shunday so'ragan;
-* menyu ochiq turganda kontrollar YASHIRINMAYDI (`onOpened` ->
-  `_hideTimer.cancel()`) — aks holda tugma daraxtdan olib
-  tashlanib, ochiq menyu "muallaq" qolardi;
+  ochiq bo'lganda (yoki menyu ochiq turganda) ko'rinadi.
+  Fullscreen sarlavhasi uning tagiga kirmasin deb yuqori qatorda
+  44 px joy qoldirilgan;
+* bosilganda uch nuqta ostida KICHIK OYNA ochiladi: "Avto
+  o'tkazish" yozuvi va yoqib-o'chiradigan tugma (`toggle_on` /
+  `toggle_off`). Ko'rinishi `HQ` tugmasidan olingan — oq 15% fon,
+  `white30` chekka, burchak 7 (foydalanuvchi talabi);
+* **`PopupMenuButton` ISHLATILMAYDI.** Foydalanuvchi talabi:
+  "avto o'tkazishni bosganda oyna yopilib ketmasin, faqat oyna
+  tashqarisiga yoki 3ta nuqtaga bossa yo'qolsin" — `PopupMenuButton`
+  esa tanlangan zahoti o'zini yopadi va buni o'zgartirib bo'lmaydi.
+  O'rniga Stack'da uchta qatlam: PARDA (butun ekran, bosilsa
+  yopadi), OYNA, va ularning USTIDA uch nuqta (unga bosilsa
+  parda tutib qolmasdan menyu yopiladi);
+* menyu ochiq turganda kontrollar YASHIRINMAYDI (`_hideTimer`
+  bekor qilinadi) — aks holda uch nuqta daraxtdan olib tashlanib,
+  oyna "muallaq" qolardi;
 * yoqilgan bo'lsa `_updateIntro` tugma ko'rsatish o'rniga
   darhol `_skipIntro()` chaqiradi. Tugma yoqilgan damda video
   intro ichida bo'lsa — o'sha zahoti o'tkaziladi.
@@ -532,6 +550,57 @@ va HISOB PAPKASIDA (`list_settings.rustbin`). Ya'ni bitta
 telefonda ikki kishi kirsa har birining o'z sozlamasi bo'ladi.
 `shared_preferences` ATAYLAB qo'shilmadi — bittagina bayroq
 uchun yangi bog'liqlik va shifrlanmagan fayl ortiqcha.
+
+## PLEYER: PARDA, OXIR VA HALQA
+
+### BILDIRISHNOMA PARDASI PAUZA QILMAYDI
+
+TOPILGAN XATO (foydalanuvchi: "telefonning yuqoridagi internet va
+boshqa narsalarni yoqib o'chiradigan oynasini tushirsa video
+pauza bo'lyapti; agar ko'tarsa yana play bo'lib ketsin").
+
+Sabab: `didChangeAppLifecycleState` da `inactive` ham `paused`
+bilan bir qatorda turardi. Android pardani tushirganda `inactive`
+yuboradi — ilova esa FONGA KETMAYDI, video ko'rinib turaveradi.
+Xuddi shu holat qo'ng'iroq oynasi va tizim dialoglarida ham.
+
+Endi:
+
+| Holat | Nima bo'ladi |
+|---|---|
+| `inactive` | tegilmaydi (parda, dialog) |
+| `paused` / `hidden` / `detached` | pauza + ESLAB QOLINADI |
+| `resumed` | biz pauza qilgan bo'lsak qaytadi |
+
+`_pausedByLifecycle` bayrog'i SHART: usiz foydalanuvchi ataylab
+pauza qilib qo'ygan video ham fon'dan qaytganda o'z-o'zidan ijro
+bo'lib ketardi.
+
+### VIDEO TUGAGACH QAYTA BOSHLANMAYDI
+
+TALAB (foydalanuvchi): "video tugagach qayta boshlanmasin,
+shunchaki pauza bo'lsin".
+
+`_onCompleted` da ilgari `seekTo(0)` + `play()` turardi. Endi
+pleyer oxirida pauza bo'lib turadi. "Play" bosilsa
+`_togglePlayPause` uni BOSHIDAN boshlaydi (aks holda `play()`
+oxirda turgan videoda hech narsa qilmasdi).
+
+### HALQA: FAQAT QIZIL NUQTA
+
+TALAB (foydalanuvchi): "pleyer o'rtasida aylanadigan progress
+chizig'i orqasida bitta kichkina chiziq bor — olib tashla; va
+progress chizig'i mutlaqo shaffof bo'lsin, faqat qizil nuqta
+ko'rinib tursin".
+
+Kutish holatidan tashqarida `_PlayerRingPainter`:
+
+* orqadagi xira halqani (`trackColor`) CHIZMAYDI;
+* o'tilgan yo'l yoyini ham CHIZMAYDI;
+* faqat hozirgi nuqtada kichik doira chizadi.
+
+Kutish (buferlash, sek, tayyorlash) paytida esa avvalgidek
+aylanma yoy qoladi — u "kutilmoqda" degan yagona belgi.
 
 ## PLEYERDAGI VAQT — FAQAT DAQIQA VA SONIYA
 
@@ -668,62 +737,104 @@ bajariladigan ish umuman qolmadi.
 sinxron o'qishga qaytsangiz 1-xato, kutdirish qulfini
 qaytarsangiz 2-xato o'sha zahoti qaytadi.
 
-## PROFIL: XOTIRA OYNASI
+## PROFIL: XOTIRA VA TRAFIK
 
-TALAB (foydalanuvchi): "ilovada qanaqa ma'lumot bo'lsa hammasi
-tartib bilan bo'lib yozib chiqilsin, masalan `video 2MB 50%`;
-yoki anime kartochkasi, tomosha tarixi, database ma'lumotlari va
-hokazolar hajmi va jami hajmdan egallab turgan foizi bilan
-ko'rsatilsin".
+TALAB (foydalanuvchi): "profildagi Xotira va Trafik
+statistikalarining o'rnini almashtir: xotirada faqat xotira
+ko'rsatilsin, trafikda esa nimaga qancha trafik ketgani aniq
+qilib ko'rsatilsin".
 
-Oynada: o'ng yuqorida JAMI hajm, tagida bitta ko'p rangli chiziq
-va toifalar ro'yxati (kattasidan kichigiga):
-
-```
-● Videolar             120,4 MB   93.10%
-● Posterlar              6,2 MB    4.79%
-● Tarix kadrlari         1,9 MB    1.47%
-...
-```
-
-### OLIB TASHLANGANLAR (foydalanuvchi talabi)
-
-* "video + rasm" yozuvi — endi toifalar o'zi aytib turadi;
-* **"Tozalash" tugmasi** — "endi keragi yo'q";
-* **"Telefon xotirasi 0.00% band"** — "endi keragi yo'q".
-
-Shu sabab `storage_usage.dart` da telefon xotirasini o'qiydigan
-kanal ham (`aru/storage`, `MainActivity.kt`), tozalash ham YO'Q.
-Kerak bo'lsa ular git tarixidan olinadi.
-
-### QAYSI FAYL QAYSI TOIFAGA KIRADI
-
-Ilova uchta papkadan foydalanadi: `<support>` (video bo'laklari),
-`<temp>` (posterlar keshi va vaqtinchalik nusxalar) va
-`<hujjatlar>` (hisob papkalari — ro'yxat keshlari, tarix
-kadrlari).
-
-Fayl nomi qoidasi (`rust_bridge.dart`):
-
-| Nom | Toifa |
+| Qayerda | Nima |
 |---|---|
-| `video_byte_cache/**` | Videolar |
-| `libCachedImageData/**` | Posterlar |
-| `thumb_*.rustbin` | Tarix kadrlari |
-| `anime_cache.rustbin`, `list_seasons_*`, `list_season_*` | Anime kartochkalari |
-| `list_eps_*` | Qismlar ro'yxati |
-| `list_watch_history*`, `list_watch_positions*` | Tomosha tarixi |
-| `list_favorites` | Sevimlilar |
-| `list_app_stats`, `list_my_stats`, `list_traffic` | Statistika |
-| `list_settings` | Sozlamalar |
-| `<temp>` dagi qolgani | Vaqtinchalik fayllar |
-| qolgani | Boshqa |
+| To'rtlikning 4-katagi | **Xotira** — bitta umumiy raqam |
+| Pastdagi keng oyna | **Trafik** — toifalar ro'yxati |
 
-Yangi kesh kaliti qo'shsangiz `_labelOfDocFile` ga ham qo'shing —
-aks holda u "Boshqa" ga tushib qoladi.
+### TRAFIK TOIFALARI
 
-Papkalarni sanash mingga yaqin fayl statistikasi — shu sabab u
-`Isolate.run` ichida bajariladi va UI oqimi qotmaydi.
+Jami raqam = serverdagi son (`users_db.traffic_bytes`) + ilovada
+hozircha yuborilmagan yig'indi (eski qoida: hisobot sutkada bir
+marta ketadi, ko'rsatkich esa kutmasligi kerak).
+
+Toifalar esa FAQAT telefonda ma'lum — serverda bitta umumiy son
+turadi, u nimaga ketganini bilmaydi:
+
+| Toifa | Manba |
+|---|---|
+| Videolar | `rust_video_cache_net_bytes` |
+| Rasmlar | `/api/image/...`, `/api/avatar/...` (http klient) |
+| Ma'lumotlar | qolgan hamma API so'rovi |
+
+`TrafficService._totals` — bu UMR BO'YI hisob: sutkalik hisobot
+yuborilgach ham NOLLANMAYDI (nollanadigani `_pending`).
+Diskka `list_traffic.rustbin` ga yoziladi.
+
+Toifalar yig'indisi jamidan kam bo'lsa (ilova qayta o'rnatilgan,
+boshqa qurilmada ko'rilgan) — farq **"Oldingi hisob"** qatoriga
+tushadi, ya'ni foizlar har doim 100% ni beradi.
+
+### XOTIRA TOIFALARI
+
+Xotira o'lchovi (`storage_usage.dart`) o'z holicha qoldi — u endi
+faqat JAMI raqam sifatida ko'rsatiladi. Toifalarga bo'lish kodi
+saqlanib turibdi: kerak bo'lsa oyna qaytariladi.
+
+## CLOUDFLARE ANALYTICS — HOZIRCHA MUMKIN EMAS
+
+TALAB (foydalanuvchi): bosh sahifadagi trafik statistikasi
+Cloudflare Analytics dashboardidan olinsin — "o'sha yerda aniq
+trafikni ko'rsatarkan".
+
+Tekshirildi, **hozirgi sozlamada mumkin emas**:
+
+* worker `*.workers.dev` da ishlaydi, ya'ni Cloudflare ZONASI
+  yo'q. Aniq bayt (`bytes`) beradigan `httpRequests*Groups`
+  datasetlari esa faqat zonaga (o'z domeniga) tegishli;
+* workers.dev uchun mavjud dataset —
+  `workersInvocationsAdaptive` — so'rovlar soni, xatolar,
+  CPU vaqtini beradi, LEKIN javob tanasining hajmini bermaydi;
+* ustiga GraphQL Analytics API Cloudflare API TOKENI talab
+  qiladi (yangi secret), va u har so'rovda tashqi API ga
+  chiqishni anglatadi.
+
+Ya'ni buning uchun avval **o'z domeni** ulanishi kerak. Domen
+ulangach `httpRequests1dGroups { sum { bytes } }` bilan aniq
+egress olinadi — o'shanda bu bo'lim qaytadan ko'rib chiqiladi.
+
+Shu paytgacha hisob ilovada qolaveradi. U endi aniq: faqat
+tarmoqqa chiqadigan ikki joydan olinadi va toifalarga bo'linadi.
+
+## KUTUBXONA: YUKLANMALAR
+
+TALAB (foydalanuvchi): "Kutubxona sahifasidagi yuklanmalar
+oynasini olib tashlab, tarix oynasiga qism bo'yicha oynasining
+o'ng tarafiga qo'sh".
+
+Kutubxonada endi ikkita oyna (Tarix, Sevimlilar); "Yuklanmalar"
+esa tomosha tarixining UCHINCHI sahifasi — barmoq bilan surib
+o'tiladi.
+
+### RO'YXAT QANDAY YIG'ILADI
+
+Rust yadrosida "qaysi videolar keshda bor" degan ro'yxat YO'Q —
+u faqat berilgan manzillar bo'yicha holat qaytaradi. Shu sabab
+`downloads_index.dart` nomzodlarni `OfflineLibrary` dagi kabi
+yig'adi (anime keshi + tarix + sevimlilar -> `eps_*` -> hamma
+sifat manzillari) va BITTA `videoStats` chaqiruvi bilan
+holatni oladi. `downloaded > 0` bo'lganlari qoladi.
+
+**Tartib — oxirgi bo'lak qachon yozilgani.** Rust har video
+uchun alohida papka ochadi
+(`<support>/video_byte_cache/<kalit>`), papkaning
+o'zgartirilgan vaqti aynan shuni bildiradi. Kalit qoidasi
+`cacheKeyOf` da va u `rust/src/video_cache.rs` -> `cache_key`
+bilan BIR XIL bo'lishi SHART — biri o'zgarsa ikkinchisi ham
+o'zgarishi kerak.
+
+**Bitta qism = bitta qator** (eng ko'p yuklangan sifat), lekin
+o'chirishda qismning HAMMA sifati o'chiriladi.
+
+**To'liq yuklanmagan qism** bosilganda ochilmaydi — avval
+"to'liq yuklab olinsinmi?" deb so'raladi (foydalanuvchi talabi).
 
 ## BREND: ARU / AniRaxUz
 

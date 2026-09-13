@@ -5,7 +5,9 @@
 //   1. Tomoshalar tarixi — ishlaydi (`HistoryTab`);
 //   2. Sevimlilar       — ishlaydi (`FavoritesTab`): pleyerda
 //      yurakcha bosilgan bo'limlar shu yerda turadi;
-//   3. Yuklanmalar      — keyingi vazifa, hozircha bo'sh.
+//
+// "Yuklanmalar" ILGARI shu yerda uchinchi oyna edi; endi u tomosha
+// tarixining uchinchi sahifasi (foydalanuvchi talabi).
 //
 // Oynalar `IndexedStack` bilan almashadi: bosilgan zahoti o'tadi va
 // ochilgan oyna holati (masalan tarix ro'yxatining o'rni) saqlanib
@@ -27,7 +29,15 @@ class LibraryScreen extends StatefulWidget {
 class _LibraryScreenState extends State<LibraryScreen> {
   int _tab = 0;
 
-  static const _titles = ['Tarix', 'Sevimlilar', 'Yuklanmalar'];
+  // ── "YUKLANMALAR" BU YERDA EMAS ────────────────────────────
+  //
+  // TALAB (foydalanuvchi): "Kutubxona sahifasidagi yuklanmalar
+  // oynasini olib tashlab, tarix oynasiga qism bo'yicha oynasining
+  // o'ng tarafiga qo'sh".
+  //
+  // Endi u `HistoryTab` ning uchinchi sahifasi (`DownloadsList`) —
+  // ya'ni barmoq bilan surib o'tiladi.
+  static const _titles = ['Tarix', 'Sevimlilar'];
 
   @override
   Widget build(BuildContext context) {
@@ -69,7 +79,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
             children: const [
               HistoryTab(),
               FavoritesTab(),
-              _SoonTab(label: 'Yuklanmalar', icon: Icons.download_rounded),
             ],
           ),
         ),
@@ -111,38 +120,6 @@ class _TabButton extends StatelessWidget {
               fontSize: 13,
               fontWeight: FontWeight.w600,
             ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// Hali tayyor bo'lmagan oyna.
-///
-/// Bo'm-bo'sh qoldirilmaydi: foydalanuvchi tugmani bosib hech narsa
-/// ko'rmasa, ilovani buzuq deb o'ylaydi.
-class _SoonTab extends StatelessWidget {
-  final String label;
-  final IconData icon;
-  const _SoonTab({required this.label, required this.icon});
-
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(24, 0, 24, 100),
-        child: Glass(
-          borderRadius: 20,
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(icon, size: 46, color: Colors.white54),
-              const SizedBox(height: 12),
-              Text('$label tez orada',
-                  style: const TextStyle(color: Colors.white70)),
-            ],
           ),
         ),
       ),

@@ -94,8 +94,24 @@ class TrafficService extends ChangeNotifier with WidgetsBindingObserver {
   Timer? _timer;
   bool _started = false;
 
-  /// Oxirgi o'qilgan tizim hisoblagichi (qurilma yoqilganidan beri).
-  int _lastSample = 0;
+  /// Har bir toifa uchun oxirgi o'lchov (ilova ishga tushganidan
+  /// beri o'sib boradigan hisoblagich).
+  final Map<String, int> _lastByKind = {};
+
+  /// ── TOIFALAR BO'YICHA UMUMIY HISOB ─────────────────────────
+  ///
+  /// TALAB (foydalanuvchi): "trafikda nimaga qancha trafik ketgani
+  /// aniq qilib ko'rsatilsin".
+  ///
+  /// Serverda BITTA umumiy raqam turadi (`users_db.traffic_bytes`)
+  /// — u nimaga ketganini bilmaydi. Shu sabab taqsimot shu yerda,
+  /// telefonda yig'iladi va diskka yoziladi: hisobot yuborilgach
+  /// ham NOLLANMAYDI, ya'ni bu "shu hisob shu telefonda qancha
+  /// sarfladi" degan umr bo'yi hisob.
+  final Map<String, int> _totals = {};
+
+  /// Toifalar bo'yicha umumiy hisob (o'zgartirib bo'lmaydi).
+  Map<String, int> get totals => Map.unmodifiable(_totals);
 
   /// Hali workerga yuborilmagan bayt.
   int _pending = 0;
@@ -158,11 +174,18 @@ class TrafficService extends ChangeNotifier with WidgetsBindingObserver {
     // Hali ishga tushmagan bo'lsa o'lchov nuqtasi yo'q — bir
     // o'lchovlik farq butun hisoblagichga teng bo'lib ketardi.
     if (!_started) return;
-    final now = _readCounter();
-    // Ilova qayta ishga tushganda hisoblagich nolga tushadi —
-    // o'shanda yangi qiymatning O'ZI farq bo'ladi.
-    final delta = now >= _lastSample ? now - _lastSample : now;
-    _lastSample = now;
+    final now = _readCounters();
+    var delta = 0;
+    now.forEach((kind, value) {
+      final last = _lastByKind[kind] ?? 0;
+      // Ilova qayta ishga tushganda hisoblagich nolga tushadi —
+      // o'shanda yangi qiymatning O'ZI farq bo'ladi.
+      final d = value >= last ? value - last : value;
+      _lastByKind[kind] = value;
+      if (d <= 0) return;
+      delta += d;
+      _totals[kind] = (_totals[kind] ?? 0) + d;
+    });
     if (delta > 0) _pending += delta;
     // Diskka: vaqti kelganda YOKI yig'indi sezilarli o'sganda.
     // Ilova to'satdan yopilsa ham ko'pi bilan shuncha bayt
@@ -196,14 +219,17 @@ class TrafficService extends ChangeNotifier with WidgetsBindingObserver {
   /// Ikkala son ham ILOVA ishga tushganidan beri o'sadi va qayta
   /// ishga tushganda nolga tushadi — `_sample` dagi farq qoidasi
   /// buni o'zi hal qiladi.
-  int _readCounter() {
-    var total = NetMeter.instance.bytes;
+  Map<String, int> _readCounters() {
+    final out = <String, int>{
+      TrafficKind.image: NetMeter.instance.of(TrafficKind.image),
+      TrafficKind.api: NetMeter.instance.of(TrafficKind.api),
+    };
     try {
-      total += RustCore.instance.videoCacheNetBytes;
+      out[TrafficKind.video] = RustCore.instance.videoCacheNetBytes;
     } catch (_) {
       // Yadro hali yuklanmagan — keyingi o'lchovda qo'shiladi.
     }
-    return total;
+    return out;
   }
 
   // ── Hisobot ──────────────────────────────────────────────────
@@ -285,9 +311,16 @@ class TrafficService extends ChangeNotifier with WidgetsBindingObserver {
       if (rows == null || rows.isEmpty) return;
       final m = rows.first;
       _pending = (m['pending'] as num?)?.toInt() ?? 0;
-      _lastSample = (m['last'] as num?)?.toInt() ?? 0;
       _reportedAt = (m['reported_at'] as num?)?.toInt() ?? 0;
       _uid = (m['uid'] as num?)?.toInt() ?? 0;
+      _totals.clear();
+      final saved = m['totals'];
+      if (saved is Map) {
+        saved.forEach((k, v) {
+          final n = (v as num?)?.toInt() ?? 0;
+          if (n > 0) _totals['$k'] = n;
+        });
+      }
     } catch (_) {}
   }
 
@@ -298,9 +331,12 @@ class TrafficService extends ChangeNotifier with WidgetsBindingObserver {
       RustCore.instance.saveListCache(_key, [
         {
           'pending': _pending,
-          'last': _lastSample,
           'reported_at': _reportedAt,
           'uid': _uid,
+          // Toifalar bo'yicha umumiy hisob. `last` (o'lchov
+          // nuqtasi) SAQLANMAYDI: u ilova ishga tushganda
+          // baribir noldan boshlanadi.
+          'totals': _totals,
         }
       ]);
     } catch (_) {}
@@ -332,11 +368,12 @@ class TrafficService extends ChangeNotifier with WidgetsBindingObserver {
     _pending = 0;
     _uid = 0;
     _reportedAt = 0;
-    _lastSample = 0;
+    _totals.clear();
+    _lastByKind.clear();
     _load();
     // O'lchov nuqtasi HOZIRGI qiymat: almashish paytidagi baytlar
     // allaqachon eski hisobga yozilgan.
-    _lastSample = _readCounter();
+    _lastByKind.addAll(_readCounters());
     _save();
     notifyListeners();
   }

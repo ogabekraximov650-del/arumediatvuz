@@ -379,7 +379,6 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _healthTimer?.cancel();
     _windowTimer?.cancel();
     _noticeTimer?.cancel();
-    _introTimer?.cancel();
     _recoveryStreakResetTimer?.cancel();
     _restoreSystemUI();
     final c = _controller;
@@ -389,16 +388,50 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     super.dispose();
   }
 
+  /// Ilovani biz PAUZA qilganmizmi (foydalanuvchi emas).
+  ///
+  /// Shu bayroq bo'lmasa, fon'dan qaytganda foydalanuvchi ATAYLAB
+  /// pauza qilib qo'ygan video ham o'z-o'zidan ijro bo'lib
+  /// ketardi.
+  bool _pausedByLifecycle = false;
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // Ilova fonga ketganda video ijrosini to'xtatamiz — orqa fonda
-    // bir nechta video parallel ijro bo'lib qolishining oldini oladi.
+    // ── BILDIRISHNOMA PARDASI PAUZA QILMAYDI ─────────────────
+    //
+    // TOPILGAN XATO (foydalanuvchi: "telefonning yuqoridagi
+    // internet va boshqa narsalarni yoqib o'chiradigan oynasini
+    // tushirsa video pauza bo'lyapti, agar ko'tarsa yana play
+    // bo'lib ketsin").
+    //
+    // Sabab: bu yerda `inactive` ham `paused` bilan bir qatorda
+    // turardi. Android pardani tushirganda `inactive` yuboradi —
+    // ilova esa FONGA KETMAYDI, video ko'rinib turaveradi.
+    // Xuddi shu holat qo'ng'iroq oynasi va tizim dialoglarida ham
+    // bo'ladi.
+    //
+    // Endi:
+    //   * `inactive`          -> tegilmaydi (parda, dialog);
+    //   * `paused`/`hidden`   -> pauza qilinadi va ESLAB QOLINADI;
+    //   * `resumed`           -> biz pauza qilgan bo'lsak qaytadi.
     if (state == AppLifecycleState.paused ||
-        state == AppLifecycleState.inactive) {
-      _controller?.pause();
+        state == AppLifecycleState.hidden ||
+        state == AppLifecycleState.detached) {
+      final c = _controller;
+      if (c != null && c.value.isPlaying) {
+        _pausedByLifecycle = true;
+        c.pause();
+      }
       // Ilova fonda o'chib ketishi mumkin — tarix yozuvi
       // yo'qolmasin.
       unawaited(WatchHistory.instance.flush());
+    } else if (state == AppLifecycleState.resumed) {
+      if (!_pausedByLifecycle) return;
+      _pausedByLifecycle = false;
+      // Foydalanuvchi shu orada pauzani o'zi bosgan bo'lsa
+      // tegilmaydi.
+      if (!_intendedPlaying) return;
+      _controller?.play();
     }
   }
 
@@ -829,7 +862,6 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     );
 
     // Yangi qism — intro oraliqlari qaytadan o'qiladi.
-    _introTimer?.cancel();
     _introIndex = -1;
     _introRanges = introRangesOf(ep);
 
@@ -1560,22 +1592,23 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     final remaining = v.duration - reached;
 
     if (remaining <= _endThreshold) {
-      // ── HAQIQIY OXIR: takrorlaymiz (avvalgi xulq saqlanadi) ──
-      VideoCacheServer.log('Video oxiriga yetdi — boshidan boshlanmoqda');
-      _lastGoodPosition = Duration.zero;
+      // ── HAQIQIY OXIR: SHUNCHAKI PAUZA ────────────────────────
+      //
+      // TALAB (foydalanuvchi): "video tugagach qayta boshlanmasin,
+      // shunchaki pauza bo'lsin".
+      //
+      // Ilgari bu yerda `seekTo(0)` + `play()` turardi va video
+      // o'z-o'zidan boshidan ketardi. Endi pleyer oxirida turadi,
+      // "play" bosilsa `_togglePlayPause` uni boshidan boshlaydi
+      // (o'sha yerdagi qoida).
+      VideoCacheServer.log('Video oxiriga yetdi — pauza');
       _pendingEofAt = null;
+      _lastGoodPosition = v.duration;
+      if (mounted) setState(() => _intendedPlaying = false);
       () async {
         try {
-          // `video_player` "tugadi" hodisasida O'ZI ham
-          // `pause()` + `seekTo(duration)` qiladi (paket kodi).
-          // Bizning `seekTo(0)` undan OLDIN ketib qolmasligi uchun
-          // bir lahza kutamiz — aks holda pleyer darhol yana
-          // oxiriga sakrab ketardi.
-          await Future.delayed(const Duration(milliseconds: 250));
           if (!mounted || _controller != c) return;
-          await c.seekTo(Duration.zero);
-          if (!mounted || _controller != c) return;
-          if (_intendedPlaying) await c.play();
+          await c.pause();
         } catch (_) {
         } finally {
           if (mounted) _handlingCompleted = false;
@@ -1908,12 +1941,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
 
   void _onTapVideo() {
     setState(() => _showControls = !_showControls);
-    if (_showControls) {
-      _scheduleHide();
-      // TALAB: "agar video ustiga bossa pleyer tugmalari bilan
-      // qayta chiqsin" — o'tkazib yuborish tugmasi ham.
-      _showIntroButton();
-    }
+    if (_showControls) _scheduleHide();
   }
 
   // Ketma-ket tez-tez bosishda play/pause "qotib qolishi"ning oldini
@@ -1942,7 +1970,26 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       ctrl.pause();
     } else {
       setState(() => _intendedPlaying = true);
-      ctrl.play();
+      // ── OXIRIDA TURGAN BO'LSA — BOSHIDAN ────────────────────
+      //
+      // Video tugagach endi qayta boshlanmaydi, oxirida pauza
+      // bo'lib turadi (foydalanuvchi talabi). Shu holatda "play"
+      // bosilsa `play()` ning o'zi hech narsa qilmaydi — avval
+      // boshiga qaytariladi.
+      final v = ctrl.value;
+      final atEnd = v.duration > Duration.zero &&
+          v.duration - v.position <= _endThreshold;
+      if (atEnd) {
+        unawaited(() async {
+          try {
+            await ctrl.seekTo(Duration.zero);
+            if (!mounted || _controller != ctrl) return;
+            await ctrl.play();
+          } catch (_) {}
+        }());
+      } else {
+        ctrl.play();
+      }
     }
     _scheduleHide();
   }
@@ -2344,11 +2391,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   /// Tugma ayni damda ekrandami.
   bool _introVisible = false;
 
-  /// 5 soniyalik ko'rinish taymeri.
-  Timer? _introTimer;
-
-  /// Tugma shuncha vaqt turadi.
-  static const Duration _introShowFor = Duration(seconds: 5);
+  /// Uch nuqta menyusi ochiqmi.
+  bool _menuOpen = false;
 
   /// Joriy qismning intro oraliqlari: (boshi, oxiri) millisekundda.
   ///
@@ -2373,7 +2417,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     if (idx == _introIndex) return;
     _introIndex = idx;
     if (idx < 0) {
-      _introTimer?.cancel();
+      // Oraliq tugadi — tugma ham ketadi.
       if (_introVisible && mounted) setState(() => _introVisible = false);
       return;
     }
@@ -2389,7 +2433,29 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _showIntroButton();
   }
 
-  /// Uch nuqta ostidagi tugma bosildi.
+  /// Uch nuqtaga bosilganda menyu ochiladi yoki yopiladi.
+  void _toggleMenu() {
+    setState(() => _menuOpen = !_menuOpen);
+    // Menyu ochiq turganda kontrollar yashirinmasin: aks holda
+    // uch nuqta daraxtdan olib tashlanib, oyna "muallaq" qolardi.
+    if (_menuOpen) {
+      _hideTimer?.cancel();
+    } else {
+      _scheduleHide();
+    }
+  }
+
+  void _closeMenu() {
+    if (!_menuOpen) return;
+    setState(() => _menuOpen = false);
+    _scheduleHide();
+  }
+
+  /// "Avto o'tkazish" tugmasi bosildi.
+  ///
+  /// MENYU YOPILMAYDI (foydalanuvchi talabi) — holat o'sha yerda
+  /// ko'rinib turadi, oyna esa tashqariga yoki uch nuqtaga
+  /// bosilgandagina yo'qoladi.
   void _toggleAutoSkipIntro() {
     final on = !AppSettings.instance.autoSkipIntro;
     AppSettings.instance.setAutoSkipIntro(on);
@@ -2397,22 +2463,21 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     setState(() {});
     // Hozir intro oralig'ida turgan bo'lsa — darhol o'tkaziladi,
     // ya'ni tugma bosilishi bilan natija ko'rinadi.
-    if (on && _introIndex >= 0) {
-      _skipIntro();
-    }
-    _showNotice(on
-        ? 'Intro endi avtomatik o\'tkaziladi'
-        : 'Introni qo\'lda o\'tkazasiz');
+    if (on && _introIndex >= 0) _skipIntro();
   }
 
-  /// Tugmani ko'rsatadi va 5 soniyalik taymerni qayta qo'yadi.
+  /// Tugmani ko'rsatadi.
+  ///
+  /// TALAB (foydalanuvchi): "intro tugmasi intro TUGAMAGUNCHA
+  /// ko'rsatilsin".
+  ///
+  /// Ilgari 5 soniyalik taymer bor edi va tugma o'zi yashirinardi —
+  /// foydalanuvchi o'sha payt ekranga qaramasa, o'tkazib yuborish
+  /// imkoni yo'qolardi. Endi tugma oraliq TUGAGUNDA yoki bosilgach
+  /// yo'qoladi (`_updateIntro` / `_skipIntro`).
   void _showIntroButton() {
     if (_introIndex < 0 || !mounted) return;
-    _introTimer?.cancel();
     if (!_introVisible) setState(() => _introVisible = true);
-    _introTimer = Timer(_introShowFor, () {
-      if (mounted && _introVisible) setState(() => _introVisible = false);
-    });
   }
 
   /// Tugma bosildi — video oraliqning OXIRIGA sakraydi.
@@ -2420,7 +2485,6 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     final ranges = _introRanges;
     if (_introIndex < 0 || _introIndex >= ranges.length) return;
     final to = Duration(milliseconds: ranges[_introIndex].$2);
-    _introTimer?.cancel();
     _introIndex = -1;
     if (mounted) setState(() => _introVisible = false);
     _scheduleSeekTo(to);
@@ -3203,15 +3267,51 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
               ),
             ),
 
-          // ── UCH NUQTA: O'NG YUQORIDA ──────────────────────────
+          // ── UCH NUQTA MENYUSI ─────────────────────────────────
           //
-          // TALAB (foydalanuvchi): "o'ng yuqori qismiga 3ta nuqta
-          // qo'y, ustiga bossa introni avtomatik o'tkazish degan
-          // yoqib-o'chiradigan tugma bo'lsin".
+          // TALAB (foydalanuvchi): "avto o'tkazishni bosganda oyna
+          // yopilib ketmasin, faqat oyna tashqarisiga yoki 3ta
+          // nuqtaga bossa yo'qolsin".
           //
-          // Faqat kontrollar ochiq bo'lganda ko'rinadi — video
-          // ko'rilayotganda ekran toza qolishi kerak.
-          if (_currentEp != null && _playerError == null && _showControls)
+          // Aynan shu sabab bu yerda `PopupMenuButton` ISHLATILMAYDI:
+          // u tanlangan zahoti o'zini yopadi va buni o'zgartirib
+          // bo'lmaydi. O'rniga oddiy uchta qatlam:
+          //
+          //   1. PARDA — butun ekranni qoplaydi, bosilsa yopadi;
+          //   2. OYNA  — uch nuqta ostida;
+          //   3. UCH NUQTA — pardadan USTIDA, ya'ni unga bosilsa
+          //      menyu yopiladi (parda tutib qolmaydi).
+          if (_menuOpen)
+            Positioned.fill(
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: _closeMenu,
+              ),
+            ),
+
+          if (_currentEp != null && _playerError == null && _menuOpen)
+            Align(
+              alignment: Alignment.topRight,
+              child: Padding(
+                padding: EdgeInsets.only(
+                  right: isFullscreen ? 10 : 6,
+                  // Uch nuqta tugmasining balandligi + kichik
+                  // bo'shliq: oyna aynan uning ostidan chiqadi.
+                  top: (isFullscreen ? 6 : 2) + 40,
+                ),
+                child: _AutoSkipPanel(
+                  on: AppSettings.instance.autoSkipIntro,
+                  onToggle: _toggleAutoSkipIntro,
+                ),
+              ),
+            ),
+
+          // Faqat kontrollar ochiq bo'lganda (yoki menyu ochiq
+          // turganda) ko'rinadi — video ko'rilayotganda ekran toza
+          // qolishi kerak.
+          if (_currentEp != null &&
+              _playerError == null &&
+              (_showControls || _menuOpen))
             Align(
               alignment: Alignment.topRight,
               child: Padding(
@@ -3219,14 +3319,14 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                   right: isFullscreen ? 8 : 4,
                   top: isFullscreen ? 6 : 2,
                 ),
-                child: _PlayerMenuButton(
-                  autoSkipIntro: AppSettings.instance.autoSkipIntro,
-                  onToggleAutoSkip: _toggleAutoSkipIntro,
-                  // Menyu ochiq turganda kontrollar yashirinmasin:
-                  // aks holda tugma daraxtdan olib tashlanib,
-                  // ochiq menyu "muallaq" qolardi.
-                  onOpened: () => _hideTimer?.cancel(),
-                  onClosed: _scheduleHide,
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: _toggleMenu,
+                  child: const Padding(
+                    padding: EdgeInsets.all(9),
+                    child: Icon(Icons.more_vert_rounded,
+                        color: Colors.white, size: 22),
+                  ),
                 ),
               ),
             ),
@@ -3411,11 +3511,12 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
               size: ringSize,
               strokeWidth: 2.6,
               color: AppColors.accent,
-              trackColor: busy || !showIcon
-                  ? Colors.transparent
-                  : Colors.white.withValues(alpha: 0.22),
+              // Orqadagi xira halqa OLIB TASHLANDI (foydalanuvchi
+              // talabi) — shu sabab har doim shaffof.
+              trackColor: Colors.transparent,
               // Kutish paytida halqa AYLANADI; aks holda u
-              // videoning qayeridaligini ko'rsatadi.
+              // videoning qayeridaligini kichik nuqta bilan
+              // ko'rsatadi.
               busy: busy,
               progress: showIcon ? progress : 0,
             ),
@@ -4877,20 +4978,33 @@ class _PlayerRingPainter extends CustomPainter {
       ..color = color;
 
     if (!busy) {
-      if (trackColor.a != 0) {
-        canvas.drawCircle(
-          center,
-          r,
-          Paint()
-            ..style = PaintingStyle.stroke
-            ..strokeWidth = strokeWidth
-            ..color = trackColor,
-        );
-      }
+      // ── FAQAT NUQTA, CHIZIQ YO'Q ────────────────────────────
+      //
+      // TALAB (foydalanuvchi): "pleyer o'rtasida aylanadigan
+      // progress chizig'i orqasida bitta kichkina chiziq bor —
+      // olib tashla; va progress chizig'i mutlaqo shaffof
+      // bo'lsin, faqat qizil nuqta ko'rinib tursin".
+      //
+      // Ya'ni kutish holatidan tashqarida:
+      //   * orqadagi xira halqa (`trackColor`) CHIZILMAYDI;
+      //   * o'tilgan yo'l yoyi ham CHIZILMAYDI;
+      //   * faqat hozirgi nuqtada kichik doira turadi.
       final p = progress.clamp(0.0, 1.0);
-      if (p > 0) {
-        canvas.drawArc(rect, -math.pi / 2, 2 * math.pi * p, false, arc);
-      }
+      if (p <= 0) return;
+      final angle = -math.pi / 2 + 2 * math.pi * p;
+      final dot = Offset(
+        center.dx + r * math.cos(angle),
+        center.dy + r * math.sin(angle),
+      );
+      canvas.drawCircle(
+        dot,
+        // Chiziq qalinligiga bog'langan — o'lcham o'zgarsa nuqta
+        // ham moslashadi.
+        strokeWidth * 1.6,
+        Paint()
+          ..style = PaintingStyle.fill
+          ..color = color,
+      );
       return;
     }
 
@@ -5462,8 +5576,9 @@ class _RatingSheetState extends State<_RatingSheet> {
 // ko'chirilgan: fon oq 15%, chekkasi `white30`, burchagi 7.
 // Ikkovini birga o'zgartiring — aks holda ular ajralib qoladi.
 //
-// Nomi — "Introni o'tkazish" (foydalanuvchi aniq shunday
-// so'ragan), joyi — videoning CHAP YUQORI burchagi.
+// Nomi — "O'tkazish" (foydalanuvchi aniq shunday so'ragan),
+// joyi — videoning CHAP YUQORI burchagi. Tugma intro oralig'i
+// TUGAGUNCHA turadi.
 class _SkipIntroButton extends StatelessWidget {
   final VoidCallback onTap;
 
@@ -5490,7 +5605,7 @@ class _SkipIntroButton extends StatelessWidget {
             Icon(Icons.fast_forward_rounded, size: 15, color: Colors.white),
             SizedBox(width: 5),
             Text(
-              'Introni o\'tkazish',
+              'O\'tkazish',
               style: TextStyle(
                 color: Colors.white,
                 fontSize: 12,
@@ -5505,77 +5620,63 @@ class _SkipIntroButton extends StatelessWidget {
 }
 
 // ══════════════════════════════════════════════════════════════
-//  UCH NUQTA — PLEYER SOZLAMALARI
+//  UCH NUQTA MENYUSI — "AVTO O'TKAZISH"
 // ══════════════════════════════════════════════════════════════
 //
-// TALAB (foydalanuvchi): "o'ng yuqori qismiga 3ta nuqta qo'y,
-// ustiga bossa `introni avtomatik o'tkazish` degan yoqib
-// o'chiradigan tugma bo'lsin: yoqib qo'ysa intro avtomatik
-// o'tkazib yuboriladi, agar o'chiq bo'lsa qo'lda o'tkazishi
-// kerak".
+// TALAB (foydalanuvchi): "oyna HQ tugmasidek SHAFFOF bo'lib
+// chiqishi kerak, yoqib o'chiradigan tugma nomini `avto
+// o'tkazish` deb qo'y — juda ko'p joy egallab turibdi, biroz
+// kichraytir. Avto o'tkazishni bosganda oyna yopilib ketmasin,
+// faqat oyna tashqarisiga yoki 3ta nuqtaga bossa yo'qolsin."
 //
-// Holat `AppSettings` da saqlanadi (diskda, shifrlangan, hisob
-// papkasida) — ilova yopilib ochilganda ham o'sha holatda qoladi.
-class _PlayerMenuButton extends StatelessWidget {
-  final bool autoSkipIntro;
-  final VoidCallback onToggleAutoSkip;
-  final VoidCallback onOpened;
-  final VoidCallback onClosed;
+// Shu sabab bu YUPQA vidjet: `PopupMenuButton` emas (u tanlangan
+// zahoti o'zini yopadi), oddiy `Container`. Ochish/yopish
+// pleyerning o'zida (`_menuOpen`), parda esa Stack'da.
+//
+// Ko'rinishi pastki paneldagi `HQ` tugmasidan olingan: fon oq
+// 15%, chekkasi `white30`, burchagi 7 — uchovi birga
+// o'zgartiriladi.
+class _AutoSkipPanel extends StatelessWidget {
+  final bool on;
+  final VoidCallback onToggle;
 
-  const _PlayerMenuButton({
-    required this.autoSkipIntro,
-    required this.onToggleAutoSkip,
-    required this.onOpened,
-    required this.onClosed,
-  });
+  const _AutoSkipPanel({required this.on, required this.onToggle});
 
   @override
   Widget build(BuildContext context) {
-    return PopupMenuButton<int>(
-      // Menyu ilova rangida — tizimning oq oynasi video ustida
-      // ko'zni qamashtirardi.
-      color: AppColors.card,
-      surfaceTintColor: Colors.transparent,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(14),
-        side: BorderSide(color: Colors.white.withValues(alpha: 0.12)),
-      ),
-      position: PopupMenuPosition.under,
-      tooltip: 'Sozlamalar',
-      icon: const Icon(Icons.more_vert_rounded,
-          color: Colors.white, size: 22),
-      onOpened: onOpened,
-      onCanceled: onClosed,
-      onSelected: (_) {
-        onToggleAutoSkip();
-        onClosed();
-      },
-      itemBuilder: (context) => [
-        PopupMenuItem<int>(
-          value: 0,
-          child: Row(
-            children: [
-              const Expanded(
-                child: Text(
-                  'Introni avtomatik o\'tkazish',
-                  style: TextStyle(color: Colors.white, fontSize: 13.5),
-                ),
-              ),
-              const SizedBox(width: 10),
-              // YOQIB-O'CHIRADIGAN tugma ko'rinishida (foydalanuvchi
-              // aynan shunday so'ragan): bir marta bosilsa yonadi,
-              // yana bir marta bosilsa o'chadi.
-              Icon(
-                autoSkipIntro
-                    ? Icons.toggle_on_rounded
-                    : Icons.toggle_off_rounded,
-                size: 30,
-                color: autoSkipIntro ? AppColors.accent : Colors.white38,
-              ),
-            ],
-          ),
+    return GestureDetector(
+      // Oyna ICHIGA bosilgani pardaga o'tib ketmasin.
+      behavior: HitTestBehavior.opaque,
+      onTap: onToggle,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.15),
+          borderRadius: BorderRadius.circular(7),
+          border: Border.all(color: Colors.white30),
         ),
-      ],
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'Avto o\'tkazish',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 11.5,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(width: 6),
+            // Yoqib-o'chiradigan tugma: bir marta bosilsa yonadi,
+            // yana bir marta bosilsa o'chadi.
+            Icon(
+              on ? Icons.toggle_on_rounded : Icons.toggle_off_rounded,
+              size: 22,
+              color: on ? AppColors.accent : Colors.white38,
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

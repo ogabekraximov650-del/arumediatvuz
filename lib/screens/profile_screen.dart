@@ -7,6 +7,7 @@ import 'package:image_picker/image_picker.dart';
 
 import '../services/auth_service.dart';
 import '../services/format.dart';
+import '../services/net_meter.dart';
 import '../services/stats_service.dart';
 import '../services/storage_janitor.dart';
 import '../services/storage_usage.dart';
@@ -410,7 +411,7 @@ class _ProfileBody extends StatelessWidget {
           // va qancha trafik sarflagan.
           const _MyStatsGrid(),
           const SizedBox(height: 12),
-          const _StorageBox(),
+          const _TrafficBox(),
           const SizedBox(height: 16),
           // ── TUGMALAR TARTIBI (foydalanuvchi belgilagan) ───────
           //   1. Bildirishnoma
@@ -512,35 +513,31 @@ class _MyStatsGridState extends State<_MyStatsGrid> {
     // Avval diskdagi nusxa (darhol ko'rinadi), keyin yangilanadi.
     MyStatsService.instance.loadFromDisk();
     MyStatsService.instance.load();
+    // Xotira endi shu to'rtlikda ko'rsatiladi (Trafik esa pastdagi
+    // keng oynaga ko'chdi — foydalanuvchi talabi).
+    unawaited(StorageUsageService.instance.refresh());
   }
 
   @override
   Widget build(BuildContext context) {
-    // ── TRAFIK IKKI QISMDAN IBORAT ──────────────────────────
+    // ── XOTIRA VA TRAFIK O'RNINI ALMASHDI ───────────────────
     //
-    // TALAB (foydalanuvchi): "agar Turso bazaga 24 soat ichida
-    // trafik yuborilmagan bo'lsa va ilova bazadan shaxsiy trafikni
-    // ololmasa, hisoblanayotgan trafikni shaxsiy statistikada
-    // ko'rsatishi kerak".
+    // TALAB (foydalanuvchi): "profildagi Xotira va Trafik
+    // statistikalarining o'rnini almashtir: xotirada faqat xotira
+    // ko'rsatilsin, trafikda esa nimaga qancha trafik ketgani
+    // aniq qilib ko'rsatilsin".
     //
-    // Shu sabab ekranda BAZADAGI raqam + ILOVADA hozircha
-    // yig'ilib turgan, hali yuborilmagan baytlar ko'rsatiladi.
-    // Natijada:
-    //
-    //   * raqam har doim TIRIK — video ko'rilgan sayin o'sadi,
-    //     sutkalik hisobotni kutib turmaydi;
-    //   * hisobot o'tgan zahoti yig'indi bazaga ko'chadi va
-    //     ko'rsatkich SAKRAMAYDI (bazadagisi o'sadi, mahalliysi
-    //     shuncha kamayadi);
-    //   * internet bo'lmasa ham (bazadan olib bo'lmaydi) diskdagi
-    //     oxirgi raqam + mahalliy yig'indi ko'rinadi.
+    // Ya'ni bu to'rtlikda endi XOTIRA (bitta umumiy raqam), keng
+    // oynada esa TRAFIK toifalari turadi (`_TrafficBox`).
     return AnimatedBuilder(
-      animation: Listenable.merge(
-        [MyStatsService.instance, TrafficService.instance],
-      ),
+      animation: Listenable.merge([
+        MyStatsService.instance,
+        TrafficService.instance,
+        StorageUsageService.instance,
+      ]),
       builder: (context, _) {
         final s = MyStatsService.instance.stats;
-        final traffic = s.traffic + TrafficService.instance.pendingBytes;
+        final storage = StorageUsageService.instance;
         return Column(
           children: [
             Row(
@@ -575,9 +572,11 @@ class _MyStatsGridState extends State<_MyStatsGrid> {
                 const SizedBox(width: 12),
                 Expanded(
                   child: _StatBox(
-                    icon: Icons.cloud_download_rounded,
-                    label: 'Trafik',
-                    value: formatBytes(traffic),
+                    icon: Icons.sd_storage_rounded,
+                    label: 'Xotira',
+                    value: storage.measured
+                        ? formatBytes(storage.usage.totalBytes)
+                        : '—',
                   ),
                 ),
               ],
@@ -590,48 +589,51 @@ class _MyStatsGridState extends State<_MyStatsGrid> {
 }
 
 // ══════════════════════════════════════════════════════════════
-//  XOTIRA OYNASI
+//  TRAFIK OYNASI
 // ══════════════════════════════════════════════════════════════
 //
-// TALAB (foydalanuvchi): "ilovada qanaqa ma'lumot bo'lsa hammasi
-// tartib bilan bo'lib yozib chiqilsin, masalan `video 2MB 50%`;
-// yoki anime kartochkasi, tomosha tarixi, database ma'lumotlari
-// va hokazolar hajmi va jami hajmdan egallab turgan foizi bilan
-// ko'rsatilsin".
+// TALAB (foydalanuvchi): "trafikda nimaga qancha trafik ketgani
+// aniq qilib ko'rsatilsin".
 //
-// ── OLIB TASHLANGANLAR (foydalanuvchi talabi) ────────────────
+// O'ng yuqorida JAMI trafik, tagida bitta ko'p rangli chiziq va
+// toifalar ro'yxati (kattasidan kichigiga):
 //
-//   * "video + rasm" yozuvi;
-//   * "Tozalash" tugmasi;
-//   * "Telefon xotirasi 0.00% band" qatori.
+//   ● Videolar        1,20 GB   93.10%
+//   ● Rasmlar          6,2 MB    0.48%
+//   ● Ma'lumotlar      420 KB    0.03%
 //
-// Ularning o'rnida FAQAT jami hajm (o'ng yuqorida) va toifalar
-// ro'yxati qoldi. Toifalar `storage_usage.dart` da aniqlanadi.
+// ── JAMI QAYERDAN OLINADI ────────────────────────────────────
+//
+// Serverdagi raqam (`users_db.traffic_bytes`) + ilovada hozircha
+// yuborilmagan yig'indi. Sabab (eski talab): hisobot sutkada bir
+// marta ketadi, lekin ko'rsatkich kutib turmasligi kerak.
+//
+// Toifalar esa FAQAT telefonda ma'lum: serverda bitta umumiy son
+// turadi, u nimaga ketganini bilmaydi. Shu sabab toifalar
+// yig'indisi jamidan KAM bo'lishi mumkin (masalan ilova qayta
+// o'rnatilgan). O'sha farq "Oldingi hisob" qatoriga tushadi —
+// foizlar har doim 100% ni beradi.
 
-class _StorageBox extends StatefulWidget {
-  const _StorageBox();
+class _TrafficBox extends StatefulWidget {
+  const _TrafficBox();
 
   @override
-  State<_StorageBox> createState() => _StorageBoxState();
+  State<_TrafficBox> createState() => _TrafficBoxState();
 }
 
-class _StorageBoxState extends State<_StorageBox> {
-  @override
-  void initState() {
-    super.initState();
-    // O'lchov fon oqimida ketadi — sahifa ochilishini
-    // sekinlashtirmaydi.
-    unawaited(StorageUsageService.instance.refresh());
-  }
+class _TrafficBoxState extends State<_TrafficBox> {
+  static const String _kOlder = 'Oldingi hisob';
 
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: StorageUsageService.instance,
+      animation: Listenable.merge(
+        [MyStatsService.instance, TrafficService.instance],
+      ),
       builder: (context, _) {
-        final svc = StorageUsageService.instance;
-        final u = svc.usage;
-        final total = u.totalBytes;
+        final total = MyStatsService.instance.stats.traffic +
+            TrafficService.instance.pendingBytes;
+        final rows = _rows(total);
         return Glass(
           borderRadius: 18,
           blur: 14,
@@ -639,14 +641,13 @@ class _StorageBoxState extends State<_StorageBox> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // ── SARLAVHA + JAMI HAJM ──────────────────────
               Row(
                 children: [
-                  Icon(Icons.sd_storage_rounded,
+                  Icon(Icons.cloud_download_rounded,
                       size: 15, color: AppColors.accent),
                   const SizedBox(width: 6),
                   Text(
-                    'Xotira',
+                    'Trafik',
                     style: TextStyle(
                       color: Colors.white.withValues(alpha: 0.55),
                       fontSize: 12,
@@ -654,7 +655,7 @@ class _StorageBoxState extends State<_StorageBox> {
                   ),
                   const Spacer(),
                   Text(
-                    svc.measured ? formatBytes(total) : '—',
+                    formatBytes(total),
                     style: const TextStyle(
                       color: Colors.white,
                       fontSize: 17,
@@ -664,37 +665,25 @@ class _StorageBoxState extends State<_StorageBox> {
                 ],
               ),
               const SizedBox(height: 12),
-
-              // ── HAMMA TOIFA BITTA CHIZIQDA ────────────────
-              _StackedBar(usage: u),
+              _StackedBar(slices: rows, colorOf: trafficColorOf),
               const SizedBox(height: 12),
-
-              // ── TOIFALAR RO'YXATI ─────────────────────────
-              if (!svc.measured)
+              if (rows.isEmpty)
                 Text(
-                  'Hisoblanmoqda...',
-                  style: TextStyle(
-                    color: Colors.white.withValues(alpha: 0.4),
-                    fontSize: 12,
-                  ),
-                )
-              else if (u.slices.isEmpty)
-                Text(
-                  'Ilovada saqlangan ma\'lumot yo\'q',
+                  'Hozircha trafik sarflanmagan',
                   style: TextStyle(
                     color: Colors.white.withValues(alpha: 0.4),
                     fontSize: 12,
                   ),
                 )
               else
-                for (final slice in u.slices) ...[
-                  _StorageRow(
-                    color: storageColorOf(slice.label),
-                    label: slice.label,
-                    size: formatBytes(slice.bytes),
-                    percent: _pct(u.shareOf(slice)),
+                for (final row in rows) ...[
+                  _UsageRow(
+                    color: trafficColorOf(row.label),
+                    label: row.label,
+                    size: formatBytes(row.bytes),
+                    percent: _pct(total > 0 ? row.bytes / total : 0),
                   ),
-                  if (slice != u.slices.last) const SizedBox(height: 7),
+                  if (row != rows.last) const SizedBox(height: 7),
                 ],
             ],
           ),
@@ -702,7 +691,38 @@ class _StorageBoxState extends State<_StorageBox> {
       },
     );
   }
+
+  /// Toifalar ro'yxati (kattasidan kichigiga) + "Oldingi hisob".
+  List<StorageSlice> _rows(int total) {
+    final out = <StorageSlice>[];
+    var known = 0;
+    TrafficService.instance.totals.forEach((label, bytes) {
+      if (bytes <= 0) return;
+      known += bytes;
+      out.add(StorageSlice(label, bytes));
+    });
+    out.sort((a, b) => b.bytes.compareTo(a.bytes));
+    // Serverdagi raqam telefondagi taqsimotdan katta bo'lsa (ilova
+    // qayta o'rnatilgan, boshqa qurilmadan ko'rilgan) — farq
+    // alohida qator bo'ladi.
+    final rest = total - known;
+    if (rest > 0 && known > 0) out.add(StorageSlice(_kOlder, rest));
+    // Taqsimot umuman bo'lmasa, jami raqamning o'zi bitta qator
+    // bo'lib turadi — oyna bo'sh ko'rinmasin.
+    if (out.isEmpty && total > 0) out.add(StorageSlice(_kOlder, total));
+    return out;
+  }
 }
+
+/// Trafik toifalarining ranglari.
+const Map<String, Color> _kTrafficColors = {
+  TrafficKind.video: Color(0xFF4CC2FF),
+  TrafficKind.image: Color(0xFFFFC83D),
+  TrafficKind.api: Color(0xFF7BD88F),
+};
+
+Color trafficColorOf(String label) =>
+    _kTrafficColors[label] ?? const Color(0xFF5C6368);
 
 /// `12,34%` — ikki kasr xona (foydalanuvchi ko'rsatgan ko'rinish).
 String _pct(double share) {
@@ -710,39 +730,19 @@ String _pct(double share) {
   return '${v.toStringAsFixed(2)}%';
 }
 
-/// Toifalar ranglari — `kStorageLabels` tartibida.
-///
-/// Ro'yxat va chiziq AYNAN bir xil rangdan foydalanadi, shu sabab
-/// rang bitta joydan olinadi.
-const List<Color> _kStorageColors = [
-  Color(0xFF4CC2FF), // Videolar
-  Color(0xFFFFC83D), // Posterlar
-  Color(0xFF7BD88F), // Tarix kadrlari
-  Color(0xFFE94560), // Anime kartochkalari
-  Color(0xFFB388FF), // Qismlar ro'yxati
-  Color(0xFF4DD0E1), // Tomosha tarixi
-  Color(0xFFFF8A65), // Sevimlilar
-  Color(0xFF9FA8DA), // Statistika
-  Color(0xFFCE93D8), // Sozlamalar
-  Color(0xFF8D9498), // Vaqtinchalik fayllar
-  Color(0xFF5C6368), // Boshqa
-];
-
-Color storageColorOf(String label) {
-  final i = kStorageLabels.indexOf(label);
-  if (i < 0) return _kStorageColors.last;
-  return _kStorageColors[i % _kStorageColors.length];
-}
-
 /// Hamma toifa bitta chiziqda, har biri o'z rangida.
 class _StackedBar extends StatelessWidget {
-  final StorageUsage usage;
+  final List<StorageSlice> slices;
+  final Color Function(String label) colorOf;
 
-  const _StackedBar({required this.usage});
+  const _StackedBar({required this.slices, required this.colorOf});
 
   @override
   Widget build(BuildContext context) {
-    final total = usage.totalBytes;
+    var total = 0;
+    for (final s in slices) {
+      total += s.bytes;
+    }
     return ClipRRect(
       borderRadius: BorderRadius.circular(4),
       child: SizedBox(
@@ -751,12 +751,12 @@ class _StackedBar extends StatelessWidget {
             ? ColoredBox(color: Colors.white.withValues(alpha: 0.10))
             : Row(
                 children: [
-                  for (final slice in usage.slices)
+                  for (final slice in slices)
                     Expanded(
                       // Juda kichik toifa ham ko'rinib tursin
                       // (aks holda chiziq "bo'sh" bo'lib qolardi).
-                      flex: (usage.shareOf(slice) * 1000).round().clamp(1, 1000),
-                      child: ColoredBox(color: storageColorOf(slice.label)),
+                      flex: (slice.bytes / total * 1000).round().clamp(1, 1000),
+                      child: ColoredBox(color: colorOf(slice.label)),
                     ),
                 ],
               ),
@@ -766,13 +766,13 @@ class _StackedBar extends StatelessWidget {
 }
 
 /// Bitta qator: "● Videolar        2,0 MB   50.00%".
-class _StorageRow extends StatelessWidget {
+class _UsageRow extends StatelessWidget {
   final Color color;
   final String label;
   final String size;
   final String percent;
 
-  const _StorageRow({
+  const _UsageRow({
     required this.color,
     required this.label,
     required this.size,

@@ -513,9 +513,18 @@ async fn init_db(env: &Env) {
         // ham ishlamasdi.
         //
         // `epizod_id` esa qism qo'shilganda bir marta beriladi va
-        // HECH QACHON o'zgarmaydi. `epizod_number` ustun sifatida
-        // qoladi, lekin faqat KO'RSATISH uchun ("3-qism") —
-        // qidiruvda ishlatilmaydi.
+        // HECH QACHON o'zgarmaydi.
+        //
+        // ── `epizod_number` USTUNI YO'Q (foydalanuvchi talabi) ─
+        //
+        // "watch history jurnalidan epizod number'ni olib tashla,
+        // epizod id yetadi."
+        //
+        // To'g'ri: raqam baribir `epizod_db` dan `LEFT JOIN` bilan
+        // olinardi (admin raqamni o'zgartirsa tarixda ham darhol
+        // yangisi ko'rinsin deb), ya'ni bu ustun faqat o'qilmagan
+        // nusxa edi. Bu jadval eng tez o'sadigani — har qatordan
+        // bitta ustun tejash arziydi.
         //
         // `last_quality` — foydalanuvchi shu qismni oxirgi marta
         // qaysi sifatda ko'rgani ("720p"). Keyingi safar internet
@@ -525,7 +534,6 @@ async fn init_db(env: &Env) {
             anime_id INTEGER,
             season_id INTEGER,
             epizod_id INTEGER,
-            epizod_number INTEGER,
             video_url TEXT,
             last_quality TEXT,
             position_ms INTEGER,
@@ -3202,15 +3210,13 @@ async fn history_route(
         // bazada qoladi: qism qayta ko'rilsa o'sha qator tiriladi
         // va statistika ham buzilmaydi.
         (Method::Get, "/api/history") => {
-            // `epizod_number` ENDI `epizod_db` DAN OLINADI.
-            //
-            // Tarix qatoridagi nusxa faqat zaxira: admin qism
-            // raqamini o'zgartirsa, ro'yxatda DARHOL yangi raqam
-            // ko'rinishi kerak (foydalanuvchi talabi — aynan shu
-            // "kadrlar qotib qoldi" muammosining ikkinchi yarmi).
+            // `epizod_number` FAQAT `epizod_db` DAN olinadi —
+            // tarix jadvalida bunday ustun yo'q. Admin qism
+            // raqamini o'zgartirsa ro'yxatda darhol yangisi
+            // ko'rinadi.
             let res = turso_exec(env,
                 "SELECT h.anime_id, h.season_id, h.epizod_id,
-                        COALESCE(e.epizod_number, h.epizod_number) AS epizod_number,
+                        e.epizod_number AS epizod_number,
                         h.video_url, h.last_quality,
                         h.position_ms, h.duration_ms, h.watched_ms, h.view_count,
                         h.updated_at,
@@ -3265,8 +3271,6 @@ async fn history_route(
             let season_id = b["season_id"].as_i64().unwrap_or(0);
             // KALIT — `epizod_id` (hech qachon o'zgarmaydi).
             let epizod_id = b["epizod_id"].as_i64().unwrap_or(0);
-            // Raqam faqat ko'rsatish uchun saqlanadi.
-            let epizod_num = b["epizod_number"].as_i64().unwrap_or(0);
             // Bazaga YALANG fayl nomi yoziladi (`bare_name` izohi).
             let video_url = bare_name(b["video_url"].as_str().unwrap_or(""));
             // Oxirgi ko'rilgan sifat ("720p") — keyingi safar
@@ -3330,12 +3334,11 @@ async fn history_route(
             let mut stmts: Vec<(&str, Vec<TursoArg>)> = Vec::with_capacity(8);
             stmts.push((
                 "INSERT INTO watch_history_db
-                    (user_id,anime_id,season_id,epizod_id,epizod_number,video_url,
+                    (user_id,anime_id,season_id,epizod_id,video_url,
                      last_quality,position_ms,duration_ms,watched_ms,view_count,
                      deleted_at,updated_at)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?,0,?)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,0,?)
                  ON CONFLICT(user_id,anime_id,season_id,epizod_id) DO UPDATE SET
-                    epizod_number=excluded.epizod_number,
                     video_url=excluded.video_url,
                     last_quality=excluded.last_quality,
                     position_ms=excluded.position_ms,
@@ -3346,7 +3349,7 @@ async fn history_route(
                     updated_at=excluded.updated_at",
                 vec![
                     TursoArg::int(me), TursoArg::int(anime_id), TursoArg::int(season_id),
-                    TursoArg::int(epizod_id), TursoArg::int(epizod_num),
+                    TursoArg::int(epizod_id),
                     TursoArg::text(&video_url), TursoArg::text(&last_quality),
                     TursoArg::int(position), TursoArg::int(duration),
                     TursoArg::int(capped), TursoArg::int(old_views + view_inc),

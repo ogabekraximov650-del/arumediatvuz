@@ -56,7 +56,27 @@ import 'dart:async';
 
 import 'package:http/http.dart' as http;
 
-/// Tarmoqdan qabul qilingan baytlarning JAMI hisobi.
+/// Trafik toifalari — profil sahifasida AYNAN shu nomlar chiqadi.
+///
+/// TALAB (foydalanuvchi): "trafikda nimaga qancha trafik ketgani
+/// aniq qilib ko'rsatilsin".
+class TrafficKind {
+  const TrafficKind._();
+
+  /// Rust yadrosi workerdan tortib olgan video baytlari.
+  static const String video = 'Videolar';
+
+  /// Posterlar va avatarlar (`/api/image/...`).
+  static const String image = 'Rasmlar';
+
+  /// Qolgan hamma so'rov: tarix, statistika, kirish, ro'yxatlar.
+  static const String api = 'Ma\'lumotlar';
+
+  /// Ekrandagi tartib (rang shu tartibdan olinadi).
+  static const List<String> all = [video, image, api];
+}
+
+/// Tarmoqdan qabul qilingan baytlar — TOIFALAR bo'yicha.
 ///
 /// Ilova ishga tushganda noldan boshlanadi — `TrafficService` uni
 /// FARQ bo'yicha o'qiydi, ya'ni qayta ishga tushish hisobni
@@ -65,13 +85,35 @@ class NetMeter {
   NetMeter._();
   static final NetMeter instance = NetMeter._();
 
-  int _bytes = 0;
+  final Map<String, int> _byKind = {};
 
   /// Ilova ishga tushganidan beri tarmoqdan qabul qilingan bayt.
-  int get bytes => _bytes;
+  int get bytes {
+    var n = 0;
+    for (final v in _byKind.values) {
+      n += v;
+    }
+    return n;
+  }
 
-  void add(int n) {
-    if (n > 0) _bytes += n;
+  /// Toifa bo'yicha hisob (shu seansda).
+  int of(String kind) => _byKind[kind] ?? 0;
+
+  void add(int n, [String kind = TrafficKind.api]) {
+    if (n > 0) _byKind[kind] = (_byKind[kind] ?? 0) + n;
+  }
+
+  /// Manzil qaysi toifaga tegishli.
+  ///
+  /// Rasmlar worker'ning `/api/image/...` yo'lidan keladi; qolgan
+  /// hamma narsa oddiy API so'rovi. Video bu yerga UMUMAN
+  /// tushmaydi — uni Rust yadrosi oladi va o'z hisoblagichi bor.
+  static String kindOfUrl(Uri url) {
+    final path = url.path;
+    if (path.contains('/api/image/') || path.contains('/api/avatar/')) {
+      return TrafficKind.image;
+    }
+    return TrafficKind.api;
   }
 }
 
@@ -104,10 +146,11 @@ class CountingClient extends http.BaseClient {
 
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    final kind = NetMeter.kindOfUrl(request.url);
     final res = await _inner.send(request);
-    NetMeter.instance.add(_headerBytes(res.headers));
+    NetMeter.instance.add(_headerBytes(res.headers), kind);
     final counted = res.stream.map((chunk) {
-      NetMeter.instance.add(chunk.length);
+      NetMeter.instance.add(chunk.length, kind);
       return chunk;
     });
     return http.StreamedResponse(
