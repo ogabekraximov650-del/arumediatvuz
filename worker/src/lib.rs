@@ -3533,7 +3533,8 @@ async fn note_traffic(env: &Env, bytes: i64, user: i64) {
 // `app_config` da turadi.
 //
 // Har sinxronizatsiyada faqat OXIRGI 50 SOAT so'raladi (soatlik
-// bo'laklarda). Sabab: eski kunlar allaqachon `stats_daily` da
+// bo'laklarda — ya'ni ko'pi bilan 50 qator, `limit:500` bemalol
+// yetadi). Sabab: eski kunlar allaqachon `stats_daily` da
 // saqlangan — ularni qayta so'rashning hojati yo'q va Cloudflare
 // analitikasining saqlash muddati ham cheklangan. Shu tarzda
 // "jami" ko'rsatkich vaqt o'tishi bilan to'planib boradi.
@@ -3628,7 +3629,7 @@ async fn cf_traffic_sync(env: &Env) {
 
     let query = "query($a:string!,$s:string!,$since:Time!,$until:Time!){\
         viewer{accounts(filter:{accountTag:$a}){\
-        workersInvocationsAdaptive(limit:10000,filter:{\
+        workersInvocationsAdaptive(limit:500,filter:{\
         scriptName:$s,datetime_geq:$since,datetime_leq:$until}){\
         dimensions{datetimeHour}sum{responseBodySize}}}}}";
 
