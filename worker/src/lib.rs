@@ -3552,7 +3552,10 @@ async fn note_traffic(env: &Env, bytes: i64, user: i64) {
 const CF_GRAPHQL_URL: &str = "https://api.cloudflare.com/client/v4/graphql";
 
 /// Ikki sinxronizatsiya orasidagi eng qisqa muddat.
-const CF_SYNC_EVERY_MS: i64 = 30 * 60 * 1000;
+///
+/// 10 daqiqa — soatiga 6 ta tashqi so'rov, ya'ni arzon; buning
+/// evaziga bosh sahifadagi raqam ancha tirikroq bo'ladi.
+const CF_SYNC_EVERY_MS: i64 = 10 * 60 * 1000;
 
 /// Har safar so'raladigan oyna (soat). 50 soat — kechagi kun
 /// TO'LIQ, bugungisi esa hozirgi soatgacha qamrab olinadi.

@@ -844,8 +844,9 @@ aynan dashboarddagi raqamning manbasi.
 ### QANDAY ISHLAYDI (`cf_traffic_sync`, `worker/src/lib.rs`)
 
 * `GET /api/stats` chaqirilganda ishga tushadi, lekin har safar
-  emas — oxirgi sinxronizatsiyadan **30 daqiqa** o'tgan bo'lsa
-  (belgi `app_config.cf_traffic_synced_at` da);
+  emas — oxirgi sinxronizatsiyadan **10 daqiqa** o'tgan bo'lsa
+  (belgi `app_config.cf_traffic_synced_at` da). Soatiga 6 ta
+  tashqi so'rov — arzon;
 * har safar faqat **oxirgi 50 soat** so'raladi, soatlik
   bo'laklarda (`dimensions { datetimeHour }`). Eski kunlar
   allaqachon `stats_daily` da — ya'ni "jami" ko'rsatkich vaqt
@@ -895,8 +896,13 @@ curl https://aniraxuzapp.ogabekraximov650.workers.dev/api/stats
 ```
 
 (javob chekkada 5 daqiqa keshlanadi, sinxronizatsiyaning o'zi esa
-30 daqiqada bir marta ishlaydi — o'zgarishni shuncha kutish
+10 daqiqada bir marta ishlaydi — o'zgarishni shuncha kutish
 kerak).
+
+**TEKSHIRILDI (13.09.2026):** jonli workerda `traffic_src` =
+`cloudflare`, ya'ni raqam haqiqatan Cloudflare Analytics'dan
+kelyapti va deploy tokenida kerakli ruxsat bor ekan — alohida
+`CF_ANALYTICS_TOKEN` yasash shart bo'lmadi.
 
 **AGAR `traffic_src` = `error` BO'LSA** — deploy tokenida "Account
 Analytics: Read" ruxsati yo'q. Cloudflare dashboard -> My
