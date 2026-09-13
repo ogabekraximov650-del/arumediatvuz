@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
@@ -508,6 +509,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       _introRanges = introRangesOf(e);
       // Hozir qaysi oraliqdaligi endi boshqacha bo'lishi mumkin.
       _introIndex = -1;
+      _introDone.clear();
       return;
     }
   }
@@ -2391,6 +2393,13 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   /// Tugma ayni damda ekrandami.
   bool _introVisible = false;
 
+  /// Shu qismda ALLAQACHON avtomatik o'tkazilgan oraliqlar.
+  /// (`_updateIntro` dagi cheksiz sek halqasi izohiga qarang.)
+  final Set<int> _introDone = <int>{};
+
+  /// Sek oraliq oxiridan shuncha millisekund KEYINGA qilinadi.
+  static const int _introSkipPad = 400;
+
   /// Uch nuqta menyusi ochiqmi.
   bool _menuOpen = false;
 
@@ -2426,7 +2435,26 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // TALAB (foydalanuvchi): uch nuqta ostidagi tugma yoqilgan
     // bo'lsa intro O'ZI o'tkazib yuboriladi, o'chiq bo'lsa
     // foydalanuvchi qo'lda bosadi.
-    if (AppSettings.instance.autoSkipIntro) {
+    //
+    // ── TOPILGAN XATO: CHEKSIZ SEK HALQASI ──────────────────
+    //
+    // Foydalanuvchi: "avto o'tkazishni yoqib qo'ysam ishlamayapti,
+    // shunchaki vaqti kelganda o'rtadagi progress chizig'i aylanib
+    // yotibdi".
+    //
+    // Sabab: sek AYNAN oraliqning oxirgi millisekundiga qilinardi,
+    // pleyer esa eng yaqin KALIT KADRGA tushadi va u ko'pincha
+    // oraliqning ICHIDA qoladi. Keyingi pozitsiya yangilanishida
+    // `_introAt` yana o'sha oraliqni topar, `_skipIntro` yana
+    // chaqirilar — video sekdan sekka o'tib, halqa aylanaverardi.
+    //
+    // Ikkita himoya qo'yildi:
+    //   1. sek oraliq oxiridan `_introSkipPad` keyinga qilinadi;
+    //   2. o'tkazilgan oraliq ESLAB QOLINADI va ikkinchi marta
+    //      AVTOMATIK o'tkazilmaydi (foydalanuvchi o'zi orqaga
+    //      qaytargan bo'lsa — qo'lda bosishi mumkin, tugma
+    //      ko'rinaveradi).
+    if (AppSettings.instance.autoSkipIntro && !_introDone.contains(idx)) {
       _skipIntro();
       return;
     }
@@ -2484,7 +2512,10 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   void _skipIntro() {
     final ranges = _introRanges;
     if (_introIndex < 0 || _introIndex >= ranges.length) return;
-    final to = Duration(milliseconds: ranges[_introIndex].$2);
+    // Oraliqning OXIRIDAN sal keyinga — kalit kadr yaxlitlanishi
+    // bizni yana o'sha oraliq ichiga tushirib qo'ymasin.
+    final to = Duration(milliseconds: ranges[_introIndex].$2 + _introSkipPad);
+    _introDone.add(_introIndex);
     _introIndex = -1;
     if (mounted) setState(() => _introVisible = false);
     _scheduleSeekTo(to);
@@ -5459,6 +5490,58 @@ class _RatingSheetState extends State<_RatingSheet> {
 // Nomi — "O'tkazish" (foydalanuvchi aniq shunday so'ragan),
 // joyi — videoning CHAP YUQORI burchagi. Tugma intro oralig'i
 // TUGAGUNCHA turadi.
+/// ── PLEYER USTIDAGI OYNALAR: HIRA SHISHA ────────────────────
+///
+/// TALAB (foydalanuvchi): "pleyerdagi o'tkazish va 3 nuqtani
+/// bosganda chiqadigan oynalarni va yozuvlarning qirralarini
+/// tiniqlashtir — shaffof bo'lgani uchun yaxshi ko'rinmayapti,
+/// yoki hira oyna effektiga o'xshash qilib o'zgartir".
+///
+/// Ilgari oyna oddiy yarim shaffof to'rtburchak edi: ochiq rangli
+/// kadr ustida yozuv ham, chegara ham yo'qolib ketardi.
+///
+/// Endi uch qatlam:
+///   1. `BackdropFilter` — ORQADAGI kadr xiralashtiriladi, ya'ni
+///      yozuv har qanday kadr ustida o'qiladi;
+///   2. quyuq fon (oq emas, QORA asosli) — kontrast keskin
+///      oshadi;
+///   3. aniq chegara va soya — oynaning qirrasi ko'rinib turadi.
+class _PlayerPanel extends StatelessWidget {
+  final Widget child;
+  final EdgeInsets padding;
+
+  const _PlayerPanel({required this.child, required this.padding});
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(9),
+      child: BackdropFilter(
+        filter: ui.ImageFilter.blur(sigmaX: 14, sigmaY: 14),
+        child: Container(
+          padding: padding,
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.52),
+            borderRadius: BorderRadius.circular(9),
+            border: Border.all(
+              color: Colors.white.withValues(alpha: 0.28),
+              width: 1,
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.45),
+                blurRadius: 12,
+                offset: const Offset(0, 3),
+              ),
+            ],
+          ),
+          child: child,
+        ),
+      ),
+    );
+  }
+}
+
 class _SkipIntroButton extends StatelessWidget {
   final VoidCallback onTap;
 
@@ -5471,14 +5554,8 @@ class _SkipIntroButton extends StatelessWidget {
       // Tugma atrofidagi kichik bo'sh joy ham tapni qabul qiladi —
       // barmoq bilan tushish oson bo'lsin.
       behavior: HitTestBehavior.opaque,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
-        decoration: BoxDecoration(
-          // HQ tugmasi bilan bir xil (`_BottomBarState` ga qarang).
-          color: Colors.white.withValues(alpha: 0.15),
-          borderRadius: BorderRadius.circular(7),
-          border: Border.all(color: Colors.white30),
-        ),
+      child: _PlayerPanel(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         child: const Row(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -5528,13 +5605,8 @@ class _AutoSkipPanel extends StatelessWidget {
       // Oyna ICHIGA bosilgani pardaga o'tib ketmasin.
       behavior: HitTestBehavior.opaque,
       onTap: onToggle,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
-        decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: 0.15),
-          borderRadius: BorderRadius.circular(7),
-          border: Border.all(color: Colors.white30),
-        ),
+      child: _PlayerPanel(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [

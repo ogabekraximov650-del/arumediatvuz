@@ -38,6 +38,7 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 
 import '../services/download_manager.dart';
+import '../services/format.dart';
 import '../services/downloads_index.dart';
 import '../services/offline_library.dart';
 import '../services/watch_history.dart';
@@ -386,19 +387,49 @@ class _DownloadsListState extends State<DownloadsList>
   @override
   bool get wantKeepAlive => true;
 
+  Timer? _tick;
+
   @override
   void initState() {
     super.initState();
     // Ro'yxat diskdan yig'iladi — tarmoq kerak emas, ya'ni oflayn
     // ham darhol chiqadi.
     unawaited(DownloadsIndex.instance.refresh());
+    // ── REAL VAQTDA YANGILANISH ────────────────────────────
+    //
+    // TALAB (foydalanuvchi): "yuklab olish foizi real vaqtda o'zi
+    // yangilansin — qo'lda tortib yangilash kerak bo'lyapti".
+    //
+    // Har soniyada FAQAT raqamlar yangilanadi (`refreshStats` —
+    // bitta xotira o'qishi). To'liq skanerlash (`refresh`) esa
+    // 10 soniyada bir marta: yangi qism qo'shilgani ham
+    // ko'rinsin, lekin disk bekorga tinmasin.
+    var n = 0;
+    _tick = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      DownloadsIndex.instance.refreshStats();
+      if (++n % 10 == 0) unawaited(DownloadsIndex.instance.refresh());
+    });
+  }
+
+  @override
+  void dispose() {
+    _tick?.cancel();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     super.build(context);
     return AnimatedBuilder(
-      animation: DownloadsIndex.instance,
+      // Kadrlar tomosha tarixidan keladi — o'sha yerdagi
+      // yangilanish shu ro'yxatda ham DARHOL ko'rinishi kerak
+      // (foydalanuvchi: "kadr tarix oynasidagidek tez
+      // yangilanmayapti"). Ilgari faqat `DownloadsIndex`
+      // eshitilardi, shu sabab kadr eskirib turardi.
+      animation: Listenable.merge(
+        [DownloadsIndex.instance, WatchHistory.instance],
+      ),
       builder: (context, _) {
         final idx = DownloadsIndex.instance;
         final rows = idx.items;
@@ -674,7 +705,7 @@ class _DownloadRow extends StatelessWidget {
           ),
           const SizedBox(width: 10),
 
-          // ── O'NG: NOM, QISM, FOIZ + TOZALASH ────────────────
+          // ── O'NG: NOM, QISM, SIFAT, HAJM, FOIZ ──────────────
           Expanded(
             flex: 4,
             child: Column(
@@ -697,19 +728,29 @@ class _DownloadRow extends StatelessWidget {
                         ),
                       ),
                     ),
-                    const SizedBox(width: 4),
-                    GestureDetector(
+                    // ── IKKI TUGMA: YUKLAB OLISH VA TOZALASH ──
+                    //
+                    // TALAB (foydalanuvchi): "tozalash tugmasini
+                    // biroz kattalashtir va bosganda aniq
+                    // ishlaydigan qil" hamda "kadr yoniga yuklab
+                    // olish ikonini qo'y — bosganda mavjud
+                    // sifatlar, hajmlari va har birining
+                    // to'g'risida yuklab olish tugmasi chiqsin".
+                    //
+                    // Ikkovi ham 40x40 nuqta bosish maydoniga ega
+                    // (Android tavsiyasi 48, ro'yxat zich bo'lgani
+                    // uchun 40) — ilgari ikonka 17 nuqta edi va
+                    // barmoq ko'pincha tegmasdan qolardi.
+                    _RowIconButton(
+                      icon: Icons.download_rounded,
+                      onTap: () => _openQualities(context),
+                    ),
+                    _RowIconButton(
+                      icon: Icons.cleaning_services_rounded,
                       onTap: () => _confirmDelete(context),
-                      behavior: HitTestBehavior.opaque,
-                      child: const Padding(
-                        padding: EdgeInsets.only(left: 4, bottom: 4),
-                        child: Icon(Icons.cleaning_services_rounded,
-                            size: 17, color: Colors.white54),
-                      ),
                     ),
                   ],
                 ),
-                const SizedBox(height: 4),
                 Text(
                   '${item.bolimNumber}-bo\'lim ${item.epizodNumber}-qism',
                   maxLines: 1,
@@ -719,7 +760,49 @@ class _DownloadRow extends StatelessWidget {
                     fontSize: 11.5,
                   ),
                 ),
-                const SizedBox(height: 6),
+                const SizedBox(height: 5),
+                // Sifat va hajm — foydalanuvchi talabi: "qanaqa
+                // sifatda, qancha MB va qancha foiz yuklab
+                // olgani yozilib turilsin".
+                Row(
+                  children: [
+                    if (item.quality.isNotEmpty) ...[
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.10),
+                          borderRadius: BorderRadius.circular(5),
+                          border: Border.all(color: Colors.white24),
+                        ),
+                        child: Text(
+                          item.quality,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 10.5,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                    ],
+                    Flexible(
+                      child: Text(
+                        item.total > 0
+                            ? '${formatBytes(item.downloaded)} / '
+                                '${formatBytes(item.total)}'
+                            : formatBytes(item.downloaded),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: Colors.white.withValues(alpha: 0.6),
+                          fontSize: 11,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 5),
                 Text(
                   _percent(item.ratio * 100),
                   style: TextStyle(
@@ -735,6 +818,246 @@ class _DownloadRow extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+
+  /// Sifatlar oynasi — har bir sifat, hajmi va "Yuklab olish".
+  Future<void> _openQualities(BuildContext context) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (_) => _QualitySheet(item: item),
+    );
+  }
+}
+
+/// Ro'yxat qatoridagi ikonka tugmasi — BOSISH MAYDONI KENG.
+class _RowIconButton extends StatelessWidget {
+  final IconData icon;
+  final VoidCallback onTap;
+
+  const _RowIconButton({required this.icon, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      // `opaque` — ikonka atrofidagi bo'sh joy ham tapni oladi.
+      behavior: HitTestBehavior.opaque,
+      child: SizedBox(
+        width: 40,
+        height: 40,
+        child: Icon(icon, size: 20, color: Colors.white70),
+      ),
+    );
+  }
+}
+
+/// ── SIFATLAR OYNASI ─────────────────────────────────────────
+///
+/// TALAB (foydalanuvchi): "mavjud sifatlar va hajmlari va har
+/// bittasining to'g'risida yuklab olish degan tugma chiqsin".
+///
+/// Hajm ikki manbadan olinadi: yuklab olingan sifat uchun
+/// DISKDAGI hisobdan (tarmoq kerak emas), qolganlari uchun bir
+/// baytlik `Range` so'rovidan (javobdagi `Content-Range` da to'liq
+/// hajm bor). Ya'ni oyna ochilganda eng ko'pi bir necha kichik
+/// so'rov ketadi.
+class _QualitySheet extends StatefulWidget {
+  final DownloadItem item;
+  const _QualitySheet({required this.item});
+
+  @override
+  State<_QualitySheet> createState() => _QualitySheetState();
+}
+
+class _QualitySheetState extends State<_QualitySheet> {
+  /// manzil -> hajm (bayt). Yo'q bo'lsa hali o'lchanmagan.
+  final Map<String, int> _sizes = {};
+  Timer? _tick;
+
+  @override
+  void initState() {
+    super.initState();
+    _measure();
+    // Yuklash borayotgan bo'lsa foiz jonli ko'rinsin.
+    _tick = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) DownloadsIndex.instance.refreshStats();
+    });
+  }
+
+  @override
+  void dispose() {
+    _tick?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _measure() async {
+    for (final url in widget.item.allUrls) {
+      final n = await DownloadsIndex.instance.sizeOf(url);
+      if (!mounted) return;
+      if (n > 0) setState(() => _sizes[url] = n);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final urls = [...widget.item.allUrls]..sort((a, b) {
+        int px(String u) =>
+            int.tryParse(qualityOf(u).replaceAll('p', '')) ?? 0;
+        return px(b).compareTo(px(a));
+      });
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(14, 0, 14, 14),
+        child: Glass(
+          borderRadius: 22,
+          blur: 18,
+          padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
+          child: AnimatedBuilder(
+            animation: DownloadsIndex.instance,
+            builder: (context, _) => Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Center(
+                  child: Container(
+                    width: 38,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: Colors.white24,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                Text(
+                  widget.item.title.isEmpty ? 'Anime' : widget.item.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                Text(
+                  '${widget.item.bolimNumber}-bo\'lim '
+                  '${widget.item.epizodNumber}-qism',
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.55),
+                    fontSize: 12,
+                  ),
+                ),
+                const SizedBox(height: 14),
+                for (final url in urls) ...[
+                  _QualityRow(
+                    url: url,
+                    size: _sizes[url] ?? 0,
+                    onDownload: () => _start(url),
+                  ),
+                  if (url != urls.last) const SizedBox(height: 8),
+                ],
+                const SizedBox(height: 4),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _start(String url) {
+    DownloadManager.instance.download(url);
+    DownloadsIndex.instance.refreshStats();
+    unawaited(DownloadsIndex.instance.refresh());
+  }
+}
+
+/// Sifatlar oynasidagi bitta qator.
+class _QualityRow extends StatelessWidget {
+  final String url;
+  final int size;
+  final VoidCallback onDownload;
+
+  const _QualityRow({
+    required this.url,
+    required this.size,
+    required this.onDownload,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final st = DownloadManager.instance.statOf(url);
+    final done = st.total > 0 && st.downloaded >= st.total;
+    final started = st.downloaded > 0;
+    final total = st.total > 0 ? st.total : size;
+    return Row(
+      children: [
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.10),
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: Colors.white24),
+          ),
+          child: Text(
+            qualityOf(url).isEmpty ? '—' : qualityOf(url),
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                total > 0 ? formatBytes(total) : 'hajmi aniqlanmoqda...',
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.75),
+                  fontSize: 12,
+                ),
+              ),
+              if (started && !done)
+                Text(
+                  _percent(st.ratio * 100),
+                  style: const TextStyle(
+                    color: AppColors.accent,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+            ],
+          ),
+        ),
+        const SizedBox(width: 8),
+        if (done)
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 8),
+            child: Icon(Icons.check_circle_rounded,
+                size: 22, color: Color(0xFF7BD88F)),
+          )
+        else
+          FilledButton(
+            style: FilledButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 14),
+              minimumSize: const Size(0, 38),
+              backgroundColor: AppColors.accent,
+            ),
+            onPressed: onDownload,
+            child: Text(
+              started ? 'Davom ettirish' : 'Yuklab olish',
+              style: const TextStyle(
+                  fontSize: 12.5, fontWeight: FontWeight.w700),
+            ),
+          ),
+      ],
     );
   }
 }

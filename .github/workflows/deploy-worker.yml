@@ -59,6 +59,8 @@ jobs:
           echo "${{ secrets.B2_KEY_ID }}" | wrangler secret put B2_KEY_ID --env production
           echo "${{ secrets.B2_APPLICATION_KEY }}" | wrangler secret put B2_APPLICATION_KEY --env production
           echo "${{ secrets.TELEGRAM_BOT_TOKEN }}" | wrangler secret put TELEGRAM_BOT_TOKEN --env production
+          # tezchek.uz — balans to'ldirish to'lov havolalari uchun.
+          echo "${{ secrets.TEZCHEK_API_KEY }}" | wrangler secret put TEZCHEK_API_KEY --env production
 
       - name: Deploy to Cloudflare Workers
         working-directory: worker

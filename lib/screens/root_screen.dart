@@ -350,9 +350,26 @@ class _BottomNav extends StatelessWidget {
     // Ustiga 14 nuqta bo'sh joy qo'shiladi (foydalanuvchi talabi:
     // "biroz yuqoriga ko'tar"), pastki chegara esa 16 — chekinish
     // umuman kelmagan qurilmada ham panel yopishib qolmasin.
-    final inset = MediaQuery.viewPaddingOf(context).bottom;
+    // ── IKKALA O'LCHOV HAM OLINADI ────────────────────────────
+    //
+    // TOPILGAN XATO (foydalanuvchi: "sahifa almashtirish tugmalari
+    // pastga tushib ketyapti").
+    //
+    // Faqat `viewPadding` ga tayanish yetarli emas: ba'zi
+    // qurilmalarda (va pleyerdan qaytgan zahoti) u NOL keladi va
+    // panel 16 nuqtaga tushib, tizim tugmalari ustiga chiqib
+    // qolardi. `padding` esa immersive rejimda nolga tushadi.
+    //
+    // Shu sabab IKKALASINING KATTASI olinadi va eng kam chekinish
+    // 24 nuqtaga ko'tarildi — hech qanday holatda panel pastga
+    // yopishib qolmaydi.
+    final mq = MediaQuery.of(context);
+    final raw = mq.viewPadding.bottom > mq.padding.bottom
+        ? mq.viewPadding.bottom
+        : mq.padding.bottom;
+    final inset = raw < 24 ? 24.0 : raw + 14;
     return Padding(
-      padding: EdgeInsets.only(bottom: inset < 16 ? 16 : inset + 14),
+      padding: EdgeInsets.only(bottom: inset),
       child: Container(
         margin: const EdgeInsets.fromLTRB(16, 0, 16, 0),
         padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 6),

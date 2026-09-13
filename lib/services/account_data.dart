@@ -41,6 +41,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'app_settings.dart';
+import 'billing_service.dart';
 import 'rust_bridge.dart';
 import 'season_info.dart';
 import 'stats_service.dart';
@@ -85,6 +86,10 @@ class AccountData {
     } catch (_) {}
     try {
       MyStatsService.instance.clear();
+    } catch (_) {}
+    // Balans va obuna ham hisobga tegishli.
+    try {
+      BillingService.instance.clear();
     } catch (_) {}
     try {
       WatchProgress.instance.reload();

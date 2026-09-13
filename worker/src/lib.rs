@@ -610,6 +610,44 @@ async fn init_db(env: &Env) -> bool {
             cfg_value TEXT
         )", vec![]),
 
+        // ── BALANS, OBUNA VA TO'LOVLAR ────────────────────────
+        //
+        // `payments_db` — tezchek.uz da yaratilgan har bir to'lov
+        // havolasi. `status` faqat `pending` -> `paid` yo'nalishida
+        // o'zgaradi, shu sabab balans ikki marta oshmaydi.
+        ("CREATE TABLE IF NOT EXISTS payments_db (
+            order_id TEXT PRIMARY KEY,
+            user_id INTEGER,
+            amount INTEGER,
+            status TEXT,
+            pay_url TEXT,
+            created_at INTEGER,
+            expires_at INTEGER,
+            paid_at INTEGER
+        )", vec![]),
+        ("CREATE INDEX IF NOT EXISTS idx_pay_user
+            ON payments_db(user_id, created_at)", vec![]),
+
+        // Obuna — odamga BITTA qator, tugash vaqti bilan.
+        ("CREATE TABLE IF NOT EXISTS subs_db (
+            user_id INTEGER PRIMARY KEY,
+            expires_at INTEGER,
+            updated_at INTEGER
+        )", vec![]),
+
+        // Tarix oynasi: har bir to'ldirish va har bir obuna.
+        ("CREATE TABLE IF NOT EXISTS billing_log (
+            id TEXT PRIMARY KEY,
+            user_id INTEGER,
+            kind TEXT,
+            amount INTEGER,
+            days INTEGER,
+            note TEXT,
+            created_at INTEGER
+        )", vec![]),
+        ("CREATE INDEX IF NOT EXISTS idx_billing_user
+            ON billing_log(user_id, created_at)", vec![]),
+
         // B2'da yetim qolgan fayllar (pastdagi izohga qarang).
         ("CREATE TABLE IF NOT EXISTS orphan_files (
             file_name TEXT PRIMARY KEY,
@@ -3786,6 +3824,321 @@ async fn sync_route(mut req: Request, env: &Env) -> Result<Response> {
 }
 
 // ═══════════════════════════════════════════════════════════════
+//  BALANS, OBUNA VA TO'LOVLAR (tezchek.uz)
+// ═══════════════════════════════════════════════════════════════
+//
+// TALAB (foydalanuvchi): profil sahifasida "Obuna olish va Balans
+// to'ldirish" tugmasi; uning ichida uchta oyna — Obuna,
+// To'ldirish, Tarix.
+//
+// ── NEGA HAMMASI SERVERDA ─────────────────────────────────────
+//
+// Pul bilan bog'liq har bir qaror WORKER da qabul qilinadi:
+//
+//   * tariflar narxi (`PLANS`) shu yerda — ilova aytgan narxga
+//     ISHONILMAYDI, aks holda o'zgartirilgan ilova 30 kunlik
+//     obunani 1 so'mga sotib olardi;
+//   * balansdan pul yechish va obunani uzaytirish BITTA quvurda;
+//   * to'lov haqiqatan bo'lganini FAQAT tezchek.uz tasdiqlaydi.
+//
+// Tezchek API kaliti (`TEZCHEK_API_KEY`) worker sirlarida turadi
+// va ilovaga hech qachon chiqmaydi.
+//
+// ── PUL IKKI MARTA QO'SHILMASLIGI ─────────────────────────────
+//
+// "Tekshirish" tugmasini necha marta bossa ham balans BIR MARTA
+// oshadi: `payments_db.status` `pending` dan `paid` ga faqat
+// SHARTLI o'tadi (`WHERE status='pending'`), balans esa o'sha
+// o'tish muvaffaqiyatli bo'lgandagina oshiriladi.
+
+/// Tezchek API manzili.
+const TEZCHEK_API: &str = "https://tezchek.uz/api";
+
+/// To'lov havolasi shuncha vaqt faol turadi (foydalanuvchi
+/// talabi: "har bitta havola 1 soat faol turadi, undan ko'p
+/// emas").
+const PAY_LINK_TTL_MS: i64 = 60 * 60 * 1000;
+
+/// Eng kam va eng ko'p to'ldirish miqdori (so'm).
+const PAY_MIN: i64 = 1_000;
+const PAY_MAX: i64 = 10_000_000;
+
+/// Obuna tariflari: (kun, narx so'mda).
+///
+/// Narx FAQAT shu yerda — ilova hech qanday summa yubormaydi,
+/// u faqat tarifning kunini aytadi.
+const PLANS: [(i64, i64); 5] = [
+    (1, 1_000),
+    (5, 4_000),
+    (10, 7_000),
+    (20, 12_000),
+    (30, 15_000),
+];
+
+fn plan_price(days: i64) -> Option<i64> {
+    PLANS.iter().find(|(d, _)| *d == days).map(|(_, p)| *p)
+}
+
+/// Tezchek'ga POST so'rovi.
+async fn tezchek(env: &Env, path: &str, mut body: Value) -> Result<Value> {
+    let key = env.secret("TEZCHEK_API_KEY")?.to_string();
+    if key.is_empty() {
+        return Err(Error::RustError("TEZCHEK_API_KEY qo'yilmagan".into()));
+    }
+    if let Some(m) = body.as_object_mut() {
+        m.insert("api_key".to_string(), json!(key));
+    }
+    let h = Headers::new();
+    h.set("Content-Type", "application/json")?;
+    let req = Request::new_with_init(
+        &format!("{TEZCHEK_API}{path}"),
+        RequestInit::new().with_method(Method::Post).with_headers(h)
+            .with_body(Some(body.to_string().into())),
+    )?;
+    let mut r = Fetch::Request(req).send().await?;
+    Ok(r.json().await.unwrap_or(json!({})))
+}
+
+/// Obuna tugash vaqti (ms). Obunasi yo'q bo'lsa 0.
+async fn sub_until(env: &Env, user: i64) -> i64 {
+    let res = turso_exec(env, "SELECT expires_at FROM subs_db WHERE user_id=?",
+        vec![TursoArg::int(user)]).await;
+    res.ok()
+        .and_then(|r| first_row(&r))
+        .and_then(|r| r["expires_at"].as_i64())
+        .unwrap_or(0)
+}
+
+/// POST /api/billing/create — to'lov havolasi yaratish.
+async fn billing_create(mut req: Request, env: &Env) -> Result<Response> {
+    let Some(u) = session_user(env, &bearer(&req)).await? else {
+        return json_resp(&json!({"error": "unauthorized"}), 401);
+    };
+    let me = u["id"].as_i64().unwrap_or(0);
+    let b: Value = req.json().await.unwrap_or(json!({}));
+    let amount = b["amount"].as_i64().unwrap_or(0);
+    if !(PAY_MIN..=PAY_MAX).contains(&amount) {
+        return json_resp(&json!({
+            "error": format!("Summa {PAY_MIN} dan {PAY_MAX} gacha bo'lishi kerak")
+        }), 400);
+    }
+
+    let resp = tezchek(env, "/create_invoice", json!({"amount": amount})).await?;
+    if resp["ok"] != json!(true) {
+        let why = resp["error"]["message"].as_str().unwrap_or("noma'lum xato");
+        return json_resp(&json!({"error": format!("To'lov yaratilmadi: {why}")}), 502);
+    }
+    // `order_id` son ham, satr ham kelishi mumkin.
+    let order_id = match &resp["order_id"] {
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => s.clone(),
+        _ => return json_resp(&json!({"error": "order_id kelmadi"}), 502),
+    };
+    let pay_url = resp["pay_url"].as_str().unwrap_or("").to_string();
+    if pay_url.is_empty() {
+        return json_resp(&json!({"error": "to'lov havolasi kelmadi"}), 502);
+    }
+
+    let now = now_ms();
+    let expires = now + PAY_LINK_TTL_MS;
+    turso_exec(env,
+        "INSERT INTO payments_db
+            (order_id,user_id,amount,status,pay_url,created_at,expires_at,paid_at)
+         VALUES (?,?,?,'pending',?,?,?,0)
+         ON CONFLICT(order_id) DO UPDATE SET
+            user_id=excluded.user_id, amount=excluded.amount,
+            pay_url=excluded.pay_url, expires_at=excluded.expires_at",
+        vec![
+            TursoArg::text(&order_id), TursoArg::int(me), TursoArg::int(amount),
+            TursoArg::text(&pay_url), TursoArg::int(now), TursoArg::int(expires),
+        ]).await?;
+
+    ok_nostore(json!({
+        "ok": true,
+        "order_id": order_id,
+        "pay_url": pay_url,
+        "amount": amount,
+        "expires_at": expires,
+    }))
+}
+
+/// POST /api/billing/check — to'lov bo'ldimi?
+///
+/// Bo'lgan bo'lsa balans BIR MARTA oshiriladi va tarixga yoziladi.
+async fn billing_check(mut req: Request, env: &Env) -> Result<Response> {
+    let Some(u) = session_user(env, &bearer(&req)).await? else {
+        return json_resp(&json!({"error": "unauthorized"}), 401);
+    };
+    let me = u["id"].as_i64().unwrap_or(0);
+    let b: Value = req.json().await.unwrap_or(json!({}));
+    let order_id = b["order_id"].as_str().unwrap_or("").to_string();
+    if order_id.is_empty() {
+        return json_resp(&json!({"error": "order_id yo'q"}), 400);
+    }
+
+    // Havola AYNAN shu odamniki ekanini tekshiramiz.
+    let row = turso_exec(env,
+        "SELECT * FROM payments_db WHERE order_id=? AND user_id=?",
+        vec![TursoArg::text(&order_id), TursoArg::int(me)]).await?;
+    let Some(pay) = first_row(&row) else {
+        return json_resp(&json!({"error": "to'lov topilmadi"}), 404);
+    };
+    let amount = pay["amount"].as_i64().unwrap_or(0);
+    if pay["status"].as_str() == Some("paid") {
+        return ok_nostore(json!({
+            "ok": true, "status": "paid", "already": true,
+            "balance": u["balance"].as_i64().unwrap_or(0),
+        }));
+    }
+
+    let resp = tezchek(env, "/status_invoice",
+        json!({"order_id": order_id})).await?;
+    let status = resp["payment"]["status"].as_str().unwrap_or("").to_string();
+    if resp["ok"] != json!(true) || status != "paid" {
+        return ok_nostore(json!({
+            "ok": true,
+            "status": if status.is_empty() { "pending".to_string() } else { status },
+            "balance": u["balance"].as_i64().unwrap_or(0),
+        }));
+    }
+
+    // ── PUL BIR MARTA QO'SHILADI ──────────────────────────────
+    //
+    // Holat `pending` dan `paid` ga SHARTLI o'tadi. Ikkinchi
+    // "Tekshirish" bosilganda bu yangilanish HECH QANDAY qatorga
+    // tegmaydi, ya'ni balans ikkinchi marta oshmaydi.
+    let now = now_ms();
+    let upd = turso_exec(env,
+        "UPDATE payments_db SET status='paid', paid_at=?
+          WHERE order_id=? AND status='pending' RETURNING order_id",
+        vec![TursoArg::int(now), TursoArg::text(&order_id)]).await?;
+    if first_row(&upd).is_none() {
+        // Boshqa so'rov bizdan oldin ulgurgan — balans allaqachon
+        // oshirilgan.
+        return ok_nostore(json!({
+            "ok": true, "status": "paid", "already": true,
+            "balance": u["balance"].as_i64().unwrap_or(0),
+        }));
+    }
+
+    turso_batch(env, &[
+        ("UPDATE users_db SET balance=COALESCE(balance,0)+? WHERE id=?",
+         vec![TursoArg::int(amount), TursoArg::int(me)]),
+        ("INSERT INTO billing_log (id,user_id,kind,amount,days,note,created_at)
+          VALUES (?,?,'topup',?,0,?,?)",
+         vec![
+            TursoArg::text(&format!("t{order_id}")), TursoArg::int(me),
+            TursoArg::int(amount),
+            TursoArg::text(&format!("Balans to'ldirildi (#{order_id})")),
+            TursoArg::int(now),
+         ]),
+    ]).await?;
+
+    ok_nostore(json!({
+        "ok": true,
+        "status": "paid",
+        "already": false,
+        "balance": u["balance"].as_i64().unwrap_or(0) + amount,
+    }))
+}
+
+/// POST /api/billing/subscribe — balansdan obuna sotib olish.
+async fn billing_subscribe(mut req: Request, env: &Env) -> Result<Response> {
+    let Some(u) = session_user(env, &bearer(&req)).await? else {
+        return json_resp(&json!({"error": "unauthorized"}), 401);
+    };
+    let me = u["id"].as_i64().unwrap_or(0);
+    let b: Value = req.json().await.unwrap_or(json!({}));
+    let days = b["days"].as_i64().unwrap_or(0);
+    let Some(price) = plan_price(days) else {
+        return json_resp(&json!({"error": "Bunday tarif yo'q"}), 400);
+    };
+    let balance = u["balance"].as_i64().unwrap_or(0);
+    if balance < price {
+        return json_resp(&json!({
+            "error": "Balansda mablag' yetarli emas",
+            "need": price - balance,
+        }), 402);
+    }
+
+    let now = now_ms();
+    // Obuna hali tugamagan bo'lsa — USTIGA qo'shiladi.
+    let base = sub_until(env, me).await.max(now);
+    let until = base + days * 86_400_000;
+
+    turso_batch(env, &[
+        ("UPDATE users_db SET balance=COALESCE(balance,0)-? WHERE id=? AND balance>=?",
+         vec![TursoArg::int(price), TursoArg::int(me), TursoArg::int(price)]),
+        ("INSERT INTO subs_db (user_id,expires_at,updated_at) VALUES (?,?,?)
+          ON CONFLICT(user_id) DO UPDATE SET
+             expires_at=excluded.expires_at, updated_at=excluded.updated_at",
+         vec![TursoArg::int(me), TursoArg::int(until), TursoArg::int(now)]),
+        ("INSERT INTO billing_log (id,user_id,kind,amount,days,note,created_at)
+          VALUES (?,?,'subscription',?,?,?,?)",
+         vec![
+            TursoArg::text(&format!("s{me}-{now}")), TursoArg::int(me),
+            TursoArg::int(-price), TursoArg::int(days),
+            TursoArg::text(&format!("{days} kunlik obuna")),
+            TursoArg::int(now),
+         ]),
+    ]).await?;
+
+    ok_nostore(json!({
+        "ok": true,
+        "balance": balance - price,
+        "subscription_until": until,
+    }))
+}
+
+/// GET /api/billing — balans, obuna, faol havolalar va tarix.
+async fn billing_state(req: Request, env: &Env) -> Result<Response> {
+    let Some(u) = session_user(env, &bearer(&req)).await? else {
+        return json_resp(&json!({"error": "unauthorized"}), 401);
+    };
+    let me = u["id"].as_i64().unwrap_or(0);
+    let now = now_ms();
+
+    let res = turso_many(env, &[
+        ("SELECT expires_at FROM subs_db WHERE user_id=?",
+         vec![TursoArg::int(me)]),
+        // Faol havolalar: to'lanmagan va muddati o'tmagan.
+        ("SELECT order_id,amount,pay_url,expires_at FROM payments_db
+           WHERE user_id=? AND status='pending' AND expires_at > ?
+           ORDER BY created_at DESC LIMIT 20",
+         vec![TursoArg::int(me), TursoArg::int(now)]),
+        ("SELECT kind,amount,days,note,created_at FROM billing_log
+           WHERE user_id=? ORDER BY created_at DESC LIMIT 100",
+         vec![TursoArg::int(me)]),
+        // Muddati o'tgan havolalar tozalanadi — jadval o'smasin.
+        ("DELETE FROM payments_db
+           WHERE status='pending' AND expires_at < ?",
+         vec![TursoArg::int(now - 86_400_000)]),
+    ]).await?;
+
+    let rows_of = |r: &Value| -> Vec<Value> {
+        let cols = r["cols"].as_array().cloned().unwrap_or_default();
+        r["rows"].as_array().cloned().unwrap_or_default().iter()
+            .map(|x| row_to_obj(&cols, x.as_array().unwrap_or(&vec![])))
+            .collect()
+    };
+
+    let until = res.first().and_then(first_row)
+        .and_then(|r| r["expires_at"].as_i64()).unwrap_or(0);
+
+    ok_nostore(json!({
+        "balance": u["balance"].as_i64().unwrap_or(0),
+        "subscription_until": until,
+        "active": until > now,
+        "plans": PLANS.iter().map(|(d, p)| json!({"days": d, "price": p}))
+                      .collect::<Vec<_>>(),
+        "links": rows_of(res.get(1).unwrap_or(&json!({}))),
+        "history": rows_of(res.get(2).unwrap_or(&json!({}))),
+        "link_ttl_ms": PAY_LINK_TTL_MS,
+        "now": now,
+    }))
+}
+
+// ═══════════════════════════════════════════════════════════════
 //  STATISTIKA CHELAKLARI
 // ═══════════════════════════════════════════════════════════════
 
@@ -4431,6 +4784,9 @@ async fn auth_route(req: Request, env: &Env, origin: &str, path: &str, method: M
                 "DELETE FROM favorites_db WHERE user_id=?",
                 "DELETE FROM watch_history_db WHERE user_id=?",
                 "DELETE FROM sync_batches WHERE user_id=?",
+                "DELETE FROM payments_db WHERE user_id=?",
+                "DELETE FROM subs_db WHERE user_id=?",
+                "DELETE FROM billing_log WHERE user_id=?",
             ] {
                 stmts.push((sql, vec![TursoArg::int(me)]));
             }
@@ -4600,7 +4956,8 @@ async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
         || path.starts_with("/api/history")
         || path == "/api/favorites"
         || path == "/api/me/stats"
-        || path == "/api/sync";
+        || path == "/api/sync"
+        || path.starts_with("/api/billing");
     let write = matches!(method, Method::Post | Method::Put | Method::Delete) && !auth_path;
     let mut resp = route(req, env, ctx).await?;
 
@@ -4708,6 +5065,20 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
     // paketda keladi (`sync_route` izohiga qarang).
     if path == "/api/sync" && method == Method::Post {
         return sync_route(req, &env).await;
+    }
+
+    // ── BALANS, OBUNA VA TO'LOVLAR ────────────────────────────
+    if path == "/api/billing" && method == Method::Get {
+        return billing_state(req, &env).await;
+    }
+    if path == "/api/billing/create" && method == Method::Post {
+        return billing_create(req, &env).await;
+    }
+    if path == "/api/billing/check" && method == Method::Post {
+        return billing_check(req, &env).await;
+    }
+    if path == "/api/billing/subscribe" && method == Method::Post {
+        return billing_subscribe(req, &env).await;
     }
 
     // ── SHAXSIY STATISTIKA VA SEVIMLILAR RO'YXATI ─────────────

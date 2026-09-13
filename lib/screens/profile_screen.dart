@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../services/auth_service.dart';
+import '../services/billing_service.dart';
 import '../services/format.dart';
 import '../services/net_meter.dart';
 import '../services/stats_service.dart';
@@ -15,6 +16,7 @@ import '../services/storage_usage.dart';
 import '../services/traffic_service.dart';
 import '../widgets/aru_logo.dart';
 import '../widgets/glass.dart';
+import 'billing_screen.dart';
 import '../widgets/telegram_logo.dart';
 import 'admin_screen.dart';
 import 'profile_edit_screen.dart';
@@ -422,6 +424,14 @@ class _ProfileBody extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 16),
+          // ── OBUNA VA BALANS ──────────────────────────────────
+          //
+          // TALAB (foydalanuvchi): "profil ma'lumotlari va shaxsiy
+          // statistika orasiga 'Obuna olish va Balans to'ldirish'
+          // degan eniga cho'zilgan bitta uzun tugma qo'sh".
+          const _BillingButton(),
+          const SizedBox(height: 12),
+
           // ── SHAXSIY STATISTIKA (2x2) ─────────────────────────
           //
           // Rasm va balans TAGIDA: nechta anime ko'rgan (bo'lim
@@ -708,6 +718,119 @@ class _TaskDialogState extends State<_TaskDialog> {
 
 /// Qizil ("xavfli") amal tugmasi — chiqish va o'chirish uchun
 /// bir xil ko'rinish beradi.
+/// ── OBUNA VA BALANS TUGMASI ──────────────────────────────────
+///
+/// TALAB (foydalanuvchi): "agar foydalanuvchi balansida pul bo'lsa
+/// obuna oynasi ochiladi, agar yo'q bo'lsa to'ldirish oynasi
+/// ochiladi".
+///
+/// Shu sabab tugma bosilganda `BillingScreen` qaysi oynadan
+/// boshlanishini balans hal qiladi.
+class _BillingButton extends StatefulWidget {
+  const _BillingButton();
+
+  @override
+  State<_BillingButton> createState() => _BillingButtonState();
+}
+
+class _BillingButtonState extends State<_BillingButton> {
+  @override
+  void initState() {
+    super.initState();
+    // Balans va obuna holati fonda olinadi — tugmada darhol
+    // ko'rinadi va qaysi oyna ochilishi ham shu bilan hal bo'ladi.
+    unawaited(BillingService.instance.load());
+  }
+
+  void _open() {
+    final b = BillingService.instance;
+    // Balansda pul bo'lsa — Obuna, bo'lmasa — To'ldirish.
+    final start = b.balance > 0 ? 0 : 1;
+    Navigator.of(context).push(
+      PageRouteBuilder(
+        transitionDuration: const Duration(milliseconds: 300),
+        pageBuilder: (_, __, ___) => BillingScreen(startPage: start),
+        transitionsBuilder: (_, anim, __, child) => FadeTransition(
+          opacity: CurvedAnimation(parent: anim, curve: Curves.easeOutCubic),
+          child: child,
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: BillingService.instance,
+      builder: (context, _) {
+        final b = BillingService.instance;
+        return GestureDetector(
+          onTap: _open,
+          behavior: HitTestBehavior.opaque,
+          child: Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                colors: [AppColors.accent, AppColors.accent2],
+                begin: Alignment.centerLeft,
+                end: Alignment.centerRight,
+              ),
+              borderRadius: BorderRadius.circular(18),
+              boxShadow: [
+                BoxShadow(
+                  color: AppColors.accent.withValues(alpha: 0.28),
+                  blurRadius: 16,
+                  offset: const Offset(0, 6),
+                ),
+              ],
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.workspace_premium_rounded,
+                    size: 20, color: Colors.white),
+                const SizedBox(width: 10),
+                const Expanded(
+                  child: Text(
+                    'Obuna olish va Balans to\'ldirish',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+                if (b.active)
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.22),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text(
+                      '${b.daysLeft} kun',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                const SizedBox(width: 6),
+                const Icon(Icons.chevron_right_rounded,
+                    size: 20, color: Colors.white70),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
 /// Foydalanuvchining O'Z statistikasi — 2x2 katak.
 class _MyStatsGrid extends StatefulWidget {
   const _MyStatsGrid();
@@ -841,8 +964,26 @@ class _TrafficBoxState extends State<_TrafficBox> {
         [MyStatsService.instance, TrafficService.instance],
       ),
       builder: (context, _) {
-        final total = MyStatsService.instance.stats.traffic +
+        // ── JAMI RAQAM: IKKI MANBANING KATTASI ──────────────
+        //
+        // TOPILGAN XATO (foydalanuvchi: "megabayt hisoblash
+        // avvalgidek to'g'ri ishlamayapti"): tepadagi jami raqam
+        // SERVERDAN (+ hali yuborilmagan qism) olinardi, pastdagi
+        // taqsimot esa TELEFONDAGI umrbod hisobdan. Ikkovi har xil
+        // manba — telefondagisi kattaroq bo'lib qolsa, foizlar
+        // 100% dan oshib ketardi (ekranda "70,9 MB — 100.00%"
+        // bo'lib, jami esa 70,3 MB bo'lib turardi).
+        //
+        // Endi jami — ikkovining KATTASI. Shunda foiz hech qachon
+        // 100 dan oshmaydi, server oldinda bo'lsa esa farq
+        // "Oldingi hisob" qatoriga tushadi (avvalgidek).
+        final synced = MyStatsService.instance.stats.traffic +
             TrafficService.instance.pendingBytes;
+        var known = 0;
+        TrafficService.instance.totals.forEach((_, b) {
+          if (b > 0) known += b;
+        });
+        final total = synced > known ? synced : known;
         final rows = _rows(total);
         return Glass(
           borderRadius: 18,

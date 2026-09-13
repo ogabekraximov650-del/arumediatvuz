@@ -1038,6 +1038,160 @@ holda ishlayverardi va har bir so'rov "no such table" bilan
 yiqilardi. Endi belgi FAQAT uchala quvur ham muvaffaqiyatli
 bo'lganda qo'yiladi.
 
+## BALANS, OBUNA VA TO'LOVLAR (tezchek.uz)
+
+TALAB (foydalanuvchi): profil sahifasida "Obuna olish va Balans
+to'ldirish" tugmasi; ichida uchta surib o'tkaziladigan oyna —
+**Obuna**, **To'ldirish**, **Tarix**. Balansda pul bo'lsa Obuna
+oynasi, bo'lmasa To'ldirish oynasi ochiladi.
+
+### PUL BILAN BOG'LIQ HAR BIR QAROR SERVERDA
+
+Ilovada birorta narx YO'Q. Tariflar `worker/src/lib.rs` dagi
+`PLANS` da:
+
+| Kun | Narx |
+|---|---|
+| 1 | 1 000 so'm |
+| 5 | 4 000 so'm |
+| 10 | 7 000 so'm |
+| 20 | 12 000 so'm |
+| 30 | 15 000 so'm |
+
+Ilova faqat **kunni** yuboradi (`{"days": 5}`), narxni server
+o'zi topadi. Aks holda o'zgartirilgan ilova 30 kunlik obunani
+1 so'mga olardi. **Narxni ilovaga ko'chirmang.**
+
+### JADVALLAR
+
+| Jadval | Nima |
+|---|---|
+| `payments_db` | har bir to'lov havolasi (`order_id` PK, `status`, `expires_at`) |
+| `subs_db` | odamga bitta qator: obuna qachon tugaydi |
+| `billing_log` | Tarix oynasi: har bir to'ldirish va obuna |
+
+### YO'LLAR
+
+| Yo'l | Nima qiladi |
+|---|---|
+| `GET /api/billing` | balans, obuna muddati, tariflar, faol havolalar, tarix |
+| `POST /api/billing/create` | tezchek'da to'lov yaratadi, havola qaytaradi |
+| `POST /api/billing/check` | to'lov bo'ldimi; bo'lsa balansni oshiradi |
+| `POST /api/billing/subscribe` | balansdan yechib obunani uzaytiradi |
+
+### TEZCHEK API
+
+Hujjat: `https://tezchek.uz/public-api-system`
+(OpenAPI: `?action=get_openapi`). Atigi ikkita yo'l kerak:
+
+```
+POST https://tezchek.uz/api/create_invoice
+     {api_key, amount}            -> {ok, order_id, pay_url}
+
+POST https://tezchek.uz/api/status_invoice
+     {api_key, order_id}          -> {ok, payment:{status:"paid"|...}}
+```
+
+Kalit — worker siri **`TEZCHEK_API_KEY`** (GitHub secret'dan
+`deploy-worker.yml` qo'yadi). U ilovaga **hech qachon
+chiqmaydi**.
+
+### PUL IKKI MARTA QO'SHILMASLIGI
+
+"Tekshirish" tugmasini necha marta bossa ham balans BIR MARTA
+oshadi:
+
+```sql
+UPDATE payments_db SET status='paid', paid_at=?
+ WHERE order_id=? AND status='pending' RETURNING order_id
+```
+
+Qator qaytmasa — demak boshqa so'rov ulgurgan va balans
+allaqachon oshirilgan. **Bu shartni olib tashlamang.**
+
+### HAVOLA 1 SOAT YASHAYDI
+
+`PAY_LINK_TTL_MS`. Muddati o'tgan havolalar ro'yxatda
+ko'rsatilmaydi, bir kundan keyin esa jadvaldan o'chiriladi
+(`/api/billing` ichidagi tozalash).
+
+## YUKLANMALAR OYNASI
+
+TALAB (foydalanuvchi): foiz **real vaqtda** yangilansin, qanaqa
+sifatda / qancha MB / qancha foiz yozilsin, tozalash tugmasi
+kattaroq va aniq ishlaydigan bo'lsin, kadr yonida yuklab olish
+ikoni bo'lsin.
+
+* `DownloadsIndex.refreshStats()` — ARZON yangilanish: faqat
+  `downloaded`/`total` raqamlari (bitta `videoStats` chaqiruvi,
+  diskka chiqmaydi). Ro'yxatda har soniyada chaqiriladi, to'liq
+  `refresh()` esa 10 soniyada bir marta;
+* ro'yxat `WatchHistory` ni ham eshitadi — kadr tarix
+  oynasidagidek darhol yangilanadi (ilgari faqat `DownloadsIndex`
+  eshitilardi va kadr eskirib turardi);
+* `qualityOf(url)` — fayl nomidan sifatni ajratadi
+  (`ep_1_1_720p_...mp4` -> `720p`);
+* tugmalar `_RowIconButton` — 40x40 bosish maydoni (ilgari ikonka
+  17 nuqta edi va barmoq tegmasdan qolardi);
+* yuklab olish ikoni `_QualitySheet` ni ochadi: har bir sifat,
+  hajmi va "Yuklab olish" tugmasi. Hajm yuklab olingan sifat
+  uchun diskdan, qolganlari uchun bir baytlik `Range` so'rovidan
+  (`DownloadsIndex.sizeOf`).
+
+## TUZATILGAN XATOLAR (2026-09, ikkinchi to'plam)
+
+### AVTO O'TKAZISH ISHLAMASDI — CHEKSIZ SEK HALQASI
+
+**Belgi:** avto o'tkazish yoqilganda intro vaqti kelganda
+o'rtadagi halqa aylanaverardi, video esa o'tmasdi.
+
+**Sabab:** sek AYNAN oraliqning oxirgi millisekundiga qilinardi.
+Pleyer eng yaqin KALIT KADRGA tushadi va u ko'pincha oraliqning
+ICHIDA qolardi — keyingi pozitsiya yangilanishida `_introAt`
+yana o'sha oraliqni topib, `_skipIntro` qaytadan chaqirilardi.
+
+**Tuzatish:** sek oraliq oxiridan `_introSkipPad` (400 ms) keyinga
+qilinadi va o'tkazilgan oraliq `_introDone` ga yoziladi — ikkinchi
+marta AVTOMATIK o'tkazilmaydi (qo'lda tugma bosish mumkin).
+
+### TRAFIK FOIZI 100% DAN OSHARDI
+
+Tepadagi jami raqam SERVERDAN olinardi, pastdagi taqsimot esa
+TELEFONDAGI umrbod hisobdan — ikki xil manba. Telefondagisi
+kattaroq bo'lib qolsa "70,9 MB — 100.00%" bo'lib, jami esa
+70,3 MB bo'lib turardi. Endi jami — **ikkovining kattasi**.
+
+### PASTKI PANEL TIZIM TUGMALARI USTIGA CHIQARDI
+
+Faqat `viewPadding` ga tayanilardi va u ba'zi holatda nol
+kelardi. Endi `viewPadding` va `padding` ning KATTASI olinadi,
+eng kam chekinish 24 nuqta.
+
+### PLEYER OYNALARI KO'RINMASDI
+
+Yarim shaffof oq to'rtburchak ochiq kadr ustida yo'qolib ketardi.
+Endi `_PlayerPanel`: `BackdropFilter` (orqa xiralashadi) + quyuq
+QORA fon + aniq chegara va soya.
+
+## YUKLASH TEZLIGI O'LCHAGICHI
+
+**Nima aniqlangan:** server (isitilgan keshdan) **35-87 MB/s**
+beradi va bo'lak o'lchami deyarli ahamiyatsiz — 1x32 MiB ham,
+16x2 MiB ham bir xil. Ya'ni 5-6 MB/s chegara **telefondagi
+kodda**.
+
+Qaysi qismida ekani TAXMIN bilan emas, o'lchov bilan aniqlanadi.
+`DlTiming` har bir oqimning vaqtini beshga bo'lib yig'adi va
+yuklash tugagach jurnalga yozadi:
+
+```
+O'LCHOV <kalit>: 166.0 MB / 31.2s = 5.32 MB/s |
+  kutish 2.1s (7%) · ttfb 2.9s (9%) · o'qish 18.1s (58%) ·
+  yozish 9.4s (30%) · qulf 0.8s (3%)
+```
+
+Bitta yuklashdan keyin shu qator sababni ANIQ ko'rsatadi.
+
 ## TELEGRAM O'ZI OCHILMAYDI
 
 TALAB (foydalanuvchi): "Telegram orqali kirish tugmasini

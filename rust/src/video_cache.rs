@@ -1068,6 +1068,97 @@ impl StatEntry {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════
+//  YUKLASH VAQTI QAYERGA KETYAPTI (o'lchagich)
+// ═══════════════════════════════════════════════════════════════
+//
+// TALAB (foydalanuvchi): "boshqa ilovalarda 10 MB/s chiqadi,
+// bizda 5-6 dan oshmayapti; foydalanuvchi internetining maksimal
+// tezligi qancha bo'lsa shuncha berish kerak".
+//
+// Server tekshirildi: isitilgan keshdan 35-87 MB/s beradi va
+// bo'lak o'lchami deyarli ahamiyatsiz. Demak chegara TELEFONDAGI
+// kodda. Qaysi qismida ekani esa TAXMIN qilib emas, O'LCHAB
+// aniqlanadi — shu sabab har bir oqim o'z vaqtini beshga bo'lib
+// yozadi va yuklash tugagach yig'indi jurnalga chiqadi:
+//
+//   t_warm  — oynaning keshga tushishini kutish;
+//   t_ttfb  — so'rov yuborildi -> birinchi bayt keldi;
+//   t_read  — soketdan o'qish (sof tarmoq vaqti);
+//   t_write — shifrlash va diskka yozish;
+//   t_claim — umumiy qulfni kutish.
+//
+// Hisoblagichlar atomik va faqat qo'shiladi — o'lchov ishning
+// o'ziga sezilarli yuk bermaydi.
+#[derive(Default)]
+struct DlTiming {
+    warm_us: AtomicU64,
+    ttfb_us: AtomicU64,
+    read_us: AtomicU64,
+    write_us: AtomicU64,
+    claim_us: AtomicU64,
+    bytes: AtomicU64,
+    started_ms: AtomicU64,
+}
+
+static DL_TIMING: OnceLock<Mutex<HashMap<String, Arc<DlTiming>>>> = OnceLock::new();
+
+fn dl_timing(key: &str) -> Arc<DlTiming> {
+    let map = DL_TIMING.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut m = match map.lock() {
+        Ok(m) => m,
+        Err(e) => e.into_inner(),
+    };
+    let e = m.entry(key.to_string()).or_default();
+    if e.started_ms.load(Ordering::Relaxed) == 0 {
+        e.started_ms.store(uptime_ms(), Ordering::Relaxed);
+    }
+    Arc::clone(e)
+}
+
+/// Yuklash tugadi — o'lchov natijasini jurnalga yozadi va
+/// hisoblagichlarni tozalaydi.
+fn dl_timing_report(key: &str) {
+    let Some(map) = DL_TIMING.get() else { return };
+    let t = {
+        let mut m = match map.lock() {
+            Ok(m) => m,
+            Err(e) => e.into_inner(),
+        };
+        match m.remove(key) {
+            Some(t) => t,
+            None => return,
+        }
+    };
+    let started = t.started_ms.load(Ordering::Relaxed);
+    if started == 0 {
+        return;
+    }
+    let wall = (uptime_ms().saturating_sub(started)) as f64 / 1000.0;
+    if wall <= 0.05 {
+        return;
+    }
+    let mb = t.bytes.load(Ordering::Relaxed) as f64 / 1_048_576.0;
+    let sec = |v: u64| v as f64 / 1_000_000.0;
+    // Oqimlar parallel ishlagani uchun yig'indi vaqt devor
+    // vaqtidan katta bo'lishi MUMKIN — foiz shu sabab yig'indiga
+    // nisbatan hisoblanadi.
+    let w = sec(t.warm_us.load(Ordering::Relaxed));
+    let f = sec(t.ttfb_us.load(Ordering::Relaxed));
+    let r = sec(t.read_us.load(Ordering::Relaxed));
+    let wr = sec(t.write_us.load(Ordering::Relaxed));
+    let c = sec(t.claim_us.load(Ordering::Relaxed));
+    let sum = (w + f + r + wr + c).max(0.001);
+    let pct = |v: f64| (v / sum * 100.0).round() as i64;
+    log(format!(
+        "O'LCHOV {key}: {mb:.1} MB / {wall:.1}s = {:.2} MB/s | \
+         kutish {w:.1}s ({}%) · ttfb {f:.1}s ({}%) · o'qish {r:.1}s ({}%) · \
+         yozish {wr:.1}s ({}%) · qulf {c:.1}s ({}%)",
+        if wall > 0.0 { mb / wall } else { 0.0 },
+        pct(w), pct(f), pct(r), pct(wr), pct(c),
+    ));
+}
+
 /// Tezlik o'lchovining oynasi: shundan uzun bo'lsa qayta
 /// hisoblanadi.
 const SPEED_WINDOW: Duration = Duration::from_millis(1000);
@@ -1789,6 +1880,7 @@ fn pool_worker() {
                 map.remove(&key);
                 save_queue_locked(&map);
                 log(format!("Yuklab olish TUGADI: {key}"));
+                dl_timing_report(&key);
             }
             // Foydalanuvchi pauza qildi.
             Ok(DlOutcome::Paused) => {
@@ -1976,8 +2068,12 @@ fn claim_next(
     total: u64,
     rate: f64,
     cached: &mut Vec<u64>,
+    tm: &DlTiming,
 ) -> Claim {
+    let t_lock = Instant::now();
     let mut w = work.lock().ok()?;
+    tm.claim_us
+        .fetch_add(t_lock.elapsed().as_micros() as u64, Ordering::Relaxed);
 
     // 1) Uzilgan so'rovdan qaytgan qoldiq bo'lsa — avval o'sha
     //    olinadi (u fayl ichida "teshik" bo'lib qolmasin).
@@ -2176,6 +2272,8 @@ fn run_download(key: &str, url: &str) -> Result<DlOutcome, String> {
                     // Ekranda "nechta oqim ishlayapti" ko'rinishi
                     // uchun (diagnostika).
                     stat_stream_delta(&k, 1);
+                    // Vaqt o'lchagichi (`DlTiming` izohiga qarang).
+                    let tmw = dl_timing(&k);
                     let mut fails: u32 = 0;
                     // Shu oqimning o'lchangan tezligi (bayt/soniya).
                     // Ulush hajmi aynan shunga qarab tanlanadi.
@@ -2201,7 +2299,8 @@ fn run_download(key: &str, url: &str) -> Result<DlOutcome, String> {
                         // baytni so'ramaydi.
                         let claim = match pending.take() {
                             Some(c) => Some(c),
-                            None => claim_next(&work, &d, total, rate, &mut cached),
+                            None => claim_next(
+                                &work, &d, total, rate, &mut cached, &tmw),
                         };
                         for idx in cached.drain(..) {
                             stat_note_chunk(&k, idx, chunk_plain_len(idx, total));
@@ -3798,8 +3897,12 @@ fn fetch_span(
     // isitilgan bo'ladi va bu ikki chaqiruv darhol qaytadi. Bu
     // yerdagisi — himoya: kesh o'chib ketgan bo'lsa ham so'rov
     // B2'ga emas, baribir keshga boradi.
+    let tm = dl_timing(key);
+    let t_warm = Instant::now();
     maybe_warm(url, key, range_start);
     wait_for_warm(key, range_start);
+    tm.warm_us
+        .fetch_add(t_warm.elapsed().as_micros() as u64, Ordering::Relaxed);
     if !download_active(key) {
         return Err("pauza".to_string());
     }
@@ -3807,12 +3910,15 @@ fn fetch_span(
     log(format!(
         "Bo'laklar {first}..={last} worker'dan olinmoqda ({range_start}-{range_end})..."
     ));
+    let t_req = Instant::now();
     let resp = shared
         .agent
         .get(url)
         .set("Range", &format!("bytes={range_start}-{range_end}"))
         .call()
         .map_err(|e| e.to_string())?;
+    tm.ttfb_us
+        .fetch_add(t_req.elapsed().as_micros() as u64, Ordering::Relaxed);
     let status = resp.status();
 
     // ── BUTUNLIK TEKSHIRUVI ────────────────────────────────────
@@ -3912,6 +4018,7 @@ fn fetch_span(
             read_err = Some("pauza — oqim uzildi".to_string());
             break;
         }
+        let t_rd = Instant::now();
         let n = match reader.read(&mut buf) {
             Ok(n) => n,
             Err(e) => {
@@ -3919,6 +4026,8 @@ fn fetch_span(
                 break;
             }
         };
+        tm.read_us
+            .fetch_add(t_rd.elapsed().as_micros() as u64, Ordering::Relaxed);
         if n == 0 {
             break;
         }
@@ -3932,6 +4041,7 @@ fn fetch_span(
             }
         }
         got_net += piece.len() as u64;
+        tm.bytes.fetch_add(piece.len() as u64, Ordering::Relaxed);
         // Ekrandagi MB/s shu yerdan hisoblanadi (arzon: har 64 KB
         // da bitta atomik qo'shish).
         stat_note_net(key, piece.len() as u64);
@@ -3947,7 +4057,11 @@ fn fetch_span(
             }
             // Bo'lak to'ldi — diskka yozamiz va yo'lakka xabar
             // qilamiz.
-            if write_full_chunk(dir, key, cur, &acc) {
+            let t_wr = Instant::now();
+            let saved = write_full_chunk(dir, key, cur, &acc);
+            tm.write_us
+                .fetch_add(t_wr.elapsed().as_micros() as u64, Ordering::Relaxed);
+            if saved {
                 on_chunk(cur);
             }
             if cur >= last {

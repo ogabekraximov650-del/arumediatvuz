@@ -48,6 +48,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 
 import 'rust_bridge.dart';
@@ -107,6 +108,39 @@ class DownloadItem {
 
   /// Nechanchi bo'lim (yozuvda bo'lmasa ichki `seasonId`).
   int get bolimNumber => bolimId > 0 ? bolimId : seasonId;
+
+  /// Sifat nomi (`720p`). Fayl nomidan olinadi, topilmasa `''`.
+  String get quality => qualityOf(url);
+
+  /// Shu qismning HAMMA sifati — nomi bo'yicha tartiblangan.
+  List<String> get qualities =>
+      allUrls.map(qualityOf).where((q) => q.isNotEmpty).toList();
+
+  DownloadItem copyWith({int? downloaded, int? total, String? url}) =>
+      DownloadItem(
+        animeId: animeId,
+        seasonId: seasonId,
+        bolimId: bolimId,
+        epizodId: epizodId,
+        epizodNumber: epizodNumber,
+        title: title,
+        poster: poster,
+        url: url ?? this.url,
+        allUrls: allUrls,
+        downloaded: downloaded ?? this.downloaded,
+        total: total ?? this.total,
+        updatedAt: updatedAt,
+      );
+}
+
+/// Manzildan sifat nomini ajratadi.
+///
+/// Fayl nomi qolipi: `ep_<anime>_<season>_<sifat>_<vaqt>.mp4`
+/// (masalan `ep_1_1_720p_1789229969480.mp4` -> `720p`).
+String qualityOf(String url) {
+  final name = url.split('?').first.split('/').last;
+  final m = RegExp(r'_(\d{3,4}p)_').firstMatch(name);
+  return m?.group(1) ?? '';
 }
 
 class DownloadsIndex extends ChangeNotifier {
@@ -134,6 +168,84 @@ class DownloadsIndex extends ChangeNotifier {
       debugPrint('Yuklanmalar ro\'yxati yig\'ilmadi: $e');
     } finally {
       _building = false;
+    }
+  }
+
+  /// ── FAQAT RAQAMLARNI YANGILAYDI ─────────────────────────
+  ///
+  /// TALAB (foydalanuvchi): "yuklab olish foizi real vaqtda o'zi
+  /// yangilansin — qo'lda tortib yangilash kerak bo'lyapti".
+  ///
+  /// To'liq `refresh()` diskni skanerlaydi va bo'limlar ro'yxatini
+  /// qaytadan yig'adi — uni har soniyada chaqirib bo'lmaydi. Bu
+  /// yerdagisi esa FAQAT mavjud qatorlarning `downloaded`/`total`
+  /// sonini yangilaydi: bitta `videoStats` chaqiruvi, u ham
+  /// xotiradagi hisobni o'qiydi, diskka chiqmaydi.
+  ///
+  /// Ro'yxatning O'ZI (yangi qism qo'shilishi) `refresh()` bilan
+  /// yangilanadi.
+  void refreshStats() {
+    if (_items.isEmpty) return;
+    final urls = <String>[];
+    for (final e in _items) {
+      urls.addAll(e.allUrls);
+    }
+    final Map<String, Map<String, dynamic>> stats;
+    try {
+      stats = RustCore.instance.videoStats(urls);
+    } catch (_) {
+      return;
+    }
+    var changed = false;
+    final next = <DownloadItem>[];
+    for (final e in _items) {
+      var bestUrl = e.url;
+      var bestDone = 0;
+      var bestTotal = e.total;
+      for (final url in e.allUrls) {
+        final m = stats[url];
+        if (m == null) continue;
+        final done = (m['downloaded'] as num?)?.toInt() ?? 0;
+        if (done <= bestDone) continue;
+        bestDone = done;
+        bestTotal = (m['total'] as num?)?.toInt() ?? 0;
+        bestUrl = url;
+      }
+      if (bestDone != e.downloaded || bestTotal != e.total || bestUrl != e.url) {
+        changed = true;
+        next.add(e.copyWith(
+            downloaded: bestDone, total: bestTotal, url: bestUrl));
+      } else {
+        next.add(e);
+      }
+    }
+    if (!changed) return;
+    _items = next;
+    notifyListeners();
+  }
+
+  /// Bitta sifatning HAJMINI serverdan so'raydi (bir baytlik
+  /// `Range` so'rovi — javobdagi `Content-Range` da to'liq hajm
+  /// bor). Bilib bo'lmasa 0.
+  ///
+  /// Avval diskdagi hisob ko'riladi: yuklab olingan sifat uchun
+  /// tarmoqqa umuman chiqilmaydi.
+  Future<int> sizeOf(String url) async {
+    try {
+      final st = RustCore.instance.videoStats([url])[url];
+      final t = (st?['total'] as num?)?.toInt() ?? 0;
+      if (t > 0) return t;
+    } catch (_) {}
+    try {
+      final r = await http.get(
+        Uri.parse(url),
+        headers: const {'Range': 'bytes=0-0'},
+      ).timeout(const Duration(seconds: 12));
+      final cr = r.headers['content-range'] ?? '';
+      final total = cr.split('/').last.trim();
+      return int.tryParse(total) ?? 0;
+    } catch (_) {
+      return 0;
     }
   }
 
