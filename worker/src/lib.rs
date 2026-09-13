@@ -584,6 +584,19 @@ async fn init_db(env: &Env) {
             PRIMARY KEY (day, metric)
         )", vec![]),
 
+        // ── SINXRONLASH PAKETLARI ─────────────────────────────
+        //
+        // Ilova hamma yozuvni telefonda yig'ib, kuniga bir necha
+        // marta BITTA paket qilib yuboradi. Tarmoq uzilib paket
+        // ikki marta kelib qolsa, ko'rishlar va tomosha vaqti IKKI
+        // MARTA sanalib ketardi — shu sabab har bir odamning
+        // oxirgi paket raqami saqlanadi va takrori rad etiladi.
+        ("CREATE TABLE IF NOT EXISTS sync_batches (
+            user_id INTEGER PRIMARY KEY,
+            batch_id TEXT,
+            at INTEGER
+        )", vec![]),
+
         // Worker ichki sozlamalari (webhook siri va manzili).
         ("CREATE TABLE IF NOT EXISTS app_config (
             cfg_key TEXT PRIMARY KEY,
@@ -2952,6 +2965,10 @@ async fn create_session(
 /// Sessiya tokeni bo'yicha foydalanuvchini topadi va "oxirgi
 /// ko'rilgan" vaqtini yangilaydi (4 ta qurilma tartibi shunga
 /// qarab hisoblanadi).
+/// `sessions_db.last_seen_at` shuncha vaqtda bir martadan ko'p
+/// yozilmaydi.
+const SEEN_EVERY_MS: i64 = 12 * 3_600_000;
+
 async fn session_user(env: &Env, token: &str) -> Result<Option<Value>> {
     if token.is_empty() { return Ok(None); }
     let now = now_ms();
@@ -2961,17 +2978,23 @@ async fn session_user(env: &Env, token: &str) -> Result<Option<Value>> {
     // Ilgari bu yerda ikkita alohida Turso so'rovi bor edi, ya'ni
     // HAR BIR himoyalangan so'rov ikki marta yo'l yurardi.
     //
-    // "Oxirgi ko'rinish" vaqti esa endi FAQAT 60 soniyada bir
-    // marta yoziladi: u ikkita indeksni qayta yozadi va har bir
-    // so'rovda bajarilsa bazadagi eng qimmat amalga aylanardi.
-    // Kunlik faol foydalanuvchi 24 SOATLIK oyna bilan sanaladi —
-    // ya'ni bu aniqlikka umuman ta'sir qilmaydi.
+    // "Oxirgi ko'rinish" vaqti esa endi FAQAT 12 SOATDA bir
+    // marta yoziladi.
+    //
+    // NEGA 12 SOAT (avval 60 soniya edi): bu bazadagi ENG KO'P
+    // takrorlanadigan yozuv edi — 2 soat faol foydalanuvchi
+    // kuniga 120 marta yozardi, ya'ni butun xarajatning ~85% i.
+    // Kunlik faol foydalanuvchi 24 SOATLIK oyna bilan sanaladi,
+    // shu sabab 12 soat aniqlikni buzmaydi: har kuni kiradigan
+    // odamning belgisi har doim 24 soatlik oyna ichida qoladi.
+    // Sinxronlash paketi ham shu vaqtni yangilaydi (u yerda bu
+    // bepul — o'sha quvurning ichida ketadi).
     let res = turso_many(env, &[
         ("SELECT u.* FROM sessions_db s JOIN users_db u ON u.id = s.user_id
           WHERE s.session_token = ?", vec![TursoArg::text(token)]),
         ("UPDATE sessions_db SET last_seen_at=?
           WHERE session_token=? AND COALESCE(last_seen_at,0) < ?",
-         vec![TursoArg::int(now), TursoArg::text(token), TursoArg::int(now - 60_000)]),
+         vec![TursoArg::int(now), TursoArg::text(token), TursoArg::int(now - SEEN_EVERY_MS)]),
     ]).await?;
     let Some(first) = res.first() else { return Ok(None) };
     let Some(u) = first_row(first) else { return Ok(None) };
@@ -3250,167 +3273,478 @@ async fn history_route(
             ok_nostore(json!({"items": items}))
         }
 
-        // ── BITTA QISM YOZILADI (yoki yangilanadi) ─────────────
+        // ── YOZUV ENDI BU YERDA EMAS ──────────────────────────
         //
-        // Bu yo'l bir vaqtning o'zida TO'RTTA ishni bajaradi:
-        //
-        //   1. tomosha tarixini yangilaydi (va o'chirilgan bo'lsa
-        //      qaytadan ko'rinadigan qiladi);
-        //   2. qism va bo'limning KO'RISHLAR sonini oshiradi;
-        //   3. TOMOSHA VAQTINI qo'shadi — faqat haqiqiy, 1x
-        //      tezlikdagi vaqt va qism uzunligidan oshmagan holda;
-        //   4. kunlik/soatlik statistika chelaklarini to'ldiradi.
-        //
-        // Hammasi ATIGI IKKI so'rovda: bitta o'qish (eski holat) va
-        // bitta "quvur" (hamma yozuv).
-        (Method::Post, "/api/history") => {
-            let mut req = req;
-            let b: Value = req.json().await.unwrap_or(json!({}));
-
-            let anime_id = b["anime_id"].as_i64().unwrap_or(0);
-            let season_id = b["season_id"].as_i64().unwrap_or(0);
-            // KALIT — `epizod_id` (hech qachon o'zgarmaydi).
-            let epizod_id = b["epizod_id"].as_i64().unwrap_or(0);
-            // Bazaga YALANG fayl nomi yoziladi (`bare_name` izohi).
-            let video_url = bare_name(b["video_url"].as_str().unwrap_or(""));
-            // Oxirgi ko'rilgan sifat ("720p") — keyingi safar
-            // internet yoqilganda AYNAN shundan davom etadi.
-            let last_quality = b["last_quality"].as_str().unwrap_or("").to_string();
-            let position = b["position_ms"].as_i64().unwrap_or(0).max(0);
-            let duration = b["duration_ms"].as_i64().unwrap_or(0).max(0);
-            // Ilova yuborgan JAMI tomosha vaqti (shu odam, shu qism).
-            let watched = b["watched_ms"].as_i64().unwrap_or(0).max(0);
-            // Shu ochilishda yangi ko'rish bo'ldimi (ilova belgilaydi).
-            let new_view = b["new_view"].as_bool().unwrap_or(false);
-
-            if anime_id <= 0 || epizod_id <= 0 || duration <= 0 {
-                return json_resp(&json!({"error": "to'liq bo'lmagan yozuv"}), 400);
-            }
-
-            let now = now_ms();
-            let key = vec![
-                TursoArg::int(me), TursoArg::int(anime_id),
-                TursoArg::int(season_id), TursoArg::int(epizod_id),
-            ];
-
-            // 1) Eski holat — bitta qator (birlamchi kalit bo'yicha).
-            let old = turso_exec(env,
-                "SELECT watched_ms, view_count, updated_at
-                   FROM watch_history_db
-                  WHERE user_id=? AND anime_id=? AND season_id=? AND epizod_id=?",
-                key.clone()).await?;
-            let old_row = first_row(&old);
-            let old_watched = old_row.as_ref()
-                .and_then(|r| r["watched_ms"].as_i64()).unwrap_or(0).max(0);
-            let old_views = old_row.as_ref()
-                .and_then(|r| r["view_count"].as_i64()).unwrap_or(0).max(0);
-
-
-            // ── TOMOSHA VAQTI QOIDASI ────────────────────────
-            //
-            // Foydalanuvchi qismni necha marta ko'rsa ham, uning
-            // hissasi QISM UZUNLIGIDAN OSHMAYDI va hech qachon
-            // kamaymaydi (eski ilova eskirgan son yuborsa ham).
-            let capped = watched.min(duration).max(old_watched);
-            let delta = (capped - old_watched).max(0);
-
-            // ── KO'RISH — ODAM BOSHIGA BITTA ────────────────
-            //
-            // TALAB (foydalanuvchi): "bitta odam bitta videoni 50
-            // marta qayta ko'rsa ham ko'rishlar soni 1 tadan
-            // oshmasligi kerak" — tomosha tarixida ham shu qism
-            // bitta qator bo'lib turgani kabi.
-            //
-            // Shu sabab umumiy hisob FAQAT shu odam shu qismni
-            // BIRINCHI marta ko'rganda oshadi. `view_count` esa
-            // shaxsiy hisob sifatida o'sib boraveradi.
-            let first_time = old_row.is_none() || old_views == 0;
-            let counts_view = new_view && first_time;
-            let view_inc = if counts_view { 1 } else { 0 };
-
-            let day = day_key(now);
-            let hour = hour_key(now);
-
-            let mut stmts: Vec<(&str, Vec<TursoArg>)> = Vec::with_capacity(8);
-            stmts.push((
-                "INSERT INTO watch_history_db
-                    (user_id,anime_id,season_id,epizod_id,video_url,
-                     last_quality,position_ms,duration_ms,watched_ms,view_count,
-                     deleted_at,updated_at)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,0,?)
-                 ON CONFLICT(user_id,anime_id,season_id,epizod_id) DO UPDATE SET
-                    video_url=excluded.video_url,
-                    last_quality=excluded.last_quality,
-                    position_ms=excluded.position_ms,
-                    duration_ms=excluded.duration_ms,
-                    watched_ms=excluded.watched_ms,
-                    view_count=excluded.view_count,
-                    deleted_at=0,
-                    updated_at=excluded.updated_at",
-                vec![
-                    TursoArg::int(me), TursoArg::int(anime_id), TursoArg::int(season_id),
-                    TursoArg::int(epizod_id),
-                    TursoArg::text(&video_url), TursoArg::text(&last_quality),
-                    TursoArg::int(position), TursoArg::int(duration),
-                    TursoArg::int(capped), TursoArg::int(old_views + view_inc),
-                    TursoArg::int(now),
-                ],
-            ));
-
-            if view_inc > 0 || delta > 0 {
-                stmts.push((
-                    "UPDATE epizod_db SET views_total=views_total+?, watch_ms_total=watch_ms_total+?
-                      WHERE anime_id=? AND season_id=? AND epizod_id=?",
-                    vec![
-                        TursoArg::int(view_inc), TursoArg::int(delta),
-                        TursoArg::int(anime_id), TursoArg::int(season_id), TursoArg::int(epizod_id),
-                    ],
-                ));
-                stmts.push((
-                    "UPDATE season_db SET views_total=views_total+?, watch_ms_total=watch_ms_total+?
-                      WHERE anime_id=? AND season_id=?",
-                    vec![
-                        TursoArg::int(view_inc), TursoArg::int(delta),
-                        TursoArg::int(anime_id), TursoArg::int(season_id),
-                    ],
-                ));
-            }
-            if view_inc > 0 {
-                stmts.push((STAT_HOUR_SQL, stat_args(&hour, "views", view_inc)));
-                stmts.push((STAT_DAY_SQL, stat_args(&day, "views", view_inc)));
-            }
-            if delta > 0 {
-                stmts.push((STAT_HOUR_SQL, stat_args(&hour, "watch_ms", delta)));
-                stmts.push((STAT_DAY_SQL, stat_args(&day, "watch_ms", delta)));
-            }
-
-            turso_batch(env, &stmts).await?;
-            ok_nostore(json!({"ok": true, "watched_ms": capped}))
-        }
-
-        // ── TARIXDAN YASHIRISH ─────────────────────────────────
-        //
-        // Yozuv O'CHIRILMAYDI (foydalanuvchi talabi): faqat
-        // `deleted_at` belgilanadi. Qism keyin qayta ko'rilsa,
-        // yuqoridagi yozuv uni yana ko'rinadigan qiladi.
-        (Method::Delete, "/api/history") => {
-            let mut req = req;
-            let b: Value = req.json().await.unwrap_or(json!({}));
-            turso_exec(env,
-                "UPDATE watch_history_db SET deleted_at=?
-                  WHERE user_id=? AND anime_id=? AND season_id=? AND epizod_id=?",
-                vec![
-                    TursoArg::int(now_ms()),
-                    TursoArg::int(me),
-                    TursoArg::int(b["anime_id"].as_i64().unwrap_or(0)),
-                    TursoArg::int(b["season_id"].as_i64().unwrap_or(0)),
-                    TursoArg::int(b["epizod_id"].as_i64().unwrap_or(0)),
-                ]).await?;
-            ok_nostore(json!({"ok": true}))
-        }
+        // Tomosha tarixini yozish, tarixdan yashirish, baho va
+        // sevimlilar — hammasi `POST /api/sync` ga ko'chdi.
+        // Sabab va hisob-kitob `sync_route` izohida.
 
         _ => err404("yo'l topilmadi"),
     }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  POST /api/sync — YAGONA YOZUV YO'LI
+// ═══════════════════════════════════════════════════════════════
+//
+// ── NEGA SHUNDAY (foydalanuvchi talabi va hisob-kitob) ────────
+//
+// TALAB: "barcha yozish va tahrirlash so'rovlari qurilmaning
+// o'zida qilinadi va kuniga bir necha marta bitta paket bo'lib
+// yuboriladi; bitta foydalanuvchining kunlik yozish so'rovlari
+// 50 tadan oshmasin".
+//
+// Sabab — pul. Turso har bir YOZILGAN QATOR uchun to'lov oladi.
+// Eski tartibda bitta qism ko'rilganda 7 ta qator yozilardi
+// (tarix + epizod + bo'lim + 4 ta statistika chelagi), ustiga
+// `last_seen_at` har 60 soniyada. Bitta faol odam kuniga ~149
+// qator, 100 ming odamda oyiga ~420 million — bu $250 dan
+// oshadi. Endi hammasi telefonda yig'iladi, siqiladi va bitta
+// paket bo'lib keladi: kuniga ~15 qator, ya'ni ~10 barobar kam.
+//
+// ── PAKET NIMA QILADI ─────────────────────────────────────────
+//
+// ATIGI IKKI marta bazaga boradi:
+//
+//   1. BITTA o'qish quvuri — eski holat (tarix, bahoyingiz,
+//      sevimlilaringiz, bo'lim hisoblagichlari) va paket raqami;
+//   2. BITTA yozuv quvuri — hamma o'zgarish birdan.
+//
+// Statistika chelaklari PAKETGA bir marta yoziladi (ilgari har
+// bir qism uchun alohida), bo'lim hisoblagichlari esa bo'limga
+// bir marta — paketda 10 ta qism bo'lsa ham.
+//
+// ── IKKI MARTA SANALMASLIK ────────────────────────────────────
+//
+// `batch_id` — paketning bir martalik raqami. Tarmoq uzilib
+// ilova o'sha paketni qayta yuborsa, worker uni tanib oladi va
+// hech narsa yozmaydi (`duplicate: true`). Bu MUHIM: ko'rishlar
+// soni va tomosha vaqti QO'SHILADIGAN raqamlar, ya'ni takror
+// yozilsa hisob shishib ketardi.
+//
+// ── SOXTA RAQAMLARDAN HIMOYA ──────────────────────────────────
+//
+// Endi ko'rishlar sonini va tomosha vaqtini TELEFON aytadi, ya'ni
+// o'zgartirilgan ilova umumiy statistikani shishirib yuborishi
+// mumkin. Shu sabab har bir paketda qat'iy chegara bor: tomosha
+// vaqti jami 24 soatdan, ko'rishlar 50 tadan, ro'yxatlar esa
+// yuqoridagi `MAX_SYNC_*` dan oshmaydi. Telefonning soati ham
+// tekshiriladi — kelajakdagi vaqt server vaqtiga tenglashtiriladi.
+
+/// Bitta paketdagi eng ko'p tarix yozuvi.
+const MAX_SYNC_HISTORY: usize = 100;
+
+/// Baho va sevimlilar ro'yxatining eng ko'p uzunligi.
+const MAX_SYNC_SMALL: usize = 50;
+
+/// Bitta paketda qo'shiladigan eng ko'p tomosha vaqti.
+const MAX_SYNC_WATCH_MS: i64 = 24 * 3_600_000;
+
+/// Bitta paketda sanaladigan eng ko'p yangi ko'rish.
+const MAX_SYNC_VIEWS: i64 = 50;
+
+/// Bitta paketda qabul qilinadigan eng ko'p trafik (256 GiB).
+const MAX_SYNC_TRAFFIC: i64 = 256 * 1024 * 1024 * 1024;
+
+/// `IN (?,?,?)` uchun savol belgilari. Ro'yxat bo'sh bo'lsa hech
+/// narsaga to'g'ri kelmaydigan `-1` qaytadi (`IN ()` — sintaksis
+/// xatosi).
+fn in_marks(n: usize) -> String {
+    if n == 0 { return "-1".to_string(); }
+    let mut out = String::with_capacity(n * 2);
+    for i in 0..n {
+        if i > 0 { out.push(','); }
+        out.push('?');
+    }
+    out
+}
+
+fn add_unique(out: &mut Vec<i64>, v: i64) {
+    if v > 0 && !out.contains(&v) { out.push(v); }
+}
+
+/// Bo'lim darajasidagi jamlangan o'zgarishlar.
+#[derive(Default, Clone, Copy)]
+struct SeasonDelta {
+    views: i64,
+    watch: i64,
+    rating_sum: i64,
+    rating_count: i64,
+    fav: i64,
+}
+
+impl SeasonDelta {
+    fn is_zero(&self) -> bool {
+        self.views == 0 && self.watch == 0
+            && self.rating_sum == 0 && self.rating_count == 0 && self.fav == 0
+    }
+}
+
+async fn sync_route(mut req: Request, env: &Env) -> Result<Response> {
+    let token = bearer(&req);
+    let Some(u) = session_user(env, &token).await? else {
+        return json_resp(&json!({"error": "unauthorized"}), 401);
+    };
+    let me = u["id"].as_i64().unwrap_or(0);
+    if me <= 0 { return json_resp(&json!({"error": "unauthorized"}), 401); }
+
+    let b: Value = req.json().await.unwrap_or(json!({}));
+    let batch_id = b["batch_id"].as_str().unwrap_or("").to_string();
+    if batch_id.is_empty() || batch_id.len() > 64 {
+        return json_resp(&json!({"error": "batch_id noto'g'ri"}), 400);
+    }
+
+    let none: Vec<Value> = vec![];
+    let history = b["history"].as_array().unwrap_or(&none);
+    let ratings = b["ratings"].as_array().unwrap_or(&none);
+    let favorites = b["favorites"].as_array().unwrap_or(&none);
+    if history.len() > MAX_SYNC_HISTORY
+        || ratings.len() > MAX_SYNC_SMALL
+        || favorites.len() > MAX_SYNC_SMALL
+    {
+        return json_resp(&json!({"error": "paket juda katta"}), 413);
+    }
+    let traffic = b["traffic_bytes"].as_i64().unwrap_or(0).clamp(0, MAX_SYNC_TRAFFIC);
+
+    let now = now_ms();
+
+    // ── TAKROR YOZUVLAR TASHLANADI ────────────────────────────
+    //
+    // Ilova navbatni allaqachon siqadi, lekin paket buzilgan yoki
+    // qasddan yasalgan bo'lishi mumkin: bir xil kalit ikki marta
+    // kelsa, ko'rish ikki marta sanalardi.
+    let mut hist_in: std::collections::HashMap<(i64, i64, i64), &Value> =
+        std::collections::HashMap::new();
+    let mut rate_in: std::collections::HashMap<(i64, i64), &Value> =
+        std::collections::HashMap::new();
+    let mut fav_in: std::collections::HashMap<(i64, i64), &Value> =
+        std::collections::HashMap::new();
+    let mut anime_ids: Vec<i64> = Vec::new();
+
+    for h in history {
+        let (a, s, e) = (
+            h["anime_id"].as_i64().unwrap_or(0),
+            h["season_id"].as_i64().unwrap_or(0),
+            h["epizod_id"].as_i64().unwrap_or(0),
+        );
+        if a <= 0 || e <= 0 { continue; }
+        add_unique(&mut anime_ids, a);
+        hist_in.insert((a, s, e), h);
+    }
+    for r in ratings {
+        let (a, s) = (r["anime_id"].as_i64().unwrap_or(0), r["season_id"].as_i64().unwrap_or(0));
+        if a <= 0 { continue; }
+        add_unique(&mut anime_ids, a);
+        rate_in.insert((a, s), r);
+    }
+    for f in favorites {
+        let (a, s) = (f["anime_id"].as_i64().unwrap_or(0), f["season_id"].as_i64().unwrap_or(0));
+        if a <= 0 { continue; }
+        add_unique(&mut anime_ids, a);
+        fav_in.insert((a, s), f);
+    }
+
+    // ── 1-QUVUR: ESKI HOLAT BITTA SO'ROVDA ────────────────────
+    let marks = in_marks(anime_ids.len());
+    let sql_hist = format!(
+        "SELECT anime_id,season_id,epizod_id,watched_ms,view_count
+           FROM watch_history_db WHERE user_id=? AND anime_id IN ({marks})");
+    let sql_rate = format!(
+        "SELECT anime_id,season_id,stars
+           FROM ratings_db WHERE user_id=? AND anime_id IN ({marks})");
+    let sql_fav = format!(
+        "SELECT anime_id,season_id
+           FROM favorites_db WHERE user_id=? AND anime_id IN ({marks})");
+    let sql_season = format!(
+        "SELECT anime_id,season_id FROM season_db WHERE anime_id IN ({marks})");
+
+    let mut args_me: Vec<TursoArg> = vec![TursoArg::int(me)];
+    for id in &anime_ids { args_me.push(TursoArg::int(*id)); }
+    let args_ids: Vec<TursoArg> = anime_ids.iter().map(|i| TursoArg::int(*i)).collect();
+
+    let pre = turso_many(env, &[
+        ("SELECT batch_id FROM sync_batches WHERE user_id=?", vec![TursoArg::int(me)]),
+        (sql_hist.as_str(), args_me.clone()),
+        (sql_rate.as_str(), args_me.clone()),
+        (sql_fav.as_str(), args_me),
+        (sql_season.as_str(), args_ids),
+    ]).await?;
+
+    // O'sha paket allaqachon qabul qilingan — hech narsa yozilmaydi.
+    if first_row(&pre[0]).and_then(|r| r["batch_id"].as_str().map(|v| v.to_string()))
+        .as_deref() == Some(batch_id.as_str())
+    {
+        return ok_nostore(json!({"ok": true, "duplicate": true}));
+    }
+
+    let rows_of = |res: &Value| -> Vec<Value> {
+        let cols = res["cols"].as_array().cloned().unwrap_or_default();
+        res["rows"].as_array().cloned().unwrap_or_default().iter()
+            .map(|r| row_to_obj(&cols, r.as_array().unwrap_or(&vec![])))
+            .collect()
+    };
+    let num = |v: &Value, k: &str| -> i64 { v[k].as_i64().unwrap_or(0) };
+
+    let mut old_hist: std::collections::HashMap<(i64, i64, i64), (i64, i64)> =
+        std::collections::HashMap::new();
+    for r in rows_of(&pre[1]) {
+        old_hist.insert(
+            (num(&r, "anime_id"), num(&r, "season_id"), num(&r, "epizod_id")),
+            (num(&r, "watched_ms").max(0), num(&r, "view_count").max(0)),
+        );
+    }
+    let mut old_rate: std::collections::HashMap<(i64, i64), i64> =
+        std::collections::HashMap::new();
+    for r in rows_of(&pre[2]) {
+        old_rate.insert((num(&r, "anime_id"), num(&r, "season_id")), num(&r, "stars"));
+    }
+    let mut old_fav: Vec<(i64, i64)> = Vec::new();
+    for r in rows_of(&pre[3]) {
+        old_fav.push((num(&r, "anime_id"), num(&r, "season_id")));
+    }
+    // Faqat MAVJUD bo'limlarning hisoblagichlari yangilanadi.
+    let mut real_season: Vec<(i64, i64)> = Vec::new();
+    for r in rows_of(&pre[4]) {
+        real_season.push((num(&r, "anime_id"), num(&r, "season_id")));
+    }
+
+    // ── HISOB-KITOB (bazaga tegmasdan) ────────────────────────
+    let mut seasons: std::collections::HashMap<(i64, i64), SeasonDelta> =
+        std::collections::HashMap::new();
+    let mut eps: std::collections::HashMap<(i64, i64, i64), (i64, i64)> =
+        std::collections::HashMap::new();
+    let mut watch_left = MAX_SYNC_WATCH_MS;
+    let mut views_left = MAX_SYNC_VIEWS;
+    let mut total_views = 0i64;
+    let mut total_watch = 0i64;
+
+    let mut stmts: Vec<(&str, Vec<TursoArg>)> = Vec::new();
+    let mut hist_args: Vec<Vec<TursoArg>> = Vec::new();
+    let mut hide_args: Vec<Vec<TursoArg>> = Vec::new();
+    let mut rate_args: Vec<Vec<TursoArg>> = Vec::new();
+    let mut fav_add: Vec<Vec<TursoArg>> = Vec::new();
+    let mut fav_del: Vec<Vec<TursoArg>> = Vec::new();
+
+    for ((aid, sid, eid), h) in &hist_in {
+        let (aid, sid, eid) = (*aid, *sid, *eid);
+        // Telefon soatiga ishonilmaydi.
+        let at = h["updated_at"].as_i64().unwrap_or(now).clamp(0, now);
+
+        if h["deleted"].as_bool().unwrap_or(false) {
+            hide_args.push(vec![
+                TursoArg::int(at), TursoArg::int(me),
+                TursoArg::int(aid), TursoArg::int(sid), TursoArg::int(eid),
+            ]);
+            continue;
+        }
+
+        let duration = h["duration_ms"].as_i64().unwrap_or(0).max(0);
+        if duration <= 0 { continue; }
+        let position = h["position_ms"].as_i64().unwrap_or(0).max(0);
+        let watched = h["watched_ms"].as_i64().unwrap_or(0).max(0);
+        let video_url = bare_name(h["video_url"].as_str().unwrap_or(""));
+        let quality = h["last_quality"].as_str().unwrap_or("").to_string();
+
+        let known = old_hist.get(&(aid, sid, eid)).copied();
+        let (old_w, old_v) = known.unwrap_or((0, 0));
+
+        // Tomosha vaqti hech qachon kamaymaydi va qism uzunligidan
+        // oshmaydi (eski ilova eskirgan son yuborsa ham).
+        let capped = watched.min(duration).max(old_w);
+        let delta = (capped - old_w).max(0).min(watch_left.max(0));
+        watch_left -= delta;
+
+        // Ko'rish — ODAM BOSHIGA BITTA: umumiy hisob faqat shu
+        // odam shu qismni BIRINCHI marta ko'rganda oshadi.
+        let first_time = known.is_none() || old_v == 0;
+        let view_inc = if h["new_view"].as_bool().unwrap_or(false)
+            && first_time && views_left > 0 { views_left -= 1; 1 } else { 0 };
+
+        hist_args.push(vec![
+            TursoArg::int(me), TursoArg::int(aid), TursoArg::int(sid), TursoArg::int(eid),
+            TursoArg::text(&video_url), TursoArg::text(&quality),
+            TursoArg::int(position), TursoArg::int(duration),
+            TursoArg::int(capped), TursoArg::int(old_v + view_inc),
+            TursoArg::int(at),
+        ]);
+
+        if view_inc > 0 || delta > 0 {
+            total_views += view_inc;
+            total_watch += delta;
+            let e = eps.entry((aid, sid, eid)).or_insert((0, 0));
+            e.0 += view_inc;
+            e.1 += delta;
+            let s = seasons.entry((aid, sid)).or_default();
+            s.views += view_inc;
+            s.watch += delta;
+        }
+    }
+
+    for ((aid, sid), r) in &rate_in {
+        let (aid, sid) = (*aid, *sid);
+        let stars = r["stars"].as_i64().unwrap_or(0);
+        if !(1..=10).contains(&stars) { continue; }
+        if !real_season.contains(&(aid, sid)) { continue; }
+        let at = r["updated_at"].as_i64().unwrap_or(now).clamp(0, now);
+        let old = old_rate.get(&(aid, sid)).copied();
+        let s = seasons.entry((aid, sid)).or_default();
+        s.rating_sum += stars - old.unwrap_or(0);
+        if old.is_none() { s.rating_count += 1; }
+        rate_args.push(vec![
+            TursoArg::int(me), TursoArg::int(aid), TursoArg::int(sid),
+            TursoArg::int(stars), TursoArg::int(at), TursoArg::int(at),
+        ]);
+    }
+
+    for ((aid, sid), f) in &fav_in {
+        let (aid, sid) = (*aid, *sid);
+        if !real_season.contains(&(aid, sid)) { continue; }
+        let on = f["on"].as_bool().unwrap_or(true);
+        let existed = old_fav.contains(&(aid, sid));
+        if on && !existed {
+            seasons.entry((aid, sid)).or_default().fav += 1;
+            fav_add.push(vec![
+                TursoArg::int(me), TursoArg::int(aid), TursoArg::int(sid),
+                TursoArg::int(f["updated_at"].as_i64().unwrap_or(now).clamp(0, now)),
+            ]);
+        } else if !on && existed {
+            seasons.entry((aid, sid)).or_default().fav -= 1;
+            fav_del.push(vec![
+                TursoArg::int(me), TursoArg::int(aid), TursoArg::int(sid),
+            ]);
+        }
+    }
+
+    // ── 2-QUVUR: HAMMA YOZUV BIRDAN ───────────────────────────
+    for a in &hist_args {
+        stmts.push((
+            "INSERT INTO watch_history_db
+                (user_id,anime_id,season_id,epizod_id,video_url,
+                 last_quality,position_ms,duration_ms,watched_ms,view_count,
+                 deleted_at,updated_at)
+             VALUES (?,?,?,?,?,?,?,?,?,?,0,?)
+             ON CONFLICT(user_id,anime_id,season_id,epizod_id) DO UPDATE SET
+                video_url=excluded.video_url,
+                last_quality=excluded.last_quality,
+                position_ms=excluded.position_ms,
+                duration_ms=excluded.duration_ms,
+                watched_ms=excluded.watched_ms,
+                view_count=excluded.view_count,
+                deleted_at=0,
+                updated_at=excluded.updated_at",
+            a.clone(),
+        ));
+    }
+    // Tarixdan yashirish — yozuv O'CHIRILMAYDI (foydalanuvchi
+    // talabi), faqat `deleted_at` belgilanadi.
+    for a in &hide_args {
+        stmts.push((
+            "UPDATE watch_history_db SET deleted_at=?
+              WHERE user_id=? AND anime_id=? AND season_id=? AND epizod_id=?",
+            a.clone(),
+        ));
+    }
+    for a in &rate_args {
+        stmts.push((
+            "INSERT INTO ratings_db (user_id,anime_id,season_id,stars,created_at,updated_at)
+             VALUES (?,?,?,?,?,?)
+             ON CONFLICT(user_id,anime_id,season_id) DO UPDATE SET
+                stars=excluded.stars, updated_at=excluded.updated_at",
+            a.clone(),
+        ));
+    }
+    for a in &fav_add {
+        stmts.push((
+            "INSERT OR IGNORE INTO favorites_db (user_id,anime_id,season_id,created_at)
+             VALUES (?,?,?,?)",
+            a.clone(),
+        ));
+    }
+    for a in &fav_del {
+        stmts.push((
+            "DELETE FROM favorites_db WHERE user_id=? AND anime_id=? AND season_id=?",
+            a.clone(),
+        ));
+    }
+    for ((aid, sid, eid), (v, w)) in &eps {
+        stmts.push((
+            "UPDATE epizod_db SET views_total=views_total+?, watch_ms_total=watch_ms_total+?
+              WHERE anime_id=? AND season_id=? AND epizod_id=?",
+            vec![
+                TursoArg::int(*v), TursoArg::int(*w),
+                TursoArg::int(*aid), TursoArg::int(*sid), TursoArg::int(*eid),
+            ],
+        ));
+    }
+    // Bo'lim qatoriga BITTA yozuv — ko'rish, tomosha vaqti, baho
+    // va sevimlilar o'zgarishi birga ketadi.
+    //
+    // Qiymatlar NISBIY (`+?`) yoziladi: shu vaqt ichida boshqa
+    // qurilmadan kelgan o'zgarish ustidan yozib yuborilmaydi.
+    for ((aid, sid), d) in &seasons {
+        if d.is_zero() || !real_season.contains(&(*aid, *sid)) { continue; }
+        stmts.push((
+            "UPDATE season_db SET
+                views_total = views_total + ?,
+                watch_ms_total = watch_ms_total + ?,
+                rating_sum = MAX(rating_sum + ?, 0),
+                rating_count = MAX(rating_count + ?, 0),
+                fav_count = MAX(fav_count + ?, 0)
+              WHERE anime_id=? AND season_id=?",
+            vec![
+                TursoArg::int(d.views), TursoArg::int(d.watch),
+                TursoArg::int(d.rating_sum), TursoArg::int(d.rating_count),
+                TursoArg::int(d.fav), TursoArg::int(*aid), TursoArg::int(*sid),
+            ],
+        ));
+    }
+
+    // ── STATISTIKA CHELAKLARI — PAKETGA BIR MARTA ─────────────
+    let hour = hour_key(now);
+    let day = day_key(now);
+    if total_views > 0 {
+        stmts.push((STAT_HOUR_SQL, stat_args(&hour, "views", total_views)));
+        stmts.push((STAT_DAY_SQL, stat_args(&day, "views", total_views)));
+    }
+    if total_watch > 0 {
+        stmts.push((STAT_HOUR_SQL, stat_args(&hour, "watch_ms", total_watch)));
+        stmts.push((STAT_DAY_SQL, stat_args(&day, "watch_ms", total_watch)));
+    }
+    if traffic > 0 {
+        stmts.push((STAT_HOUR_SQL, stat_args(&hour, "traffic", traffic)));
+        stmts.push((STAT_DAY_SQL, stat_args(&day, "traffic", traffic)));
+        stmts.push((
+            "UPDATE users_db SET traffic_bytes=COALESCE(traffic_bytes,0)+? WHERE id=?",
+            vec![TursoArg::int(traffic), TursoArg::int(me)],
+        ));
+    }
+
+    // Paket belgisi — takrorni tanib olish uchun.
+    stmts.push((
+        "INSERT INTO sync_batches (user_id,batch_id,at) VALUES (?,?,?)
+         ON CONFLICT(user_id) DO UPDATE SET batch_id=excluded.batch_id, at=excluded.at",
+        vec![TursoArg::int(me), TursoArg::text(&batch_id), TursoArg::int(now)],
+    ));
+    // "Oxirgi ko'rinish" — bu yerda bepul (o'sha quvurning ichida).
+    if !token.is_empty() {
+        stmts.push((
+            "UPDATE sessions_db SET last_seen_at=? WHERE session_token=?",
+            vec![TursoArg::int(now), TursoArg::text(&token)],
+        ));
+    }
+
+    turso_batch(env, &stmts).await?;
+
+    ok_nostore(json!({
+        "ok": true,
+        "duplicate": false,
+        // Ilova navbatdan AYNAN shularni o'chiradi.
+        "history": hist_args.len() + hide_args.len(),
+        "ratings": rate_args.len(),
+        "favorites": fav_add.len() + fav_del.len(),
+        "traffic": traffic,
+        "rows": stmts.len(),
+    }))
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -3455,316 +3789,62 @@ fn stat_args(bucket: &str, metric: &str, value: i64) -> Vec<TursoArg> {
 // qo'shadi. Trafik raqami real vaqtda kerak emas, shu sabab bu
 // yo'l ham arzon (kuniga bitta so'rov), ham aniq.
 
-/// POST /api/traffic — ilova sanagan sutkalik trafik.
-///
-/// Tana: `{"bytes": 123456}`. Faqat kirgan foydalanuvchi uchun
-/// ishlaydi; javob `{"ok":true}` bo'lsa, ilova o'z hisobini
-/// nolga tushiradi va qaytadan sanay boshlaydi.
-///
-/// Son AQLGA SIG'ADIGAN chegaraga olinadi (256 GiB): buzilgan
-/// yoki o'ylab topilgan qiymat umumiy statistikani buzmasin.
-async fn traffic_route(mut req: Request, env: &Env) -> Result<Response> {
-    const MAX_ONE_REPORT: i64 = 256 * 1024 * 1024 * 1024;
-    let Some(u) = session_user(env, &bearer(&req)).await? else {
-        return json_resp(&json!({"error": "unauthorized"}), 401);
-    };
-    let body: Value = req.json().await.unwrap_or(json!({}));
-    let bytes = body["bytes"].as_i64().unwrap_or(0);
-    if bytes <= 0 {
-        // Sanaydigan narsa yo'q — bu xato emas.
-        return ok_nostore(json!({"ok": true, "bytes": 0}));
-    }
-    let bytes = bytes.min(MAX_ONE_REPORT);
-    note_traffic(env, bytes, u["id"].as_i64().unwrap_or(0)).await;
-    ok_nostore(json!({"ok": true, "bytes": bytes}))
-}
 
-/// Trafikni faqat SHAXSIY hisobga qo'shadi.
+/// Trafikni umumiy chelaklarga VA shaxsiy hisobga qo'shadi.
 ///
-/// ── NEGA UMUMIY CHELAKKA QO'SHILMAYDI ────────────────────────
+/// ── QAYSI RAQAM QAYERDAN ──────────────────────────────────────
 ///
 /// TALAB (foydalanuvchi): "bosh sahifadagi trafik statistikasi
-/// Cloudflare dashboarddagi Analytics'dan olinsin, shaxsiy
-/// statistika qo'shilmasin; shaxsiy statistika esa faqat
-/// foydalanuvchining o'ziga ko'rinsin va o'zi uchun hisoblansin".
+/// yana ilovadagi shaxsiy trafik statistikasidan olinsin".
 ///
-/// Ya'ni ikki hisob BIR-BIRIDAN BUTUNLAY AJRATILDI:
+/// Ya'ni yagona manba — ILOVA. U qurilma darajasida HAQIQATAN
+/// qabul qilingan baytni sanaydi (`traffic_service.dart`), keyin
+/// sinxronlash paketi bilan bir marta yuboradi. Worker o'sha
+/// sonni ikki joyga qo'shadi:
 ///
-///   * UMUMIY (bosh sahifadagi banner, `/api/stats`) — endi faqat
-///     Cloudflare Analytics'dan keladi (`cf_traffic_sync`);
-///   * SHAXSIY (`/api/me/stats`, profil sahifasi) — shu yerda,
-///     `users_db.traffic_bytes` ustunida. Uni faqat egasi ko'radi.
+///   * UMUMIY — `stats_hourly` / `stats_daily` chelaklari
+///     (bosh sahifadagi banner, `/api/stats`);
+///   * SHAXSIY — `users_db.traffic_bytes` (profil sahifasi,
+///     `/api/me/stats`; buni faqat egasi ko'radi).
 ///
-/// Ilgari bitta son ikkala joyga ham qo'shilardi — shu sabab
-/// umumiy raqam ham noto'g'ri edi (ilova o'zi sanagan taxminiy
-/// baytlar), ham ikki manba aralashib ketardi.
+/// ── NEGA CLOUDFLARE ANALYTICS EMAS ────────────────────────────
+///
+/// Bir muddat umumiy raqam Cloudflare'ning
+/// `workersInvocationsAdaptive.sum.responseBodySize` maydonidan
+/// olindi. Texnik jihatdan ishladi, LEKIN raqam telefon
+/// qabul qilganidan ~10 barobar katta chiqdi: pleyer
+/// `Range: bytes=0-` bilan so'rab, bir necha megabaytdan keyin
+/// ulanishni uzadi — Cloudflare esa yo'lga chiqqan baytni
+/// sanaydi. Foydalanuvchiga ko'rsatiladigan raqam sifatida bu
+/// noto'g'ri (foydalanuvchi talabi: "bu soxta"), shu sabab
+/// Cloudflare manbasi BUTUNLAY olib tashlandi.
 async fn note_traffic(env: &Env, bytes: i64, user: i64) {
-    if bytes <= 0 || user <= 0 { return; }
+    if bytes <= 0 { return; }
     ensure_db(env).await;
-    let _ = turso_exec(env,
-        "UPDATE users_db SET traffic_bytes=COALESCE(traffic_bytes,0)+? WHERE id=?",
-        vec![TursoArg::int(bytes), TursoArg::int(user)]).await;
-}
-
-// ═══════════════════════════════════════════════════════════════
-//  UMUMIY TRAFIK — CLOUDFLARE ANALYTICS'DAN
-// ═══════════════════════════════════════════════════════════════
-//
-// TALAB (foydalanuvchi): "bosh sahifadagi trafik statistikasi
-// Cloudflare dashboarddagi Analytics'dan olinsin".
-//
-// ── QAYSI MANBA ───────────────────────────────────────────────
-//
-// Cloudflare'ning GraphQL Analytics API'sida `workersInvocations
-// Adaptive` to'plami bor va uning `sum { responseBodySize }`
-// maydoni — worker HAQIQATAN uzatgan javob tanalarining baytlari.
-// Bu AYNAN dashboarddagi raqamning manbasi, ya'ni endi ilova
-// taxmin qilmaydi — Cloudflare o'zi o'lchaganini beradi.
-//
-// To'plam HISOB (account) darajasida ishlaydi, shu sabab domen
-// (zone) shart emas — worker `*.workers.dev` da tursa ham
-// raqam keladi.
-//
-// ── QANDAY ISHLAYDI ───────────────────────────────────────────
-//
-// `GET /api/stats` chaqirilganda (chekka keshi bo'shagach) shu
-// funksiya ishga tushadi, lekin HAR SAFAR emas — oxirgi
-// sinxronizatsiyadan 30 daqiqa o'tgan bo'lsa. Vaqt belgisi
-// `app_config` da turadi.
-//
-// Har sinxronizatsiyada faqat OXIRGI 50 SOAT so'raladi (soatlik
-// bo'laklarda — ya'ni ko'pi bilan 50 qator, `limit:500` bemalol
-// yetadi). Sabab: eski kunlar allaqachon `stats_daily` da
-// saqlangan — ularni qayta so'rashning hojati yo'q va Cloudflare
-// analitikasining saqlash muddati ham cheklangan. Shu tarzda
-// "jami" ko'rsatkich vaqt o'tishi bilan to'planib boradi.
-//
-// Qiymatlar QO'SHILMAYDI, ALMASHTIRILADI (`value=excluded.value`):
-// bir soat necha marta sinxronlansa ham raqam ikkilanmaydi.
-//
-// ── KALITLAR ──────────────────────────────────────────────────
-//
-// Ikki sir kerak: `CF_ACCOUNT_ID` va `CF_ANALYTICS_TOKEN`
-// (tokenda "Account Analytics: Read" ruxsati bo'lishi shart).
-// Ular yo'q bo'lsa funksiya JIM qaytadi — ilova ishlashda davom
-// etadi, faqat umumiy trafik yangilanmaydi.
-
-const CF_GRAPHQL_URL: &str = "https://api.cloudflare.com/client/v4/graphql";
-
-/// Ikki sinxronizatsiya orasidagi eng qisqa muddat.
-///
-/// 10 daqiqa — soatiga 6 ta tashqi so'rov, ya'ni arzon; buning
-/// evaziga bosh sahifadagi raqam ancha tirikroq bo'ladi.
-const CF_SYNC_EVERY_MS: i64 = 10 * 60 * 1000;
-
-/// Har safar so'raladigan oyna (soat). 50 soat — kechagi kun
-/// TO'LIQ, bugungisi esa hozirgi soatgacha qamrab olinadi.
-const CF_WINDOW_HOURS: i64 = 50;
-
-/// Oxirgi sinxronizatsiya vaqti (`app_config` kaliti).
-const CF_SYNC_KEY: &str = "cf_traffic_synced_at";
-
-/// Eski (ilova sanagan) trafik qatorlari tozalanganini bildiradi.
-const CF_PURGE_KEY: &str = "cf_traffic_purged";
-
-/// Oxirgi urinish natijasi — `/api/stats` javobida `traffic_src`
-/// bo'lib chiqadi. Kalitlar to'g'ri qo'yilganini TASHQARIDAN
-/// tekshirish uchun kerak: aks holda sinxronizatsiya jimgina
-/// yiqilib, raqam qotib qolgani bilinmasdi.
-///
-///   `cloudflare` — ishladi;
-///   `off`        — kalitlar qo'yilmagan;
-///   `error`      — Cloudflare so'rovi yiqildi (ko'pincha
-///                  tokenda "Account Analytics: Read" yo'q);
-///   `?`          — hali birorta urinish bo'lmagan (qator yo'q).
-const CF_STATUS_KEY: &str = "cf_traffic_status";
-
-/// Chelak qiymatini QO'SHMAYDI, ALMASHTIRADI.
-const STAT_HOUR_SET_SQL: &str =
-    "INSERT INTO stats_hourly (hour,metric,value) VALUES (?,?,?)
-     ON CONFLICT(hour,metric) DO UPDATE SET value=excluded.value";
-const STAT_DAY_SET_SQL: &str =
-    "INSERT INTO stats_daily (day,metric,value) VALUES (?,?,?)
-     ON CONFLICT(day,metric) DO UPDATE SET value=excluded.value";
-
-/// Sana -> 1970-01-01 dan beri o'tgan kunlar (Howard Hinnant algoritmi).
-/// `ymdhm` ning teskarisi.
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let mp = if m > 2 { m - 3 } else { m + 9 };
-    let doy = (153 * mp + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146097 + doe - 719468
-}
-
-/// UTC vaqtini GraphQL kutgan ko'rinishga aylantiradi.
-fn iso_utc(ms: i64) -> String {
-    let (y, m, d, h, mi) = ymdhm(ms);
-    format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:00Z")
-}
-
-/// "2026-09-13T06:00:00Z" -> epoch ms (UTC).
-fn parse_iso_ms(s: &str) -> Option<i64> {
-    let num = |a: usize, z: usize| -> Option<i64> {
-        s.get(a..z).and_then(|p| p.parse::<i64>().ok())
-    };
-    let (y, m, d, h) = (num(0, 4)?, num(5, 7)?, num(8, 10)?, num(11, 13)?);
-    Some((days_from_civil(y, m, d) * 86_400 + h * 3_600) * 1000)
-}
-
-/// Cloudflare Analytics'dan umumiy trafikni olib, chelaklarga yozadi.
-async fn cf_traffic_sync(env: &Env) {
-    let account = env.secret("CF_ACCOUNT_ID")
-        .map(|v| v.to_string()).unwrap_or_default();
-    let token = env.secret("CF_ANALYTICS_TOKEN")
-        .map(|v| v.to_string()).unwrap_or_default();
-
     let now = now_ms();
-    ensure_db(env).await;
-
-    // Kalitlar yo'q — buni ATAYLAB yozib qo'yamiz. Aks holda
-    // "hali urinilmagan" bilan "kalit yo'q" holati bir xil
-    // ko'rinardi va nima bo'layotganini bilib bo'lmasdi.
-    if account.is_empty() || token.is_empty() {
-        if config_get(env, CF_STATUS_KEY).await.as_deref() != Some("off") {
-            config_put(env, CF_STATUS_KEY, "off").await;
-        }
-        return;
+    let mut stmts: Vec<(&str, Vec<TursoArg>)> = vec![
+        (STAT_HOUR_SQL, stat_args(&hour_key(now), "traffic", bytes)),
+        (STAT_DAY_SQL, stat_args(&day_key(now), "traffic", bytes)),
+    ];
+    if user > 0 {
+        stmts.push((
+            "UPDATE users_db SET traffic_bytes=COALESCE(traffic_bytes,0)+? WHERE id=?",
+            vec![TursoArg::int(bytes), TursoArg::int(user)],
+        ));
     }
-
-    // Juda tez-tez so'ralmasin.
-    if let Some(prev) = config_get(env, CF_SYNC_KEY).await {
-        if let Ok(p) = prev.parse::<i64>() {
-            if now - p < CF_SYNC_EVERY_MS && now >= p { return; }
-        }
-    }
-    // Belgi DARHOL yangilanadi — bir vaqtda kelgan bir necha so'rov
-    // Cloudflare'ga birdaniga urilmasin.
-    config_put(env, CF_SYNC_KEY, &now.to_string()).await;
-
-    let script = env.var("CF_SCRIPT_NAME")
-        .map(|v| v.to_string())
-        .unwrap_or_else(|_| "aniraxuzapp".to_string());
-    let since = now - CF_WINDOW_HOURS * 3_600_000;
-
-    let query = "query($a:string!,$s:string!,$since:Time!,$until:Time!){\
-        viewer{accounts(filter:{accountTag:$a}){\
-        workersInvocationsAdaptive(limit:500,filter:{\
-        scriptName:$s,datetime_geq:$since,datetime_leq:$until}){\
-        dimensions{datetimeHour}sum{responseBodySize}}}}}";
-
-    let body = json!({
-        "query": query,
-        "variables": {
-            "a": account,
-            "s": script,
-            "since": iso_utc(since),
-            "until": iso_utc(now),
-        }
-    });
-
-    // Bundan keyingi har bir yiqilish "error" deb belgilanadi;
-    // muvaffaqiyat oxirida "cloudflare" ga almashtiriladi.
-    config_put(env, CF_STATUS_KEY, "error").await;
-
-    let Ok(h) = (|| -> Result<Headers> {
-        let h = Headers::new();
-        h.set("Authorization", &format!("Bearer {token}"))?;
-        h.set("Content-Type", "application/json")?;
-        Ok(h)
-    })() else { return; };
-
-    let Ok(req) = Request::new_with_init(
-        CF_GRAPHQL_URL,
-        RequestInit::new().with_method(Method::Post).with_headers(h)
-            .with_body(Some(body.to_string().into())),
-    ) else { return; };
-
-    let Ok(mut resp) = Fetch::Request(req).send().await else { return; };
-    let Ok(data): Result<Value> = resp.json().await else { return; };
-
-    // Xato bo'lsa — hech nima yozilmaydi (eski raqamlar qoladi).
-    if data["errors"].is_array()
-        && !data["errors"].as_array().map(|a| a.is_empty()).unwrap_or(true)
-    {
-        return;
-    }
-    let Some(rows) = data["data"]["viewer"]["accounts"][0]
-        ["workersInvocationsAdaptive"].as_array()
-    else {
-        return;
-    };
-
-    // Soatlik va kunlik yig'indilar (chelak kaliti — UTC+5).
-    let mut hourly: std::collections::HashMap<String, i64> =
-        std::collections::HashMap::new();
-    let mut dayly: std::collections::HashMap<String, i64> =
-        std::collections::HashMap::new();
-    for r in rows {
-        let Some(stamp) = r["dimensions"]["datetimeHour"].as_str() else { continue };
-        let Some(ms) = parse_iso_ms(stamp) else { continue };
-        let bytes = r["sum"]["responseBodySize"].as_f64().unwrap_or(0.0) as i64;
-        if bytes <= 0 { continue; }
-        *hourly.entry(hour_key(ms)).or_insert(0) += bytes;
-        *dayly.entry(day_key(ms)).or_insert(0) += bytes;
-    }
-
-    let mut stmts: Vec<(&str, Vec<TursoArg>)> = Vec::new();
-
-    // ── BIR MARTALIK TOZALASH ─────────────────────────────────
-    //
-    // Chelaklarda ilgari ILOVA sanagan (endi ishlatilmaydigan)
-    // trafik qatorlari qolgan bo'lishi mumkin. Cloudflare manbasi
-    // birinchi marta ishlaganda ular o'chiriladi — aks holda ikki
-    // xil manba qo'shilib ketardi.
-    let purged = config_get(env, CF_PURGE_KEY).await.is_some();
-    if !purged {
-        stmts.push(("DELETE FROM stats_hourly WHERE metric='traffic'", vec![]));
-        stmts.push(("DELETE FROM stats_daily WHERE metric='traffic'", vec![]));
-    }
-
-    for (k, v) in &hourly {
-        stmts.push((STAT_HOUR_SET_SQL, stat_args(k, "traffic", *v)));
-    }
-    // Kunlik chelakka FAQAT to'liq qamrab olingan kunlar yoziladi:
-    // oynadan tashqarida qolgan kun yarim qiymat bilan ustiga
-    // yozilib, hisobni kamaytirib yuborardi. Kalit formati
-    // saralanadigan bo'lgani uchun oddiy solishtirish yetarli.
-    let edge = hour_key(since);
-    for (k, v) in &dayly {
-        if format!("{k}T00").as_str() >= edge.as_str() {
-            stmts.push((STAT_DAY_SET_SQL, stat_args(k, "traffic", *v)));
-        }
-    }
-
-    // Bo'sh javob ham to'g'ri javob: demak o'sha 50 soatda
-    // umuman trafik bo'lmagan.
-    if stmts.is_empty() {
-        config_put(env, CF_STATUS_KEY, "cloudflare").await;
-        return;
-    }
-    if turso_batch(env, &stmts).await.is_ok() {
-        config_put(env, CF_STATUS_KEY, "cloudflare").await;
-        if !purged { config_put(env, CF_PURGE_KEY, "1").await; }
-    }
+    let _ = turso_batch(env, &stmts).await;
 }
 
 // ═══════════════════════════════════════════════════════════════
 //  GET /api/stats — SHAFFOF STATISTIKA
 // ═══════════════════════════════════════════════════════════════
 //
-// Hammasi BITTA so'rovda (6 ta buyruq bitta quvurda) va chekkada
+// Hammasi BITTA so'rovda (5 ta buyruq bitta quvurda) va chekkada
 // 5 daqiqa keshlanadi — minglab foydalanuvchi bazani urmaydi.
 //
 // Kunlik ko'rsatkich — "oxirgi 24 soat" (soatlik chelaklardan),
 // qolganlari esa kunlik chelaklardan yig'iladi.
 async fn stats_route(env: &Env) -> Result<Response> {
-    // Umumiy trafik Cloudflare Analytics'dan yangilanadi (kerak
-    // bo'lsa — funksiyaning o'zi 30 daqiqada bir marta ishlaydi).
-    cf_traffic_sync(env).await;
-
     let now = now_ms();
     let day_ms = 86_400_000i64;
     let h24 = hour_key(now - 23 * 3_600_000);
@@ -3800,9 +3880,6 @@ async fn stats_route(env: &Env) -> Result<Response> {
         // Eski soatlik chelaklar kerak emas (3 kundan oshgani).
         ("DELETE FROM stats_hourly WHERE hour < ?",
          vec![TursoArg::text(&day_key(now - 3 * day_ms))]),
-        // Trafik raqami qaysi manbadan kelayotgani.
-        ("SELECT cfg_value FROM app_config WHERE cfg_key=?",
-         vec![TursoArg::text(CF_STATUS_KEY)]),
     ]).await?;
 
     let urow = &res[0]["rows"][0];
@@ -3842,10 +3919,6 @@ async fn stats_route(env: &Env) -> Result<Response> {
         }));
     }
     out.insert("tz".into(), json!("UTC+5"));
-    // Trafik manbasi: "cloudflare" | "error" | "off".
-    out.insert("traffic_src".into(), json!(
-        res[5]["rows"][0][0]["value"].as_str().unwrap_or("?")
-    ));
     ok(Value::Object(out))
 }
 
@@ -3958,94 +4031,8 @@ async fn favorites_route(req: Request, env: &Env, origin: &str) -> Result<Respon
 }
 
 /// POST /api/rating — bitta bo'limga bitta baho (1..10).
-async fn rating_route(mut req: Request, env: &Env) -> Result<Response> {
-    let Some(u) = session_user(env, &bearer(&req)).await? else {
-        return json_resp(&json!({"error": "unauthorized"}), 401);
-    };
-    let me = u["id"].as_i64().unwrap_or(0);
-    let b: Value = req.json().await.unwrap_or(json!({}));
-    let aid = b["anime_id"].as_i64().unwrap_or(0);
-    let sid = b["season_id"].as_i64().unwrap_or(0);
-    let stars = b["stars"].as_i64().unwrap_or(0);
-    if aid <= 0 || !(1..=10).contains(&stars) {
-        return json_resp(&json!({"error": "noto'g'ri baho"}), 400);
-    }
-
-    let now = now_ms();
-    let pre = turso_many(env, &[
-        ("SELECT stars FROM ratings_db WHERE user_id=? AND anime_id=? AND season_id=?",
-         vec![TursoArg::int(me), TursoArg::int(aid), TursoArg::int(sid)]),
-        ("SELECT rating_sum, rating_count FROM season_db WHERE anime_id=? AND season_id=?",
-         vec![TursoArg::int(aid), TursoArg::int(sid)]),
-    ]).await?;
-    let old = first_row(&pre[0]).and_then(|r| r["stars"].as_i64());
-    let Some(srow) = first_row(&pre[1]) else { return err404("Bo'lim topilmadi") };
-    let sum = srow["rating_sum"].as_i64().unwrap_or(0) + stars - old.unwrap_or(0);
-    let count = srow["rating_count"].as_i64().unwrap_or(0) + if old.is_some() { 0 } else { 1 };
-
-    turso_batch(env, &[
-        ("INSERT INTO ratings_db (user_id,anime_id,season_id,stars,created_at,updated_at)
-          VALUES (?,?,?,?,?,?)
-          ON CONFLICT(user_id,anime_id,season_id) DO UPDATE SET
-             stars=excluded.stars, updated_at=excluded.updated_at",
-         vec![
-            TursoArg::int(me), TursoArg::int(aid), TursoArg::int(sid),
-            TursoArg::int(stars), TursoArg::int(now), TursoArg::int(now),
-         ]),
-        ("UPDATE season_db SET rating_sum=?, rating_count=? WHERE anime_id=? AND season_id=?",
-         vec![
-            TursoArg::int(sum), TursoArg::int(count),
-            TursoArg::int(aid), TursoArg::int(sid),
-         ]),
-    ]).await?;
-
-    ok_nostore(json!({
-        "ok": true,
-        "my_stars": stars,
-        "rating": average_rating(sum, count),
-        "rating_count": count,
-    }))
-}
 
 /// POST /api/favorite — bo'limni sevimlilarga qo'shish/olib tashlash.
-async fn favorite_route(mut req: Request, env: &Env) -> Result<Response> {
-    let Some(u) = session_user(env, &bearer(&req)).await? else {
-        return json_resp(&json!({"error": "unauthorized"}), 401);
-    };
-    let me = u["id"].as_i64().unwrap_or(0);
-    let b: Value = req.json().await.unwrap_or(json!({}));
-    let aid = b["anime_id"].as_i64().unwrap_or(0);
-    let sid = b["season_id"].as_i64().unwrap_or(0);
-    let on = b["on"].as_bool().unwrap_or(true);
-    if aid <= 0 { return json_resp(&json!({"error": "noto'g'ri so'rov"}), 400); }
-
-    let key = vec![TursoArg::int(me), TursoArg::int(aid), TursoArg::int(sid)];
-    let pre = turso_many(env, &[
-        ("SELECT 1 FROM favorites_db WHERE user_id=? AND anime_id=? AND season_id=?", key.clone()),
-        ("SELECT fav_count FROM season_db WHERE anime_id=? AND season_id=?",
-         vec![TursoArg::int(aid), TursoArg::int(sid)]),
-    ]).await?;
-    let existed = pre[0]["rows"].as_array().map(|r| !r.is_empty()).unwrap_or(false);
-    let mut count = first_row(&pre[1]).and_then(|r| r["fav_count"].as_i64()).unwrap_or(0);
-
-    if on && !existed {
-        count += 1;
-        turso_batch(env, &[
-            ("INSERT OR IGNORE INTO favorites_db (user_id,anime_id,season_id,created_at) VALUES (?,?,?,?)",
-             vec![TursoArg::int(me), TursoArg::int(aid), TursoArg::int(sid), TursoArg::int(now_ms())]),
-            ("UPDATE season_db SET fav_count=? WHERE anime_id=? AND season_id=?",
-             vec![TursoArg::int(count), TursoArg::int(aid), TursoArg::int(sid)]),
-        ]).await?;
-    } else if !on && existed {
-        count = (count - 1).max(0);
-        turso_batch(env, &[
-            ("DELETE FROM favorites_db WHERE user_id=? AND anime_id=? AND season_id=?", key),
-            ("UPDATE season_db SET fav_count=? WHERE anime_id=? AND season_id=?",
-             vec![TursoArg::int(count), TursoArg::int(aid), TursoArg::int(sid)]),
-        ]).await?;
-    }
-    ok_nostore(json!({"ok": true, "is_fav": on, "fav_count": count}))
-}
 
 /// So'rov kelgan domen — rasm manzillarini to'liq qilish uchun.
 fn origin_of(req: &Request) -> String {
@@ -4314,12 +4301,87 @@ async fn auth_route(req: Request, env: &Env, origin: &str, path: &str, method: M
                 }), 502);
             }
 
-            let _ = turso_exec(env, "DELETE FROM sessions_db WHERE user_id=?",
-                vec![TursoArg::int(me)]).await;
-            let _ = turso_exec(env, "DELETE FROM login_tokens WHERE user_id=?",
-                vec![TursoArg::int(me)]).await;
-            let _ = turso_exec(env, "DELETE FROM users_db WHERE id=?",
-                vec![TursoArg::int(me)]).await;
+            // ── NIMA O'CHADI, NIMA QOLADI ─────────────────────
+            //
+            // TALAB (foydalanuvchi): "hisob o'chirilganda unga
+            // tegishli va Turso'dagi statistikaga ta'sir
+            // qilmaydigan ma'lumotlar tozalab tashlansin".
+            //
+            // O'CHADI — odamning O'ZIGA tegishli hamma narsa:
+            // hisob, sessiyalar, kirish kodlari, tomosha tarixi,
+            // sevimlilar va BAHOLAR.
+            //
+            // QOLADI — TARIXIY jamlanmalar: statistika chelaklari
+            // (`stats_hourly` / `stats_daily`) hamda qism va
+            // bo'limning `views_total` / `watch_ms_total`
+            // hisoblagichlari. Ular "o'tgan kuni shuncha bo'lgan"
+            // degan yozuv, ya'ni bir odam ketgani bilan o'tmish
+            // o'zgarmasligi kerak.
+            //
+            // TUZATILADI — HOZIRGI holatni sanaydigan raqamlar:
+            // `season_db.fav_count` (nechta odamning sevimlisida
+            // turibdi) va reyting (`rating_sum` / `rating_count`).
+            //
+            // NEGA BAHO HAM O'CHADI: bir odam hisobini 3-4 marta
+            // o'chirib, har safar yangi hisobdan baho bersa
+            // reyting soxtalashadi (foydalanuvchi topgan xato).
+            let mine = turso_many(env, &[
+                ("SELECT anime_id,season_id,stars FROM ratings_db WHERE user_id=?",
+                 vec![TursoArg::int(me)]),
+                ("SELECT anime_id,season_id FROM favorites_db WHERE user_id=?",
+                 vec![TursoArg::int(me)]),
+            ]).await?;
+
+            let rows_of = |res: &Value| -> Vec<Value> {
+                let cols = res["cols"].as_array().cloned().unwrap_or_default();
+                res["rows"].as_array().cloned().unwrap_or_default().iter()
+                    .map(|r| row_to_obj(&cols, r.as_array().unwrap_or(&vec![])))
+                    .collect()
+            };
+
+            // Bo'lim bo'yicha jamlanadi: bitta odam bitta bo'limga
+            // bitta baho va bitta sevimli qo'ya oladi, lekin
+            // yozuvlar bo'lim bo'yicha guruhlansa yozuv soni ham
+            // kamayadi.
+            let mut fix: std::collections::HashMap<(i64, i64), (i64, i64, i64)> =
+                std::collections::HashMap::new();
+            for r in rows_of(&mine[0]) {
+                let k = (r["anime_id"].as_i64().unwrap_or(0), r["season_id"].as_i64().unwrap_or(0));
+                let e = fix.entry(k).or_insert((0, 0, 0));
+                e.0 -= r["stars"].as_i64().unwrap_or(0);
+                e.1 -= 1;
+            }
+            for r in rows_of(&mine[1]) {
+                let k = (r["anime_id"].as_i64().unwrap_or(0), r["season_id"].as_i64().unwrap_or(0));
+                fix.entry(k).or_insert((0, 0, 0)).2 -= 1;
+            }
+
+            let mut stmts: Vec<(&str, Vec<TursoArg>)> = Vec::new();
+            for ((aid, sid), (rsum, rcount, fav)) in &fix {
+                stmts.push((
+                    "UPDATE season_db SET
+                        rating_sum = MAX(rating_sum + ?, 0),
+                        rating_count = MAX(rating_count + ?, 0),
+                        fav_count = MAX(fav_count + ?, 0)
+                      WHERE anime_id=? AND season_id=?",
+                    vec![
+                        TursoArg::int(*rsum), TursoArg::int(*rcount), TursoArg::int(*fav),
+                        TursoArg::int(*aid), TursoArg::int(*sid),
+                    ],
+                ));
+            }
+            for sql in [
+                "DELETE FROM ratings_db WHERE user_id=?",
+                "DELETE FROM favorites_db WHERE user_id=?",
+                "DELETE FROM watch_history_db WHERE user_id=?",
+                "DELETE FROM sync_batches WHERE user_id=?",
+                "DELETE FROM sessions_db WHERE user_id=?",
+                "DELETE FROM login_tokens WHERE user_id=?",
+                "DELETE FROM users_db WHERE id=?",
+            ] {
+                stmts.push((sql, vec![TursoArg::int(me)]));
+            }
+            turso_batch(env, &stmts).await?;
 
             ok_nostore(json!({"success": true}))
         }
@@ -4461,11 +4523,9 @@ async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
     let auth_path = path.starts_with("/api/auth/")
         || path.starts_with("/api/telegram/")
         || path.starts_with("/api/history")
-        || path == "/api/rating"
-        || path == "/api/favorite"
         || path == "/api/favorites"
         || path == "/api/me/stats"
-        || path == "/api/traffic";
+        || path == "/api/sync";
     let write = matches!(method, Method::Post | Method::Put | Method::Delete) && !auth_path;
     let mut resp = route(req, env, ctx).await?;
 
@@ -4525,7 +4585,7 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
     if method == Method::Get {
         if let Some(fname) = path.strip_prefix("/api/image/") {
             // Javob HECH O'ZGARTIRILMASDAN uzatiladi — trafikni
-            // endi ilovaning o'zi sanaydi (`traffic_route` izohi).
+            // endi ilovaning o'zi sanaydi (`note_traffic` izohi).
             return b2_proxy(&env, &ctx, fname, range_header).await;
         }
         // Pleyer SHU manzildan oqim oladi (b2_play izohiga qarang).
@@ -4567,9 +4627,12 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
         return stats_route(&env).await;
     }
 
-    // ── ILOVA SANAGAN TRAFIK (sutkada bir marta) ──────────────
-    if path == "/api/traffic" && method == Method::Post {
-        return traffic_route(req, &env).await;
+    // ── YAGONA YOZUV YO'LI ────────────────────────────────────
+    //
+    // Tomosha tarixi, baho, sevimlilar va trafik — hammasi BITTA
+    // paketda keladi (`sync_route` izohiga qarang).
+    if path == "/api/sync" && method == Method::Post {
+        return sync_route(req, &env).await;
     }
 
     // ── SHAXSIY STATISTIKA VA SEVIMLILAR RO'YXATI ─────────────
@@ -4578,14 +4641,6 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
     }
     if path == "/api/favorites" && method == Method::Get {
         return favorites_route(req, &env, &origin).await;
-    }
-
-    // ── BAHO VA SEVIMLILAR ────────────────────────────────────
-    if path == "/api/rating" && method == Method::Post {
-        return rating_route(req, &env).await;
-    }
-    if path == "/api/favorite" && method == Method::Post {
-        return favorite_route(req, &env).await;
     }
 
     // ── BITTA BO'LIM: MA'LUMOT OYNASI UCHUN ───────────────────

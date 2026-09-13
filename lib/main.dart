@@ -10,6 +10,7 @@ import 'services/net_meter.dart';
 import 'services/offline_library.dart';
 import 'services/rust_bridge.dart';
 import 'services/storage_janitor.dart';
+import 'services/sync_queue.dart';
 import 'services/traffic_service.dart';
 import 'services/video_cache_server.dart';
 import 'services/watch_history.dart';
@@ -74,10 +75,18 @@ Future<void> _main() async {
 
   // ── TRAFIK HISOBI ───────────────────────────────────────────
   // Faqat TARMOQDAN kelgan baytlar sanaladi (Rust yadrosining
-  // video hisobi + yuqoridagi sanovchi klient) va sutkada bir
-  // marta serverga yuboriladi (traffic_service.dart izohiga
-  // qarang). Kutilmaydi — ilova ochilishini sekinlashtirmasin.
+  // video hisobi + yuqoridagi sanovchi klient). Bu xizmat endi
+  // hech qayerga murojaat qilmaydi — yig'indini pastdagi navbat
+  // paketning ichida olib ketadi. Kutilmaydi: ilova ochilishini
+  // sekinlashtirmasin.
   unawaited(TrafficService.instance.start());
+
+  // ── YAGONA YOZUV NAVBATI ────────────────────────────────────
+  // Tomosha tarixi, baho, sevimlilar va trafik — hammasi avval
+  // TELEFONDA yig'iladi, siqiladi va kuniga bir necha marta bitta
+  // paket bo'lib yuboriladi. Kunlik so'rov 2-4 ta (qat'iy chegara
+  // 50). Sabab va hisob-kitob — `sync_queue.dart` izohida.
+  SyncQueue.instance.start();
 
   // ── OFLAYN RO'YXATLARI ──────────────────────────────────────
   // Internet bor-yo'qligini BITTA joyda kuzatadi va "qaysi qism

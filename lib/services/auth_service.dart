@@ -10,7 +10,7 @@ import 'package:http/http.dart' as http;
 
 import 'account_data.dart';
 import 'rust_bridge.dart';
-import 'traffic_service.dart';
+import 'sync_queue.dart';
 
 const String kApiBase = 'https://aniraxuzapp.ogabekraximov650.workers.dev';
 
@@ -369,15 +369,47 @@ class AuthService extends ChangeNotifier {
     }
   }
 
+  // ═══════════════════════════════════════════════════════════
+  //  HISOBDAN CHIQISH — AVVAL MA'LUMOTLAR SAQLANADI
+  // ═══════════════════════════════════════════════════════════
+  //
+  // TALAB (foydalanuvchi): "foydalanuvchi hisobidan chiqqanda
+  // telefondagi ma'lumotlar Turso'ga yozilishi kerak; nima
+  // bo'layotgani va progress chizig'i ko'rsatilsin, chiziq 100%
+  // ga yetganda 'ma'lumotlar sinxronlandi, sizni ilovamizda kutib
+  // qolamiz' degan xabar chiqsin".
+  //
+  // Endi hamma yozuv navbatda turadi (`SyncQueue`), shu sabab
+  // chiqishdan oldin AYNAN o'sha navbat yuboriladi.
+  //
+  // ── INTERNET YO'Q BO'LSA ────────────────────────────────────
+  //
+  // Chiqish BLOKLANMAYDI. Navbat diskda, hisob papkasida qoladi
+  // va o'sha hisobga qaytilganda yuboriladi — ya'ni hech narsa
+  // yo'qolmaydi. Chaqiruvchi `SyncResult.offline` ni ko'rib
+  // foydalanuvchiga shuni aytadi va "baribir chiqish" imkonini
+  // beradi.
+
+  /// Navbatni yuboradi, LEKIN hisobdan chiqarmaydi.
+  ///
+  /// Chiqish oynasi avval shuni chaqiradi, natijani ko'rsatadi va
+  /// keyin `logout()` ni chaqiradi.
+  Future<SyncResult> syncBeforeLogout({
+    void Function(String step, double progress)? onStep,
+  }) async {
+    try {
+      return await SyncQueue.instance.flush(force: true, onStep: onStep);
+    } catch (_) {
+      onStep?.call('Internet yo\'q', 1.0);
+      return SyncResult.offline;
+    }
+  }
+
+  /// Qurilmadan hisobni olib tashlaydi.
+  ///
+  /// Ma'lumotlar `syncBeforeLogout` da yuborilgan bo'lishi kerak.
   Future<void> logout() async {
     final s = _session;
-    // Chiqishda hamma narsa tozalanadi, shu sabab shu paytgacha
-    // sanalgan trafik SHU YERDA yuboriladi (odatdagi qoida —
-    // sutkada bir marta). Yiqilsa ham chiqish davom etadi.
-    try {
-      await TrafficService.instance.sampleNow();
-      await TrafficService.instance.reportNow();
-    } catch (_) {}
     if (s != null && s.isNotEmpty) {
       try {
         await http.post(
@@ -514,25 +546,64 @@ class AuthService extends ChangeNotifier {
     }
   }
 
-  /// HISOBNI BUTUNLAY O'CHIRISH. Serverda foydalanuvchi, uning
-  /// barcha sessiyalari va profil rasmi o'chiriladi; qurilmadan
-  /// esa sessiya tozalanadi.
-  ///
+  // ═══════════════════════════════════════════════════════════
+  //  HISOBNI BUTUNLAY O'CHIRISH
+  // ═══════════════════════════════════════════════════════════
+  //
+  // TALAB (foydalanuvchi): "hisob o'chirilganda foydalanuvchiga
+  // tegishli va Turso'dagi statistikaga ta'sir qilmaydigan
+  // ma'lumotlar tozalab tashlansin; tozalanish jarayoni va
+  // progress chizig'i ko'rsatilsin".
+  //
+  // ── SERVERDA ────────────────────────────────────────────────
+  //
+  // O'chadi: hisob, sessiyalar, kirish kodlari, tomosha tarixi,
+  // sevimlilar va BAHOLAR; bo'limning `fav_count` va reyting
+  // hisoblagichlari tuzatiladi (worker bajaradi).
+  //
+  // Qoladi: statistika chelaklari va qism/bo'limning
+  // `views_total` / `watch_ms_total` — bular TARIXIY jamlanma,
+  // bir odam ketgani bilan o'tmish o'zgarmasligi kerak.
+  //
+  // Baho ham o'chadi, chunki aks holda bir odam hisobini bir
+  // necha marta o'chirib, har safar yangi hisobdan baho berib
+  // reytingni soxtalashtira olardi (foydalanuvchi topgan xato).
+  //
+  // ── NAVBAT YUBORILMAYDI ─────────────────────────────────────
+  //
+  // Yuborilmagan yozuvlarni avval yozib, keyin o'chirishning
+  // ma'nosi yo'q — ular bir soniyadan keyin baribir o'chadi.
+  // Shu sabab navbat shunchaki tashlab yuboriladi.
+  //
   /// Qaytaradi: xato matni yoki muvaffaqiyatda `null`.
-  Future<String?> deleteAccount() async {
+  Future<String?> deleteAccount({
+    void Function(String step, double progress)? onStep,
+  }) async {
     final s = _session;
     if (s == null || s.isEmpty) return 'Avval hisobga kiring';
+    onStep?.call('Server ma\'lumotlari o\'chirilmoqda', 0.15);
     try {
       final r = await http.post(
         Uri.parse('$kApiBase/api/auth/delete-account'),
         headers: {'Authorization': 'Bearer $s'},
-      ).timeout(const Duration(seconds: 25));
+      ).timeout(const Duration(seconds: 30));
       if (r.statusCode != 200) return 'O\'chirib bo\'lmadi';
-      await _clear();
-      return null;
     } catch (_) {
       return 'Tarmoq xatosi — qaytadan urinib ko\'ring';
     }
+
+    // Telefondagi nusxalar — server tasdiqlagandan KEYIN.
+    // Tartib muhim: papka almashishidan oldin tozalanadi, aks
+    // holda mehmon papkasi o'chib ketardi.
+    try {
+      await AccountData.wipeDevice(
+        onStep: (step, p) => onStep?.call(step, 0.25 + p * 0.7),
+      );
+    } catch (_) {}
+
+    await _clear();
+    onStep?.call('Tayyor', 1.0);
+    return null;
   }
 
   // ── PROFIL RASMI ─────────────────────────────────────────────

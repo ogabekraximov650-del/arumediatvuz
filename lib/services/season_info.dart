@@ -15,6 +15,7 @@ import 'package:http/http.dart' as http;
 
 import 'auth_service.dart';
 import 'rust_bridge.dart';
+import 'sync_queue.dart';
 
 class SeasonInfo {
   final Map<String, dynamic> season;
@@ -126,52 +127,86 @@ class SeasonService {
     }
   }
 
-  /// Baho qo'yish (1..10). Javobda yangi reyting keladi.
-  static Future<({double rating, int count})?> rate(
-      int animeId, int seasonId, int stars) async {
-    try {
-      final r = await http
-          .post(
-            Uri.parse('$kApiBase/api/rating'),
-            headers: _headers(json: true),
-            body: jsonEncode({
-              'anime_id': animeId,
-              'season_id': seasonId,
-              'stars': stars,
-            }),
-          )
-          .timeout(const Duration(seconds: 12));
-      if (r.statusCode != 200) return null;
-      final j = jsonDecode(r.body) as Map<String, dynamic>;
-      return (
-        rating: ((j['rating'] as num?) ?? 0).toDouble(),
-        count: ((j['rating_count'] as num?) ?? 0).toInt(),
-      );
-    } catch (_) {
-      return null;
-    }
+  // ── BAHO VA SEVIMLILAR — AVVAL TELEFONDA ───────────────────
+  //
+  // TALAB (foydalanuvchi): "barcha yozish va tahrirlash so'rovlari
+  // qurilmaning o'zida qilinadi va paket bo'lib yuboriladi".
+  //
+  // Shu sabab bu yerda serverga MUROJAAT YO'Q. Ikki ish bo'ladi:
+  //
+  //   1. yangi holat DARHOL hisoblanadi va diskdagi nusxaga
+  //      yoziladi — ekranda o'zgarish shu zahoti ko'rinadi,
+  //      internet bo'lmasa ham;
+  //   2. yozuv `SyncQueue` navbatiga tushadi.
+  //
+  // Reytingni mahalliy hisoblash serverdagi bilan BIR XIL qoida
+  // bo'yicha ketadi (oddiy o'rtacha): yig'indidan eski bahoyingiz
+  // ayiriladi, yangisi qo'shiladi; birinchi marta baho berilsa
+  // sanoq bittaga oshadi.
+
+  /// Baho qo'yish (1..10). Yangi holat DARHOL qaytadi.
+  ///
+  /// `current` — ekranda hozir turgan holat. Uni chaqiruvchi
+  /// beradi, chunki oflaynda diskda nusxa bo'lmasligi mumkin,
+  /// lekin baho baribir qabul qilinishi kerak.
+  static SeasonInfo rate(
+      int animeId, int seasonId, int stars, SeasonInfo current) {
+    final oldStars = current.myStars;
+    final count = current.ratingCount + (oldStars > 0 ? 0 : 1);
+    // Eski yig'indi saqlanmaydi — u o'rtacha × sanoq orqali
+    // tiklanadi (yaxlitlash xatosi ko'pi bilan 0.01).
+    final oldSum = (current.rating * current.ratingCount).round();
+    final sum = oldSum + stars - oldStars;
+    final rating = count <= 0 ? 0.0 : ((sum / count) * 100).round() / 100;
+
+    final season = Map<String, dynamic>.from(current.season);
+    season['rating_count'] = count;
+    final next = SeasonInfo(
+      season: season,
+      rating: rating,
+      myStars: stars,
+      isFav: current.isFav,
+    );
+    _saveDisk(animeId, seasonId, next);
+    SyncQueue.instance.putRating(animeId, seasonId, stars);
+    return next;
   }
 
-  /// Sevimlilarga qo'shish / olib tashlash.
-  static Future<int?> setFavorite(int animeId, int seasonId, bool on) async {
+  /// Sevimlilarga qo'shish / olib tashlash. Yangi holat DARHOL
+  /// qaytadi.
+  static SeasonInfo setFavorite(
+      int animeId, int seasonId, bool on, SeasonInfo current) {
+    final count = current.isFav == on
+        ? current.favCount
+        : (current.favCount + (on ? 1 : -1)).clamp(0, 1 << 40);
+    final season = Map<String, dynamic>.from(current.season);
+    season['fav_count'] = count;
+    final next = SeasonInfo(
+      season: season,
+      rating: current.rating,
+      myStars: current.myStars,
+      isFav: on,
+    );
+    _saveDisk(animeId, seasonId, next);
+    SyncQueue.instance.putFavorite(animeId, seasonId, on);
+    // Kutubxonadagi "Sevimlilar" oynasi ham DARHOL o'zgaradi —
+    // server ro'yxati kelguncha kutilmaydi.
+    FavoritesService.instance.applyLocal(animeId, seasonId, on, season);
+    return next;
+  }
+
+  /// Diskdagi nusxani yangilaydi (server javobi kutilmaydi).
+  static void _saveDisk(int animeId, int seasonId, SeasonInfo info) {
     try {
-      final r = await http
-          .post(
-            Uri.parse('$kApiBase/api/favorite'),
-            headers: _headers(json: true),
-            body: jsonEncode({
-              'anime_id': animeId,
-              'season_id': seasonId,
-              'on': on,
-            }),
-          )
-          .timeout(const Duration(seconds: 12));
-      if (r.statusCode != 200) return null;
-      final j = jsonDecode(r.body) as Map<String, dynamic>;
-      return ((j['fav_count'] as num?) ?? 0).toInt();
-    } catch (_) {
-      return null;
-    }
+      RustCore.instance.saveListCache(_cacheKey(animeId, seasonId), [
+        {
+          'season': info.season,
+          'rating': info.rating,
+          'my_stars': info.myStars,
+          'is_fav': info.isFav,
+        }
+      ]);
+    } catch (_) {}
   }
 }
 
@@ -230,9 +265,10 @@ class FavoritesService extends ChangeNotifier {
       ).timeout(const Duration(seconds: 15));
       if (r.statusCode == 200) {
         final data = jsonDecode(r.body) as Map<String, dynamic>;
-        _items = ((data['items'] as List?) ?? [])
+        final fresh = ((data['items'] as List?) ?? [])
             .cast<Map<String, dynamic>>()
             .toList();
+        _items = _mergeLocal(fresh);
         _loadedAt = DateTime.now();
         try {
           RustCore.instance.saveListCache(_cacheKey, _items);
@@ -248,6 +284,62 @@ class FavoritesService extends ChangeNotifier {
   /// Pleyerda yurakcha bosilganda ro'yxat DARHOL yangilansin.
   void markChanged() {
     _loadedAt = null;
+  }
+
+  /// Yurakcha bosildi — ro'yxat SHU ZAHOTI o'zgaradi.
+  ///
+  /// Yozuv serverga navbat bilan ketadi, ya'ni javob kutilmaydi.
+  void applyLocal(
+      int animeId, int seasonId, bool on, Map<String, dynamic> season) {
+    bool same(Map<String, dynamic> e) =>
+        ((e['anime_id'] as num?)?.toInt() ?? 0) == animeId &&
+        ((e['season_id'] as num?)?.toInt() ?? 0) == seasonId;
+
+    final next = _items.where((e) => !same(e)).toList();
+    if (on) {
+      final row = Map<String, dynamic>.from(season);
+      row['anime_id'] = animeId;
+      row['season_id'] = seasonId;
+      next.insert(0, row);
+    }
+    _items = next;
+    _loadedAt = null;
+    try {
+      RustCore.instance.saveListCache(_cacheKey, _items);
+    } catch (_) {}
+    notifyListeners();
+  }
+
+  /// Server ro'yxatining ustiga YUBORILMAGAN o'zgarishlarni
+  /// qo'yadi.
+  ///
+  /// Aks holda hozirgina sevimliga qo'shilgan anime ro'yxat
+  /// yangilangan zahoti yo'qolib qolardi (serverda hali yo'q).
+  List<Map<String, dynamic>> _mergeLocal(List<Map<String, dynamic>> server) {
+    final pend = SyncQueue.instance.pendingFavorites();
+    if (pend.isEmpty) return server;
+    String keyOf(Map<String, dynamic> e) =>
+        '${(e['anime_id'] as num?)?.toInt() ?? 0}:'
+        '${(e['season_id'] as num?)?.toInt() ?? 0}';
+
+    final out = <Map<String, dynamic>>[];
+    for (final e in server) {
+      final on = pend[keyOf(e)];
+      if (on == false) continue; // olib tashlangan
+      out.add(e);
+    }
+    pend.forEach((k, on) {
+      if (!on) return;
+      if (out.any((e) => keyOf(e) == k)) return;
+      // Qator faqat telefonda bor — eski ro'yxatdan olinadi.
+      for (final e in _items) {
+        if (keyOf(e) == k) {
+          out.insert(0, e);
+          break;
+        }
+      }
+    });
+    return out;
   }
 
   /// Hisob almashganda xotiradagi ro'yxat bo'shatiladi. Diskdagi

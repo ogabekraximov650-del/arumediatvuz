@@ -4435,23 +4435,11 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     );
     if (chosen == null || !mounted) return;
 
-    final res = await SeasonService.rate(aid, sid, chosen);
-    if (!mounted) return;
-    if (res == null) {
-      _showNotice('Bahoni saqlab bo\'lmadi');
-      return;
-    }
-    setState(() {
-      final base = _info;
-      final season = Map<String, dynamic>.from(base?.season ?? widget.season);
-      season['rating_count'] = res.count;
-      _info = SeasonInfo(
-        season: season,
-        rating: res.rating,
-        myStars: chosen,
-        isFav: base?.isFav ?? false,
-      );
-    });
+    // Baho DARHOL qabul qilinadi va diskka yoziladi; serverga
+    // esa navbat bilan, keyingi paketda ketadi. Shu sabab
+    // internet bo'lmasa ham "saqlanmadi" degan xato chiqmaydi.
+    final next = SeasonService.rate(aid, sid, chosen, _baseInfo());
+    setState(() => _info = next);
   }
 
   Future<void> _toggleFavorite() async {
@@ -4460,39 +4448,25 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     if (aid <= 0) return;
     final want = !(_info?.isFav ?? false);
 
-    // Tugma DARHOL javob beradi — so'rov fon'da ketadi.
-    setState(() {
-      final base = _info;
-      final season = Map<String, dynamic>.from(base?.season ?? widget.season);
-      final next = ((season['fav_count'] as num?)?.toInt() ?? 0) +
-          (want ? 1 : -1);
-      season['fav_count'] = next < 0 ? 0 : next;
-      _info = SeasonInfo(
-        season: season,
-        rating: base?.rating ?? 0,
-        myStars: base?.myStars ?? 0,
-        isFav: want,
-      );
-    });
-
-    final count = await SeasonService.setFavorite(aid, sid, want);
+    // Tugma DARHOL javob beradi: holat diskka yoziladi, serverga
+    // esa keyingi paket bilan ketadi. Ortga qaytariladigan xato
+    // yo'q — internet bo'lmasa yozuv navbatda kutadi.
+    final next = SeasonService.setFavorite(aid, sid, want, _baseInfo());
+    setState(() => _info = next);
     // Kutubxonadagi "Sevimlilar" ro'yxati endi eskirdi.
     FavoritesService.instance.markChanged();
-    if (!mounted) return;
-    if (count == null) {
-      // Saqlanmadi — holatni qaytaramiz.
-      setState(() {
-        final base = _info;
-        if (base != null) _info = base.copyWith(isFav: !want);
-      });
-      _showNotice('Saqlab bo\'lmadi — internetni tekshiring');
-      return;
-    }
-    setState(() {
-      final base = _info;
-      if (base != null) _info = base.copyWith(favCount: count);
-    });
   }
+
+  /// Ekranda turgan holat; hali yuklanmagan bo'lsa — bo'lim
+  /// qatoridan yasalgan bo'sh holat.
+  SeasonInfo _baseInfo() =>
+      _info ??
+      SeasonInfo(
+        season: Map<String, dynamic>.from(widget.season),
+        rating: 0,
+        myStars: 0,
+        isFav: false,
+      );
 
   Widget _infoRow(String label, String value) {
     if (value.isEmpty) return const SizedBox.shrink();

@@ -184,9 +184,9 @@ ma'lum holat ko'rinadi.
 | Trafik | oxirgi 24 soat | kunlik chelaklar | jami |
 | Tomosha vaqti | oxirgi 24 soat | kunlik chelaklar | jami |
 
-Trafik chelaklari **Cloudflare Analytics**'dan to'ldiriladi
-(pastdagi "UMUMIY TRAFIK" bo'limiga qarang) — ilova yuborgan
-shaxsiy hisob ularga QO'SHILMAYDI.
+Trafik chelaklarini **ILOVA** to'ldiradi (sinxronlash paketi
+ichida). Cloudflare Analytics manbasi sinab ko'rilgan va OLIB
+TASHLANGAN — sabab "YAGONA YOZUV YO'LI" bo'limida.
 
 **YILLIK ko'rsatkich ATAYLAB YO'Q** (foydalanuvchi talabi):
 kunlik, haftalik, oylik va umumiy yetarli.
@@ -194,6 +194,9 @@ kunlik, haftalik, oylik va umumiy yetarli.
 **Hodisalar ro'yxati saqlanmaydi** (u millionlab qator bo'lardi) —
 faqat yig'indilar: `stats_hourly` (oxirgi 24 soat uchun, 3 kundan
 eskisi o'chiriladi) va `stats_daily` (hafta/oy/jami).
+
+Chelaklarga yozish **paketga bir marta** bo'ladi (ilgari har bir
+qism uchun 4 ta qator) — "YAGONA YOZUV YO'LI" bo'limiga qarang.
 
 **TRAFIKNI ILOVA SANAYDI (worker EMAS).**
 
@@ -270,10 +273,10 @@ Qolgani o'zgarmadi:
   qo'shadi va diskka yozadi (`list_traffic.rustbin`, shifrlangan).
   Yozuvda hisob raqami ham bor: hisob almashsa eski yig'indi
   tashlab yuboriladi.
-* **SUTKADA BIR MARTA** `POST /api/traffic {"bytes": N}` —
-  bitta so'rov. Worker `note_traffic` bilan uni FAQAT o'sha
-  odamning `users_db.traffic_bytes` ustuniga qo'shadi (umumiy
-  chelaklarga EMAS — umumiy raqam Cloudflare'dan keladi). Javob 200 bo'lsa
+* Yig'indi **sinxronlash paketining ichida** ketadi
+  (`traffic_bytes`) — alohida so'rov YO'Q. Worker uni HAM umumiy
+  chelaklarga, HAM `users_db.traffic_bytes` ga qo'shadi
+  (`note_traffic`). Javob 200 bo'lsa
   ilova yuborilgan miqdorni ayiradi va qaytadan sanay boshlaydi.
 * Ilova qayta ishga tushganda ikkala hisoblagich ham nolga
   tushadi — bu aniqlanadi (yangi qiymat eskisidan kichik) va
@@ -403,6 +406,12 @@ Foydalanuvchi talabi: "birinchi odam 10 baho bersa reyting ham
 Baho qo'yish oynasida yulduz bosilganda faqat TANLANADI;
 saqlash uchun "Baholash" tugmasi bosiladi ("Bekor qilish" ham
 bor).
+
+**Baho va sevimli serverga DARHOL bormaydi.** Yangi holat
+telefonda hisoblanadi (server bilan BIR XIL qoida bo'yicha),
+diskka yoziladi va `SyncQueue` navbatiga tushadi — oflaynda ham
+ishlaydi va "saqlanmadi" degan xato chiqmaydi. Batafsil —
+"YAGONA YOZUV YO'LI" bo'limi.
 
 Tezlik uchun `season_db` da hisoblangan ustunlar turadi:
 `views_total`, `watch_ms_total`, `fav_count`, `rating_sum`,
@@ -804,112 +813,157 @@ Xotira o'lchovi (`storage_usage.dart`) o'z holicha qoldi — u endi
 faqat JAMI raqam sifatida ko'rsatiladi. Toifalarga bo'lish kodi
 saqlanib turibdi: kerak bo'lsa oyna qaytariladi.
 
-## UMUMIY TRAFIK — CLOUDFLARE ANALYTICS'DAN
+## YAGONA YOZUV YO'LI: `SyncQueue` + `POST /api/sync`
 
-TALAB (foydalanuvchi): "bosh sahifadagi trafik statistikasi
-Cloudflare dashboarddagi Analytics'dan olinsin, shaxsiy
-statistika qo'shilmasin; shaxsiy statistika esa faqat
-foydalanuvchining o'ziga ko'rinsin va o'zi uchun hisoblansin".
+**Bu loyihaning eng muhim arxitektura qarori.** Buzmang.
 
-### IKKI HISOB BUTUNLAY AJRATILDI
+### NEGA (pul)
 
-| Qayerda | Manba | Kim ko'radi |
+Turso har bir **yozilgan qator** uchun to'lov oladi. Eski
+tartibda bitta qism ko'rilganda **7 ta** qator yozilardi:
+
+| Nima | Qator |
+|---|---|
+| `watch_history_db` upsert | 1 |
+| `epizod_db` — views_total, watch_ms_total | 1 |
+| `season_db` — views_total, watch_ms_total | 1 |
+| `stats_hourly` + `stats_daily` (views) | 2 |
+| `stats_hourly` + `stats_daily` (watch_ms) | 2 |
+
+Ustiga `sessions_db.last_seen_at` **har 60 soniyada**. Bitta faol
+odam kuniga ~149 qator, shundan ~85% i `last_seen_at`.
+
+| Foydalanuvchi | Eski tartib | Yangi tartib |
 |---|---|---|
-| Bosh sahifa banneri, `/api/stats` | **Cloudflare Analytics** | hamma |
-| Profil sahifasi, `/api/me/stats` | `users_db.traffic_bytes` | faqat egasi |
+| 10k | 45M/oy | 4.5M/oy |
+| 100k | ~420M/oy (~$281) | ~45M/oy (**$24.92**) |
+| 300k | ~1.3 mlrd/oy | ~135M/oy (~$53) |
 
-`note_traffic` endi umumiy chelaklarga (`stats_hourly`,
-`stats_daily`) UMUMAN tegmaydi — u faqat o'sha odamning
-`users_db.traffic_bytes` ustunini oshiradi. Ilgari bitta son
-ikkala joyga ham qo'shilardi.
+Foydalanuvchi qo'ygan shart: **kunlik yozish so'rovlari 50 tadan
+oshmasin**. Hozirgi tartibda o'rtacha **2-4 ta**.
 
-### QAYSI DATASET (avval "mumkin emas" deb yozilgandi — noto'g'ri)
+### UCHTA QOIDA (`lib/services/sync_queue.dart`)
 
-Ilgari bu bo'limda "workers.dev da bayt olib bo'lmaydi" deb
-yozilgan edi. Cloudflare GraphQL sxemasi tekshirilgach ma'lum
-bo'ldiki, **mumkin ekan**:
+**1. Hamma yozuv avval telefonda.** Ekranda o'zgarish DARHOL
+ko'rinadi, serverga keyin xabar beriladi.
 
-```
-AccountWorkersInvocationsAdaptiveSum {
-  responseBodySize: uint64!   # Sum of Response Body Sizes
-  requests, errors, cpuTimeUs, subrequests, wallTime, ...
-}
-```
+**2. Navbat siqiladi.** Har yozuvning `key` si bor
+(`h:anime:season:epizod`, `r:anime:season`, `f:anime:season`);
+o'sha kalit navbatda bo'lsa eskisi ALMASHTIRILADI. Bir qismni 50
+marta ko'rgan odam ham navbatda **bitta** qator qoldiradi.
 
-`workersInvocationsAdaptive` — HISOB (account) darajasidagi
-to'plam, ya'ni ZONA (o'z domeni) SHART EMAS: worker
-`*.workers.dev` da tursa ham ishlaydi. `responseBodySize` esa
-aynan dashboarddagi raqamning manbasi.
+Ikki xil maydon HAR XIL siqiladi:
 
-### QANDAY ISHLAYDI (`cf_traffic_sync`, `worker/src/lib.rs`)
-
-* `GET /api/stats` chaqirilganda ishga tushadi, lekin har safar
-  emas — oxirgi sinxronizatsiyadan **10 daqiqa** o'tgan bo'lsa
-  (belgi `app_config.cf_traffic_synced_at` da). Soatiga 6 ta
-  tashqi so'rov — arzon;
-* har safar faqat **oxirgi 50 soat** so'raladi, soatlik
-  bo'laklarda (`dimensions { datetimeHour }`). Eski kunlar
-  allaqachon `stats_daily` da — ya'ni "jami" ko'rsatkich vaqt
-  o'tishi bilan to'planib boradi va Cloudflare'ning saqlash
-  muddati cheklovi to'sqinlik qilmaydi;
-* qiymatlar QO'SHILMAYDI, **ALMASHTIRILADI**
-  (`value=excluded.value`) — bir soat necha marta sinxronlansa
-  ham raqam ikkilanmaydi. Shuning uchun alohida
-  `STAT_HOUR_SET_SQL` / `STAT_DAY_SET_SQL` bor;
-* kunlik chelakka faqat oynaga TO'LIQ sig'gan kunlar yoziladi,
-  aks holda yarim qiymat kunlik hisobni kamaytirib yuborardi;
-* BIR MARTALIK tozalash: birinchi muvaffaqiyatli
-  sinxronizatsiyada eski (ilova sanagan) `traffic` qatorlari
-  o'chiriladi (`app_config.cf_traffic_purged`).
-
-Cloudflare vaqti UTC bo'lgani uchun soat satri
-(`2026-09-13T06:00:00Z`) `parse_iso_ms` bilan ms ga o'giriladi,
-keyin `hour_key`/`day_key` uni UTC+5 chelagiga soladi —
-qolgan statistika bilan bir xil mintaqada.
-
-### KERAKLI KALITLAR
-
-| Secret | Nima |
+| Tur | Qoida |
 |---|---|
-| `CF_ACCOUNT_ID` | Cloudflare hisob ID si |
-| `CF_ANALYTICS_TOKEN` | **Account Analytics: Read** ruxsatli API token |
-| `CF_SCRIPT_NAME` (var) | skript nomi, `wrangler.toml` da: `aniraxuzapp` |
+| holat (pozitsiya, sifat, baho, sevimli) | oxirgisi o'rnini bosadi |
+| "birinchi ko'rish" belgisi | **yo'qolmaydi** (`||`) |
 
-`deploy-worker.yml` ularni o'zi qo'yadi: `CF_ACCOUNT_ID` —
-mavjud `CLOUDFLARE_ACCOUNT_ID` sirdan; `CF_ANALYTICS_TOKEN` —
-agar GitHub'da shu nomli alohida secret bo'lsa o'shandan, aks
-holda deploy tokenidan (`CLOUDFLARE_API_TOKEN`).
+`watched_ms` JAMI qiymat sifatida yuboriladi (`WatchHistory` uni
+eski yozuvdan davom ettiradi), farqni server hisoblaydi.
 
-### QANDAY TEKSHIRILADI
+**3. Yuborish shartlari + qat'iy kunlik chegara.**
 
-`GET /api/stats` javobida `traffic_src` maydoni bor:
-
-| Qiymat | Ma'nosi |
+| Shart | Qiymat |
 |---|---|
-| `cloudflare` | ishlayapti, raqam Cloudflare'dan |
-| `error` | so'rov yiqildi — ko'pincha tokenda "Account Analytics: Read" ruxsati yo'q |
-| `off` | `CF_ACCOUNT_ID` / `CF_ANALYTICS_TOKEN` qo'yilmagan |
-| `?` | hali birorta urinish bo'lmagan |
+| Navbat to'ldi | 20 qator |
+| Fonga ketdi va oxirgi yuborishdan | 30 daqiqa |
+| Ochildi va oxirgi yuborishdan | 6 soat |
+| Har holda | 24 soatda 1 marta |
+| Chiqish / hisobni o'chirish | majburiy |
+| **Oddiy yuborish, kuniga** | **12** |
+| **Qat'iy chegara, kuniga** | **50** |
 
-```
-curl https://aniraxuzapp.ogabekraximov650.workers.dev/api/stats
-```
+Kunlik hisoblagich telefonda (`list_sync_state.rustbin`), mahalliy
+yarim tunda nolga tushadi.
 
-(javob chekkada 5 daqiqa keshlanadi, sinxronizatsiyaning o'zi esa
-10 daqiqada bir marta ishlaydi — o'zgarishni shuncha kutish
-kerak).
+### SERVER: `POST /api/sync` (`sync_route`)
 
-**TEKSHIRILDI (13.09.2026):** jonli workerda `traffic_src` =
-`cloudflare`, ya'ni raqam haqiqatan Cloudflare Analytics'dan
-kelyapti va deploy tokenida kerakli ruxsat bor ekan — alohida
-`CF_ANALYTICS_TOKEN` yasash shart bo'lmadi.
+ATIGI IKKI marta bazaga boradi:
 
-**AGAR `traffic_src` = `error` BO'LSA** — deploy tokenida "Account
-Analytics: Read" ruxsati yo'q. Cloudflare dashboard -> My
-Profile -> API Tokens da shu ruxsatli token yasab, uni GitHub
-Actions secret'iga `CF_ANALYTICS_TOKEN` nomi bilan qo'shish
-kifoya (kodni o'zgartirish shart emas). Kalitlar yo'q bo'lsa
-funksiya JIM qaytadi — ilovaning qolgan hamma joyi ishlayveradi.
+1. **bitta o'qish quvuri** — eski holat (tarix, baho, sevimlilar,
+   mavjud bo'limlar) va oxirgi paket raqami;
+2. **bitta yozuv quvuri** — hamma o'zgarish birdan.
+
+Jamlanadi:
+
+* statistika chelaklari — **paketga bir marta** (ilgari har bir
+  qism uchun 4 ta);
+* `season_db` — **bo'limga bitta** UPDATE: ko'rish, tomosha vaqti,
+  reyting va sevimlilar o'zgarishi birga ketadi;
+* qiymatlar **NISBIY** (`+?`) yoziladi — boshqa qurilmadan kelgan
+  o'zgarish ustidan yozib yuborilmaydi.
+
+### IKKI MARTA SANALMASLIK
+
+Har paketda bir martalik `batch_id`. Oxirgisi `sync_batches`
+jadvalida saqlanadi; takrori kelsa worker **hech narsa
+yozmaydi** va `duplicate: true` qaytaradi.
+
+Bu MUHIM: ko'rishlar soni va tomosha vaqti **qo'shiladigan**
+raqamlar — takror yozilsa hisob shishib ketardi.
+
+### SOXTA RAQAMLARDAN HIMOYA
+
+Endi ko'rishlar sonini va tomosha vaqtini TELEFON aytadi, ya'ni
+o'zgartirilgan ilova statistikani shishira olardi. Har paketda:
+
+| Chegara | Qiymat |
+|---|---|
+| tarix yozuvlari | 100 |
+| baho / sevimli | 50 |
+| tomosha vaqti jami | 24 soat |
+| yangi ko'rishlar | 50 |
+| trafik | 256 GiB |
+
+Telefon soati ham tekshiriladi: `updated_at` kelajakda bo'lsa
+server vaqtiga tenglashtiriladi.
+
+### `last_seen_at`: 60 SONIYA → 12 SOAT
+
+`SEEN_EVERY_MS`. Bu bazadagi eng ko'p takrorlanadigan yozuv edi.
+Kunlik faol foydalanuvchi 24 soatlik oyna bilan sanaladi, shu
+sabab 12 soat aniqlikni buzmaydi. Sinxronlash paketi ham shu
+vaqtni yangilaydi — u yerda bepul, o'sha quvurning ichida.
+
+### RO'YXATLAR: SERVER JAVOBI USTIGA NAVBAT QO'YILADI
+
+**Yo'l qo'yilishi mumkin bo'lgan xato:** tarix va sevimlilar
+ro'yxati serverdan keladi va xotiradagini butunlay almashtiradi.
+Navbatdagi yozuv serverda hali yo'q — ya'ni foydalanuvchi
+hozirgina qo'shgan narsasi ekrandan YO'QOLIB qolardi.
+
+Shu sabab `WatchHistory._mergeLocal` va
+`FavoritesService._mergeLocal` server javobining ustiga
+`SyncQueue.pendingHistory()` / `pendingFavorites()` ni qo'yadi.
+**Bu ikkisini olib tashlamang.**
+
+### NIMA HALI HAM DARHOL KETADI
+
+| Nima | Nega |
+|---|---|
+| Kirish / ro'yxatdan o'tish | sessiyani server yaratadi |
+| Admin paneli (anime/bo'lim/qism) | kontentning o'zi, faqat admin |
+| Hisobni o'chirish | orqaga qaytmaydigan amal |
+
+### UMUMIY TRAFIK — ILOVADAN (Cloudflare Analytics OLIB TASHLANDI)
+
+Bir muddat bosh sahifadagi trafik Cloudflare'ning
+`workersInvocationsAdaptive.sum.responseBodySize` maydonidan
+olindi. Texnik jihatdan **ishladi** (`traffic_src: cloudflare`
+bilan tekshirildi), lekin raqam telefon qabul qilganidan **~10
+barobar katta** chiqdi: pleyer `Range: bytes=0-` bilan so'rab, bir
+necha megabaytdan keyin ulanishni uzadi — Cloudflare esa yo'lga
+chiqqan baytni sanaydi.
+
+Foydalanuvchi bunga "bu soxta" dedi, shu sabab **butun Cloudflare
+manbasi olib tashlandi** (`cf_traffic_sync`, `traffic_src`,
+`CF_*` sirlar). Endi yagona manba — ilova: u paket bilan bir marta
+yuboradi, `note_traffic` esa uni HAM umumiy chelaklarga, HAM
+`users_db.traffic_bytes` ga qo'shadi.
+
+**Agar kelajakda server xarajatini bilish kerak bo'lsa** — uni
+Cloudflare dashboardidan qarash kerak, ilovaga qo'shish emas.
 
 ## KUTUBXONA: YUKLANMALAR
 
@@ -1088,9 +1142,11 @@ holatga o'tadi.
 
 ### Qayerda saqlanadi
 
-**Asosiy manba — Turso.** Mahalliy nusxa FAQAT oflayn uchun
-(foydalanuvchi talabi: "to'g'ridan-to'g'ri Turso bilan ishlasin,
-iloji boricha kamroq so'rov bilan").
+**Asosiy manba — Turso, lekin YOZUV NAVBAT ORQALI.** Mahalliy
+nusxa ham oflayn uchun, ham yuborilmagan o'zgarishlarni ushlab
+turish uchun kerak: server ro'yxati kelganda uning ustiga
+`SyncQueue.pendingHistory()` qo'yiladi (`_mergeLocal`), aks holda
+hozirgina ko'rilgan qism ekrandan yo'qolib qolardi.
 
 Jadval `watch_history_db`: `user_id + anime_id + season_id +
 epizod_id` birlamchi kalit (RAQAM emas — yuqoridagi "KALIT
@@ -1114,10 +1170,15 @@ bo'lim qatorlarining O'ZI keladi, ya'ni kartochka darhol
 chiziladi va pleyer qo'shimcha so'rovsiz ochiladi). Ro'yxat
 Kutubxona tugmasi bosilganda yangilanadi va diskka yoziladi.
 
+Sevimlilar ro'yxati ham server javobining ustiga navbatni
+qo'yadi (`FavoritesService._mergeLocal`) — yurakcha bosilgan
+zahoti Kutubxonada ko'rinadi, sinxronlash kutilmaydi.
+
 Profil sahifasida rasm/balans tagida **2x2 shaxsiy statistika**:
 nechta ANIME (bo'lim emas — `anime_id` bo'yicha noyob), nechta
 qism, necha soat va qancha trafik. Bitta so'rov:
-`GET /api/me/stats`.
+`GET /api/me/stats`. Paket muvaffaqiyatli ketgach u majburiy
+yangilanadi — aks holda raqamlar bir necha soat orqada qolardi.
 
 ## ADMIN PANELIDAN "OTILIB CHIQISH"
 
@@ -1527,22 +1588,70 @@ javoblar tartibsiz kelib natijani chalkashtirardi.
 versiyalari bilan moslik uchun qoldirilgan, unga qarab hech
 qanday oyna ochilmaydi.
 
-## HISOBNI O'CHIRISH
+## HISOBNI O'CHIRISH VA HISOBDAN CHIQISH
 
-`POST /api/auth/delete-account`. Ilovada **ikki marta** so'raladi:
-ikkinchi oyna oqibatlarni ro'yxat qilib ko'rsatadi.
+Ikkalasi ham **progress chizig'i bilan** ko'rsatiladi
+(`_TaskDialog`, `profile_screen.dart`) — foydalanuvchi talabi.
 
-**TARTIB QAT'IY:** 1) B2'dagi profil rasmi → 2) sessiyalar →
-3) bir martalik tokenlar → 4) hisobning o'zi.
+### CHIQISH (`logout`)
 
-Nega aynan shunday: bazadagi yozuv B2'dagi faylga **yagona
+1. `syncBeforeLogout()` — navbat MAJBURIY yuboriladi;
+2. chiziq 100% ga yetgach: **"Hammasi saqlandi — ma'lumotlaringiz
+   sinxronlandi. Sizni ilovamizda kutib qolamiz!"**;
+3. keyin `logout()`.
+
+**Internet yo'q bo'lsa chiqish BLOKLANMAYDI.** Oyna "ma'lumotlar
+telefonda saqlanadi va keyingi kirishingizda yuboriladi" deydi va
+**Baribir chiqish / Qayta urinish / Bekor qilish** tugmalarini
+beradi. Navbat hisobning `accountid_<id>` papkasida qoladi.
+
+**Chiqishda telefonda HECH NARSA o'chmaydi** (eski qoida o'z
+kuchida): o'sha hisobga qaytilsa hammasi joyida turadi.
+
+### HISOBNI O'CHIRISH (`POST /api/auth/delete-account`)
+
+Ilovada **ikki marta** so'raladi; ikkinchi oyna oqibatlarni
+ro'yxat qilib ko'rsatadi.
+
+**TARTIB QAT'IY:** 1) B2'dagi profil rasmi → 2) hisoblagichlarni
+tuzatish → 3) qolgan hamma yozuv → 4) telefondagi nusxalar.
+
+Nega rasm birinchi: bazadagi yozuv B2'dagi faylga **yagona
 havola**. Avval hisob o'chsa va keyin fayl o'chmay qolsa, uni endi
 hech kim topa olmaydi — fayl omborda abadiy yotib, pul yeb turadi.
-
 Shu sabab rasm o'chishi **tekshiriladi** (`b2_delete_checked`):
-o'chmasa hisobga umuman tegilmaydi va 502 qaytadi — foydalanuvchi
-qaytadan urinishi mumkin. Fayl allaqachon yo'q bo'lsa, bu xato
-hisoblanmaydi.
+o'chmasa hisobga umuman tegilmaydi va 502 qaytadi.
+
+#### Nima o'chadi, nima qoladi
+
+| O'CHADI (odamning o'zi) | QOLADI (tarixiy jamlanma) |
+|---|---|
+| `users_db`, `sessions_db`, `login_tokens` | `stats_hourly` / `stats_daily` |
+| `watch_history_db` | `epizod_db.views_total`, `watch_ms_total` |
+| `favorites_db` | `season_db.views_total`, `watch_ms_total` |
+| `ratings_db` | |
+| `sync_batches` | |
+| B2'dagi avatar | |
+
+**TUZATILADI** — hozirgi holatni sanaydigan raqamlar:
+`season_db.fav_count`, `rating_sum`, `rating_count`
+(`MAX(... - ?, 0)` bilan, bo'limga bitta UPDATE).
+
+**Nega baho ham o'chadi** (foydalanuvchi topgan xato): bir odam
+hisobini 3-4 marta o'chirib, har safar yangi hisobdan baho bersa
+reyting soxtalashadi. Odamlarning 90% i hisobni o'chirmaydi —
+ilovani o'chiradi yoki shunchaki chiqib ketadi, ya'ni bu yo'l
+ataylab suiiste'mol uchun ochiq qolardi.
+
+**Navbat yuborilmaydi, tashlab yuboriladi** (`SyncQueue.wipe`):
+bir soniyadan keyin baribir o'chadigan yozuvni yozishning ma'nosi
+yo'q.
+
+#### Telefonda nima tozalanadi (`AccountData.wipeDevice`)
+
+Hisob papkasi (tomosha tarixi, sevimlilar, kadrlar, trafik
+hisobi, sozlamalar, navbat) → yuklab olingan videolar
+(`videoCacheWipe`) → posterlar keshi (`libCachedImageData`).
 
 ## QAYSI TELEGRAM BILAN KIRISH
 
@@ -1755,6 +1864,9 @@ qoladi va keyingi urinish aynan o'sha joydan davom etadi — buni
 
 ## Miqyos (yuz minglab foydalanuvchi)
 
+- **YOZUV** — hammasi `POST /api/sync` orqali, paket bo'lib
+  ("YAGONA YOZUV YO'LI" bo'limiga qarang). 100 ming faol
+  foydalanuvchida Turso xarajati ~$25/oy;
 - `ensure_db` — jadval yaratish buyruqlari izolyat umrida **bir
   marta** (avval har bir so'rovda 10 ta DDL Turso'ga ketardi);
 - ro'yxat so'rovlari (`/api/anime`, `/api/seasons/...`,

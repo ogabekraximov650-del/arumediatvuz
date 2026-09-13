@@ -9,6 +9,7 @@ import '../services/auth_service.dart';
 import '../services/format.dart';
 import '../services/net_meter.dart';
 import '../services/stats_service.dart';
+import '../services/sync_queue.dart';
 import '../services/storage_janitor.dart';
 import '../services/storage_usage.dart';
 import '../services/traffic_service.dart';
@@ -169,6 +170,15 @@ class _ProfileBody extends StatelessWidget {
   final AppUser user;
   const _ProfileBody({required this.user});
 
+  /// HISOBDAN CHIQISH — AVVAL MA'LUMOTLAR SAQLANADI.
+  ///
+  /// TALAB (foydalanuvchi): "hisobdan chiqqanda telefondagi
+  /// ma'lumotlar Turso'ga yozilsin; nima bo'layotgani va progress
+  /// chizig'i ko'rsatilsin, 100% da esa 'sinxronlandi, sizni
+  /// ilovamizda kutib qolamiz' degan xabar chiqsin".
+  ///
+  /// Internet bo'lmasa chiqish BLOKLANMAYDI: navbat hisobning
+  /// papkasida qoladi va o'sha hisobga qaytilganda yuboriladi.
   Future<void> _logout(BuildContext context) async {
     final yes = await showDialog<bool>(
       context: context,
@@ -192,7 +202,31 @@ class _ProfileBody extends StatelessWidget {
         ],
       ),
     );
-    if (yes == true) await AuthService.instance.logout();
+    if (yes != true || !context.mounted) return;
+
+    final outcome = await showDialog<TaskOutcome>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => _TaskDialog(
+        title: 'Ma\'lumotlar saqlanmoqda',
+        doneTitle: 'Hammasi saqlandi',
+        doneText: 'Ma\'lumotlaringiz sinxronlandi.\n'
+            'Sizni ilovamizda kutib qolamiz!',
+        anywayLabel: 'Baribir chiqish',
+        run: (onStep) async {
+          final r = await AuthService.instance.syncBeforeLogout(onStep: onStep);
+          return switch (r) {
+            SyncResult.done => null,
+            SyncResult.noAccount => null,
+            SyncResult.offline =>
+              'Internet yo\'q — ma\'lumotlar telefonda saqlanadi va '
+                  'keyingi kirishingizda yuboriladi.',
+          };
+        },
+      ),
+    );
+    if (outcome == TaskOutcome.cancel || outcome == null) return;
+    await AuthService.instance.logout();
   }
 
   /// HISOBNI BUTUNLAY O'CHIRISH — IKKI MARTA SO'RALADI.
@@ -261,34 +295,18 @@ class _ProfileBody extends StatelessWidget {
     );
     if (second != true || !context.mounted) return;
 
-    // O'chirish tarmoq orqali ketadi — kutish belgisi ko'rsatiladi.
-    showDialog<void>(
+    // O'chirish ham, tozalash ham progress chizig'i bilan
+    // ko'rsatiladi (foydalanuvchi talabi).
+    await showDialog<TaskOutcome>(
       context: context,
       barrierDismissible: false,
-      builder: (_) => const Center(
-        child: CircularProgressIndicator(color: Colors.white70),
-      ),
-    );
-    final err = await AuthService.instance.deleteAccount();
-    if (!context.mounted) return;
-    Navigator.of(context).pop(); // kutish oynasi
-
-    if (err != null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          behavior: SnackBarBehavior.floating,
-          backgroundColor: AppColors.card,
-          content: Text(err, style: const TextStyle(color: Colors.white)),
-        ),
-      );
-      return;
-    }
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        behavior: SnackBarBehavior.floating,
-        backgroundColor: AppColors.card,
-        content: Text('Account o\'chirildi',
-            style: TextStyle(color: Colors.white)),
+      builder: (_) => _TaskDialog(
+        title: 'Ma\'lumotlar tozalanmoqda',
+        doneTitle: 'Hisob o\'chirildi',
+        doneText: 'Barcha ma\'lumotlaringiz tozalandi.\n'
+            'Yaxshi qoling!',
+        run: (onStep) =>
+            AuthService.instance.deleteAccount(onStep: onStep),
       ),
     );
   }
@@ -494,6 +512,191 @@ class _ProfileBody extends StatelessWidget {
 
   Widget _divider() =>
       Divider(height: 1, color: Colors.white.withValues(alpha: 0.12));
+}
+
+// ══════════════════════════════════════════════════════════════
+//  JARAYON OYNASI — PROGRESS CHIZIG'I BILAN
+// ══════════════════════════════════════════════════════════════
+//
+// TALAB (foydalanuvchi): "hisobdan chiqqanda nima bo'layotgani va
+// progress chizig'i ko'rsatilsin; chiziq 100% ga yetganda
+// ma'lumotlar sinxronlangani va 'sizni ilovamizda kutib qolamiz'
+// degan xabar chiqsin. Hisobni o'chirishda ham xuddi shunday —
+// ma'lumotlar tozalanayotgani ko'rsatilsin".
+//
+// Bitta oyna ikkala holatga ham xizmat qiladi: farqi faqat
+// sarlavha, tugagandagi xabar va xato holatidagi tugmalarda.
+//
+// Oyna YOPILMAYDI (`barrierDismissible: false` va orqaga tugmasi
+// bloklangan): jarayon o'rtasida tasodifan yopilib qolmasin.
+class _TaskDialog extends StatefulWidget {
+  /// Ishlayotgan paytdagi sarlavha.
+  final String title;
+
+  /// Tugagandagi sarlavha va matn.
+  final String doneTitle;
+  final String doneText;
+
+  /// Ishning o'zi. `null` qaytarsa — muvaffaqiyat, aks holda
+  /// xato matni. `onStep` bosqich nomi va 0..1 ulushni beradi.
+  final Future<String?> Function(void Function(String, double) onStep) run;
+
+  /// Xato bo'lganda ko'rsatiladigan "baribir davom etish"
+  /// tugmasining nomi. `null` bo'lsa tugma chiqmaydi.
+  final String? anywayLabel;
+
+  const _TaskDialog({
+    required this.title,
+    required this.doneTitle,
+    required this.doneText,
+    required this.run,
+    this.anywayLabel,
+  });
+
+  @override
+  State<_TaskDialog> createState() => _TaskDialogState();
+}
+
+/// Oynadan qaytadigan javob.
+enum TaskOutcome {
+  /// Ish muvaffaqiyatli tugadi.
+  done,
+
+  /// Xato bo'ldi, lekin foydalanuvchi "baribir davom etish" dedi.
+  anyway,
+
+  /// Foydalanuvchi bekor qildi.
+  cancel,
+}
+
+class _TaskDialogState extends State<_TaskDialog> {
+  double _progress = 0;
+  String _step = '';
+  String? _error;
+  bool _busy = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _start();
+  }
+
+  Future<void> _start() async {
+    setState(() {
+      _busy = true;
+      _error = null;
+      _progress = 0;
+      _step = '';
+    });
+    final err = await widget.run((step, p) {
+      if (!mounted) return;
+      setState(() {
+        _step = step;
+        // Chiziq ORQAGA ketmaydi — bu "nimadir buzildi" degan
+        // taassurot beradi.
+        if (p > _progress) _progress = p.clamp(0.0, 1.0);
+      });
+    });
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      _error = err;
+      if (err == null) _progress = 1;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final ok = !_busy && _error == null;
+    return PopScope(
+      // Jarayon o'rtasida orqaga tugmasi ishlamaydi.
+      canPop: false,
+      child: AlertDialog(
+        backgroundColor: AppColors.card,
+        title: Text(
+          ok ? widget.doneTitle : widget.title,
+          style: const TextStyle(color: Colors.white, fontSize: 17),
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(4),
+              child: LinearProgressIndicator(
+                value: _progress,
+                minHeight: 6,
+                backgroundColor: Colors.white.withValues(alpha: 0.12),
+                valueColor: AlwaysStoppedAnimation<Color>(
+                  _error != null ? Colors.orangeAccent : AppColors.accent,
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              _error ?? (ok ? widget.doneText : _step),
+              style: TextStyle(
+                color: Colors.white.withValues(alpha: 0.75),
+                fontSize: 13,
+                height: 1.45,
+              ),
+            ),
+            if (!ok && _error == null) ...[
+              const SizedBox(height: 6),
+              Text(
+                '${(_progress * 100).round()}%',
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.45),
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ],
+        ),
+        actions: [
+          if (_busy)
+            const Padding(
+              padding: EdgeInsets.only(right: 8, bottom: 4),
+              child: SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: Colors.white38,
+                ),
+              ),
+            ),
+          if (ok)
+            TextButton(
+              onPressed: () =>
+                  Navigator.of(context).pop(TaskOutcome.done),
+              child: const Text('Yopish',
+                  style: TextStyle(color: AppColors.accent)),
+            ),
+          if (!_busy && _error != null) ...[
+            TextButton(
+              onPressed: () =>
+                  Navigator.of(context).pop(TaskOutcome.cancel),
+              child: const Text('Bekor qilish'),
+            ),
+            TextButton(
+              onPressed: _start,
+              child: const Text('Qayta urinish',
+                  style: TextStyle(color: Colors.white70)),
+            ),
+            if (widget.anywayLabel != null)
+              TextButton(
+                onPressed: () =>
+                    Navigator.of(context).pop(TaskOutcome.anyway),
+                child: Text(widget.anywayLabel!,
+                    style: const TextStyle(color: AppColors.accent)),
+              ),
+          ],
+        ],
+      ),
+    );
+  }
 }
 
 /// Qizil ("xavfli") amal tugmasi — chiqish va o'chirish uchun

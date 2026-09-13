@@ -58,10 +58,8 @@
 // hisob hech qachon manfiy bo'lmaydi va sakrab ketmaydi.
 
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:flutter/widgets.dart';
-import 'package:http/http.dart' as http;
 
 import 'auth_service.dart';
 import 'net_meter.dart';
@@ -74,9 +72,6 @@ class TrafficService extends ChangeNotifier with WidgetsBindingObserver {
 
   /// Diskdagi yozuv kaliti (Rust yadrosining ro'yxat keshi).
   static const String _key = 'traffic';
-
-  /// Hisobot oralig'i — foydalanuvchi talabi bo'yicha 24 soat.
-  static const Duration _reportEvery = Duration(hours: 24);
 
   /// Yadro hisoblagichini shuncha vaqtda bir marta o'qiymiz.
   /// Arzon chaqiruv (bitta tizim fayli), lekin tez-tez qilishning
@@ -127,7 +122,6 @@ class TrafficService extends ChangeNotifier with WidgetsBindingObserver {
 
   /// Oxirgi saqlashdagi yig'indi (qancha o'sganini bilish uchun).
   int _savedPending = 0;
-  bool _reporting = false;
 
   /// Hozircha yuborilmagan bayt (diagnostika/ekran uchun).
   int get pendingBytes => _pending;
@@ -149,7 +143,6 @@ class TrafficService extends ChangeNotifier with WidgetsBindingObserver {
 
   void _tick() {
     unawaited(_sample());
-    unawaited(maybeReport());
   }
 
   @override
@@ -162,7 +155,6 @@ class TrafficService extends ChangeNotifier with WidgetsBindingObserver {
       unawaited(_sample(save: true));
     } else if (state == AppLifecycleState.resumed) {
       unawaited(_sample());
-      unawaited(maybeReport());
     }
   }
 
@@ -237,71 +229,46 @@ class TrafficService extends ChangeNotifier with WidgetsBindingObserver {
 
   /// Vaqti kelmagan bo'lsa ham yig'indini DARHOL yuboradi.
   ///
-  /// Faqat bitta joyda ishlatiladi — hisobdan chiqishdan oldin.
-  /// Aks holda o'sha paytgacha yig'ilgan trafik tashlab
-  /// yuborilardi (chiqishda hamma narsa tozalanadi).
-  Future<void> reportNow() => maybeReport(force: true);
-
-  /// Vaqti kelgan bo'lsa yig'indini workerga yuboradi.
+  /// ── YUBORISHNI ENDI `SyncQueue` BAJARADI ──────────────────
   ///
-  /// Shart: hisobga kirilgan, yig'indi noldan katta va oxirgi
-  /// hisobotdan 24 soat o'tgan (`force` bo'lsa vaqt shart emas).
-  Future<void> maybeReport({bool force = false}) async {
-    if (_reporting) return;
-    if (_pending <= 0) return;
-    final token = AuthService.instance.sessionToken;
-    if (token == null) return;
+  /// TALAB (foydalanuvchi): "barcha yozish so'rovlari qurilmaning
+  /// o'zida qilinadi va bitta paket bo'lib yuboriladi".
+  ///
+  /// Shu sabab bu xizmat endi HECH QAYERGA murojaat qilmaydi. U
+  /// faqat sanaydi va diskka yozadi; yig'indini `SyncQueue`
+  /// paketning ichida olib ketadi va muvaffaqiyat bo'lsa shu
+  /// yerdagi `markReported` ni chaqiradi.
+  ///
+  /// Ilgari bu yerda alohida `POST /api/traffic` bor edi — endi u
+  /// yo'q, ya'ni kunlik so'rovlar sonidan yana bittasi tejaladi.
+
+  /// Paket muvaffaqiyatli ketdi: AYNAN yuborilgani ayiriladi.
+  ///
+  /// Kutish davomida qo'shilgan yangi baytlar hisobda qoladi.
+  void markReported(int sent) {
+    if (sent <= 0) return;
+    final left = _pending - sent;
+    _pending = left > 0 ? left : 0;
+    _reportedAt = DateTime.now().millisecondsSinceEpoch;
+    _uid = AuthService.instance.user?.id ?? _uid;
+    _save();
+    // Profil sahifasidagi "Trafik" darhol yangilansin.
+    notifyListeners();
+    unawaited(MyStatsService.instance.load(force: true));
+  }
+
+  /// Hisob almashgan — eski yig'indi begona odamga yozilmasin.
+  ///
+  /// `SyncQueue` paketni yuborishdan oldin chaqiradi.
+  void dropIfForeignAccount() {
     final me = AuthService.instance.user?.id ?? 0;
     if (me <= 0) return;
-    // Hisob almashgan — eski yig'indi begona odamga yozilmaydi.
     if (_uid != 0 && _uid != me) {
       _pending = 0;
-      _uid = me;
       _reportedAt = DateTime.now().millisecondsSinceEpoch;
       _save();
-      return;
     }
     _uid = me;
-    final now = DateTime.now().millisecondsSinceEpoch;
-    if (!force) {
-      // Birinchi marta: sanoq boshlangan paytdan 24 soat o'tsin.
-      if (_reportedAt == 0) {
-        _reportedAt = now;
-        _save();
-        return;
-      }
-      if (now - _reportedAt < _reportEvery.inMilliseconds) return;
-    }
-
-    _reporting = true;
-    final sending = _pending;
-    try {
-      final r = await http
-          .post(
-            Uri.parse('$kApiBase/api/traffic'),
-            headers: {
-              'Authorization': 'Bearer $token',
-              'Content-Type': 'application/json',
-            },
-            body: jsonEncode({'bytes': sending}),
-          )
-          .timeout(const Duration(seconds: 20));
-      if (r.statusCode == 200) {
-        // AYNAN yuborilgani ayiriladi: kutish davomida yangi
-        // baytlar qo'shilgan bo'lsa, ular hisobda qoladi.
-        final left = _pending - sending;
-        _pending = left > 0 ? left : 0;
-        _reportedAt = DateTime.now().millisecondsSinceEpoch;
-        _save();
-        // Profil sahifasidagi "Trafik" darhol yangilansin.
-        notifyListeners();
-        unawaited(MyStatsService.instance.load(force: true));
-      }
-    } catch (_) {
-      // Tarmoq yo'q — keyingi safar qayta urinamiz, hisob joyida.
-    } finally {
-      _reporting = false;
-    }
   }
 
   // ── Disk ─────────────────────────────────────────────────────

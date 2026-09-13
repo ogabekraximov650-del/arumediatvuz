@@ -10,20 +10,9 @@ command = "cargo install -q worker-build && worker-build --release"
 name = "aniraxuzapp"
 workers_dev = true
 
-# Cloudflare Analytics so'rovi AYNAN shu skript nomi bo'yicha
-# filtrlanadi (umumiy trafik statistikasi shundan olinadi).
-[env.production.vars]
-CF_SCRIPT_NAME = "aniraxuzapp"
-
 # Secrets (GitHub Actions orqali o'rnatiladi):
 # wrangler secret put TURSO_URL --env production
 # wrangler secret put TURSO_TOKEN --env production
 # wrangler secret put B2_KEY_ID --env production
 # wrangler secret put B2_APPLICATION_KEY --env production
 # wrangler secret put TELEGRAM_BOT_TOKEN --env production
-# wrangler secret put CF_ACCOUNT_ID --env production
-# wrangler secret put CF_ANALYTICS_TOKEN --env production
-#
-# CF_ANALYTICS_TOKEN — "Account Analytics: Read" ruxsatli API token.
-# U bo'lmasa bosh sahifadagi UMUMIY trafik yangilanmaydi (ilova
-# qolgan hamma narsada avvalgidek ishlayveradi).

@@ -39,6 +39,7 @@ import 'package:http/http.dart' as http;
 
 import 'auth_service.dart';
 import 'rust_bridge.dart';
+import 'sync_queue.dart';
 import 'video_cache_server.dart';
 import 'watch_progress.dart';
 
@@ -228,11 +229,6 @@ class WatchHistory extends ChangeNotifier {
     return 'watch_history_$id';
   }
 
-  String get _outboxKey {
-    final id = AuthService.instance.user?.id ?? 0;
-    return 'watch_history_outbox_$id';
-  }
-
   /// Ro'yxat shu muddat ichida qayta so'ralmaydi.
   static const Duration _freshFor = Duration(seconds: 60);
 
@@ -403,8 +399,8 @@ class WatchHistory extends ChangeNotifier {
     // 2) To'xtagan joydagi kadr SHU ZAHOTI yasalib diskka
     //    yoziladi — tarix oynasi oflaynda ham rasmli ochiladi.
     unawaited(_prepareThumb(row));
-    // 3) Va nihoyat serverga BITTA so'rov.
-    await _send(row);
+    // 3) Va nihoyat navbatga — serverga keyin, paket bilan ketadi.
+    SyncQueue.instance.putHistory(row);
   }
 
   // ── MAHALLIY RO'YXATNI YANGILASH ────────────────────────────
@@ -488,81 +484,18 @@ class WatchHistory extends ChangeNotifier {
   }
 
   // ── SERVER BILAN ISHLASH ────────────────────────────────────
-
-  Future<void> _send(Map<String, dynamic> row) async {
-    final token = AuthService.instance.sessionToken;
-    if (token == null) return;
-    try {
-      final r = await http
-          .post(
-            Uri.parse('$kApiBase/api/history'),
-            headers: {
-              'Authorization': 'Bearer $token',
-              'Content-Type': 'application/json',
-            },
-            body: jsonEncode(row),
-          )
-          .timeout(const Duration(seconds: 15));
-      if (r.statusCode == 200) {
-        // Ro'yxat endi eskirdi — keyingi ochilishda yangilanadi.
-        _loadedAt = null;
-        return;
-      }
-    } catch (_) {
-      // Tarmoq yo'q — pastda navbatga tushadi.
-    }
-    _queue(row);
-  }
-
-  /// Yuborilmagan yozuvni diskdagi (shifrlangan) navbatga qo'yadi.
-  void _queue(Map<String, dynamic> row) {
-    final box = RustCore.instance.getCachedList(_outboxKey) ?? [];
-    // Bir xil qism uchun ikkinchi yozuv saqlanmaydi — eng
-    // oxirgisi to'g'ri.
-    box.removeWhere((e) =>
-        e['anime_id'] == row['anime_id'] &&
-        e['season_id'] == row['season_id'] &&
-        e['epizod_id'] == row['epizod_id']);
-    box.add(row);
-    // Navbat cheksiz o'smasin.
-    final trimmed = box.length > 200 ? box.sublist(box.length - 200) : box;
-    RustCore.instance.saveListCache(_outboxKey, trimmed);
-  }
-
-  /// Navbatdagi yozuvlarni yuborishga urinadi.
-  Future<void> _drainOutbox() async {
-    final box = RustCore.instance.getCachedList(_outboxKey) ?? [];
-    if (box.isEmpty) return;
-    final token = AuthService.instance.sessionToken;
-    if (token == null) return;
-
-    final left = <Map<String, dynamic>>[];
-    for (final row in box) {
-      try {
-        final isDelete = row['_op'] == 'delete';
-        final uri = Uri.parse('$kApiBase/api/history');
-        final headers = {
-          'Authorization': 'Bearer $token',
-          'Content-Type': 'application/json',
-        };
-        final body = jsonEncode(row);
-        final r = await (isDelete
-                ? http.delete(uri, headers: headers, body: body)
-                : http.post(uri, headers: headers, body: body))
-            .timeout(const Duration(seconds: 15));
-        if (r.statusCode != 200 && r.statusCode < 500) {
-          // Server yozuvni rad etdi (masalan to'liq emas) —
-          // uni abadiy qayta yuborib o'tirmaymiz.
-          continue;
-        }
-        if (r.statusCode != 200) left.add(row);
-      } catch (_) {
-        // Tarmoq hali yo'q — qolganini keyingi safarga qoldiramiz.
-        left.add(row);
-      }
-    }
-    RustCore.instance.saveListCache(_outboxKey, left);
-  }
+  //
+  // YOZUV SERVERGA DARHOL BORMAYDI. U `SyncQueue` navbatiga
+  // tushadi va bir necha soatda bir marta, boshqa yozuvlar bilan
+  // BIRGA, bitta paket bo'lib yuboriladi.
+  //
+  // NEGA (foydalanuvchi talabi va hisob-kitob): Turso har bir
+  // yozilgan qator uchun pul oladi. Bitta qism ko'rilganda 7 ta
+  // qator yozilardi; endi paket ichida hammasi jamlanadi va
+  // kunlik so'rov 2-4 taga tushadi. Batafsil — `sync_queue.dart`.
+  //
+  // Mahalliy ro'yxat (`_applyLocal`) DARHOL yangilanadi, ya'ni
+  // ekranda hech narsa kutilmaydi.
 
   /// Tarixni yuklaydi.
   ///
@@ -596,8 +529,10 @@ class WatchHistory extends ChangeNotifier {
     notifyListeners();
 
     // Avval kutayotgan yozuvlar yuboriladi — aks holda foydalanuvchi
-    // hozirgina ko'rgan qismini ro'yxatda ko'rmasdi.
-    await _drainOutbox();
+    // hozirgina ko'rgan qismini serverdagi ro'yxatda ko'rmasdi.
+    // Shartlar bajarilmagan bo'lsa hech narsa yuborilmaydi; ekranda
+    // baribir MAHALLIY ro'yxat ko'rinadi, ya'ni yozuv yo'qolmaydi.
+    await SyncQueue.instance.maybeFlush('ochilish');
 
     final token = AuthService.instance.sessionToken;
     List<HistoryItem>? fresh;
@@ -613,9 +548,6 @@ class WatchHistory extends ChangeNotifier {
           fresh = rows
               .map((e) => HistoryItem.fromJson(e as Map<String, dynamic>))
               .toList();
-          // Oflayn uchun nusxa.
-          RustCore.instance.saveListCache(
-              _listKey, fresh.map((e) => e.toJson()).toList());
           _loadedAt = DateTime.now();
         }
       } catch (_) {
@@ -631,9 +563,13 @@ class WatchHistory extends ChangeNotifier {
     }
 
     if (fresh != null) {
+      fresh = _mergeLocal(fresh);
       fresh.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
       _items = fresh;
       _loadedForUser = userId;
+      // Oflayn uchun nusxa — navbat qo'shilgandan KEYIN, aks holda
+      // yuborilmagan yozuvlar diskdan ham yo'qolardi.
+      _saveDisk();
       // Kadrlar fon'da xotiraga ko'chiriladi — ro'yxat ochilganda
       // ular allaqachon tayyor bo'ladi.
       unawaited(_warmThumbs());
@@ -666,6 +602,40 @@ class WatchHistory extends ChangeNotifier {
     } catch (_) {
       // Nusxa o'qilmadi — ro'yxat keyin serverdan keladi.
     }
+  }
+
+  /// Server ro'yxatining ustiga YUBORILMAGAN o'zgarishlarni
+  /// qo'yadi.
+  ///
+  /// TOPILISHI MUMKIN BO'LGAN XATO: yozuvlar endi navbatda turadi
+  /// va serverda hali yo'q. Server javobini shundayligicha olsak,
+  /// foydalanuvchi hozirgina ko'rgan qismi (yoki o'chirgan yozuvi)
+  /// ro'yxat yangilangan zahoti qaytib kelardi/yo'qolardi.
+  List<HistoryItem> _mergeLocal(List<HistoryItem> server) {
+    final pend = SyncQueue.instance.pendingHistory();
+    if (pend.isEmpty) return server;
+    String keyOf(HistoryItem e) => '${e.animeId}:${e.seasonId}:${e.epizodId}';
+    HistoryItem? localOf(String k) {
+      for (final e in _items) {
+        if (keyOf(e) == k) return e;
+      }
+      return null;
+    }
+
+    final out = <HistoryItem>[];
+    for (final e in server) {
+      final op = pend[keyOf(e)];
+      if (op == true) continue; // yashirilgan
+      out.add(op == false ? (localOf(keyOf(e)) ?? e) : e);
+    }
+    // Serverda hali umuman yo'q, faqat telefonda turgan yozuvlar.
+    pend.forEach((k, hidden) {
+      if (hidden) return;
+      if (out.any((e) => keyOf(e) == k)) return;
+      final local = localOf(k);
+      if (local != null) out.add(local);
+    });
+    return out;
   }
 
   /// Diskdagi qatorlardan ro'yxat yasaydi.
@@ -731,33 +701,10 @@ class WatchHistory extends ChangeNotifier {
 
     _dropThumb(item);
 
-    final row = <String, dynamic>{
-      '_op': 'delete',
-      'anime_id': item.animeId,
-      'season_id': item.seasonId,
-      'epizod_id': item.epizodId,
-    };
-    final token = AuthService.instance.sessionToken;
-    if (token == null) return;
-    try {
-      final r = await http
-          .delete(
-            Uri.parse('$kApiBase/api/history'),
-            headers: {
-              'Authorization': 'Bearer $token',
-              'Content-Type': 'application/json',
-            },
-            body: jsonEncode(row),
-          )
-          .timeout(const Duration(seconds: 15));
-      if (r.statusCode == 200) {
-        _loadedAt = null;
-        return;
-      }
-    } catch (_) {
-      // Tarmoq yo'q — pastda navbatga tushadi.
-    }
-    _queue(row);
+    // Serverda yozuv O'CHIRILMAYDI, faqat yashiriladi — qism
+    // keyin qayta ko'rilsa yana ro'yxatga chiqadi.
+    SyncQueue.instance
+        .hideHistory(item.animeId, item.seasonId, item.epizodId);
   }
 
   /// Hisobdan chiqilganda tarix ham tozalanadi.
