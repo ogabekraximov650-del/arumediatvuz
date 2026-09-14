@@ -413,15 +413,15 @@ class _ProfileBody extends StatelessWidget {
                             const SizedBox(height: 8),
                             // ID cho'zinchoq aylana ichida — uning
                             // ISTALGAN joyiga bosilsa nusxalanadi.
-                            // PREMIUM belgisi ham shu qatorda: bu
-                            // yer bo'sh va ismga xalaqit bermaydi.
-                            Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Flexible(child: _IdPill(id: user.id)),
-                                const _PremiumBadge(),
-                              ],
-                            ),
+                            //
+                            // TOPILGAN XATO (foydalanuvchi:
+                            // "premium belgisi rasm ustiga qo'y,
+                            // ID ko'rinmayapti"). Belgi shu
+                            // qatorda turardi va uzun ID raqamini
+                            // bosib qo'yardi. Endi u PROFIL RASMI
+                            // ustida (`_Avatar`), ya'ni hech
+                            // qanday yozuvga tegmaydi.
+                            _IdPill(id: user.id),
                             const SizedBox(height: 6),
                             Text('Balans: ${user.balance}',
                                 style: TextStyle(
@@ -785,7 +785,10 @@ class _TaskDialogState extends State<_TaskDialog> {
 // Manba — `BillingService`: u serverdan kelgan obuna tugash
 // vaqtini saqlaydi, ya'ni belgi ilovada "o'ylab topilmaydi".
 class _PremiumBadge extends StatefulWidget {
-  const _PremiumBadge();
+  /// Rasm ustida turadigan kichraytirilgan ko'rinish.
+  final bool compact;
+
+  const _PremiumBadge({this.compact = false});
 
   @override
   State<_PremiumBadge> createState() => _PremiumBadgeState();
@@ -809,13 +812,14 @@ class _PremiumBadgeState extends State<_PremiumBadge> {
         if (!BillingService.instance.active) {
           return const SizedBox.shrink();
         }
+        final c = widget.compact;
         return Padding(
-          padding: const EdgeInsets.only(left: 7),
+          padding: EdgeInsets.only(left: c ? 0 : 7),
           child: Tooltip(
             message: 'Obuna: ${formatLeft(BillingService.instance.left)}',
             child: Container(
-              padding: const EdgeInsets.symmetric(
-                  horizontal: 8, vertical: 3),
+              padding: EdgeInsets.symmetric(
+                  horizontal: c ? 6 : 8, vertical: c ? 2.5 : 3),
               decoration: BoxDecoration(
                 gradient: const LinearGradient(
                   colors: [Color(0xFFFFC93C), Color(0xFFFF8A3D)],
@@ -831,19 +835,19 @@ class _PremiumBadgeState extends State<_PremiumBadge> {
                   ),
                 ],
               ),
-              child: const Row(
+              child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Icon(Icons.workspace_premium_rounded,
-                      size: 13, color: Color(0xFF2A1800)),
-                  SizedBox(width: 3),
+                      size: c ? 11 : 13, color: const Color(0xFF2A1800)),
+                  SizedBox(width: c ? 2 : 3),
                   Text(
                     'PREMIUM',
                     style: TextStyle(
-                      color: Color(0xFF2A1800),
-                      fontSize: 9.5,
+                      color: const Color(0xFF2A1800),
+                      fontSize: c ? 8 : 9.5,
                       fontWeight: FontWeight.w900,
-                      letterSpacing: 0.4,
+                      letterSpacing: c ? 0.2 : 0.4,
                     ),
                   ),
                 ],
@@ -1609,6 +1613,20 @@ class _AvatarState extends State<_Avatar> {
                   ),
                 ),
               ),
+            // ── PREMIUM BELGISI RASM USTIDA ──────────────────
+            //
+            // TALAB (foydalanuvchi): "premium belgisi rasm ustiga
+            // qo'y, ID ko'rinmayapti".
+            //
+            // Yuqori o'rtada: pastki o'ng burchakda rasm
+            // almashtirish tugmasi turibdi, ikkovi to'qnashmasin.
+            // Obuna yo'q bo'lsa belgi umuman chizilmaydi.
+            const Positioned(
+              left: 0,
+              right: 0,
+              top: 3,
+              child: Center(child: _PremiumBadge(compact: true)),
+            ),
             // "Bosish mumkin" ekanini ko'rsatuvchi kichik belgi.
             Positioned(
               right: 0,

@@ -298,6 +298,27 @@ class ChatController extends ChangeNotifier {
     return null;
   }
 
+  /// ADMIN: TANLANGAN xabarlarni birdaniga o'chiradi.
+  ///
+  /// TALAB (foydalanuvchi): "xabarni bittalab emas, ustiga bosib
+  /// turadi — xabar tanlandi, keyin qolganlarini qo'lda tanlab
+  /// o'chirsa bo'ladigan qil; va hammasini bittada tanlab
+  /// o'chiradigan tugma qo'sh".
+  ///
+  /// Hammasi BITTA so'rovda ketadi: 200 ta xabar uchun 200 ta
+  /// so'rov yuborish sekin bo'lardi va yarmida uzilib qolsa
+  /// yozishma yarim o'chgan holatda qolardi.
+  Future<String?> removeMessages(Iterable<String> ids) async {
+    final list = ids.toList();
+    if (list.isEmpty) return null;
+    final err = await deleteChatMessages(list);
+    if (err != null) return err;
+    final gone = list.toSet();
+    _items.removeWhere((m) => gone.contains(m.id));
+    notifyListeners();
+    return null;
+  }
+
   /// Xabar yuboradi. Xato bo'lsa matn qaytadi.
   ///
   /// `mediaFile` — B2'ga allaqachon yuklangan faylning NOMI,
@@ -349,6 +370,27 @@ Future<String?> deleteChatMessage(String id) async {
     final r = await http
         .delete(Uri.parse('$_base/message/$id'), headers: _headers())
         .timeout(const Duration(seconds: 20));
+    if (r.statusCode != 200) {
+      final j = jsonDecode(r.body) as Map<String, dynamic>;
+      return '${j['error'] ?? 'O\'chirilmadi'}';
+    }
+    return null;
+  } catch (_) {
+    return 'Internet yo\'q';
+  }
+}
+
+/// ADMIN: bir nechta xabarni BITTA so'rovda o'chiradi.
+Future<String?> deleteChatMessages(List<String> ids) async {
+  if (ids.isEmpty) return null;
+  try {
+    final r = await http
+        .post(
+          Uri.parse('$_base/messages/delete'),
+          headers: _headers(json: true),
+          body: jsonEncode({'ids': ids}),
+        )
+        .timeout(const Duration(seconds: 25));
     if (r.statusCode != 200) {
       final j = jsonDecode(r.body) as Map<String, dynamic>;
       return '${j['error'] ?? 'O\'chirilmadi'}';

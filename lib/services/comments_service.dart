@@ -144,7 +144,7 @@ class CommentsController extends ChangeNotifier {
 
   /// Nechta izoh bor (javoblar bilan) — tab sarlavhasi uchun.
   int get total {
-    var n = _items.where((c) => !c.deleted).length;
+    var n = _items.length;
     for (final c in _items) {
       n += c.replyCount;
     }
@@ -182,10 +182,21 @@ class CommentsController extends ChangeNotifier {
     if (rows == null) return;
     _items
       ..clear()
-      ..addAll(rows.map(Comment.fromJson));
+      ..addAll(rows.where(_alive).map(Comment.fromJson));
     _loaded = true;
     notifyListeners();
   }
+
+  /// O'chirilgan izoh ro'yxatga UMUMAN tushmaydi.
+  ///
+  /// TALAB (foydalanuvchi): "izoh o'chirilgan bo'lsa ham profil
+  /// va bitta javob ko'rsatilyapti, men esa butunlay o'chirib
+  /// tashlansin degandim".
+  ///
+  /// Server endi qatorni haqiqatan o'chiradi, lekin DISKDA eski
+  /// nusxa qolgan bo'lishi mumkin — shu sabab bu yerda ham
+  /// tekshiriladi.
+  static bool _alive(Map<String, dynamic> j) => j['deleted'] != true;
 
   Future<void> load({bool force = false}) async {
     if (_loading) return;
@@ -204,7 +215,7 @@ class CommentsController extends ChangeNotifier {
             .cast<Map<String, dynamic>>();
         _items
           ..clear()
-          ..addAll(rows.map(Comment.fromJson));
+          ..addAll(rows.where(_alive).map(Comment.fromJson));
         _page = 0;
         _hasMore = j['has_more'] == true;
         _loaded = true;
@@ -276,7 +287,9 @@ class CommentsController extends ChangeNotifier {
   }
 
   List<Comment> _parse(dynamic raw) => ((raw as List?) ?? [])
-      .map((e) => Comment.fromJson(e as Map<String, dynamic>))
+      .cast<Map<String, dynamic>>()
+      .where(_alive)
+      .map(Comment.fromJson)
       .toList();
 
   // ── YOZISH ────────────────────────────────────────────────

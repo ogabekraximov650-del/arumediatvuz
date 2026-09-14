@@ -1214,6 +1214,93 @@ async fn b2_fetch_range(env: &Env, file_name: &str, start: u64, end: u64) -> Res
     Ok((b2_resp, total))
 }
 
+/// ── YOZISHMADAGI RASM/VIDEO UCHUN ALOHIDA YO'L ───────────────
+///
+/// TOPILGAN XATO (foydalanuvchi: "adminga yuborilgan video
+/// ochilmayapti").
+///
+/// SABAB. ExoPlayer video ochganda `Range: bytes=0-` deb
+/// so'raydi va javobda E'LON QILINGAN uzunlikni FAYLNING
+/// QOLGAN QISMI deb biladi. `/api/image/...` yo'li esa bir
+/// so'rovda eng ko'pi 8 MiB beradi (B2'dan olinadigan bo'lak
+/// worker xotirasiga yig'ilgani uchun chegara ataylab kichik).
+///
+/// Ya'ni pleyer 20 MB'lik videoni 8 MB deb o'ylardi. MP4'ning
+/// ichki ko'rsatkichlari (`moov`) esa telefonda yozilgan
+/// videolarda FAYL OXIRIDA turadi — pleyer ularga yetib
+/// bormay, "ochib bo'lmadi" deb xato berardi. 8 MB'dan kichik
+/// video esa ochilaverardi, shuning uchun xato bir qarashda
+/// tushunarsiz edi.
+///
+/// YECHIM. Yozishmadagi fayl SHU yo'ldan beriladi va oraliq
+/// HECH QACHON qisqartirilmaydi. Baytlar oqim bilan o'tadi
+/// (`fixed_length_stream`), ya'ni fayl qanchalik katta
+/// bo'lmasin worker xotirasiga yig'ilmaydi.
+///
+/// NEGA `/api/play/...` EMAS: u faqat OLDINDAN keshga
+/// isitilgan oynadan beradi (isitilmagan bo'lsa 503). U yo'l
+/// anime qismlari uchun — ular katta va qayta-qayta
+/// ko'riladi. Yozishmadagi qisqa video uchun isitish ortiqcha.
+///
+/// NEGA KESHLANMAYDI: bitta videoni odatda ikki kishi (admin
+/// va muallif) bir-ikki marta ochadi. Kesh yozuvi bundan
+/// tejamaydi, faqat joy egallaydi.
+async fn b2_media(env: &Env, file_name: &str, range: Option<String>) -> Result<Response> {
+    let Some((start, end_opt)) = range.as_deref().and_then(parse_range) else {
+        return b2_proxy_full(env, file_name).await;
+    };
+
+    let end = match end_opt {
+        Some(e) => e,
+        // Oxiri berilmagan va boshi 0 — bu "butun faylni ber"
+        // degani, ya'ni Range'siz so'rov bilan bir xil.
+        None if start == 0 => return b2_proxy_full(env, file_name).await,
+        // Oxiri berilmagan, lekin o'rtadan so'ralgan (seek).
+        // Faylning hajmini bilish uchun BITTA bayt so'raymiz —
+        // javobning `Content-Range`i hajmni aytadi.
+        None => {
+            let (_probe, total) = b2_fetch_range(env, file_name, 0, 0).await?;
+            if total == 0 {
+                return b2_proxy_full(env, file_name).await;
+            }
+            total - 1
+        }
+    };
+    if end < start {
+        return b2_proxy_full(env, file_name).await;
+    }
+
+    let (mut b2, total) = b2_fetch_range(env, file_name, start, end).await?;
+    let ct = b2
+        .headers()
+        .get("Content-Type")?
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    let len = end - start + 1;
+    let total_str = if total > 0 {
+        total.to_string()
+    } else {
+        (end + 1).to_string()
+    };
+
+    let mut resp = match b2.body() {
+        ResponseBody::Stream(rs) => {
+            let readable = fixed_length_stream(&rs.clone(), len)?;
+            Response::from_body(ResponseBody::Stream(readable))?.with_status(206)
+        }
+        _ => Response::from_stream(b2.stream()?)?.with_status(206),
+    };
+    set_cors(&mut resp);
+    {
+        let h = resp.headers_mut();
+        h.set("Content-Type", &ct)?;
+        h.set("Accept-Ranges", "bytes")?;
+        h.set("Cache-Control", "public, max-age=86400")?;
+        h.set("Content-Length", &len.to_string())?;
+        h.set("Content-Range", &format!("bytes {start}-{end}/{total_str}"))?;
+    }
+    Ok(resp)
+}
+
 fn cache_key_url(file_name: &str, suffix: &str) -> String {
     format!("https://fulutter-chunk-cache.internal/{file_name}/{suffix}")
 }
@@ -4533,20 +4620,11 @@ const COMMENT_SELECT: &str =
        FROM comments_db c
        LEFT JOIN users_db u ON u.id = c.user_id
       WHERE c.anime_id = ? AND c.season_id = ? AND c.parent_id = ?
-        -- ── O'CHIRILGAN IZOH QACHON KO'RINADI ──────────────
-        --
-        -- TOPILGAN XATO: o'chirilgan izoh ham bitta javob deb
-        -- sanalib turardi.
-        --
-        -- O'chirilgan JAVOB umuman ko'rsatilmaydi — u hech
-        -- narsani ushlab turmaydi.
-        --
-        -- O'chirilgan BOSH izoh esa javoblari bo'lsagina
-        -- (o'rniga izoh o'chirilgani yozilib) qoladi: aks holda
-        -- ostidagi javoblar yetim qolib, suhbat uzilib
-        -- ko'rinardi. Javobi yo'q bo'lsa u ham yo'qoladi.
-        AND (c.deleted = 0
-             OR (c.parent_id = '' AND c.reply_count > 0))
+        -- O'chirilgan izoh bazada UMUMAN qolmaydi
+        -- (comments_delete izohiga qarang). Bu shart faqat eski
+        -- yozuvlar uchun: bir marta belgilangan-u o'chirilmagan
+        -- qatorlar ham endi ko'rinmasin.
+        AND c.deleted = 0
       ORDER BY c.created_at DESC
       LIMIT ? OFFSET ?";
 
@@ -4750,31 +4828,55 @@ async fn comments_delete(req: &Request, env: &Env, id: &str) -> Result<Response>
     };
     let me = u["id"].as_i64().unwrap_or(0);
 
-    // Qator O'CHIRILMAYDI — belgilanadi. Sabab: bosh izohning
-    // javoblari joyida qolishi kerak (yuqoridagi izohga qarang).
+    // ── IZOH BUTUNLAY O'CHIRILADI ────────────────────────────
     //
-    // `parent_id` ham qaytariladi: javob o'chirilgan bo'lsa bosh
-    // izohning "N ta javob" hisobi kamayishi kerak.
+    // TOPILGAN XATO (foydalanuvchi: izoh o'chirilgan bo'lsa ham
+    // profili va bitta javobi ko'rsatilib turibdi, men esa
+    // butunlay o'chirib tashlansin degandim).
+    //
+    // Ilgari qator o'chirilmasdan BELGILANARDI (deleted=1) va
+    // javoblari bo'lsa ro'yxatda muallifning ismi va rasmi bilan
+    // turaverardi.
+    //
+    // Endi qator HAQIQATAN o'chiriladi. Bosh izoh o'chirilsa
+    // uning JAVOBLARI ham o'chadi: ular o'chgan izohga tegishli
+    // edi, yolg'iz qolsa suhbat ma'nosini yo'qotadi.
+    //
+    // Layklar ham o'chiriladi — aks holda comment_likes jadvalida
+    // hech qachon o'qilmaydigan qatorlar yig'ilib borardi.
+    //
+    // Tartib MUHIM: avval EGALIK tekshiriladi (user_id=?), shu
+    // o'tgandan keyingina qolgani o'chiriladi.
     let res = turso_exec(env,
-        "UPDATE comments_db SET deleted=1, body=''
-          WHERE id=? AND user_id=? AND deleted=0
+        "DELETE FROM comments_db
+          WHERE id=? AND user_id=?
           RETURNING id, parent_id",
         vec![TursoArg::text(id), TursoArg::int(me)]).await?;
     let Some(row) = first_row(&res) else {
         return json_resp(&json!({"error": "Izoh topilmadi"}), 404);
     };
 
-    // ── JAVOB O'CHDI — HISOB KAMAYADI ────────────────────────
-    //
-    // TOPILGAN XATO: o'chirilgan javob ham "1 ta javob" bo'lib
-    // sanalar va ro'yxatda "Izoh o'chirilgan" bo'lib turardi.
     let parent = row["parent_id"].as_str().unwrap_or("").to_string();
+
+    let mut cleanup: Vec<(&str, Vec<TursoArg>)> = vec![
+        // Javoblarning layklari — javoblarning O'ZIDAN oldin.
+        ("DELETE FROM comment_likes
+           WHERE comment_id IN (SELECT id FROM comments_db WHERE parent_id=?)",
+         vec![TursoArg::text(id)]),
+        // Javoblarning o'zi.
+        ("DELETE FROM comments_db WHERE parent_id=?", vec![TursoArg::text(id)]),
+        // O'chirilgan izohning layklari.
+        ("DELETE FROM comment_likes WHERE comment_id=?", vec![TursoArg::text(id)]),
+    ];
+    // ── JAVOB O'CHDI — BOSH IZOHNING HISOBI KAMAYADI ─────────
     if !parent.is_empty() {
-        let _ = turso_exec(env,
-            "UPDATE comments_db SET reply_count=MAX(reply_count-1,0)
-              WHERE id=?",
-            vec![TursoArg::text(&parent)]).await;
+        cleanup.push((
+            "UPDATE comments_db SET reply_count=MAX(reply_count-1,0) WHERE id=?",
+            vec![TursoArg::text(&parent)],
+        ));
     }
+    let _ = turso_batch(env, &cleanup).await;
+
     ok_nostore(json!({"ok": true, "parent_id": parent}))
 }
 
@@ -4819,7 +4921,7 @@ fn chat_msg_public(origin: &str, r: &Value) -> Value {
         "media_url": if file.is_empty() {
             String::new()
         } else {
-            format!("{origin}/api/image/{file}")
+            format!("{origin}/api/media/{file}")
         },
         "media_type": r["media_type"].as_str().unwrap_or(""),
         "created_at": r["created_at"].as_i64().unwrap_or(0),
@@ -4999,7 +5101,7 @@ async fn chat_send(mut req: Request, env: &Env, origin: &str) -> Result<Response
         "from_admin": from_admin,
         "body": body,
         "media_url": if has_media {
-            format!("{origin}/api/image/{media_file}")
+            format!("{origin}/api/media/{media_file}")
         } else {
             String::new()
         },
@@ -5100,6 +5202,74 @@ async fn chat_del_message(req: &Request, env: &Env, id: &str) -> Result<Response
     // o'zi ham olib tashlanadi.
     refresh_thread(env, owner).await;
     ok_nostore(json!({"ok": true}))
+}
+
+/// POST /api/chat/messages/delete — BIR NECHTA xabarni birdaniga.
+///
+/// TALAB (foydalanuvchi): "xabarni bittalab emas, ustiga bosib
+/// turadi — xabar tanlandi, keyin qolganlarini qo'lda tanlab
+/// o'chirsa bo'ladigan qil; va hammasini bittada tanlab
+/// o'chiradigan tugma qo'sh".
+///
+/// NEGA ALOHIDA YO'L: 200 ta xabar tanlansa, har biri uchun
+/// alohida so'rov yuborish 200 ta so'rov degani — bu sekin va
+/// yarmida uzilib qolsa yozishma yarim o'chgan holatda qolardi.
+/// Bu yerda esa hammasi BITTA so'rovda va BITTA paketda
+/// o'chiriladi.
+///
+/// FAQAT ADMIN — foydalanuvchi o'z xabarini ham o'chira olmaydi
+/// (foydalanuvchi talabi).
+async fn chat_del_many(mut req: Request, env: &Env) -> Result<Response> {
+    let Some(u) = session_user(env, &bearer(&req)).await? else {
+        return json_resp(&json!({"error": "unauthorized"}), 401);
+    };
+    if !is_admin(&u) {
+        return json_resp(&json!({"error": "forbidden"}), 403);
+    }
+    let b: Value = req.json().await.unwrap_or(json!({}));
+    let ids: Vec<String> = b["ids"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .take(CHAT_LIMIT as usize)
+                .collect()
+        })
+        .unwrap_or_default();
+    if ids.is_empty() {
+        return json_resp(&json!({"error": "Hech narsa tanlanmadi"}), 400);
+    }
+
+    // `IN (?,?,...)` — o'rin egalari soni ro'yxat uzunligicha.
+    let holes = vec!["?"; ids.len()].join(",");
+    let args: Vec<TursoArg> = ids.iter().map(|i| TursoArg::text(i)).collect();
+
+    // Qaysi suhbatlarga tegdi — o'chirishdan OLDIN bilib olamiz,
+    // keyin ularning oxirgi xabari qayta hisoblanadi.
+    let owners_res = turso_exec(env,
+        &format!("SELECT DISTINCT user_id FROM chat_messages WHERE id IN ({holes})"),
+        args.clone()).await?;
+    let owners: Vec<i64> = owners_res["rows"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|r| r.as_array())
+                .filter_map(|r| r.first())
+                .filter_map(|c| c["value"].as_str().and_then(|v| v.parse::<i64>().ok()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    turso_exec(env,
+        &format!("DELETE FROM chat_messages WHERE id IN ({holes})"),
+        args).await?;
+
+    for o in owners {
+        refresh_thread(env, o).await;
+    }
+    ok_nostore(json!({"ok": true, "count": ids.len()}))
 }
 
 /// DELETE /api/chat/thread/:user_id — butun yozishma.
@@ -6423,6 +6593,11 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
             // endi ilovaning o'zi sanaydi (`note_traffic` izohi).
             return b2_proxy(&env, &ctx, fname, range_header).await;
         }
+        // Yozishmadagi rasm/video — oraliq qisqartirilmaydi
+        // (`b2_media` izohiga qarang).
+        if let Some(fname) = path.strip_prefix("/api/media/") {
+            return b2_media(&env, fname, range_header).await;
+        }
         // Pleyer SHU manzildan oqim oladi (b2_play izohiga qarang).
         // Farqi: javob hech qachon sun'iy kesilmaydi va bo'laklab
         // keshlash mantiqi umuman ishlatilmaydi — ya'ni pleyer
@@ -6498,6 +6673,9 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
     }
     if path == "/api/chat/threads" && method == Method::Get {
         return chat_threads(&req, &env, &origin).await;
+    }
+    if path == "/api/chat/messages/delete" && method == Method::Post {
+        return chat_del_many(req, &env).await;
     }
     if let Some(idv) = path.strip_prefix("/api/chat/thread/") {
         if let Ok(uid) = idv.parse::<i64>() {

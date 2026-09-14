@@ -110,7 +110,12 @@ class NetMeter {
   /// tushmaydi — uni Rust yadrosi oladi va o'z hisoblagichi bor.
   static String kindOfUrl(Uri url) {
     final path = url.path;
-    if (path.contains('/api/image/') || path.contains('/api/avatar/')) {
+    // `/api/media/` — yozishmadagi rasm/video (`b2_media` izohiga
+    // qarang). U ham rasm hisoblanadi, aks holda chatga yuborilgan
+    // rasm statistikada "Ma'lumotlar" bo'lib chiqardi.
+    if (path.contains('/api/image/') ||
+        path.contains('/api/media/') ||
+        path.contains('/api/avatar/')) {
       return TrafficKind.image;
     }
     return TrafficKind.api;

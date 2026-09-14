@@ -70,6 +70,21 @@ class _SupportChatScreenState extends State<SupportChatScreen> {
   bool _uploading = false;
   double _upProgress = 0;
 
+  // ── TANLASH REJIMI ────────────────────────────────────────
+  //
+  // TALAB (foydalanuvchi): "xabarni bittalab emas — ustiga bosib
+  // turadi, xabar tanlandi, keyin qolganlarini qo'lda tanlab
+  // o'chirsa bo'ladigan qil; va hammasini bittada tanlab
+  // o'chiradigan tugma qo'sh. Chiqindi tugmasi o'ng yuqori
+  // qismida bo'lsin. Va faqatgina admin o'chirishi mumkin
+  // bo'lsin, foydalanuvchi o'chira olmasin".
+  //
+  // Bitta xabar uzoq bosilishi bilan rejim ochiladi; shundan
+  // keyin oddiy bosish tanlaydi/tanlovni oladi. Ro'yxat bo'shashi
+  // bilan rejim o'zi yopiladi.
+  final Set<String> _selected = {};
+  bool get _selecting => _selected.isNotEmpty;
+
   @override
   void initState() {
     super.initState();
@@ -227,9 +242,44 @@ class _SupportChatScreenState extends State<SupportChatScreen> {
     );
   }
 
-  /// ADMIN: xabarni butunlay o'chiradi (uzoq bosilganda).
-  Future<void> _deleteMessage(ChatMessage m) async {
+  /// Xabarni tanlaydi yoki tanlovdan chiqaradi.
+  ///
+  /// FAQAT ADMIN: foydalanuvchida tanlash umuman ochilmaydi.
+  /// (Server ham shunday: o'chirish so'rovi admin bo'lmasa 403
+  /// qaytaradi — ya'ni o'zgartirilgan ilova ham o'chira olmaydi.)
+  void _toggleSelect(ChatMessage m) {
     if (!_isAdmin) return;
+    setState(() {
+      if (!_selected.remove(m.id)) _selected.add(m.id);
+    });
+  }
+
+  void _clearSelection() => setState(_selected.clear);
+
+  void _selectAll() => setState(() {
+        _selected
+          ..clear()
+          ..addAll(_chat.items.map((m) => m.id));
+      });
+
+  /// ADMIN: TANLANGAN xabarlarni butunlay o'chiradi.
+  Future<void> _deleteSelected() async {
+    if (!_isAdmin || _selected.isEmpty) return;
+    final n = _selected.length;
+    final ok = await _confirm(n == 1
+        ? 'Xabar butunlay o\'chirilsinmi?'
+        : '$n ta xabar butunlay o\'chirilsinmi?');
+    if (ok != true) return;
+    final ids = _selected.toList();
+    final err = await _chat.removeMessages(ids);
+    if (!mounted) return;
+    _clearSelection();
+    if (err != null) _snack(err);
+  }
+
+  /// Ha/Yo'q so'raydigan oyna.
+  Future<bool?> _confirm(String text) async {
+    if (!_isAdmin) return false;
     final ok = await showDialog<bool>(
       context: context,
       barrierColor: Colors.black54,
@@ -242,11 +292,11 @@ class _SupportChatScreenState extends State<SupportChatScreen> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Text(
-                'Xabar butunlay o\'chirilsinmi?',
+              Text(
+                text,
                 textAlign: TextAlign.center,
-                style:
-                    TextStyle(color: Colors.white, fontSize: 15, height: 1.4),
+                style: const TextStyle(
+                    color: Colors.white, fontSize: 15, height: 1.4),
               ),
               const SizedBox(height: 18),
               Row(
@@ -273,9 +323,7 @@ class _SupportChatScreenState extends State<SupportChatScreen> {
         ),
       ),
     );
-    if (ok != true) return;
-    final err = await _chat.removeMessage(m.id);
-    if (err != null) _snack(err);
+    return ok;
   }
 
   Future<void> _send() async {
@@ -298,9 +346,78 @@ class _SupportChatScreenState extends State<SupportChatScreen> {
   @override
   Widget build(BuildContext context) {
     return AppBackground(
-      child: Scaffold(
+      child: PopScope(
+        // Tanlash rejimi ochiq bo'lsa "orqaga" avval TANLOVNI
+        // bekor qiladi — ekran yopilib ketmaydi.
+        canPop: !_selecting,
+        onPopInvokedWithResult: (didPop, _) {
+          if (!didPop && _selecting) _clearSelection();
+        },
+        child: Scaffold(
         backgroundColor: Colors.transparent,
-        appBar: AppBar(
+        appBar: _selecting ? _selectionBar() : _normalBar(),
+        body: SafeArea(
+          top: false,
+          child: Column(
+            children: [
+              Expanded(
+                child: AnimatedBuilder(
+                  animation: _chat,
+                  builder: (context, _) => _body(),
+                ),
+              ),
+              _composer(),
+            ],
+          ),
+        ),
+      ),
+      ),
+    );
+  }
+
+  /// ── TANLASH PANELI ──────────────────────────────────────
+  ///
+  /// Chapda — tanlovni bekor qilish, o'rtada nechtasi
+  /// tanlangani, O'NG YUQORIDA esa chiqindi tugmasi
+  /// (foydalanuvchi talabi). Yonida "hammasini tanlash".
+  PreferredSizeWidget _selectionBar() {
+    final all = _chat.items.isNotEmpty &&
+        _selected.length >= _chat.items.length;
+    return AppBar(
+      backgroundColor: Colors.transparent,
+      elevation: 0,
+      iconTheme: const IconThemeData(color: Colors.white),
+      titleSpacing: 0,
+      leading: IconButton(
+        icon: const Icon(Icons.close_rounded, color: Colors.white),
+        onPressed: _clearSelection,
+      ),
+      title: Text(
+        '${_selected.length} ta tanlandi',
+        style: const TextStyle(color: Colors.white, fontSize: 17),
+      ),
+      actions: [
+        IconButton(
+          tooltip: all ? 'Tanlovni olish' : 'Hammasini tanlash',
+          icon: Icon(
+            all ? Icons.deselect_rounded : Icons.select_all_rounded,
+            color: Colors.white,
+          ),
+          onPressed: all ? _clearSelection : _selectAll,
+        ),
+        IconButton(
+          tooltip: 'O\'chirish',
+          icon: const Icon(Icons.delete_outline_rounded),
+          color: Colors.red.shade400,
+          onPressed: _deleteSelected,
+        ),
+        const SizedBox(width: 4),
+      ],
+    );
+  }
+
+  PreferredSizeWidget _normalBar() {
+    return AppBar(
           backgroundColor: Colors.transparent,
           elevation: 0,
           iconTheme: const IconThemeData(color: Colors.white),
@@ -335,23 +452,7 @@ class _SupportChatScreenState extends State<SupportChatScreen> {
               ),
             ],
           ),
-        ),
-        body: SafeArea(
-          top: false,
-          child: Column(
-            children: [
-              Expanded(
-                child: AnimatedBuilder(
-                  animation: _chat,
-                  builder: (context, _) => _body(),
-                ),
-              ),
-              _composer(),
-            ],
-          ),
-        ),
-      ),
-    );
+        );
   }
 
   Widget _body() {
@@ -434,8 +535,12 @@ class _SupportChatScreenState extends State<SupportChatScreen> {
                           PublicProfileScreen(userId: widget.userId!),
                     ),
                   ),
-          // Admin istalgan xabarni uzoq bosib o'chira oladi.
-          onLongPress: _isAdmin ? () => _deleteMessage(m) : null,
+          // Admin uzoq bosib TANLAYDI, keyin qolganlarini oddiy
+          // bosib qo'shadi. Foydalanuvchida ikkovi ham ishlamaydi.
+          onLongPress: _isAdmin ? () => _toggleSelect(m) : null,
+          onTap: _selecting ? () => _toggleSelect(m) : null,
+          selected: _selected.contains(m.id),
+          selecting: _selecting,
           onOpenMedia: () => Navigator.of(context).push(
             MaterialPageRoute<void>(
               builder: (_) => MediaViewScreen(
@@ -473,17 +578,6 @@ class _SupportChatScreenState extends State<SupportChatScreen> {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
-          // ── RASM / VIDEO BIRIKTIRISH ────────────────────────
-          //
-          // Yuklash ketayotganda tugma o'rnida AYLANA progress va
-          // uning ichida foiz turadi (foydalanuvchi talabi).
-          _AttachButton(
-            uploading: _uploading,
-            progress: _upProgress,
-            onImage: () => _pickAndSend(video: false),
-            onVideo: () => _pickAndSend(video: true),
-          ),
-          const SizedBox(width: 6),
           Expanded(
             child: Container(
               decoration: BoxDecoration(
@@ -513,7 +607,21 @@ class _SupportChatScreenState extends State<SupportChatScreen> {
               ),
             ),
           ),
-          const SizedBox(width: 8),
+          // ── RASM / VIDEO BIRIKTIRISH ────────────────────────
+          //
+          // TALAB (foydalanuvchi): "fayl yuklash tugmasi yozish
+          // joyi va yuborish tugmasining ORASIDA bo'lsin".
+          //
+          // Yuklash ketayotganda tugma o'rnida AYLANA progress va
+          // uning ichida foiz turadi.
+          const SizedBox(width: 6),
+          _AttachButton(
+            uploading: _uploading,
+            progress: _upProgress,
+            onImage: () => _pickAndSend(video: false),
+            onVideo: () => _pickAndSend(video: true),
+          ),
+          const SizedBox(width: 6),
           GestureDetector(
             onTap: (_input.text.trim().isEmpty || _sending) ? null : _send,
             behavior: HitTestBehavior.opaque,
@@ -609,9 +717,19 @@ class _Bubble extends StatelessWidget {
   final bool showAvatar;
   final VoidCallback? onAvatarTap;
 
-  /// Admin uchun — uzoq bosilganda o'chirish.
+  /// Admin uchun — uzoq bosilganda tanlash boshlanadi.
   final VoidCallback? onLongPress;
+
+  /// Tanlash rejimida bosish tanlaydi, oddiy holatda esa
+  /// rasm/video ochiladi.
+  final VoidCallback? onTap;
   final VoidCallback onOpenMedia;
+
+  /// Shu xabar hozir tanlanganmi.
+  final bool selected;
+
+  /// Umuman tanlash rejimi ochiqmi (bitta bo'lsa ham).
+  final bool selecting;
 
   const _Bubble({
     required this.message,
@@ -622,12 +740,23 @@ class _Bubble extends StatelessWidget {
     this.showAvatar = false,
     this.onAvatarTap,
     this.onLongPress,
+    this.onTap,
+    this.selected = false,
+    this.selecting = false,
   });
 
   @override
   Widget build(BuildContext context) {
     final m = message;
-    return Padding(
+    // ── TANLANGAN XABAR AJRALIB TURADI ────────────────────────
+    //
+    // Butun qator (rasm bilan birga) bo'yaladi — Telegram ham
+    // shunday qiladi, ya'ni nimani tanlagani bir qarashda
+    // ko'rinadi.
+    return Container(
+      color: selected
+          ? AppColors.accent.withValues(alpha: 0.16)
+          : Colors.transparent,
       padding: const EdgeInsets.only(bottom: 8),
       child: Row(
         mainAxisAlignment:
@@ -657,6 +786,8 @@ class _Bubble extends StatelessWidget {
           Flexible(
             child: GestureDetector(
               onLongPress: onLongPress,
+              onTap: onTap,
+              behavior: HitTestBehavior.opaque,
               child: Container(
                 constraints: BoxConstraints(
                   maxWidth: MediaQuery.sizeOf(context).width * 0.76,
@@ -733,7 +864,10 @@ class _Bubble extends StatelessWidget {
   Widget _media(BuildContext context) {
     final m = message;
     return GestureDetector(
-      onTap: onOpenMedia,
+      // Tanlash rejimida rasm/video OCHILMAYDI — bosish tanlaydi.
+      // Aks holda tanlayman deb bosgan odam har safar video
+      // ko'ruvchiga tushib ketardi.
+      onTap: selecting ? onTap : onOpenMedia,
       child: ClipRRect(
         borderRadius: BorderRadius.circular(13),
         child: Container(
