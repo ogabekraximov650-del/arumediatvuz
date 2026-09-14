@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import '../services/auth_service.dart';
+import '../services/support_service.dart';
 import '../services/season_info.dart';
 import '../services/ui_state.dart';
 import '../services/downloads_index.dart';
@@ -80,6 +81,9 @@ class _RootScreenState extends State<RootScreen>
     // `UiState` izohiga qarang.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !UiState.takeAdminRestore()) return;
+      // Belgi diskda qolib ketgan bo'lsa ham panel faqat adminga
+      // ochiladi.
+      if (AuthService.instance.user?.isAdmin != true) return;
       Navigator.of(context).push(
         MaterialPageRoute<void>(builder: (_) => const AdminScreen()),
       );
@@ -92,6 +96,8 @@ class _RootScreenState extends State<RootScreen>
     // Javob kutilmaydi — sessiya bekor qilingan bo'lsa
     // AuthService o'zi xabar beradi va profil yangilanadi.
     AuthService.instance.refresh();
+    // Fon'dan qaytdi — admin javob yozgan bo'lsa nuqta yonsin.
+    unawaited(UnreadBadge.instance.refresh());
     // Telegramdan qaytdi. Foydalanuvchi u yerda START bosgan
     // bo'lsa, sessiya serverda allaqachon ochilgan — saqlangan
     // token bilan bir marta so'rasak, hisob o'zi ochiladi.

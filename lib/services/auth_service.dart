@@ -36,6 +36,14 @@ class AppUser {
   /// Hisobdagi mablag' (Turso'dagi `users_db.balance`).
   final int balance;
 
+  /// Admin panelini ko'radimi.
+  ///
+  /// Qiymatni SERVER beradi (Telegram raqamiga qarab). Ilova uni
+  /// o'zi hisoblamaydi va o'zgartira olmaydi: bu yerdagi belgi
+  /// faqat TUGMANI ko'rsatadi/yashiradi, haqiqiy to'siq esa har
+  /// bir so'rovda serverda qo'yiladi.
+  final bool isAdmin;
+
   /// Ism va username to'ldirilganmi.
   ///
   /// Yangi hisobga nomni server O'ZI qo'yadi (`User 7` /
@@ -53,6 +61,7 @@ class AppUser {
     required this.photoUrl,
     this.balance = 0,
     this.profileDone = true,
+    this.isAdmin = false,
   });
 
   String get fullName {
@@ -82,6 +91,8 @@ class AppUser {
         balance: (j['balance'] as num?)?.toInt() ?? 0,
         // Eski serverdan javob kelsa maydon bo'lmaydi — `true`.
         profileDone: j['profile_done'] as bool? ?? true,
+        // Maydon yo'q bo'lsa — admin EMAS (xavfsiz tomon).
+        isAdmin: j['is_admin'] as bool? ?? false,
       );
 
   Map<String, dynamic> toJson() => {
@@ -93,6 +104,7 @@ class AppUser {
         'photo_url': photoUrl,
         'balance': balance,
         'profile_done': profileDone,
+        'is_admin': isAdmin,
       };
 }
 

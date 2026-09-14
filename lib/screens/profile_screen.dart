@@ -18,7 +18,9 @@ import '../widgets/aru_logo.dart';
 import '../widgets/glass.dart';
 import 'billing_screen.dart';
 import '../widgets/telegram_logo.dart';
+import '../services/support_service.dart';
 import 'admin_screen.dart';
+import 'support_chat_screen.dart';
 import 'profile_edit_screen.dart';
 import 'sessions_screen.dart';
 import 'telegram_login_screen.dart';
@@ -485,6 +487,22 @@ class _ProfileBody extends StatelessWidget {
                   onTap: () => _open(context, const SessionsScreen()),
                 ),
                 _divider(),
+                // ── ADMIN BILAN BOG'LANISH ────────────────────
+                //
+                // TALAB (foydalanuvchi): "profil sahifasiga admin
+                // bilan bog'lanadigan chat qo'sh ... xabar
+                // o'qilmagan bo'lsa profil sahifasida nuqta yonib
+                // tursin".
+                //
+                // Nuqta FAQAT sonni so'raydigan kichik so'rovdan
+                // keladi (`support_service.dart` -> `UnreadBadge`).
+                _ProfileTile(
+                  icon: Icons.support_agent_rounded,
+                  label: 'Admin bilan bog\'lanish',
+                  trailing: const _UnreadDot(),
+                  onTap: () => _open(context, const SupportChatScreen()),
+                ),
+                _divider(),
                 const _ProfileTile(
                     icon: Icons.info_outline_rounded, label: 'Ilova haqida'),
               ],
@@ -492,6 +510,13 @@ class _ProfileBody extends StatelessWidget {
           ),
           const SizedBox(height: 16),
           // ── Admin paneli tugmasi ─────────────────────────────────────
+          //
+          // TOPILGAN XATO: bu tugma HAMMAGA ko'rinardi. Endi u
+          // faqat adminga chiqadi. Belgini SERVER beradi
+          // (Telegram raqamiga qarab) — ya'ni ilovani
+          // o'zgartirish bilan panelga kirib bo'lmaydi: har bir
+          // admin so'rovi serverda ham tekshiriladi.
+          if (user.isAdmin)
           GlassTappable(
             onTap: () => _open(context, AdminScreen()),
             child: Glass(
@@ -1601,6 +1626,62 @@ class _AvatarState extends State<_Avatar> {
   }
 }
 
+/// O'qilmagan xabar bo'lsa yonadigan nuqta.
+///
+/// Ekran ochilganda va har 30 soniyada bir marta so'raladi —
+/// so'rov juda kichik (faqat son), shu sabab bu arzon. Ilova
+/// fon'da turganda esa hech narsa so'ralmaydi.
+class _UnreadDot extends StatefulWidget {
+  const _UnreadDot();
+
+  @override
+  State<_UnreadDot> createState() => _UnreadDotState();
+}
+
+class _UnreadDotState extends State<_UnreadDot> {
+  Timer? _tick;
+
+  @override
+  void initState() {
+    super.initState();
+    UnreadBadge.instance.refresh();
+    _tick = Timer.periodic(
+      const Duration(seconds: 30),
+      (_) => UnreadBadge.instance.refresh(),
+    );
+  }
+
+  @override
+  void dispose() {
+    _tick?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: UnreadBadge.instance,
+      builder: (context, _) {
+        if (!UnreadBadge.instance.has) return const SizedBox.shrink();
+        return Container(
+          width: 10,
+          height: 10,
+          decoration: BoxDecoration(
+            color: AppColors.accent,
+            shape: BoxShape.circle,
+            boxShadow: [
+              BoxShadow(
+                color: AppColors.accent.withValues(alpha: 0.6),
+                blurRadius: 7,
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
 class _ProfileTile extends StatelessWidget {
   final IconData icon;
   final String label;
@@ -1613,14 +1694,30 @@ class _ProfileTile extends StatelessWidget {
   /// bu "ilova buzuq" degani — u tugmani qayta-qayta bosib
   /// ko'radi. Endi ilova ochiq javob beradi.
   final VoidCallback? onTap;
-  const _ProfileTile({required this.icon, required this.label, this.onTap});
+
+  /// O'ng tomondagi qo'shimcha belgi (masalan o'qilmagan nuqtasi).
+  /// Berilmasa oddiy ">" strelkasi turadi.
+  final Widget? trailing;
+
+  const _ProfileTile({
+    required this.icon,
+    required this.label,
+    this.onTap,
+    this.trailing,
+  });
 
   @override
   Widget build(BuildContext context) {
     return ListTile(
       leading: Icon(icon, color: Colors.white70),
       title: Text(label, style: const TextStyle(color: Colors.white)),
-      trailing: const Icon(Icons.chevron_right_rounded, color: Colors.white38),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (trailing != null) ...[trailing!, const SizedBox(width: 6)],
+          const Icon(Icons.chevron_right_rounded, color: Colors.white38),
+        ],
+      ),
       onTap: onTap ??
           () {
             ScaffoldMessenger.of(context).showSnackBar(

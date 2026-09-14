@@ -42,6 +42,7 @@ import 'package:path_provider/path_provider.dart';
 
 import 'app_settings.dart';
 import 'billing_service.dart';
+import 'support_service.dart';
 import 'rust_bridge.dart';
 import 'season_info.dart';
 import 'stats_service.dart';
@@ -90,6 +91,10 @@ class AccountData {
     // Balans va obuna ham hisobga tegishli.
     try {
       BillingService.instance.clear();
+    } catch (_) {}
+    // O'qilmagan xabarlar nuqtasi ham hisobga tegishli.
+    try {
+      UnreadBadge.instance.clear();
     } catch (_) {}
     try {
       WatchProgress.instance.reload();

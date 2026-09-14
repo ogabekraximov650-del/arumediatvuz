@@ -735,6 +735,56 @@ async fn init_db(env: &Env) -> bool {
             PRIMARY KEY (comment_id, user_id)
         )", vec![]),
 
+        // ══════════════════════════════════════════════════════
+        //  ADMIN BILAN YOZISHMA
+        // ══════════════════════════════════════════════════════
+        //
+        // TALAB (foydalanuvchi): "profil sahifasiga admin bilan
+        // bog'lanadigan chat qo'sh, admin paneliga esa barcha
+        // chatlar bo'limi. Telegram chatidek ishlasin: xabar
+        // o'qilmagan bo'lsa profil sahifasida nuqta yonib tursin,
+        // admin panelida yangi xabar yuqorida tursin va profil
+        // rasmi bilan ko'rinsin".
+        //
+        // ── NEGA IKKI JADVAL ──────────────────────────────────
+        //
+        // `chat_messages` — xabarlarning o'zi.
+        // `chat_threads`  — har bir odam uchun BITTA qator:
+        //                   oxirgi xabar, uning vaqti va
+        //                   o'qilmaganlar soni.
+        //
+        // Jadvalsiz ham bo'lardi: admin ro'yxatini har safar
+        // `chat_messages` dan guruhlab olish mumkin. Lekin u
+        // butun jadvalni ko'rib chiqish degani va xabarlar soni
+        // o'sgani sari sekinlashib borardi. `chat_threads` esa
+        // odam soniga teng va AYNAN kerakli tartibda
+        // (`last_at DESC`) indekslangan — ya'ni "yangi xabar
+        // yuqorida" ro'yxati har doim bir xil tez.
+        ("CREATE TABLE IF NOT EXISTS chat_threads (
+            user_id INTEGER PRIMARY KEY,
+            last_body TEXT,
+            last_at INTEGER DEFAULT 0,
+            -- Oxirgi xabarni kim yozgan: 1 — admin, 0 — foydalanuvchi.
+            last_from_admin INTEGER DEFAULT 0,
+            -- Foydalanuvchi o'qimagan (admin yozgan) xabarlar soni.
+            unread_user INTEGER DEFAULT 0,
+            -- Admin o'qimagan (foydalanuvchi yozgan) xabarlar soni.
+            unread_admin INTEGER DEFAULT 0
+        )", vec![]),
+        ("CREATE INDEX IF NOT EXISTS idx_chat_threads_at
+            ON chat_threads(last_at DESC)", vec![]),
+
+        ("CREATE TABLE IF NOT EXISTS chat_messages (
+            id TEXT PRIMARY KEY,
+            user_id INTEGER,
+            from_admin INTEGER DEFAULT 0,
+            body TEXT,
+            created_at INTEGER
+        )", vec![]),
+        // Suhbat AYNAN shu tartibda so'raladi.
+        ("CREATE INDEX IF NOT EXISTS idx_chat_msgs
+            ON chat_messages(user_id, created_at DESC)", vec![]),
+
         // ── ESKI TRAFIK RAQAMI BIR MARTA TOZALANADI ───────────
         //
         // TALAB (foydalanuvchi): "bosh sahifadagi eski soxta
@@ -861,6 +911,10 @@ async fn init_db(env: &Env) -> bool {
         ("DELETE FROM comments_db WHERE NOT EXISTS
             (SELECT 1 FROM app_config WHERE cfg_key='wipe_all_v4')", vec![]),
         ("DELETE FROM comment_likes WHERE NOT EXISTS
+            (SELECT 1 FROM app_config WHERE cfg_key='wipe_all_v4')", vec![]),
+        ("DELETE FROM chat_messages WHERE NOT EXISTS
+            (SELECT 1 FROM app_config WHERE cfg_key='wipe_all_v4')", vec![]),
+        ("DELETE FROM chat_threads WHERE NOT EXISTS
             (SELECT 1 FROM app_config WHERE cfg_key='wipe_all_v4')", vec![]),
         // Anime ma'lumoti QOLADI, faqat unga yopishgan hisoblar
         // nollanadi.
@@ -3095,6 +3149,11 @@ fn user_public(origin: &str, u: &Value) -> Value {
         "last_name": u["last_name"].as_str().unwrap_or(""),
         "photo_url": photo_url,
         "balance": u["balance"].as_i64().unwrap_or(0),
+        // Admin panelini KIM ko'rishi shu bilan hal bo'ladi.
+        // Ilgari tugma HAMMAGA ko'rinardi. Ilovadagi tekshiruv
+        // shunchaki ekranni yashiradi — haqiqiy to'siq har bir
+        // so'rovda serverda (`is_admin`).
+        "is_admin": is_admin(u),
         // Ism/username to'ldirilganmi. Yangi hisobga nom
         // AVTOMATIK berilgani uchun bu endi doim 1 — maydon
         // eski ilova versiyalari bilan moslik uchun qoldirilgan.
@@ -4683,6 +4742,239 @@ async fn comments_delete(req: &Request, env: &Env, id: &str) -> Result<Response>
     ok_nostore(json!({"ok": true}))
 }
 
+
+// ═══════════════════════════════════════════════════════════════
+//  ADMIN BILAN YOZISHMA
+// ═══════════════════════════════════════════════════════════════
+//
+// TALAB (foydalanuvchi): "profil sahifasiga admin bilan
+// bog'lanadigan chat qo'sh; admin paneliga barcha chatlar bo'limi;
+// Telegram chatidek ishlasin".
+//
+// ── KIM ADMIN ─────────────────────────────────────────────────
+//
+// Admin — TELEGRAM RAQAMI bo'yicha aniqlanadi. Bu raqam ilovada
+// emas, SERVERDA turadi: ilovadagi tekshiruv shunchaki ekranni
+// yashiradi, haqiqiy to'siq esa har bir so'rovda shu yerda
+// qo'yiladi. Ya'ni o'zgartirilgan ilova bilan ham begona odam
+// boshqalarning yozishmasini o'qiy olmaydi.
+const ADMIN_TELEGRAM_ID: i64 = 6_805_215_964;
+
+fn is_admin(u: &Value) -> bool {
+    u["telegram_id"].as_i64().unwrap_or(0) == ADMIN_TELEGRAM_ID
+}
+
+/// Bitta xabarning eng uzun uzunligi.
+const CHAT_MAX: usize = 2000;
+
+/// Bir suhbatda ko'rsatiladigan xabarlar soni.
+const CHAT_LIMIT: i64 = 200;
+
+/// Xabar qatorini ilova kutgan ko'rinishga aylantiradi.
+fn chat_msg_public(r: &Value) -> Value {
+    json!({
+        "id": r["id"].as_str().unwrap_or(""),
+        "from_admin": r["from_admin"].as_i64().unwrap_or(0) != 0,
+        "body": r["body"].as_str().unwrap_or(""),
+        "created_at": r["created_at"].as_i64().unwrap_or(0),
+    })
+}
+
+/// Bitta odamning suhbatini o'qiydi va O'QILDI deb belgilaydi.
+///
+/// `as_admin` — kim o'qiyapti. Shunga qarab qaysi hisoblagich
+/// nollanishi hal bo'ladi.
+async fn chat_read(env: &Env, user: i64, as_admin: bool) -> Result<Response> {
+    let res = turso_exec(env,
+        "SELECT id, from_admin, body, created_at FROM chat_messages
+          WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
+        vec![TursoArg::int(user), TursoArg::int(CHAT_LIMIT)]).await?;
+    let cols = res["cols"].as_array().cloned().unwrap_or_default();
+    let rows = res["rows"].as_array().cloned().unwrap_or_default();
+    // Eskisidan yangisiga — suhbat tartibida.
+    let items: Vec<Value> = rows.iter().rev()
+        .map(|r| chat_msg_public(&row_to_obj(&cols, r.as_array().unwrap_or(&vec![]))))
+        .collect();
+
+    // O'qildi. Qator yo'q bo'lsa yangilanadigan narsa ham yo'q.
+    let col = if as_admin { "unread_admin" } else { "unread_user" };
+    let _ = turso_exec(env,
+        &format!("UPDATE chat_threads SET {col}=0 WHERE user_id=?"),
+        vec![TursoArg::int(user)]).await;
+
+    ok_nostore(json!({"items": items}))
+}
+
+/// GET /api/chat — o'z yozishmasi (foydalanuvchi tomoni).
+async fn chat_mine(req: &Request, env: &Env) -> Result<Response> {
+    let Some(u) = session_user(env, &bearer(req)).await? else {
+        return json_resp(&json!({"error": "unauthorized"}), 401);
+    };
+    let me = u["id"].as_i64().unwrap_or(0);
+    chat_read(env, me, false).await
+}
+
+/// GET /api/chat/unread — profil sahifasidagi NUQTA uchun.
+///
+/// Ataylab juda kichik javob: bu so'rov tez-tez qilinadi, shu
+/// sabab u xabarlarning O'ZINI olib kelmaydi — faqat sonini.
+async fn chat_unread(req: &Request, env: &Env) -> Result<Response> {
+    let Some(u) = session_user(env, &bearer(req)).await? else {
+        return json_resp(&json!({"error": "unauthorized"}), 401);
+    };
+    let me = u["id"].as_i64().unwrap_or(0);
+
+    if is_admin(&u) {
+        // Admin uchun — hamma suhbatlardagi o'qilmaganlar yig'indisi.
+        let res = turso_exec(env,
+            "SELECT COALESCE(SUM(unread_admin),0) FROM chat_threads",
+            vec![]).await?;
+        return ok_nostore(json!({"unread": scalar(&res), "admin": true}));
+    }
+
+    let res = turso_exec(env,
+        "SELECT COALESCE(unread_user,0) FROM chat_threads WHERE user_id=?",
+        vec![TursoArg::int(me)]).await?;
+    ok_nostore(json!({"unread": scalar(&res), "admin": false}))
+}
+
+/// POST /api/chat — xabar yuborish.
+///
+/// Foydalanuvchi yozsa — adminga; admin `user_id` bilan yozsa —
+/// o'sha odamga.
+async fn chat_send(mut req: Request, env: &Env) -> Result<Response> {
+    let Some(u) = session_user(env, &bearer(&req)).await? else {
+        return json_resp(&json!({"error": "unauthorized"}), 401);
+    };
+    let me = u["id"].as_i64().unwrap_or(0);
+    if u["is_banned"].as_i64().unwrap_or(0) != 0 {
+        return json_resp(&json!({"error": "Sizga yozish taqiqlangan"}), 403);
+    }
+
+    let b: Value = req.json().await.unwrap_or(json!({}));
+    let body = b["body"].as_str().unwrap_or("").trim().to_string();
+    if body.is_empty() {
+        return json_resp(&json!({"error": "Xabar bo'sh"}), 400);
+    }
+    // Uzunlik BELGI bo'yicha (bayt emas): o'zbekcha harflar ikki
+    // bayt egallaydi va bayt bilan kesilsa yozuv o'rtasidan
+    // uzilib qolardi.
+    let body: String = body.chars().take(CHAT_MAX).collect();
+
+    // Suhbat KIMNIKI: admin boshqa odamga yozsa — o'shaniki.
+    let admin = is_admin(&u);
+    let target = if admin {
+        let t = b["user_id"].as_i64().unwrap_or(0);
+        if t <= 0 {
+            return json_resp(&json!({"error": "user_id yo'q"}), 400);
+        }
+        t
+    } else {
+        me
+    };
+
+    let now = now_ms();
+    let id = format!("m{}", random_hex(12));
+
+    // Xabar va suhbat qatori BITTA paketda: ikkovi ham yozilsin
+    // yoki hech qaysisi yozilmasin.
+    //
+    // O'QILMAGANLAR: admin yozsa foydalanuvchiniki oshadi, aksincha
+    // ham shunday. `ON CONFLICT` — suhbat birinchi marta
+    // boshlanayotgan bo'lsa qator o'zi yaratiladi.
+    let (inc_user, inc_admin) = if admin { (1, 0) } else { (0, 1) };
+    turso_batch(env, &[
+        ("INSERT INTO chat_messages (id,user_id,from_admin,body,created_at)
+          VALUES (?,?,?,?,?)",
+         vec![
+            TursoArg::text(&id), TursoArg::int(target),
+            TursoArg::int(if admin { 1 } else { 0 }),
+            TursoArg::text(&body), TursoArg::int(now),
+         ]),
+        ("INSERT INTO chat_threads
+            (user_id,last_body,last_at,last_from_admin,unread_user,unread_admin)
+          VALUES (?,?,?,?,?,?)
+          ON CONFLICT(user_id) DO UPDATE SET
+             last_body=excluded.last_body,
+             last_at=excluded.last_at,
+             last_from_admin=excluded.last_from_admin,
+             unread_user=unread_user+excluded.unread_user,
+             unread_admin=unread_admin+excluded.unread_admin",
+         vec![
+            TursoArg::int(target), TursoArg::text(&body), TursoArg::int(now),
+            TursoArg::int(if admin { 1 } else { 0 }),
+            TursoArg::int(inc_user), TursoArg::int(inc_admin),
+         ]),
+    ]).await?;
+
+    created(json!({
+        "id": id,
+        "from_admin": admin,
+        "body": body,
+        "created_at": now,
+    }))
+}
+
+/// GET /api/chat/threads — ADMIN uchun barcha suhbatlar.
+///
+/// Yangi xabar YUQORIDA (`last_at DESC`) va har bir qatorda odamning
+/// ismi va rasmi — foydalanuvchi talabi: "huddi Telegram chatidek".
+async fn chat_threads(req: &Request, env: &Env, origin: &str) -> Result<Response> {
+    let Some(u) = session_user(env, &bearer(req)).await? else {
+        return json_resp(&json!({"error": "unauthorized"}), 401);
+    };
+    if !is_admin(&u) {
+        return json_resp(&json!({"error": "forbidden"}), 403);
+    }
+
+    let res = turso_exec(env,
+        "SELECT t.user_id, t.last_body, t.last_at, t.last_from_admin,
+                t.unread_admin,
+                u.first_name AS first_name, u.username AS username,
+                u.avatar_file AS avatar_file
+           FROM chat_threads t
+           LEFT JOIN users_db u ON u.id = t.user_id
+          ORDER BY t.last_at DESC
+          LIMIT 200",
+        vec![]).await?;
+    let cols = res["cols"].as_array().cloned().unwrap_or_default();
+    let rows = res["rows"].as_array().cloned().unwrap_or_default();
+    let items: Vec<Value> = rows.iter().map(|r| {
+        let o = row_to_obj(&cols, r.as_array().unwrap_or(&vec![]));
+        let uid = o["user_id"].as_i64().unwrap_or(0);
+        let avatar = o["avatar_file"].as_str().unwrap_or("");
+        let photo = if avatar.is_empty() {
+            format!("{origin}/api/avatar/{uid}")
+        } else {
+            format!("{origin}/api/image/{avatar}")
+        };
+        json!({
+            "user_id": uid,
+            "first_name": o["first_name"].as_str().unwrap_or(""),
+            "username": o["username"].as_str().unwrap_or(""),
+            "photo_url": photo,
+            "last_body": o["last_body"].as_str().unwrap_or(""),
+            "last_at": o["last_at"].as_i64().unwrap_or(0),
+            "last_from_admin": o["last_from_admin"].as_i64().unwrap_or(0) != 0,
+            "unread": o["unread_admin"].as_i64().unwrap_or(0),
+        })
+    }).collect();
+
+    ok_nostore(json!({"items": items}))
+}
+
+/// GET /api/chat/thread/:user_id — ADMIN bitta odamning suhbatini
+/// o'qiydi.
+async fn chat_one(req: &Request, env: &Env, user: i64) -> Result<Response> {
+    let Some(u) = session_user(env, &bearer(req)).await? else {
+        return json_resp(&json!({"error": "unauthorized"}), 401);
+    };
+    if !is_admin(&u) {
+        return json_resp(&json!({"error": "forbidden"}), 403);
+    }
+    chat_read(env, user, true).await
+}
+
 /// GET /api/billing — balans, obuna, faol havolalar va tarix.
 async fn billing_state(req: Request, env: &Env) -> Result<Response> {
     let Some(u) = session_user(env, &bearer(&req)).await? else {
@@ -5554,7 +5846,10 @@ async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
         // Izohlarda "men layk bosganmi" belgisi bor — ya'ni javob
         // HAR BIR ODAM uchun boshqacha. Uni chekkada keshlash
         // boshqa odamning belgisini ko'rsatib qo'yardi.
-        || path.starts_with("/api/comments");
+        || path.starts_with("/api/comments")
+        // Yozishma HAR BIR ODAM uchun boshqacha va u katalogga
+        // umuman aloqasi yo'q — keshni kuydirmaydi.
+        || path.starts_with("/api/chat");
     let write = matches!(method, Method::Post | Method::Put | Method::Delete) && !auth_path;
     let mut resp = route(req, env, ctx).await?;
 
@@ -5676,6 +5971,29 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
     }
     if path == "/api/billing/subscribe" && method == Method::Post {
         return billing_subscribe(req, &env).await;
+    }
+
+    // ── ADMIN BILAN YOZISHMA ──────────────────────────────────
+    if path == "/api/chat" {
+        if method == Method::Get {
+            return chat_mine(&req, &env).await;
+        }
+        if method == Method::Post {
+            return chat_send(req, &env).await;
+        }
+    }
+    if path == "/api/chat/unread" && method == Method::Get {
+        return chat_unread(&req, &env).await;
+    }
+    if path == "/api/chat/threads" && method == Method::Get {
+        return chat_threads(&req, &env, &origin).await;
+    }
+    if method == Method::Get {
+        if let Some(idv) = path.strip_prefix("/api/chat/thread/") {
+            if let Ok(uid) = idv.parse::<i64>() {
+                return chat_one(&req, &env, uid).await;
+            }
+        }
     }
 
     // ── IZOHLAR ───────────────────────────────────────────────

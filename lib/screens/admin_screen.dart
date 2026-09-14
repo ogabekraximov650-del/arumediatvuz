@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import '../theme/app_background.dart';
 import '../widgets/glass.dart';
+import '../services/support_service.dart';
+import 'admin_chats_screen.dart';
 import 'anime_management_screen.dart';
 
 class AdminScreen extends StatelessWidget {
@@ -82,6 +84,34 @@ class AdminScreen extends StatelessWidget {
                         ),
                       ),
                     ),
+                    const SizedBox(height: 12),
+                    // ── BARCHA SUHBATLAR ──────────────────────
+                    //
+                    // TALAB: "admin paneliga barcha chatlar
+                    // bo'limini qo'sh, huddi animelarni boshqarish
+                    // bo'limiga kirgandek".
+                    //
+                    // O'qilmagan xabar bo'lsa tugmada ham soni
+                    // ko'rinadi — panelga kirmasdan turib bilinadi.
+                    AnimatedBuilder(
+                      animation: UnreadBadge.instance,
+                      builder: (context, _) {
+                        final n = UnreadBadge.instance.count;
+                        return _AdminButton(
+                          icon: Icons.forum_rounded,
+                          label: 'Barcha suhbatlar',
+                          subtitle: n > 0
+                              ? '$n ta o\'qilmagan xabar'
+                              : 'Foydalanuvchilar bilan yozishma',
+                          badge: n,
+                          onTap: () => Navigator.of(context).push(
+                            MaterialPageRoute<void>(
+                              builder: (_) => const AdminChatsScreen(),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
                   ],
                 ),
               ),
@@ -99,11 +129,15 @@ class _AdminButton extends StatelessWidget {
   final String subtitle;
   final VoidCallback onTap;
 
+  /// O'qilmaganlar soni (0 — belgi ko'rsatilmaydi).
+  final int badge;
+
   const _AdminButton({
     required this.icon,
     required this.label,
     required this.subtitle,
     required this.onTap,
+    this.badge = 0,
   });
 
   @override
@@ -142,6 +176,27 @@ class _AdminButton extends StatelessWidget {
                 ],
               ),
             ),
+            if (badge > 0) ...[
+              Container(
+                constraints: const BoxConstraints(minWidth: 22),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                decoration: BoxDecoration(
+                  color: AppColors.accent,
+                  borderRadius: BorderRadius.circular(11),
+                ),
+                child: Text(
+                  '$badge',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 6),
+            ],
             const Icon(Icons.chevron_right_rounded, color: Colors.white38),
           ],
         ),
