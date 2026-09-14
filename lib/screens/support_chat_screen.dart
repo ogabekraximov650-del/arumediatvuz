@@ -1063,12 +1063,29 @@ class _Bubble extends StatelessWidget {
                     Padding(
                       padding: EdgeInsets.only(
                           top: 3, right: m.isViewable ? 9 : 0),
-                      child: Text(
-                        chatTime(m.createdAt),
-                        style: TextStyle(
-                          color: Colors.white.withValues(alpha: 0.6),
-                          fontSize: 10.5,
-                        ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            chatTime(m.createdAt),
+                            style: TextStyle(
+                              color: Colors.white.withValues(alpha: 0.6),
+                              fontSize: 10.5,
+                            ),
+                          ),
+                          // ── HALI YUBORILMAGAN ─────────────────
+                          //
+                          // Xabar ekranda DARHOL paydo bo'ladi,
+                          // serverning javobi esa keyin keladi.
+                          // Shu oraliqda yonida soat turadi —
+                          // Telegram ham shunday qiladi.
+                          if (m.pending) ...[
+                            const SizedBox(width: 4),
+                            Icon(Icons.schedule_rounded,
+                                size: 11,
+                                color: Colors.white.withValues(alpha: 0.6)),
+                          ],
+                        ],
                       ),
                     ),
                   ],

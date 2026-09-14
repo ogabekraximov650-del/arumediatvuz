@@ -85,9 +85,15 @@ class _RootScreenState extends State<RootScreen>
     // "sahifa qurilganmi" degan tasodifga bog'liq bo'lib qolardi.
     //
     // So'rov juda kichik — faqat SON qaytadi (`/api/chat/unread`).
+    //
+    // 30 -> 12 soniya: yozishma ekrani OCHIQ bo'lmaganda ham
+    // nuqta tez yonsin (foydalanuvchi: "supportga yuborilgan
+    // xabar tez kelmayapti"). Suhbatning O'ZI ochiq turganda
+    // esa umuman kutilmaydi — u yerda uzoq kutish ishlaydi
+    // (`ChatController._watchLoop`).
     unawaited(UnreadBadge.instance.refresh());
     _unreadTimer = Timer.periodic(
-      const Duration(seconds: 30),
+      const Duration(seconds: 12),
       (_) => UnreadBadge.instance.refresh(),
     );
 

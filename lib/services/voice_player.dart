@@ -1,36 +1,60 @@
 // lib/services/voice_player.dart — OVOZLI XABARNI IJRO ETISH.
 //
 // ═══════════════════════════════════════════════════════════════
-//  TALAB
+//  TOPILGAN XATO
 // ═══════════════════════════════════════════════════════════════
 //
-// Foydalanuvchi: "chatda ovozli xabar yuborish tizimini ham
-// qo'sh".
+// Foydalanuvchi: "yuborilgan audio ishlamayapti".
 //
-// ── NEGA YANGI PAKET OLINMADI ───────────────────────────────
+// SABAB. Ijro `video_player` bilan qilingan edi. U TASVIR
+// YO'LAGI bor faylga mo'ljallangan: Android tomonida pleyer
+// tasvir uchun sirt (surface/texture) yaratadi va o'lchamni
+// kutadi. Ovozli faylda tasvir yo'lagi UMUMAN yo'q — shu sabab
+// `initialize()` ba'zan tugamaydi, uzunlik esa nol bo'lib
+// qoladi. Ya'ni tugma bosilardi-yu, hech narsa bo'lmasdi.
 //
-// Ijro uchun `video_player` ishlatiladi. U Android'da ExoPlayer
-// (androidx.media3) ustida ishlaydi, ExoPlayer esa audio faylni
-// (m4a/aac) video kabi bemalol o'ynatadi — shunchaki tasvir
-// yo'lagi bo'lmaydi. Ya'ni ilovada ALLAQACHON bor va sinalgan
-// dvigatel ishlatiladi; yangi paket qo'shish esa yana bitta
-// native bog'lanish va yana bitta sinishi mumkin bo'lgan joy
-// degani.
+// YECHIM. `just_audio` — Flutter'da audio uchun eng keng
+// ishlatiladigan paket. Android'da u ham ExoPlayer ustida
+// ishlaydi (ya'ni dvigatel o'sha-o'sha), lekin audio uchun
+// to'g'ri yo'l bilan: sirt yaratilmaydi, uzunlik konteynerdan
+// o'qiladi, oldindan buferlash va surib o'tkazish to'g'ri
+// ishlaydi.
+//
+// Fayl `m4a` (AAC) — bu konteynerda uzunlik va surish jadvali
+// bor. Xom `aac` oqimida ular bo'lmaydi va uzunlik noto'g'ri
+// chiqadi; shu sabab yozib olishda ham aynan `m4a` tanlangan.
 //
 // ── BIR VAQTDA BITTA OVOZ ───────────────────────────────────
 //
-// Ijrochi YAGONA (singleton). Boshqa xabar bosilsa oldingisi
-// o'zi to'xtaydi: ikkita ovoz bir vaqtda yangrasa suhbatni
+// Ijrochi YAGONA (singleton): boshqa xabar bosilsa oldingisi
+// o'zi to'xtaydi. Ikkita ovoz bir vaqtda yangrasa suhbatni
 // tinglab bo'lmasdi.
 
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
-import 'package:video_player/video_player.dart';
+import 'package:just_audio/just_audio.dart';
 
 class VoicePlayer extends ChangeNotifier {
-  VoicePlayer._();
+  VoicePlayer._() {
+    // Bitta pleyer butun ilova uchun — har bosishda yangisini
+    // yaratish Android'da sekin va resurs talab qiladi.
+    _p.playerStateStream.listen((st) {
+      // Oxiriga yetdi — boshiga qaytariladi va tugma yana
+      // "play" bo'lib ko'rinadi.
+      if (st.processingState == ProcessingState.completed) {
+        _p.pause();
+        _p.seek(Duration.zero);
+      }
+      notifyListeners();
+    });
+    _p.positionStream.listen((_) => notifyListeners());
+    _p.durationStream.listen((_) => notifyListeners());
+  }
+
   static final VoicePlayer instance = VoicePlayer._();
 
-  VideoPlayerController? _c;
+  final AudioPlayer _p = AudioPlayer();
 
   /// Hozir ijro etilayotgan (yoki ochilayotgan) xabarning raqami.
   String? _id;
@@ -40,96 +64,67 @@ class VoicePlayer extends ChangeNotifier {
 
   bool isCurrent(String id) => _id == id;
   bool isOpening(String id) => _id == id && _opening;
-  bool isPlaying(String id) =>
-      _id == id && (_c?.value.isPlaying ?? false);
+  bool isPlaying(String id) => _id == id && _p.playing;
 
   Duration positionOf(String id) =>
-      _id == id ? (_c?.value.position ?? Duration.zero) : Duration.zero;
+      _id == id ? _p.position : Duration.zero;
 
   /// Faylning haqiqiy uzunligi. Hali ochilmagan bo'lsa nol —
   /// bunday paytda xabar bilan kelgan uzunlik ishlatiladi.
   Duration durationOf(String id) =>
-      _id == id ? (_c?.value.duration ?? Duration.zero) : Duration.zero;
+      _id == id ? (_p.duration ?? Duration.zero) : Duration.zero;
 
   /// Bosilganda: shu xabar yangrayotgan bo'lsa to'xtatadi, aks
   /// holda (kerak bo'lsa oldingisini yopib) shuni boshlaydi.
   Future<void> toggle(String id, String url) async {
-    if (_id == id && _c != null) {
-      final c = _c!;
-      if (c.value.isPlaying) {
-        await c.pause();
+    if (_id == id) {
+      if (_p.playing) {
+        await _p.pause();
       } else {
-        // Oxirigacha yetgan bo'lsa boshidan.
-        if (c.value.position >= c.value.duration) {
-          await c.seekTo(Duration.zero);
+        if (_p.processingState == ProcessingState.completed) {
+          await _p.seek(Duration.zero);
         }
-        await c.play();
+        unawaited(_p.play());
       }
       notifyListeners();
       return;
     }
 
-    await stop();
     _id = id;
     _opening = true;
     notifyListeners();
-
-    final c = VideoPlayerController.networkUrl(Uri.parse(url));
     try {
-      await c.initialize();
+      await _p.stop();
+      await _p.setUrl(url);
       // Ochilayotganda boshqa xabar bosilgan bo'lsa — bunisi
       // keraksiz.
-      if (_id != id) {
-        await c.dispose();
-        return;
-      }
-      _c = c;
-      c.addListener(_tick);
-      await c.setVolume(1.0);
-      await c.play();
+      if (_id != id) return;
+      _opening = false;
+      notifyListeners();
+      // `play()` KUTILMAYDI: u ijro TUGAGUNCHA tugamaydi.
+      unawaited(_p.play());
     } catch (_) {
-      await c.dispose();
-      if (_id == id) _id = null;
+      if (_id == id) {
+        _id = null;
+        _opening = false;
+      }
     }
-    _opening = false;
     notifyListeners();
   }
 
   Future<void> seek(String id, Duration to) async {
-    if (_id != id || _c == null) return;
-    await _c!.seekTo(to);
+    if (_id != id) return;
+    await _p.seek(to);
     notifyListeners();
   }
 
-  void _tick() {
-    final c = _c;
-    if (c == null) return;
-    // Oxiriga yetdi — boshiga qaytaramiz va to'xtatamiz, shunda
-    // tugma yana "play" bo'lib ko'rinadi.
-    if (c.value.isInitialized &&
-        !c.value.isPlaying &&
-        c.value.duration > Duration.zero &&
-        c.value.position >= c.value.duration) {
-      c.seekTo(Duration.zero);
-    }
-    notifyListeners();
-  }
-
-  /// Ijroni to'xtatadi va resurslarni bo'shatadi.
+  /// Ijroni to'xtatadi (ekran yopilganda).
   Future<void> stop() async {
-    final c = _c;
-    _c = null;
     _id = null;
     _opening = false;
-    if (c != null) {
-      c.removeListener(_tick);
-      try {
-        await c.pause();
-      } catch (_) {}
-      try {
-        await c.dispose();
-      } catch (_) {}
-    }
+    try {
+      await _p.stop();
+    } catch (_) {}
     notifyListeners();
   }
 }

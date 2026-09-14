@@ -64,6 +64,18 @@ dependencies:
   # xatosi beradi (`RecordLinux` sinfi interfeysni to'liq
   # bajarmaydi). 6.2.1 da butun oila o'zaro mos.
   record: ^6.2.1
+  # ── OVOZLI XABARNI IJRO ETISH ───────────────────────────────
+  #
+  # NEGA `video_player` EMAS: u tasvir yo'lagi bor faylga
+  # mo'ljallangan. Android'da audio faylni ochganda ba'zan
+  # `initialize()` umuman tugamaydi (tasvir o'lchami hech qachon
+  # kelmaydi) yoki uzunlik noto'g'ri chiqadi — ovozli xabar
+  # ishlamasligining sababi aynan shu edi.
+  #
+  # `just_audio` — Flutter'dagi audio uchun eng keng ishlatiladigan
+  # paket. Android'da u ham ExoPlayer ustida ishlaydi, ya'ni
+  # dvigatel o'sha-o'sha; lekin audio uchun to'g'ri yo'l bilan.
+  just_audio: ^0.10.6
 
 dev_dependencies:
   flutter_test:

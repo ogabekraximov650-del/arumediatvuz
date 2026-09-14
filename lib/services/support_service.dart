@@ -52,6 +52,15 @@ class ChatMessage {
   /// shu sabab uzunlik faylni yuklamasdan turib ko'rinadi.
   final int mediaMs;
 
+  /// Hali serverga yetib bormagan (ekranda DARHOL ko'rsatilgan)
+  /// nusxa.
+  ///
+  /// TALAB (foydalanuvchi): "huddi Telegramdek tez ishlasin".
+  /// Telegram yuborilgan xabarni serverni KUTMASDAN ekranga
+  /// qo'yadi va yoniga soat belgisini chizadi; javob kelgach
+  /// belgi yo'qoladi. Shu yerda ham xuddi shunday.
+  final bool pending;
+
   const ChatMessage({
     required this.id,
     required this.fromAdmin,
@@ -60,6 +69,7 @@ class ChatMessage {
     this.mediaUrl = '',
     this.mediaType = '',
     this.mediaMs = 0,
+    this.pending = false,
   });
 
   bool get hasMedia => mediaUrl.isNotEmpty && mediaType.isNotEmpty;
@@ -79,6 +89,16 @@ class ChatMessage {
         mediaType: '${j['media_type'] ?? ''}',
         mediaMs: ((j['media_ms'] as num?) ?? 0).toInt(),
       );
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'from_admin': fromAdmin,
+        'body': body,
+        'created_at': createdAt,
+        'media_url': mediaUrl,
+        'media_type': mediaType,
+        'media_ms': mediaMs,
+      };
 }
 
 /// Admin ro'yxatidagi bitta suhbat.
@@ -237,23 +257,76 @@ class ChatController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Suhbat ochiq turganda yangi xabarlar o'zi kelib tursin.
-  ///
-  /// 10 soniya — Telegram'dagidek "jonli" tuyuladi, lekin so'rovlar
-  /// soni ham oqilona: suhbat ochiq turgan vaqtgina ishlaydi va
-  /// ekran yopilishi bilan to'xtaydi.
+  // ── UZOQ KUTISH: XABAR DARHOL KELSIN ────────────────────
+  //
+  // TALAB (foydalanuvchi): "supportga yuborilgan xabar tez
+  // kelmayapti, Telegramnikidek tez ishlaydigan qilib ber".
+  //
+  // ILGARI: har 10 soniyada butun ro'yxat qaytadan so'ralardi.
+  // Xabar eng yomon holatda 10 soniyadan keyin ko'rinardi.
+  //
+  // ENDI: Telegramning O'Z Bot API'sidagi usul — so'rov
+  // yuboriladi va SERVER javobni yangi xabar paydo bo'lgunicha
+  // ushlab turadi (`/api/chat/wait`). Xabar kelishi bilan javob
+  // qaytadi va faqat YANGILARI olinadi.
+  //
+  // Natija: xabar ~1 soniyada yetib boradi, so'rovlar soni esa
+  // KAMAYADI (daqiqasiga 6 ta emas, ~3 ta).
+
+  bool _watching = false;
+
+  /// Oxirgi ko'rilgan xabar vaqti — kutish shundan boshlanadi.
+  int get _lastAt => _items.isEmpty ? 0 : _items.last.createdAt;
+
   void startPolling() {
-    _poll?.cancel();
-    _poll = Timer.periodic(const Duration(seconds: 10), (_) => load(force: true));
+    if (_watching) return;
+    _watching = true;
+    unawaited(_watchLoop());
   }
 
   void stopPolling() {
+    _watching = false;
     _poll?.cancel();
     _poll = null;
   }
 
+  Future<void> _watchLoop() async {
+    while (_watching) {
+      if (AuthService.instance.sessionToken == null) {
+        await Future<void>.delayed(const Duration(seconds: 5));
+        continue;
+      }
+      try {
+        final uri = Uri.parse('$_base/wait?since=$_lastAt'
+            '${userId != null ? '&user_id=$userId' : ''}');
+        final r = await http
+            .get(uri, headers: _headers())
+            // Server ~19 soniya ushlaydi; 35 — zaxira bilan.
+            .timeout(const Duration(seconds: 35));
+        if (!_watching) return;
+        if (r.statusCode == 200) {
+          final j = jsonDecode(r.body) as Map<String, dynamic>;
+          if (j['new'] == true) {
+            await load(force: true);
+          }
+          // Javob darhol qaytsa ham (yangi xabar bor edi),
+          // keyingi kutish shu zahoti boshlanadi.
+          continue;
+        }
+        // Xato javob — bir oz kutib qaytadan.
+        await Future<void>.delayed(const Duration(seconds: 3));
+      } catch (_) {
+        // Internet uzildi yoki so'rov muddati tugadi — bu
+        // KUTILGAN holat, shunchaki qaytadan uriniladi.
+        if (!_watching) return;
+        await Future<void>.delayed(const Duration(seconds: 2));
+      }
+    }
+  }
+
   @override
   void dispose() {
+    _watching = false;
     _poll?.cancel();
     super.dispose();
   }
@@ -268,18 +341,37 @@ class ChatController extends ChangeNotifier {
     }
     _loading = true;
     if (!_loaded) notifyListeners();
+    // ── FAQAT YANGILARINI OLAMIZ ──────────────────────────
+    //
+    // Ro'yxat allaqachon bo'lsa serverga "shu vaqtdan keyingisi"
+    // deb aytiladi. Javob odatda BO'SH ro'yxat bo'ladi — bir
+    // necha o'nlab bayt. Ilgari har safar 200 ta xabar qaytadan
+    // tashilardi.
+    final since = _loaded ? _lastAt : 0;
     try {
+      final uri = Uri.parse(since > 0 ? '$_url?since=$since' : _url);
       final r = await http
-          .get(Uri.parse(_url), headers: _headers())
+          .get(uri, headers: _headers())
           .timeout(const Duration(seconds: 20));
       if (r.statusCode == 200) {
         final j = jsonDecode(r.body) as Map<String, dynamic>;
         final raw = ((j['items'] as List?) ?? [])
             .cast<Map<String, dynamic>>();
         final rows = raw.map(ChatMessage.fromJson).toList();
-        // Ro'yxat FAQAT haqiqatan o'zgarganda almashtiriladi —
-        // aks holda har 10 soniyada ekran bekorga qayta chizilardi.
-        if (rows.length != _items.length ||
+        if (since > 0) {
+          // Qo'shimcha xabarlar — oxiriga qo'shiladi.
+          // Takrorlanmasin: sekin tarmoqda bitta javob ikki
+          // marta kelishi mumkin.
+          final have = _items.map((m) => m.id).toSet();
+          final fresh = rows.where((m) => !have.contains(m.id)).toList();
+          if (fresh.isNotEmpty) {
+            // Yuborayotgan paytda qo'yilgan vaqtinchalik nusxa
+            // bo'lsa — u serverdan kelgani bilan almashadi.
+            _items.removeWhere((m) => m.pending);
+            _items.addAll(fresh);
+            _saveDisk();
+          }
+        } else if (rows.length != _items.length ||
             (rows.isNotEmpty &&
                 _items.isNotEmpty &&
                 rows.last.id != _items.last.id)) {
@@ -300,6 +392,14 @@ class ChatController extends ChangeNotifier {
     }
     _loading = false;
     notifyListeners();
+  }
+
+  /// Ro'yxatni diskka yozadi (vaqtinchalik nusxalarsiz).
+  void _saveDisk() {
+    DiskCache.write(
+      _diskKey,
+      _items.where((m) => !m.pending).map((m) => m.toJson()).toList(),
+    );
   }
 
   /// ADMIN: xabarni o'chiradi va ro'yxatdan darhol olib tashlaydi.
@@ -344,6 +444,31 @@ class ChatController extends ChangeNotifier {
   }) async {
     final text = body.trim();
     if (text.isEmpty && mediaFile.isEmpty) return null;
+
+    // ── XABAR EKRANDA DARHOL PAYDO BO'LADI ────────────────
+    //
+    // Serverning javobi kutilmaydi: xabar vaqtinchalik nusxa
+    // bo'lib ro'yxatga qo'yiladi va yonida soat belgisi turadi.
+    // Javob kelgach nusxa serverdan kelgani bilan almashadi.
+    // Telegram ham aynan shunday qiladi — shu sabab u "bir
+    // zumda yuboradi" bo'lib tuyuladi.
+    //
+    // Fayl bor bo'lsa vaqtinchalik nusxa QO'YILMAYDI: u paytda
+    // yuklash progressi allaqachon ko'rinib turadi.
+    final tempId = 'tmp${DateTime.now().microsecondsSinceEpoch}';
+    if (mediaFile.isEmpty) {
+      _items.add(ChatMessage(
+        id: tempId,
+        // Admin boshqa odamning suhbatida yozsa — admindan.
+        fromAdmin: isAdminView,
+        body: text,
+        createdAt: DateTime.now().millisecondsSinceEpoch,
+        pending: true,
+      ));
+      _loaded = true;
+      notifyListeners();
+    }
+
     try {
       final r = await http
           .post(
@@ -360,13 +485,20 @@ class ChatController extends ChangeNotifier {
           .timeout(const Duration(seconds: 20));
       final j = jsonDecode(r.body) as Map<String, dynamic>;
       if (r.statusCode != 200 && r.statusCode != 201) {
+        _items.removeWhere((m) => m.id == tempId);
+        notifyListeners();
         return '${j['error'] ?? 'Yuborilmadi'}';
       }
-      _items.add(ChatMessage.fromJson(j));
+      _items.removeWhere((m) => m.id == tempId);
+      final saved = ChatMessage.fromJson(j);
+      if (!_items.any((m) => m.id == saved.id)) _items.add(saved);
       _loaded = true;
+      _saveDisk();
       notifyListeners();
       return null;
     } catch (_) {
+      _items.removeWhere((m) => m.id == tempId);
+      notifyListeners();
       return 'Internet yo\'q — qaytadan urinib ko\'ring';
     }
   }
@@ -467,6 +599,60 @@ class ChatThreadsController extends ChangeNotifier {
   }
 
   static const String _diskKey = 'chat_threads';
+
+  // ── UZOQ KUTISH ───────────────────────────────────────────
+  //
+  // Admin suhbatlar ro'yxatini ochib turganda yangi xabar
+  // DARHOL yuqorida paydo bo'lsin. Usul xuddi suhbat ichidagidek
+  // (`ChatController._watchLoop` izohiga qarang), farqi faqat
+  // nimani kuzatishida: bu yerda BARCHA suhbatlarning eng
+  // oxirgi vaqti (`all=1`).
+  bool _watching = false;
+
+  int get _lastAt =>
+      _items.isEmpty ? 0 : _items.map((t) => t.lastAt).reduce((a, b) => a > b ? a : b);
+
+  void startWatching() {
+    if (_watching) return;
+    _watching = true;
+    unawaited(_watchLoop());
+  }
+
+  void stopWatching() => _watching = false;
+
+  Future<void> _watchLoop() async {
+    while (_watching) {
+      if (AuthService.instance.sessionToken == null) {
+        await Future<void>.delayed(const Duration(seconds: 5));
+        continue;
+      }
+      try {
+        final r = await http
+            .get(Uri.parse('$_base/wait?all=1&since=$_lastAt'),
+                headers: _headers())
+            .timeout(const Duration(seconds: 35));
+        if (!_watching) return;
+        if (r.statusCode == 200) {
+          final j = jsonDecode(r.body) as Map<String, dynamic>;
+          if (j['new'] == true) {
+            await load(force: true);
+            await UnreadBadge.instance.refresh();
+          }
+          continue;
+        }
+        await Future<void>.delayed(const Duration(seconds: 3));
+      } catch (_) {
+        if (!_watching) return;
+        await Future<void>.delayed(const Duration(seconds: 2));
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _watching = false;
+    super.dispose();
+  }
 
   /// Diskdagi nusxani DARHOL ko'rsatadi.
   void loadFromDisk() {

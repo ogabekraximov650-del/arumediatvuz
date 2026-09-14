@@ -91,6 +91,9 @@ class _AdminUsersScreenState extends State<AdminUsersScreen> {
     // kerak bo'ladi.
     _threads.loadFromDisk();
     _threads.load();
+    // Yangi xabar DARHOL yuqorida paydo bo'lsin (uzoq kutish —
+    // `ChatThreadsController._watchLoop` izohiga qarang).
+    _threads.startWatching();
     _scroll.addListener(() {
       if (!_scroll.hasClients) return;
       final left = _scroll.position.maxScrollExtent - _scroll.position.pixels;
@@ -102,6 +105,7 @@ class _AdminUsersScreenState extends State<AdminUsersScreen> {
   void dispose() {
     _debounce?.cancel();
     _ctrl.dispose();
+    _threads.stopWatching();
     _threads.dispose();
     _search.dispose();
     _scroll.dispose();

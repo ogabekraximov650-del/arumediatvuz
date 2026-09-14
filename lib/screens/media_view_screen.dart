@@ -46,28 +46,47 @@ class _MediaViewScreenState extends State<MediaViewScreen> {
   }
 
   Future<void> _open() async {
-    // ── OVOZ BILAN ISHLASHI ──────────────────────────────────
+    // ── ANIME PLEYERI BILAN BIR XIL ─────────────────────────
     //
-    // TALAB (foydalanuvchi): "ovoz bilan video aniq ishlasin".
+    // TALAB (foydalanuvchi): "chat video pleyeri anime pleyeri
+    // bilan bir xil bo'lishi kerak, faqat unda play/pause
+    // tugmasi va pastida qo'lda surasa bo'ladigan progress
+    // chizig'i bo'lsin".
     //
-    // `mixWithOthers: false` — pleyer ovoz fokusini O'ZIGA
-    // oladi, ya'ni fon'da musiqa yangrab tursa u to'xtaydi va
-    // video ovozi bo'g'ilib qolmaydi.
+    // Shu sabab pleyer ANIQ o'sha sozlamalar bilan ochiladi:
     //
-    // Ovoz balandligi ham ATAYLAB qo'yiladi: paket standart
-    // qiymatga tayanadi, lekin oldingi ijrodan qolgan holat
-    // ba'zan 0 bo'lib qolishi mumkin.
+    //   * `platformView` (SurfaceView) — Android'da Google'ning
+    //     rasmiy tavsiyasi. Video o'z ekran qatlamiga chiziladi,
+    //     Flutter sahnasiga aralashmaydi; quvvat sarfi kam va
+    //     tekstura bilan bog'liq muammolar (Impeller) tegmaydi.
+    //     Asosiy pleyer aynan shu sababdan unga o'tkazilgan edi.
+    //
+    //   * ovoz fokusi o'ziniki (`mixWithOthers: false`) va ilova
+    //     fon'ga ketsa to'xtaydi.
+    //
+    // Ko'rinish esa ataylab sodda: sifat tanlash, intro
+    // o'tkazish, qismlar, tezlik va to'liq ekran — yozishmadagi
+    // qisqa video uchun ularning hammasi ortiqcha.
+    setState(() => _error = false);
     final c = VideoPlayerController.networkUrl(
       Uri.parse(widget.url),
+      viewType: VideoViewType.platformView,
       videoPlayerOptions: VideoPlayerOptions(
         allowBackgroundPlayback: false,
         mixWithOthers: false,
       ),
     );
     try {
-      await c.initialize();
+      // Birinchi ochishda fayl Cloudflare keshiga ko'chiriladi
+      // (`b2_media` izohiga qarang) — shu sabab muddat uzunroq.
+      await c.initialize().timeout(const Duration(seconds: 40));
       if (!mounted) {
         await c.dispose();
+        return;
+      }
+      if (!c.value.isInitialized) {
+        await c.dispose();
+        setState(() => _error = true);
         return;
       }
       await c.setVolume(1.0);
@@ -119,9 +138,24 @@ class _MediaViewScreenState extends State<MediaViewScreen> {
 
   Widget _video() {
     if (_error) {
-      return const Text(
-        'Videoni ochib bo\'lmadi',
-        style: TextStyle(color: Colors.white54),
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Text(
+            'Videoni ochib bo\'lmadi',
+            style: TextStyle(color: Colors.white54),
+          ),
+          const SizedBox(height: 12),
+          OutlinedButton.icon(
+            onPressed: _open,
+            icon: const Icon(Icons.refresh_rounded, size: 18),
+            label: const Text('Qayta urinish'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: Colors.white,
+              side: const BorderSide(color: Colors.white30),
+            ),
+          ),
+        ],
       );
     }
     final c = _ctrl;

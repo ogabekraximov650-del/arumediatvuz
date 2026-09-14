@@ -1219,50 +1219,160 @@ async fn b2_fetch_range(env: &Env, file_name: &str, start: u64, end: u64) -> Res
     Ok((b2_resp, total))
 }
 
-/// ── YOZISHMADAGI RASM/VIDEO UCHUN ALOHIDA YO'L ───────────────
+/// ── YOZISHMADAGI RASM/VIDEO/OVOZ ─────────────────────────────
 ///
-/// TOPILGAN XATO (foydalanuvchi: "adminga yuborilgan video
-/// ochilmayapti").
+/// TALAB (foydalanuvchi): "chatda yuborilgan video ham surat ham
+/// keshga saqlanishi kerak va keshdan olinishi kerak — video
+/// CLOUDFLARE keshida saqlanishi kerak, telefon keshida emas".
 ///
-/// SABAB. ExoPlayer video ochganda `Range: bytes=0-` deb
-/// so'raydi va javobda E'LON QILINGAN uzunlikni FAYLNING
-/// QOLGAN QISMI deb biladi. `/api/image/...` yo'li esa bir
-/// so'rovda eng ko'pi 8 MiB beradi (B2'dan olinadigan bo'lak
-/// worker xotirasiga yig'ilgani uchun chegara ataylab kichik).
+/// ── QANDAY ISHLAYDI ─────────────────────────────────────────
 ///
-/// Ya'ni pleyer 20 MB'lik videoni 8 MB deb o'ylardi. MP4'ning
-/// ichki ko'rsatkichlari (`moov`) esa telefonda yozilgan
-/// videolarda FAYL OXIRIDA turadi — pleyer ularga yetib
-/// bormay, "ochib bo'lmadi" deb xato berardi. 8 MB'dan kichik
-/// video esa ochilaverardi, shuning uchun xato bir qarashda
-/// tushunarsiz edi.
+/// Fayl BIR MARTA B2'dan olinib, BUTUNLAY Cloudflare keshiga
+/// ko'chiriladi (anime qismlari uchun yozilgan `b2_warm` shu
+/// ishni qiladi). Shundan keyin har qanday so'rov — to'liq
+/// bo'ladimi, oraliq bo'ladimi — AYNAN o'sha kesh yozuvidan
+/// kesib beriladi va B2'ga umuman chiqilmaydi.
 ///
-/// YECHIM. Yozishmadagi fayl SHU yo'ldan beriladi va oraliq
-/// HECH QACHON qisqartirilmaydi. Baytlar oqim bilan o'tadi
-/// (`fixed_length_stream`), ya'ni fayl qanchalik katta
-/// bo'lmasin worker xotirasiga yig'ilmaydi.
+/// Ya'ni:
+///   * birinchi ochish  — B2'dan bir marta (pulli);
+///   * keyingi hammasi  — Cloudflare keshidan (tekin va tez).
 ///
-/// NEGA `/api/play/...` EMAS: u faqat OLDINDAN keshga
-/// isitilgan oynadan beradi (isitilmagan bo'lsa 503). U yo'l
-/// anime qismlari uchun — ular katta va qayta-qayta
-/// ko'riladi. Yozishmadagi qisqa video uchun isitish ortiqcha.
+/// ── NEGA `/api/image/...` YARAMADI ──────────────────────────
 ///
-/// NEGA KESHLANMAYDI: bitta videoni odatda ikki kishi (admin
-/// va muallif) bir-ikki marta ochadi. Kesh yozuvi bundan
-/// tejamaydi, faqat joy egallaydi.
-async fn b2_media(env: &Env, file_name: &str, range: Option<String>) -> Result<Response> {
+/// U yo'l bir so'rovda eng ko'pi 8 MiB beradi, chunki baytlar
+/// worker xotirasiga yig'iladi. ExoPlayer esa javobda E'LON
+/// QILINGAN uzunlikni faylning qolgan qismi deb biladi — 20 MB
+/// lik videoni 8 MB deb o'ylab, MP4'ning oxiridagi
+/// ko'rsatkichlarga (`moov`) yetib bormay, xato berardi.
+///
+/// Bu yerda esa oraliq HECH QACHON qisqartirilmaydi: kesh
+/// yozuvidan kesish Cloudflare'ning O'ZIDA bo'ladi va baytlar
+/// oqim bilan o'tadi.
+///
+/// ── NEGA `/api/play/...` EMAS ───────────────────────────────
+///
+/// U faqat oldindan isitilgan oynadan beradi va isitilmagan
+/// bo'lsa 503 qaytaradi — ilova o'zi isitishi kerak. Anime
+/// qismlari uchun bu to'g'ri (ular gigabaytlik). Yozishmadagi
+/// kichik fayl uchun esa ortiqcha: bu yer keraklisini O'ZI
+/// isitadi va darhol beradi.
+async fn b2_media(
+    env: &Env,
+    file_name: &str,
+    range: Option<String>,
+) -> Result<Response> {
+    // 1) Keshda bormi — darhol beramiz.
+    if let Some(r) = media_from_cache(file_name, range.as_deref()).await? {
+        return Ok(r);
+    }
+
+    // 2) Yo'q — B2'dan olib keshga ko'chiramiz. `b2_warm` bir
+    //    vaqtda faqat BITTA isitish ketishini ta'minlaydi
+    //    (belgi qo'yadi), ya'ni ikki kishi bir vaqtda ochsa ham
+    //    B2'ga bitta so'rov ketadi.
+    //
+    //    Oyna raqami 0: yozishmadagi fayl 480 MiB'dan kichik,
+    //    ya'ni butun fayl bitta oynaga sig'adi.
+    let _ = b2_warm(env, file_name, 0, false).await;
+
+    // 3) Endi keshdan beriladi.
+    if let Some(r) = media_from_cache(file_name, range.as_deref()).await? {
+        return Ok(r);
+    }
+
+    // 4) Kesh ishlamadi (juda katta fayl yoki Cloudflare yozuvni
+    //    qabul qilmadi) — oxirgi chora: to'g'ridan B2'dan, lekin
+    //    oraliqni QISQARTIRMASDAN.
+    b2_media_direct(env, file_name, range).await
+}
+
+/// Kesh yozuvidan (butun fayl) so'ralgan qismni kesib beradi.
+///
+/// `None` qaytsa — keshda yo'q yoki yaroqsiz.
+async fn media_from_cache(
+    file_name: &str,
+    range: Option<&str>,
+) -> Result<Option<Response>> {
+    let lookup_h = Headers::new();
+    if let Some(r) = range {
+        lookup_h.set("Range", r)?;
+    }
+    let lookup = Request::new_with_init(
+        &warm_window_url(file_name, 0),
+        RequestInit::new().with_method(Method::Get).with_headers(lookup_h),
+    )?;
+    let Some(hit) = Cache::default().get(&lookup, false).await? else {
+        return Ok(None);
+    };
+    let status = hit.status_code();
+    // Oraliq so'ralgan bo'lsa FAQAT 206 yaraydi: 200 kelsa oraliq
+    // kesilmagan va butun faylni oraliq o'rniga yuborish xato
+    // bo'lardi.
+    if range.is_some() && status != 206 {
+        return Ok(None);
+    }
+    let ct = hit
+        .headers()
+        .get("Content-Type")?
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    let total = hit
+        .headers()
+        .get("X-Total-Size")?
+        .and_then(|t| t.parse::<u64>().ok())
+        .unwrap_or(0);
+    if total == 0 {
+        return Ok(None);
+    }
+
+    // Nechta bayt qaytyapti va qaysi oraliq.
+    let (start, end) = match hit
+        .headers()
+        .get("Content-Range")?
+        .and_then(|c| parse_content_range(&c))
+    {
+        Some((s, e, _)) => (s, e),
+        None => (0, total - 1),
+    };
+    let len = end.saturating_sub(start) + 1;
+    let src = match hit.body() {
+        ResponseBody::Stream(rs) => rs.clone(),
+        _ => return Ok(None),
+    };
+    // Uzunlik OLDINDAN e'lon qilinadi — aks holda javob jimgina
+    // uzilib, pleyer faylni kalta deb o'ylardi.
+    let readable = fixed_length_stream(&src, len)?;
+    let mut resp = Response::from_body(ResponseBody::Stream(readable))?
+        .with_status(if range.is_some() { 206 } else { 200 });
+    set_cors(&mut resp);
+    {
+        let h = resp.headers_mut();
+        h.set("Content-Type", &ct)?;
+        h.set("Accept-Ranges", "bytes")?;
+        h.set("Cache-Control", "public, max-age=86400")?;
+        h.set("Content-Length", &len.to_string())?;
+        if range.is_some() {
+            h.set("Content-Range", &format!("bytes {start}-{end}/{total}"))?;
+        }
+        h.set("X-Cache", "HIT-MEDIA")?;
+    }
+    Ok(Some(resp))
+}
+
+/// Kesh ishlamagan holat uchun zaxira yo'l: B2'dan to'g'ridan,
+/// oraliq qisqartirilmasdan.
+async fn b2_media_direct(
+    env: &Env,
+    file_name: &str,
+    range: Option<String>,
+) -> Result<Response> {
     let Some((start, end_opt)) = range.as_deref().and_then(parse_range) else {
         return b2_proxy_full(env, file_name).await;
     };
-
     let end = match end_opt {
         Some(e) => e,
         // Oxiri berilmagan va boshi 0 — bu "butun faylni ber"
-        // degani, ya'ni Range'siz so'rov bilan bir xil.
+        // degani.
         None if start == 0 => return b2_proxy_full(env, file_name).await,
-        // Oxiri berilmagan, lekin o'rtadan so'ralgan (seek).
-        // Faylning hajmini bilish uchun BITTA bayt so'raymiz —
-        // javobning `Content-Range`i hajmni aytadi.
         None => {
             let (_probe, total) = b2_fetch_range(env, file_name, 0, 0).await?;
             if total == 0 {
@@ -1286,7 +1396,6 @@ async fn b2_media(env: &Env, file_name: &str, range: Option<String>) -> Result<R
     } else {
         (end + 1).to_string()
     };
-
     let mut resp = match b2.body() {
         ResponseBody::Stream(rs) => {
             let readable = fixed_length_stream(&rs.clone(), len)?;
@@ -1302,6 +1411,7 @@ async fn b2_media(env: &Env, file_name: &str, range: Option<String>) -> Result<R
         h.set("Cache-Control", "public, max-age=86400")?;
         h.set("Content-Length", &len.to_string())?;
         h.set("Content-Range", &format!("bytes {start}-{end}/{total_str}"))?;
+        h.set("X-Cache", "MISS-MEDIA")?;
     }
     Ok(resp)
 }
@@ -4938,14 +5048,32 @@ fn chat_msg_public(origin: &str, r: &Value) -> Value {
 ///
 /// `as_admin` — kim o'qiyapti. Shunga qarab qaysi hisoblagich
 /// nollanishi hal bo'ladi.
+/// Suhbatni o'qiydi.
+///
+/// `since` berilgan bo'lsa FAQAT undan keyingi xabarlar qaytadi.
+///
+/// NEGA KERAK: yozishma ochiq turganda ilova tez-tez so'raydi.
+/// Har safar 200 ta xabarni qaytadan tashish ham tarmoqni, ham
+/// bazani behuda ishlatardi. `since` bilan javob odatda bo'sh
+/// ro'yxat bo'ladi — bir necha o'nlab bayt.
 async fn chat_read(
-    env: &Env, origin: &str, user: i64, as_admin: bool,
+    env: &Env, origin: &str, user: i64, as_admin: bool, since: i64,
 ) -> Result<Response> {
-    let res = turso_exec(env,
-        "SELECT id, from_admin, body, media_file, media_type, media_ms, created_at
-           FROM chat_messages
-          WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
-        vec![TursoArg::int(user), TursoArg::int(CHAT_LIMIT)]).await?;
+    let res = if since > 0 {
+        turso_exec(env,
+            "SELECT id, from_admin, body, media_file, media_type, media_ms, created_at
+               FROM chat_messages
+              WHERE user_id = ? AND created_at > ?
+              ORDER BY created_at DESC LIMIT ?",
+            vec![TursoArg::int(user), TursoArg::int(since),
+                 TursoArg::int(CHAT_LIMIT)]).await?
+    } else {
+        turso_exec(env,
+            "SELECT id, from_admin, body, media_file, media_type, media_ms, created_at
+               FROM chat_messages
+              WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
+            vec![TursoArg::int(user), TursoArg::int(CHAT_LIMIT)]).await?
+    };
     let cols = res["cols"].as_array().cloned().unwrap_or_default();
     let rows = res["rows"].as_array().cloned().unwrap_or_default();
     // Eskisidan yangisiga — suhbat tartibida.
@@ -4959,7 +5087,7 @@ async fn chat_read(
         &format!("UPDATE chat_threads SET {col}=0 WHERE user_id=?"),
         vec![TursoArg::int(user)]).await;
 
-    ok_nostore(json!({"items": items}))
+    ok_nostore(json!({"items": items, "since": since}))
 }
 
 /// GET /api/chat — o'z yozishmasi (foydalanuvchi tomoni).
@@ -4968,7 +5096,20 @@ async fn chat_mine(req: &Request, env: &Env, origin: &str) -> Result<Response> {
         return json_resp(&json!({"error": "unauthorized"}), 401);
     };
     let me = u["id"].as_i64().unwrap_or(0);
-    chat_read(env, origin, me, false).await
+    chat_read(env, origin, me, false, since_of(req)).await
+}
+
+/// So'rovdagi `?since=<ms>` — faqat shundan keyingi xabarlar.
+fn since_of(req: &Request) -> i64 {
+    req.url()
+        .ok()
+        .and_then(|u| {
+            u.query_pairs()
+                .find(|(k, _)| k == "since")
+                .and_then(|(_, v)| v.parse::<i64>().ok())
+        })
+        .unwrap_or(0)
+        .max(0)
 }
 
 /// GET /api/chat/unread — profil sahifasidagi NUQTA uchun.
@@ -5126,6 +5267,104 @@ async fn chat_send(mut req: Request, env: &Env, origin: &str) -> Result<Response
     }))
 }
 
+// ═══════════════════════════════════════════════════════════════
+//  UZOQ KUTISH (LONG POLLING) — XABAR DARHOL YETIB BORSIN
+// ═══════════════════════════════════════════════════════════════
+//
+// TALAB (foydalanuvchi): "supportga yuborilgan xabar tez
+// kelmayapti; Telegram kodini topib, uning xabar jo'natish
+// tizimi qanday ishlashini aniqla va huddi Telegramdek tez
+// ishlaydigan qilib ber".
+//
+// ── TELEGRAM QANDAY QILADI ─────────────────────────────────────
+//
+// Telegram mijozlari (MTProto) serverga DOIMIY ulanib turadi va
+// server yangi xabarni O'ZI itaradi — mijoz so'ramaydi.
+//
+// Telegramning O'Z Bot API'si esa xuddi shu tezlikni oddiy HTTP
+// ustida beradi: `getUpdates` so'rovi `timeout` bilan yuboriladi
+// va SERVER javobni darhol bermaydi — yangi xabar paydo
+// bo'lgunicha so'rovni OCHIQ ushlab turadi. Xabar kelishi bilan
+// javob qaytadi; hech narsa bo'lmasa muddat tugagach bo'sh javob
+// beradi va mijoz qaytadan so'raydi.
+//
+// Bu yerda aynan o'sha usul.
+//
+// ── NEGA WEBSOCKET EMAS ────────────────────────────────────────
+//
+// Cloudflare Worker'da haqiqiy "server itarishi" uchun Durable
+// Objects kerak — alohida xizmat va butun tizimni qayta qurish.
+// Uzoq kutish esa oddiy HTTP so'rovi: hozirgi tizimga hech narsa
+// qo'shmaydi, natijasi foydalanuvchi uchun bir xil.
+//
+// ── ARZONLIGI ──────────────────────────────────────────────────
+//
+// Kutish paytida bazadan FAQAT BITTA SON so'raladi
+// (`MAX(created_at)`), xabarlarning o'zi emas. Yangi narsa
+// topilsagina ilova ro'yxatni so'raydi — uni ham `since` bilan,
+// ya'ni faqat yangilarini.
+//
+// So'rovlar soni ham KAMAYADI: ilgari har 10 soniyada bitta
+// so'rov ketardi (daqiqasiga 6 ta), endi har ~19 soniyada bitta
+// (daqiqasiga 3 ta) — lekin xabar 10 soniya emas, ~1 soniyada
+// yetib boradi.
+
+/// Bir so'rovda eng ko'pi shuncha kutamiz.
+///
+/// Worker'da bitta so'rovdan chiqadigan ichki so'rovlar soni
+/// chegaralangan, shu sabab tekshiruvlar soni ham chegarali:
+/// 16 ta tekshiruv x 1.2 soniya = ~19 soniya.
+const CHAT_WAIT_TICKS: u32 = 16;
+const CHAT_WAIT_STEP_MS: u64 = 1200;
+
+/// GET /api/chat/wait?since=<ms>[&user_id=N][&all=1]
+async fn chat_wait(req: &Request, env: &Env) -> Result<Response> {
+    let Some(u) = session_user(env, &bearer(req)).await? else {
+        return json_resp(&json!({"error": "unauthorized"}), 401);
+    };
+    let me = u["id"].as_i64().unwrap_or(0);
+    let admin = is_admin(&u);
+
+    let url = req.url()?;
+    let q = |k: &str| -> String {
+        url.query_pairs()
+            .find(|(n, _)| n == k)
+            .map(|(_, v)| v.to_string())
+            .unwrap_or_default()
+    };
+    let since: i64 = q("since").parse().unwrap_or(0);
+    // Admin butun ro'yxatni kuzatishi mumkin (yangi suhbat ham
+    // paydo bo'lishi mumkin), oddiy foydalanuvchi esa faqat
+    // O'Z suhbatini. Bu tekshiruv SERVERDA — o'zgartirilgan ilova
+    // bilan begona odam boshqalarning suhbatini kuzata olmaydi.
+    let watch_all = admin && q("all") == "1";
+    let target = match q("user_id").parse::<i64>() {
+        Ok(t) if admin && t > 0 => t,
+        _ => me,
+    };
+
+    let (sql, args): (&str, Vec<TursoArg>) = if watch_all {
+        ("SELECT COALESCE(MAX(last_at),0) FROM chat_threads", vec![])
+    } else {
+        ("SELECT COALESCE(MAX(created_at),0) FROM chat_messages WHERE user_id=?",
+         vec![TursoArg::int(target)])
+    };
+
+    for i in 0..CHAT_WAIT_TICKS {
+        // Birinchi tekshiruv KUTMASDAN: xabar allaqachon kelgan
+        // bo'lsa javob darhol qaytadi.
+        if i > 0 {
+            Delay::from(core::time::Duration::from_millis(CHAT_WAIT_STEP_MS)).await;
+        }
+        let res = turso_exec(env, sql, args.clone()).await?;
+        let last = scalar(&res);
+        if last > since {
+            return ok_nostore(json!({"new": true, "last": last}));
+        }
+    }
+    ok_nostore(json!({"new": false, "last": since}))
+}
+
 /// GET /api/chat/threads — ADMIN uchun barcha suhbatlar.
 ///
 /// Yangi xabar YUQORIDA (`last_at DESC`) va har bir qatorda odamning
@@ -5177,7 +5416,7 @@ async fn chat_threads(req: &Request, env: &Env, origin: &str) -> Result<Response
 /// GET /api/chat/thread/:user_id — ADMIN bitta odamning suhbatini
 /// o'qiydi.
 async fn chat_one(
-    req: &Request, env: &Env, origin: &str, user: i64,
+    req: &Request, env: &Env, origin: &str, user: i64, since: i64,
 ) -> Result<Response> {
     let Some(u) = session_user(env, &bearer(req)).await? else {
         return json_resp(&json!({"error": "unauthorized"}), 401);
@@ -5185,7 +5424,7 @@ async fn chat_one(
     if !is_admin(&u) {
         return json_resp(&json!({"error": "forbidden"}), 403);
     }
-    chat_read(env, origin, user, true).await
+    chat_read(env, origin, user, true, since).await
 }
 
 // ── ADMIN O'CHIRA OLADI ───────────────────────────────────────
@@ -6758,6 +6997,11 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
     if path == "/api/chat/unread" && method == Method::Get {
         return chat_unread(&req, &env).await;
     }
+    // Uzoq kutish — xabar kelishi bilan javob qaytadi
+    // (`chat_wait` izohiga qarang).
+    if path == "/api/chat/wait" && method == Method::Get {
+        return chat_wait(&req, &env).await;
+    }
     if path == "/api/chat/threads" && method == Method::Get {
         return chat_threads(&req, &env, &origin).await;
     }
@@ -6767,7 +7011,7 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
     if let Some(idv) = path.strip_prefix("/api/chat/thread/") {
         if let Ok(uid) = idv.parse::<i64>() {
             if method == Method::Get {
-                return chat_one(&req, &env, &origin, uid).await;
+                return chat_one(&req, &env, &origin, uid, since_of(&req)).await;
             }
             if method == Method::Delete {
                 return chat_del_thread(&req, &env, uid).await;
