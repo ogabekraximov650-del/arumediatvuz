@@ -1,15 +1,14 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
-import 'dart:convert';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import '../widgets/aru_logo.dart';
 import '../widgets/glass.dart';
 import '../widgets/stats_banner.dart';
 import '../services/auth_service.dart';
+import '../services/format.dart';
 import '../services/offline_library.dart';
-import '../services/rust_bridge.dart';
+import '../services/seasons_repo.dart';
 import '../services/watch_history.dart';
 import 'video_player_screen.dart';
 
@@ -23,8 +22,16 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  List<Map<String, dynamic>> _seasons = [];
-  bool _isLoading = true;
+  // ── RO'YXAT ENDI UMUMIY ──────────────────────────────────
+  //
+  // Bo'limlar ro'yxati Katalog sahifasida ham kerak. Ilgari
+  // ikkovi alohida so'rov qilardi; endi manba BITTA
+  // (`SeasonsRepo`), ya'ni ro'yxat ilova ochilganda bir marta
+  // olinadi va ikkala sahifada ham bir vaqtda yangilanadi.
+  SeasonsRepo get _repo => SeasonsRepo.instance;
+  List<Map<String, dynamic>> get _seasons => _repo.items;
+  bool get _isLoading => _repo.isLoading && _seasons.isEmpty;
+
   bool _isOffline = false;
   StreamSubscription<List<ConnectivityResult>>? _connectivitySub;
   bool _wasOffline = false;
@@ -32,7 +39,7 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
-    _loadData();
+    _repo.load();
     _listenConnectivity();
     // Diskdagi tomosha tarixi — TARMOQSIZ o'qiladi. Anime ustiga
     // bosilganda "oxirgi ko'rilgan qism" darhol ma'lum bo'lishi
@@ -46,63 +53,8 @@ class _HomeScreenState extends State<HomeScreen> {
   //
   // TALAB (foydalanuvchi): kartalar KO'RINIB tursin, lekin ustiga
   // bosilganda hisobga kirish so'ralsin.
-  void _openSeason(Map<String, dynamic> season) {
-    if (!AuthService.instance.isLoggedIn) {
-      _askLogin();
-      return;
-    }
-    // Tarix hali o'qilmagan bo'lsa (masalan endigina kirilgan) —
-    // shu yerda o'qib olamiz, so'rov ketmaydi.
-    WatchHistory.instance.loadFromDisk();
-    Navigator.of(context).push(
-      PageRouteBuilder(
-        transitionDuration: const Duration(milliseconds: 300),
-        pageBuilder: (_, anim, __) => VideoPlayerScreen(season: season),
-        transitionsBuilder: (_, anim, __, child) => FadeTransition(
-          opacity: CurvedAnimation(parent: anim, curve: Curves.easeOutCubic),
-          child: child,
-        ),
-      ),
-    );
-  }
-
-  void _askLogin() {
-    showDialog<void>(
-      context: context,
-      barrierColor: Colors.black54,
-      builder: (ctx) => Dialog(
-        backgroundColor: Colors.transparent,
-        insetPadding: const EdgeInsets.symmetric(horizontal: 28),
-        child: Glass(
-          borderRadius: 22,
-          padding: const EdgeInsets.fromLTRB(22, 22, 22, 16),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(Icons.lock_outline_rounded,
-                  size: 44, color: AppColors.accent),
-              const SizedBox(height: 14),
-              const Text(
-                'Iltimos anime ko\'rish uchun avval profil sahifasiga '
-                'o\'tib accountingizga kiring yoki yangi accaunt oching',
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                    color: Colors.white, fontSize: 14.5, height: 1.45),
-              ),
-              const SizedBox(height: 18),
-              SizedBox(
-                width: double.infinity,
-                child: FilledButton(
-                  onPressed: () => Navigator.of(ctx).pop(),
-                  child: const Text('Tushunarli'),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
+  void _openSeason(Map<String, dynamic> season) =>
+      openSeasonFromAnywhere(context, season);
 
   @override
   void dispose() {
@@ -121,7 +73,7 @@ class _HomeScreenState extends State<HomeScreen> {
       } else if (_wasOffline) {
         _wasOffline = false;
         if (mounted) setState(() => _isOffline = false);
-        _fetchFromApi(force: true);
+        _repo.fetch();
       }
     });
   }
@@ -151,61 +103,15 @@ class _HomeScreenState extends State<HomeScreen> {
     }).toList();
   }
 
-  // MUHIM: kesh MUDDATIDAN QAT'IY NAZAR har doim darhol ko'rsatiladi.
-  Future<void> _loadData() async {
-    final cached = RustCore.instance.getCachedAnimes();
-    if (cached != null && mounted) {
-      setState(() {
-        _seasons = cached;
-        _isLoading = false;
-      });
-      unawaited(OfflineLibrary.instance.refresh(cached));
-      if (!RustCore.instance.isCacheFresh()) {
-        _fetchFromApi();
-      }
-      return;
-    }
-    await _fetchFromApi(showLoading: true);
-  }
-
-  Future<void> _fetchFromApi(
-      {bool force = false, bool showLoading = false}) async {
-    if (showLoading && mounted) setState(() => _isLoading = true);
-    try {
-      final res = await http
-          .get(Uri.parse('$API_BASE/api/seasons'))
-          .timeout(const Duration(seconds: 10));
-      if (res.statusCode == 200 && mounted) {
-        final data =
-            (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
-        RustCore.instance.saveAnimesCache(data);
-        setState(() {
-          _seasons = data;
-          _isLoading = false;
-          _isOffline = false;
-        });
-        // Yangi ro'yxat — oflayn indeksi ham yangilanadi.
-        unawaited(OfflineLibrary.instance.refresh(data));
-      }
-    } catch (_) {
-      if (mounted)
-        setState(() {
-          _isLoading = false;
-          _isOffline = true;
-        });
-    }
-  }
-
-  Future<void> _onRefresh() async {
-    RustCore.instance.clearCache();
-    await _fetchFromApi(force: true);
-  }
+  Future<void> _onRefresh() => _repo.refresh();
 
   @override
   Widget build(BuildContext context) {
     // Oflayn indeksi yangilanganda ro'yxat qayta chizilsin.
     return AnimatedBuilder(
-      animation: OfflineLibrary.instance,
+      // Ro'yxat ham, oflayn indeksi ham qayta chizishga sabab.
+      animation: Listenable.merge(
+          [SeasonsRepo.instance, OfflineLibrary.instance]),
       builder: (context, _) => _buildList(context),
     );
   }
@@ -382,6 +288,76 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 }
 
+// ══════════════════════════════════════════════════════════════
+//  ANIMENI OCHISH — BITTA JOYDA
+// ══════════════════════════════════════════════════════════════
+//
+// Pleyerga bir necha sahifadan kiriladi (Bosh sahifa, Katalog,
+// Sevimlilar). Kirish tekshiruvi ham, o'tish animatsiyasi ham
+// hamma joyda BIR XIL bo'lishi kerak — shu sabab u shu yerda,
+// bitta funksiyada.
+//
+// TALAB (foydalanuvchi): kartalar KO'RINIB tursin, lekin ustiga
+// bosilganda hisobga kirish so'ralsin.
+void openSeasonFromAnywhere(
+    BuildContext context, Map<String, dynamic> season) {
+  if (!AuthService.instance.isLoggedIn) {
+    _askLoginDialog(context);
+    return;
+  }
+  // Tarix hali o'qilmagan bo'lsa (masalan endigina kirilgan) —
+  // shu yerda o'qib olamiz, so'rov ketmaydi.
+  WatchHistory.instance.loadFromDisk();
+  Navigator.of(context).push(
+    PageRouteBuilder(
+      transitionDuration: const Duration(milliseconds: 300),
+      pageBuilder: (_, anim, __) => VideoPlayerScreen(season: season),
+      transitionsBuilder: (_, anim, __, child) => FadeTransition(
+        opacity: CurvedAnimation(parent: anim, curve: Curves.easeOutCubic),
+        child: child,
+      ),
+    ),
+  );
+}
+
+void _askLoginDialog(BuildContext context) {
+  showDialog<void>(
+    context: context,
+    barrierColor: Colors.black54,
+    builder: (ctx) => Dialog(
+      backgroundColor: Colors.transparent,
+      insetPadding: const EdgeInsets.symmetric(horizontal: 28),
+      child: Glass(
+        borderRadius: 22,
+        padding: const EdgeInsets.fromLTRB(22, 22, 22, 16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.lock_outline_rounded,
+                size: 44, color: AppColors.accent),
+            const SizedBox(height: 14),
+            const Text(
+              'Iltimos anime ko\'rish uchun avval profil sahifasiga '
+              'o\'tib accountingizga kiring yoki yangi accaunt oching',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                  color: Colors.white, fontSize: 14.5, height: 1.45),
+            ),
+            const SizedBox(height: 18),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: const Text('Tushunarli'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
 // ── Season kartochkasi ──────────────────────────────────────────────────────
 class SeasonCard extends StatelessWidget {
   final Map<String, dynamic> season;
@@ -403,6 +379,27 @@ class SeasonCard extends StatelessWidget {
     final photoUrl = season['photo_url'] as String?;
     final name = (season['nomi'] ?? '').toString();
     final bolim = int.tryParse(season['bolim_id']?.toString() ?? '') ?? 0;
+
+    // ── KARTOCHKA BELGILARI ───────────────────────────────────
+    //
+    // TALAB (foydalanuvchi): "anime kartochkalarining yuqori
+    // qismida reytingi va necha marta ko'rilgani yozib qo'yilsin,
+    // pastroqda esa yosh chegarasi bo'lsin (17+, 18+ va hokazo)".
+    //
+    // Uchalasi ham SERVERDAN keladi (`season_db`) — ilovada hech
+    // narsa o'ylab topilmaydi:
+    //   * reyting  — `rating_sum / rating_count`;
+    //   * ko'rish  — `views_total`;
+    //   * yosh     — `yosh` (0 bo'lsa belgi umuman chiqmaydi).
+    //
+    // Baho hali berilmagan bo'lsa reyting belgisi ham chiqmaydi:
+    // `0.0` deb turish "yomon anime" degan noto'g'ri taassurot
+    // berardi.
+    final rCount = int.tryParse('${season['rating_count'] ?? 0}') ?? 0;
+    final rSum = int.tryParse('${season['rating_sum'] ?? 0}') ?? 0;
+    final rating = rCount > 0 ? rSum / rCount : 0.0;
+    final views = int.tryParse('${season['views_total'] ?? 0}') ?? 0;
+    final yosh = int.tryParse('${season['yosh'] ?? 0}') ?? 0;
 
     return GlassTappable(
       onTap: onTap,
@@ -459,6 +456,43 @@ class SeasonCard extends StatelessWidget {
                       child: Icon(Icons.movie_creation_outlined,
                           size: 36, color: Colors.white38)),
                 ),
+
+              // ── TEPADAGI BELGILAR ──────────────────────
+              //
+              // Rasm ustida turadi, shu sabab har biri o'z quyuq
+              // foniga ega — och kadrda ham o'qilsin.
+              Positioned(
+                top: 8,
+                left: 8,
+                right: 8,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(
+                      children: [
+                        if (rCount > 0)
+                          _CardBadge(
+                            icon: Icons.star_rounded,
+                            text: rating.toStringAsFixed(1),
+                            iconColor: const Color(0xFFFFC93C),
+                          ),
+                        const Spacer(),
+                        if (views > 0)
+                          _CardBadge(
+                            icon: Icons.visibility_rounded,
+                            text: formatCompact(views),
+                          ),
+                      ],
+                    ),
+                    // Yosh chegarasi — talab bo'yicha PASTROQDA.
+                    if (yosh > 0) ...[
+                      const SizedBox(height: 6),
+                      _AgeBadge(yosh: yosh),
+                    ],
+                  ],
+                ),
+              ),
 
               // Pastdan gradient + yozuvlar. Ikkovi bitta
               // `LayoutBuilder` ichida: gradient balandligi
@@ -530,6 +564,84 @@ class SeasonCard extends StatelessWidget {
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+// ── Kartochka ustidagi kichik belgi ─────────────────────────────
+//
+// Reyting va ko'rishlar soni uchun. Fon quyuq va biroz shaffof:
+// och rangli kadrda ham yozuv o'qiladi, lekin rasmni ham
+// butunlay bosib qo'ymaydi.
+class _CardBadge extends StatelessWidget {
+  final IconData icon;
+  final String text;
+  final Color? iconColor;
+
+  const _CardBadge({
+    required this.icon,
+    required this.text,
+    this.iconColor,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.62),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.14)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 12, color: iconColor ?? Colors.white70),
+          const SizedBox(width: 3),
+          Text(
+            text,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 10.5,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Yosh chegarasi belgisi ──────────────────────────────────────
+//
+// Rang chegaraning O'ZIGA qarab o'zgaradi: 18+ qizil, 16+ to'q
+// sariq, qolgani ko'kroq. Ya'ni belgini o'qimasdan ham ko'z
+// bilan ajratib olsa bo'ladi.
+class _AgeBadge extends StatelessWidget {
+  final int yosh;
+  const _AgeBadge({required this.yosh});
+
+  @override
+  Widget build(BuildContext context) {
+    final color = yosh >= 18
+        ? const Color(0xFFE5484D)
+        : (yosh >= 16 ? const Color(0xFFF76B15) : const Color(0xFF3E9BFF));
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2.5),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.92),
+        borderRadius: BorderRadius.circular(7),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.28)),
+      ),
+      child: Text(
+        '$yosh+',
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 10.5,
+          fontWeight: FontWeight.w900,
+          letterSpacing: 0.2,
         ),
       ),
     );

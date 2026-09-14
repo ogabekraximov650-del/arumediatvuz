@@ -69,6 +69,22 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
   final _nameCtrl = TextEditingController();
 
   // ══════════════════════════════════════════════════════════
+  //  YOSH CHEGARASI
+  // ══════════════════════════════════════════════════════════
+  //
+  // TALAB (foydalanuvchi): "epizod qo'shish sahifasiga qism nomi
+  // tagiga yosh chegarasini yozadigan oyna qo'sh".
+  //
+  // Qo'lda yozilmaydi — tanlanadi: `16+` o'rniga `!6+` yozilib
+  // qolishi yoki bir qismga `18+`, boshqasiga `18 +` yozilishi
+  // mumkin edi, keyin esa ro'yxatda ikki xil belgi chiqardi.
+  //
+  // 0 — "belgilanmagan": kartochkada hech qanday belgi
+  // ko'rsatilmaydi.
+  static const List<int> _yoshlar = [0, 6, 12, 16, 18];
+  int _yosh = 0;
+
+  // ══════════════════════════════════════════════════════════
   //  OPENINGNI O'TKAZIB YUBORISH — VAQT OYNALARI
   // ══════════════════════════════════════════════════════════
   //
@@ -119,6 +135,8 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
       }
       _numberCtrl.text = (ep['epizod_number'] ?? '').toString();
       _nameCtrl.text = ep['epizod_name'] ?? '';
+      final y = int.tryParse('${ep['yosh'] ?? 0}') ?? 0;
+      if (_yoshlar.contains(y)) _yosh = y;
       for (final q in _qualities) {
         // Worker GET javobida to'liq URL keladi — bare nomga qaytaramiz,
         // saqlashda serverga aynan shu (bare) holida yuboriladi.
@@ -357,6 +375,7 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
         'season_id': widget.seasonId,
         'epizod_number': int.tryParse(_numberCtrl.text) ?? 0,
         'epizod_name': _nameCtrl.text,
+        'yosh': _yosh,
         'url_360p': _qualities[0].url ?? '',
         'size_360p': _qualities[0].size ?? '',
         'url_480p': _qualities[1].url ?? '',
@@ -478,6 +497,11 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
 
                       _buildTextField('Epizod nomi (ixtiyoriy)', _nameCtrl,
                           Icons.title_rounded),
+                      const SizedBox(height: 12),
+
+                      // Qism nomining TAGIDA — foydalanuvchi aytgan
+                      // joyda.
+                      _buildYoshCard(),
                       const SizedBox(height: 20),
 
                       // ── 4 ta sifat yuklash oynasi ──
@@ -647,6 +671,73 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
               color: Colors.white.withValues(alpha: 0.3), fontSize: 13),
           border: InputBorder.none,
         ),
+      ),
+    );
+  }
+
+  /// Yosh chegarasi tanlovi.
+  Widget _buildYoshCard() {
+    return Glass(
+      borderRadius: 14,
+      blur: 14,
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.shield_outlined, color: Colors.white54,
+                  size: 20),
+              const SizedBox(width: 10),
+              Text(
+                'Yosh chegarasi',
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.85),
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: _yoshlar.map((y) {
+              final sel = _yosh == y;
+              return GestureDetector(
+                onTap: () => setState(() => _yosh = y),
+                behavior: HitTestBehavior.opaque,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 14, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: sel
+                        ? AppColors.accent
+                        : Colors.white.withValues(alpha: 0.07),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(
+                      color: sel
+                          ? AppColors.accent
+                          : Colors.white.withValues(alpha: 0.16),
+                    ),
+                  ),
+                  child: Text(
+                    y == 0 ? 'Belgilanmagan' : '$y+',
+                    style: TextStyle(
+                      color: sel
+                          ? Colors.white
+                          : Colors.white.withValues(alpha: 0.75),
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+              );
+            }).toList(),
+          ),
+        ],
       ),
     );
   }

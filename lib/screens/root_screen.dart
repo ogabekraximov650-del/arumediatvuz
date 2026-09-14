@@ -309,6 +309,49 @@ class _RootScreenState extends State<RootScreen>
 
 // ── Yangi tezkor pastki navigatsiya ───────────────────────────
 // Blur yo'q — faqat Container + BoxShadow. 60fps+ istalgan qurilmada.
+/// Pastda tizim tugmalari egallagan jismoniy balandlik (nuqtada).
+double systemBottomInset(BuildContext context) {
+  var best = 0.0;
+  void take(double v) {
+    if (v.isFinite && v > best) best = v;
+  }
+
+  // 1) Qurilmadan to'g'ridan — eng ishonchli manba.
+  final view = View.of(context);
+  final dpr = view.devicePixelRatio <= 0 ? 1.0 : view.devicePixelRatio;
+  take(view.viewPadding.bottom / dpr);
+  take(view.padding.bottom / dpr);
+  take(view.systemGestureInsets.bottom / dpr);
+
+  // 2) `MediaQuery` — shu bilan birga QAYTA CHIZISHGA obuna
+  //    bo'lamiz (tizim o'lchovi o'zgarsa widget yangilanadi).
+  final mq = MediaQuery.maybeOf(context);
+  if (mq != null) {
+    take(mq.viewPadding.bottom);
+    take(mq.padding.bottom);
+  }
+  return best;
+}
+
+
+/// Pastki navigatsiya paneli EGALLAGAN to'liq balandlik.
+///
+/// NEGA KERAK: Katalogdagi "Filtrlash" tugmasi shu panelning
+/// USTIDA turishi kerak (foydalanuvchi talabi: "sahifa tugmalari
+/// oynasi ustida, oynaga yopishgan holda").
+///
+/// Raqamni qo'lda yozib qo'yish XATO bo'lardi: chekinish
+/// qurilmaga qarab o'zgaradi va panel balandligi ham shu yerda
+/// bir joyda hisoblanadi. Shu sabab o'lchov MANBASI bitta —
+/// panelning o'zi va shu funksiya.
+///
+///   chekinish + (10 + 52 + 10) + chegara ≈ chekinish + 74
+double bottomNavHeight(BuildContext context) {
+  final raw = systemBottomInset(context);
+  final inset = (raw < 26 ? 26.0 : raw) + 12;
+  return inset + 74;
+}
+
 class _BottomNav extends StatefulWidget {
   final int currentIndex;
 
@@ -366,30 +409,6 @@ class _BottomNavState extends State<_BottomNav>
     if (mounted) setState(() {});
   }
 
-  /// Pastda tizim tugmalari egallagan jismoniy balandlik (nuqtada).
-  double _systemInset(BuildContext context) {
-    var best = 0.0;
-    void take(double v) {
-      if (v.isFinite && v > best) best = v;
-    }
-
-    // 1) Qurilmadan to'g'ridan — eng ishonchli manba.
-    final view = View.of(context);
-    final dpr = view.devicePixelRatio <= 0 ? 1.0 : view.devicePixelRatio;
-    take(view.viewPadding.bottom / dpr);
-    take(view.padding.bottom / dpr);
-    take(view.systemGestureInsets.bottom / dpr);
-
-    // 2) `MediaQuery` — shu bilan birga QAYTA CHIZISHGA obuna
-    //    bo'lamiz (tizim o'lchovi o'zgarsa widget yangilanadi).
-    final mq = MediaQuery.maybeOf(context);
-    if (mq != null) {
-      take(mq.viewPadding.bottom);
-      take(mq.padding.bottom);
-    }
-    return best;
-  }
-
   static const _items = [
     (icon: Icons.home_rounded, label: 'Bosh sahifa'),
     (icon: Icons.search_rounded, label: 'Qidiruv'),
@@ -405,7 +424,7 @@ class _BottomNavState extends State<_BottomNav>
     // Eng kam 26 nuqta — chekinish umuman kelmagan qurilmada ham
     // panel ekran chetiga yopishib qolmasin. Ustiga 12 nuqta
     // qo'shiladi: foydalanuvchi talabi "biroz yuqoriga ko'tar".
-    final raw = _systemInset(context);
+    final raw = systemBottomInset(context);
     final inset = (raw < 26 ? 26.0 : raw) + 12;
     return Padding(
       padding: EdgeInsets.only(bottom: inset),

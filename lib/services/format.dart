@@ -66,3 +66,23 @@ String formatRating(num value) {
   final text = v.toStringAsFixed(2);
   return text.length < 5 ? '0$text' : text;
 }
+
+/// Kartochkadagi kichkina belgi uchun QISQA raqam.
+///
+/// `formatCount` (`1.284.512`) kartochkaga sig'maydi — u yerda
+/// atigi bir necha belgi joy bor. Shu sabab bu yerda qisqartma:
+/// `1.284.512` -> `1,3 mln`, `12.400` -> `12,4 ming`.
+///
+/// Mingdan kichik son o'z holicha qoladi: `843`.
+String formatCompact(num value) {
+  final n = value.round();
+  if (n < 1000) return '$n';
+  String cut(double v) {
+    // `12,0 ming` emas, `12 ming` — ortiqcha nol ko'zni charchatadi.
+    final t = v.toStringAsFixed(1).replaceAll('.', ',');
+    return t.endsWith(',0') ? t.substring(0, t.length - 2) : t;
+  }
+
+  if (n < 1000000) return '${cut(n / 1000)} ming';
+  return '${cut(n / 1000000)} mln';
+}
