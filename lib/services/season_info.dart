@@ -100,10 +100,62 @@ class SeasonService {
     try {
       final rows = RustCore.instance.getCachedList(_cacheKey(animeId, seasonId));
       if (rows == null || rows.isEmpty) return null;
-      return SeasonInfo.fromJson(rows.first);
+      return _withPending(animeId, seasonId, SeasonInfo.fromJson(rows.first));
     } catch (_) {
       return null;
     }
+  }
+
+  // ══════════════════════════════════════════════════════════
+  //  NAVBATDAGI HOLAT SERVERNIKIDAN USTUN
+  // ══════════════════════════════════════════════════════════
+  //
+  // TOPILGAN XATO (foydalanuvchi: "sevimlilar va baholash tugmasi
+  // ishlamayapti").
+  //
+  // Tugma aslida ISHLARDI: holat darhol o'zgarar va navbatga
+  // tushardi. Lekin navbat kuniga bir necha marta yuboriladi, ya'ni
+  // serverda u bir necha SOAT davomida yo'q bo'lib turadi.
+  //
+  // Bo'lim ma'lumoti esa har ochilganda SERVERDAN olinardi va
+  // xotiradagini BUTUNLAY almashtirardi. Natijada qism almashtirsa
+  // yoki pleyer qayta ochilsa, hozirgina qo'yilgan baho va sevimli
+  // belgisi YO'QOLARDI — foydalanuvchi uchun bu "tugma ishlamadi"
+  // degani.
+  //
+  // Sevimlilar RO'YXATIDA bu qoida allaqachon bor edi
+  // (`sync_queue.dart` -> `pendingFavorites` izohi), lekin pleyer
+  // ma'lumotiga qo'llanmagan edi. Endi ikkalasi bir xil ishlaydi:
+  // serverdan kelgan javob ustiga navbatdagi holat qo'yiladi.
+  static SeasonInfo _withPending(int animeId, int seasonId, SeasonInfo info) {
+    final key = '$animeId:$seasonId';
+    var out = info;
+    try {
+      final fav = SyncQueue.instance.pendingFavorites()[key];
+      if (fav != null && fav != out.isFav) {
+        final season = Map<String, dynamic>.from(out.season);
+        final count = (out.favCount + (fav ? 1 : -1)).clamp(0, 1 << 40);
+        season['fav_count'] = count;
+        out = SeasonInfo(
+          season: season,
+          rating: out.rating,
+          myStars: out.myStars,
+          isFav: fav,
+        );
+      }
+      final stars = SyncQueue.instance.pendingRatings()[key];
+      if (stars != null && stars != out.myStars) {
+        out = SeasonInfo(
+          season: out.season,
+          rating: out.rating,
+          myStars: stars,
+          isFav: out.isFav,
+        );
+      }
+    } catch (_) {
+      // Navbat o'qilmasa — serverdan kelgani o'z holicha qoladi.
+    }
+    return out;
   }
 
   /// Bo'lim ma'lumoti. Xato bo'lsa DISKDAGI nusxa, u ham bo'lmasa
@@ -121,7 +173,7 @@ class SeasonService {
       try {
         RustCore.instance.saveListCache(_cacheKey(animeId, seasonId), [j]);
       } catch (_) {}
-      return SeasonInfo.fromJson(j);
+      return _withPending(animeId, seasonId, SeasonInfo.fromJson(j));
     } catch (_) {
       return fromDisk(animeId, seasonId);
     }

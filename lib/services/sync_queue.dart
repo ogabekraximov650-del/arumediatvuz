@@ -373,6 +373,26 @@ class SyncQueue extends ChangeNotifier with WidgetsBindingObserver {
     return out;
   }
 
+  /// Yuborilmagan baholar: `'anime:season'` -> yulduzlar soni.
+  ///
+  /// NEGA KERAK: bo'lim ma'lumoti SERVERDAN keladi va xotiradagini
+  /// butunlay almashtiradi. Navbatdagi baho serverda hali yo'q —
+  /// ya'ni foydalanuvchi hozirgina qo'ygan bahosi qism almashtirsa
+  /// yoki pleyer qayta ochilsa EKRANDAN YO'QOLIB qolardi va tugma
+  /// "ishlamayaptidek" ko'rinardi.
+  Map<String, int> pendingRatings() {
+    load();
+    final out = <String, int>{};
+    for (final e in _rows) {
+      if (e['kind'] != SyncKind.rating) continue;
+      final d = e['data'] as Map?;
+      if (d == null) continue;
+      final stars = (d['stars'] as num?)?.toInt() ?? 0;
+      if (stars > 0) out['${d['anime_id']}:${d['season_id']}'] = stars;
+    }
+    return out;
+  }
+
   // ── YUBORISH SHARTLARI ──────────────────────────────────────
 
   /// Shartlar bajarilgan bo'lsa yuboradi; aks holda hech nima

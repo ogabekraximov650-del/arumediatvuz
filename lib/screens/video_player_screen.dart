@@ -2982,27 +2982,14 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                         if (ep != null) _centerOnEpisode(ep);
                       }
                     },
-                    // ── HAR BIR OYNA ALOHIDA CHIZILADI ──────
-                    //
-                    // `RepaintBoundary` bo'lmasa, bitta oynadagi
-                    // eng kichik o'zgarish ham (masalan izohdagi
-                    // layk) QO'SHNI oynalarni qayta chizishga
-                    // majbur qilardi — surish paytida aynan shu
-                    // ortiqcha ish kadr tashlashga olib kelardi.
+                    // `RepaintBoundary` bu yerda QAYTA yozilmaydi —
+                    // u `_KeepAlivePage` ning ichida allaqachon bor
+                    // (o'sha yerdagi izohga qarang).
                     children: [
-                      RepaintBoundary(
-                        child: _KeepAlivePage(
-                            child: _buildInfoTab(tavsif.toString())),
-                      ),
-                      RepaintBoundary(
-                        child: _KeepAlivePage(child: _buildEpisodeTab()),
-                      ),
-                      RepaintBoundary(
-                        child: _KeepAlivePage(child: _buildSeasonsTab()),
-                      ),
-                      RepaintBoundary(
-                        child: _KeepAlivePage(child: _buildCommentsTab()),
-                      ),
+                      _KeepAlivePage(child: _buildInfoTab(tavsif.toString())),
+                      _KeepAlivePage(child: _buildEpisodeTab()),
+                      _KeepAlivePage(child: _buildSeasonsTab()),
+                      _KeepAlivePage(child: _buildCommentsTab()),
                     ],
                   ),
                 ),
