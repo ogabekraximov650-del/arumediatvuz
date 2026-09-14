@@ -23,6 +23,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import 'auth_service.dart';
+import 'disk_cache.dart';
 
 /// Ro'yxat qaysi vaqt bo'yicha terilgan.
 enum UserSort {
@@ -118,6 +119,7 @@ class AdminUsersController extends ChangeNotifier {
   void setSort(UserSort s) {
     if (_sort == s) return;
     _sort = s;
+    _items.clear();
     load(force: true);
   }
 
@@ -132,17 +134,40 @@ class AdminUsersController extends ChangeNotifier {
     load(force: true);
   }
 
+  /// Diskdagi kalit. Har bir ro'yxat turi alohida saqlanadi —
+  /// izlash natijasi esa SAQLANMAYDI (u vaqtinchalik).
+  String get _diskKey => 'admin_users_${_sort.code}';
+
+  /// Diskdagi nusxani DARHOL ko'rsatadi (tarmoq kutilmaydi).
+  ///
+  /// TALAB (foydalanuvchi): "admin panelidagi ma'lumotlar ham
+  /// diskda saqlansin, keyingi safar sekin ochilmasligi uchun".
+  void loadFromDisk() {
+    if (_query.isNotEmpty) return;
+    final rows = DiskCache.read(_diskKey);
+    if (rows == null) return;
+    _items
+      ..clear()
+      ..addAll(rows.map(AdminUser.fromJson));
+    notifyListeners();
+  }
+
   Future<void> load({bool force = false}) async {
     if (_loading) return;
     if (_items.isNotEmpty && !force) return;
     _loading = true;
     _page = 0;
     _error = null;
+    // Yangi ro'yxat turiga o'tilgan bo'lsa — uning diskdagi
+    // nusxasi darhol chiqadi.
+    loadFromDisk();
     notifyListeners();
     final rows = await _fetch(0);
-    _items
-      ..clear()
-      ..addAll(rows);
+    if (rows.isNotEmpty || _error == null) {
+      _items
+        ..clear()
+        ..addAll(rows);
+    }
     _loading = false;
     notifyListeners();
   }
@@ -174,9 +199,12 @@ class AdminUsersController extends ChangeNotifier {
         _total = ((j['total'] as num?) ?? 0).toInt();
         _hasMore = j['has_more'] == true;
         _error = null;
-        return ((j['items'] as List?) ?? [])
-            .map((e) => AdminUser.fromJson(e as Map<String, dynamic>))
-            .toList();
+        final raw =
+            ((j['items'] as List?) ?? []).cast<Map<String, dynamic>>();
+        // Faqat BIRINCHI sahifa va izlashsiz holat saqlanadi:
+        // ekran ochilganda kerak bo'ladigan narsa aynan shu.
+        if (page == 0 && _query.isEmpty) DiskCache.write(_diskKey, raw);
+        return raw.map(AdminUser.fromJson).toList();
       }
       if (r.statusCode == 403) {
         _error = 'Bu bo\'lim faqat admin uchun';

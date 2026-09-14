@@ -38,6 +38,8 @@ class _AdminChatsScreenState extends State<AdminChatsScreen> {
   @override
   void initState() {
     super.initState();
+    // Avval DISK (darhol), keyin tarmoq.
+    _threads.loadFromDisk();
     _threads.load();
   }
 

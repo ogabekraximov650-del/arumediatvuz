@@ -44,6 +44,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import 'auth_service.dart';
+import 'disk_cache.dart';
 
 /// Bitta izoh (yoki javob).
 class Comment {
@@ -162,6 +163,30 @@ class CommentsController extends ChangeNotifier {
 
   // ── O'QISH ────────────────────────────────────────────────
 
+  /// Diskdagi kalit — bo'limga bog'langan.
+  String get _diskKey => 'comments_${animeId}_$seasonId';
+
+  /// Diskdagi nusxani DARHOL ko'rsatadi (tarmoq kutilmaydi).
+  ///
+  /// TALAB (foydalanuvchi): "izohlar ham diskda tursin, tezroq
+  /// ishlashi uchun". Izohlar oynasi ochilganda ekran bo'sh
+  /// turmasin — oxirgi ko'rilgan ro'yxat darhol chiqadi va
+  /// yangisi fon'da keladi.
+  ///
+  /// Layk belgisi ham saqlanadi: u SHU ODAMNIKI va hisob
+  /// almashsa papka ham almashadi, ya'ni begona odamga
+  /// ko'rinmaydi.
+  void loadFromDisk() {
+    if (_items.isNotEmpty) return;
+    final rows = DiskCache.read(_diskKey);
+    if (rows == null) return;
+    _items
+      ..clear()
+      ..addAll(rows.map(Comment.fromJson));
+    _loaded = true;
+    notifyListeners();
+  }
+
   Future<void> load({bool force = false}) async {
     if (_loading) return;
     if (_loaded && !force) return;
@@ -175,14 +200,18 @@ class CommentsController extends ChangeNotifier {
           .timeout(const Duration(seconds: 20));
       if (r.statusCode == 200) {
         final j = jsonDecode(r.body) as Map<String, dynamic>;
+        final rows = ((j['items'] as List?) ?? [])
+            .cast<Map<String, dynamic>>();
         _items
           ..clear()
-          ..addAll(_parse(j['items']));
+          ..addAll(rows.map(Comment.fromJson));
         _page = 0;
         _hasMore = j['has_more'] == true;
         _loaded = true;
         // Ochiq javoblar eskirdi — qayta ochilganda yangisi keladi.
         _replies.clear();
+        // Keyingi ochilishda ekran darhol to'lsin.
+        DiskCache.write(_diskKey, rows);
       } else {
         _error = 'Izohlar yuklanmadi (${r.statusCode})';
       }

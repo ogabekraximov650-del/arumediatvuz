@@ -169,8 +169,9 @@ class _BalanceBar extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(height: 2),
-                    Text(
-                      b.active ? '${b.daysLeft} kun qoldi' : 'Yo\'q',
+                    // Kun, soat, daqiqa va sekund — har soniyada
+                    // yangilanadi (`SubCountdown` izohiga qarang).
+                    SubCountdown(
                       style: TextStyle(
                         color: b.active
                             ? const Color(0xFF7BD88F)
@@ -334,7 +335,6 @@ class _ActiveSubNote extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final left = BillingService.instance.daysLeft;
     return Glass(
       borderRadius: 16,
       blur: 12,
@@ -358,15 +358,34 @@ class _ActiveSubNote extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: 3),
+                Row(
+                  children: [
+                    Text(
+                      'Yana ',
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.62),
+                        fontSize: 12,
+                      ),
+                    ),
+                    Flexible(
+                      child: SubCountdown(
+                        expired: 'tugadi',
+                        style: const TextStyle(
+                          color: Color(0xFF7BD88F),
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 2),
                 Text(
-                  left > 0
-                      ? 'Yana $left kun qoldi. Tugagach yangi tarif '
-                          'tanlay olasiz.'
-                      : 'Bugun tugaydi.',
+                  'Tugagach yangi tarif tanlay olasiz.',
                   style: TextStyle(
-                    color: Colors.white.withValues(alpha: 0.62),
-                    fontSize: 12,
-                    height: 1.4,
+                    color: Colors.white.withValues(alpha: 0.5),
+                    fontSize: 11.5,
+                    height: 1.35,
                   ),
                 ),
               ],

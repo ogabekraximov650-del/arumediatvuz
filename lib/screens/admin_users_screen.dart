@@ -56,6 +56,8 @@ class _AdminUsersScreenState extends State<AdminUsersScreen> {
   @override
   void initState() {
     super.initState();
+    // Avval DISK (darhol), keyin tarmoq.
+    _ctrl.loadFromDisk();
     _ctrl.load();
     _scroll.addListener(() {
       if (!_scroll.hasClients) return;

@@ -377,35 +377,30 @@ class _ProfileBody extends StatelessWidget {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            // ── ISM VA PREMIUM BELGISI ────
+                            // ── ISM ─────────────────────────
                             //
-                            // TALAB (foydalanuvchi): "Obuna sotib
-                            // olgan odamning profilida premiumga
-                            // o'xshagan belgi bo'lishi kerak".
+                            // TOPILGAN XATO (foydalanuvchi:
+                            // "obuna olganini bildiradigan
+                            // belgisini boshqa joyga o'tkaz, ismi
+                            // ko'rinmayapti").
                             //
-                            // Belgi ismning YONIDA turadi va
-                            // faqat obuna FAOL bo'lgandagina
-                            // ko'rinadi. Ism uzun bo'lsa belgi
-                            // siqilib qolmasligi uchun u
-                            // `Flexible` emas — ism qisqaradi.
-                            Row(
-                              crossAxisAlignment:
-                                  CrossAxisAlignment.center,
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Flexible(
-                                  child: Text(
-                                    user.fullName,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 21,
-                                        fontWeight: FontWeight.w700),
-                                  ),
-                                ),
-                                const _PremiumBadge(),
-                              ],
+                            // PREMIUM belgisi ism bilan bitta
+                            // qatorda turardi va o'ng tomonda
+                            // tahrirlash tugmasi ham bor —
+                            // natijada ismga atigi bir necha
+                            // harflik joy qolar, "AniRaxUz"
+                            // "A..." bo'lib ko'rinardi.
+                            //
+                            // Endi ism butun qatorni oladi, belgi
+                            // esa pastda, ID yonida turadi.
+                            Text(
+                              user.fullName,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 21,
+                                  fontWeight: FontWeight.w700),
                             ),
                             if (user.username.isNotEmpty) ...[
                               const SizedBox(height: 4),
@@ -418,7 +413,15 @@ class _ProfileBody extends StatelessWidget {
                             const SizedBox(height: 8),
                             // ID cho'zinchoq aylana ichida — uning
                             // ISTALGAN joyiga bosilsa nusxalanadi.
-                            _IdPill(id: user.id),
+                            // PREMIUM belgisi ham shu qatorda: bu
+                            // yer bo'sh va ismga xalaqit bermaydi.
+                            Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Flexible(child: _IdPill(id: user.id)),
+                                const _PremiumBadge(),
+                              ],
+                            ),
                             const SizedBox(height: 6),
                             Text('Balans: ${user.balance}',
                                 style: TextStyle(
@@ -806,11 +809,10 @@ class _PremiumBadgeState extends State<_PremiumBadge> {
         if (!BillingService.instance.active) {
           return const SizedBox.shrink();
         }
-        final left = BillingService.instance.daysLeft;
         return Padding(
           padding: const EdgeInsets.only(left: 7),
           child: Tooltip(
-            message: left > 0 ? 'Obuna: yana $left kun' : 'Obuna faol',
+            message: 'Obuna: ${formatLeft(BillingService.instance.left)}',
             child: Container(
               padding: const EdgeInsets.symmetric(
                   horizontal: 8, vertical: 3),
@@ -938,9 +940,12 @@ class _BillingButtonState extends State<_BillingButton> {
                       color: Colors.white.withValues(alpha: 0.22),
                       borderRadius: BorderRadius.circular(8),
                     ),
-                    child: Text(
-                      '${b.daysLeft} kun',
-                      style: const TextStyle(
+                    // Tugmada joy tor — qisqa ko'rinish: kun
+                    // qolgan bo'lsa "2 kun", oxirgi kunda esa
+                    // soat:daqiqa:sekund (`formatLeftShort`).
+                    child: const SubCountdown(
+                      short: true,
+                      style: TextStyle(
                         color: Colors.white,
                         fontSize: 11.5,
                         fontWeight: FontWeight.w700,

@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+
+import '../services/rust_bridge.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 import '../theme/app_background.dart';
@@ -35,9 +37,23 @@ class _EpizodManagementScreenState extends State<EpizodManagementScreen> {
     _loadEpizodlar();
   }
 
+  /// Diskdagi kalit — pleyer ishlatadigan kalit BILAN BIR XIL.
+  ///
+  /// Ya'ni admin qismlarni ochsa pleyer ham tayyor ro'yxatdan
+  /// foydalanadi va aksincha — bitta ro'yxat ikki marta
+  /// saqlanmaydi.
+  String get _diskKey => 'eps_${_animeId}_$_seasonId';
+
   Future<void> _loadEpizodlar() async {
+    // 1) DISK — ekran darhol to'ladi (`disk_cache.dart` izohi).
+    if (_epizodlar.isEmpty) {
+      final cached = RustCore.instance.getCachedList(_diskKey);
+      if (cached != null && cached.isNotEmpty) {
+        setState(() => _epizodlar = cached);
+      }
+    }
     setState(() {
-      _isLoading = true;
+      _isLoading = _epizodlar.isEmpty;
       _errorMsg = null;
     });
     try {
@@ -49,7 +65,9 @@ class _EpizodManagementScreenState extends State<EpizodManagementScreen> {
       if (!mounted) return;
       if (res.statusCode == 200) {
         final data = jsonDecode(res.body) as List;
-        setState(() => _epizodlar = data.cast<Map<String, dynamic>>());
+        final rows = data.cast<Map<String, dynamic>>();
+        RustCore.instance.saveListCache(_diskKey, rows);
+        setState(() => _epizodlar = rows);
       } else {
         throw 'Epizodlar yuklab olib bo\'lmadi';
       }

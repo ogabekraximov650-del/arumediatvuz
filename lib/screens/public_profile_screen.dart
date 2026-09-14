@@ -31,6 +31,7 @@ import 'package:http/http.dart' as http;
 
 import '../services/auth_service.dart';
 import '../services/billing_service.dart' show formatSum;
+import '../services/disk_cache.dart';
 import '../services/format.dart';
 import '../theme/app_background.dart';
 import '../widgets/glass.dart';
@@ -48,9 +49,19 @@ class _PublicProfileScreenState extends State<PublicProfileScreen> {
   bool _loading = true;
   String? _error;
 
+  /// Diskdagi kalit.
+  String get _diskKey => 'profile_${widget.userId}';
+
   @override
   void initState() {
     super.initState();
+    // 1) DISK — ekran darhol to'ladi, tarmoq kutilmaydi
+    //    (`disk_cache.dart` izohiga qarang).
+    final cached = DiskCache.readOne(_diskKey);
+    if (cached != null) {
+      _data = cached;
+      _loading = false;
+    }
     _load();
   }
 
@@ -68,20 +79,24 @@ class _PublicProfileScreenState extends State<PublicProfileScreen> {
           .timeout(const Duration(seconds: 20));
       if (!mounted) return;
       if (r.statusCode == 200) {
+        final j = jsonDecode(r.body) as Map<String, dynamic>;
+        DiskCache.writeOne(_diskKey, j);
         setState(() {
-          _data = jsonDecode(r.body) as Map<String, dynamic>;
+          _data = j;
           _loading = false;
         });
       } else {
         setState(() {
-          _error = 'Foydalanuvchi topilmadi';
+          // Diskdagi nusxa bor bo'lsa u joyida qoladi — xato
+          // faqat hech narsa bo'lmaganda ko'rsatiladi.
+          if (_data == null) _error = 'Foydalanuvchi topilmadi';
           _loading = false;
         });
       }
     } catch (_) {
       if (mounted) {
         setState(() {
-          _error = 'Internet yo\'q';
+          if (_data == null) _error = 'Internet yo\'q';
           _loading = false;
         });
       }

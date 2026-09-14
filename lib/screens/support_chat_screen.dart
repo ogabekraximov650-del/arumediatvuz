@@ -74,6 +74,8 @@ class _SupportChatScreenState extends State<SupportChatScreen> {
   void initState() {
     super.initState();
     _chat.addListener(_onData);
+    // Avval DISK (darhol), keyin tarmoq.
+    _chat.loadFromDisk();
     _chat.load().then((_) => _toBottom(jump: true));
     // Suhbat OCHIQ turgandagina yangi xabarlar so'raladi.
     _chat.startPolling();

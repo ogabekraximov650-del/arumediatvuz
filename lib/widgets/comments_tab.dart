@@ -46,6 +46,8 @@ class _CommentsTabState extends State<CommentsTab> {
   @override
   void initState() {
     super.initState();
+    // Avval DISK (darhol), keyin tarmoq (`disk_cache.dart` izohi).
+    widget.controller.loadFromDisk();
     widget.controller.load();
     // Pastga yetganda keyingi sahifa o'zi so'raladi.
     _scroll.addListener(() {

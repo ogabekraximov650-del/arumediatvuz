@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+
+import '../services/disk_cache.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 import '../theme/app_background.dart';
@@ -27,9 +29,22 @@ class _AnimeManagementScreenState extends State<AnimeManagementScreen> {
     _loadAnimes();
   }
 
+  /// Diskdagi kalit.
+  ///
+  /// TALAB (foydalanuvchi): "admin panelidagi ma'lumotlar ham
+  /// diskda saqlansin, keyingi safar sekin ochilmasligi uchun".
+  static const String _diskKey = 'admin_anime';
+
   Future<void> _loadAnimes() async {
+    // 1) DISK — tarmoq umuman kutilmaydi, ekran darhol to'ladi.
+    if (_animes.isEmpty) {
+      final cached = DiskCache.read(_diskKey);
+      if (cached != null) setState(() => _animes = cached);
+    }
     setState(() {
-      _isLoading = true;
+      // Diskda nusxa bo'lsa aylana ko'rsatilmaydi — ro'yxat
+      // allaqachon ekranda.
+      _isLoading = _animes.isEmpty;
       _errorMsg = null;
     });
     try {
@@ -40,7 +55,9 @@ class _AnimeManagementScreenState extends State<AnimeManagementScreen> {
       if (!mounted) return;
       if (res.statusCode == 200) {
         final data = jsonDecode(res.body) as List;
-        setState(() => _animes = data.cast<Map<String, dynamic>>());
+        final rows = data.cast<Map<String, dynamic>>();
+        DiskCache.write(_diskKey, rows);
+        setState(() => _animes = rows);
       } else {
         throw 'Animelar yuklab olib bo\'lmadi';
       }

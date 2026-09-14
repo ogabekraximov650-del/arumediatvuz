@@ -30,6 +30,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import 'auth_service.dart';
+import 'disk_cache.dart';
 
 /// Bitta xabar.
 @immutable
@@ -204,6 +205,25 @@ class ChatController extends ChangeNotifier {
   String get _url =>
       userId == null ? _base : '$_base/thread/$userId';
 
+  /// Diskdagi kalit. Admin ko'rinishida — o'sha odamniki.
+  String get _diskKey => 'chat_${userId ?? 0}';
+
+  /// Diskdagi nusxani DARHOL ko'rsatadi (tarmoq kutilmaydi).
+  ///
+  /// TALAB (foydalanuvchi): "hullas hammasi diskda tursin, tezroq
+  /// ishlashi uchun". Suhbat ochilganda eski xabarlar darhol
+  /// chiqadi, yangisi esa fon'da keladi.
+  void loadFromDisk() {
+    if (_items.isNotEmpty) return;
+    final rows = DiskCache.read(_diskKey);
+    if (rows == null) return;
+    _items
+      ..clear()
+      ..addAll(rows.map(ChatMessage.fromJson));
+    _loaded = true;
+    notifyListeners();
+  }
+
   /// Suhbat ochiq turganda yangi xabarlar o'zi kelib tursin.
   ///
   /// 10 soniya — Telegram'dagidek "jonli" tuyuladi, lekin so'rovlar
@@ -241,9 +261,9 @@ class ChatController extends ChangeNotifier {
           .timeout(const Duration(seconds: 20));
       if (r.statusCode == 200) {
         final j = jsonDecode(r.body) as Map<String, dynamic>;
-        final rows = ((j['items'] as List?) ?? [])
-            .map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
-            .toList();
+        final raw = ((j['items'] as List?) ?? [])
+            .cast<Map<String, dynamic>>();
+        final rows = raw.map(ChatMessage.fromJson).toList();
         // Ro'yxat FAQAT haqiqatan o'zgarganda almashtiriladi —
         // aks holda har 10 soniyada ekran bekorga qayta chizilardi.
         if (rows.length != _items.length ||
@@ -253,6 +273,7 @@ class ChatController extends ChangeNotifier {
           _items
             ..clear()
             ..addAll(rows);
+          DiskCache.write(_diskKey, raw);
         }
         _loaded = true;
         _error = null;
@@ -372,8 +393,34 @@ class ChatThreadsController extends ChangeNotifier {
     final err = await deleteChatThread(userId);
     if (err != null) return err;
     _items.removeWhere((t) => t.userId == userId);
+    // Diskdagi nusxa ham yangilansin — aks holda o'chirilgan
+    // suhbat keyingi ochilishda qaytib chiqardi.
+    DiskCache.write(_diskKey, _items.map((t) => {
+          'user_id': t.userId,
+          'first_name': t.firstName,
+          'username': t.username,
+          'photo_url': t.photoUrl,
+          'last_body': t.lastBody,
+          'last_at': t.lastAt,
+          'last_from_admin': t.lastFromAdmin,
+          'unread': t.unread,
+        }).toList());
     notifyListeners();
     return null;
+  }
+
+  static const String _diskKey = 'chat_threads';
+
+  /// Diskdagi nusxani DARHOL ko'rsatadi.
+  void loadFromDisk() {
+    if (_items.isNotEmpty) return;
+    final rows = DiskCache.read(_diskKey);
+    if (rows == null) return;
+    _items
+      ..clear()
+      ..addAll(rows.map(ChatThread.fromJson));
+    _loaded = true;
+    notifyListeners();
   }
 
   Future<void> load({bool force = false}) async {
@@ -387,12 +434,14 @@ class ChatThreadsController extends ChangeNotifier {
           .timeout(const Duration(seconds: 20));
       if (r.statusCode == 200) {
         final j = jsonDecode(r.body) as Map<String, dynamic>;
+        final rows =
+            ((j['items'] as List?) ?? []).cast<Map<String, dynamic>>();
         _items
           ..clear()
-          ..addAll(((j['items'] as List?) ?? [])
-              .map((e) => ChatThread.fromJson(e as Map<String, dynamic>)));
+          ..addAll(rows.map(ChatThread.fromJson));
         _loaded = true;
         _error = null;
+        DiskCache.write(_diskKey, rows);
       } else if (r.statusCode == 403) {
         _error = 'Bu bo\'lim faqat admin uchun';
       } else {

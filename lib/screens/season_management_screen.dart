@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+
+import '../services/disk_cache.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 import '../theme/app_background.dart';
@@ -32,9 +34,17 @@ class _SeasonManagementScreenState extends State<SeasonManagementScreen> {
     _loadSeasons();
   }
 
+  /// Diskdagi kalit — har bir anime uchun alohida.
+  String get _diskKey => 'admin_seasons_$_animeId';
+
   Future<void> _loadSeasons() async {
+    // 1) DISK — ekran darhol to'ladi (`disk_cache.dart` izohi).
+    if (_seasons.isEmpty) {
+      final cached = DiskCache.read(_diskKey);
+      if (cached != null) setState(() => _seasons = cached);
+    }
     setState(() {
-      _isLoading = true;
+      _isLoading = _seasons.isEmpty;
       _errorMsg = null;
     });
     try {
@@ -46,7 +56,9 @@ class _SeasonManagementScreenState extends State<SeasonManagementScreen> {
       if (!mounted) return;
       if (res.statusCode == 200) {
         final data = jsonDecode(res.body) as List;
-        setState(() => _seasons = data.cast<Map<String, dynamic>>());
+        final rows = data.cast<Map<String, dynamic>>();
+        DiskCache.write(_diskKey, rows);
+        setState(() => _seasons = rows);
       } else {
         throw 'Bo\'limlar yuklab olib bo\'lmadi';
       }

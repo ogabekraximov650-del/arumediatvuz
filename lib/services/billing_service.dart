@@ -31,7 +31,7 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
 import 'auth_service.dart';
@@ -122,6 +122,15 @@ class BillingService extends ChangeNotifier {
     final ms = _until - DateTime.now().millisecondsSinceEpoch;
     if (ms <= 0) return 0;
     return (ms / 86400000).ceil();
+  }
+
+  /// Obunaga qancha vaqt qolgani — ANIQ.
+  ///
+  /// TALAB (foydalanuvchi): "obuna tugash vaqti kun, soat, daqiqa
+  /// va sekundda ko'rsatilsin".
+  Duration get left {
+    final ms = _until - DateTime.now().millisecondsSinceEpoch;
+    return ms <= 0 ? Duration.zero : Duration(milliseconds: ms);
   }
 
   List<SubPlan> get plans => _plans;
@@ -311,6 +320,32 @@ class BillingService extends ChangeNotifier {
   }
 }
 
+/// Qolgan vaqt: `2 kun 05:12:33` yoki `05:12:33`.
+///
+/// TALAB (foydalanuvchi): "obuna tugash vaqti kun, soat, daqiqa va
+/// sekundda ko'rsatilsin".
+///
+/// Kun bo'lmasa u yozilmaydi — `0 kun 05:12:33` ortiqcha va
+/// chalkashtiradi.
+String formatLeft(Duration d) {
+  if (d <= Duration.zero) return 'tugadi';
+  String two(int n) => n.toString().padLeft(2, '0');
+  final days = d.inDays;
+  final h = d.inHours % 24;
+  final m = d.inMinutes % 60;
+  final s = d.inSeconds % 60;
+  final clock = '${two(h)}:${two(m)}:${two(s)}';
+  return days > 0 ? '$days kun $clock' : clock;
+}
+
+/// Qisqa ko'rinish (tor joylar uchun): `2 kun` yoki `05:12:33`.
+String formatLeftShort(Duration d) {
+  if (d <= Duration.zero) return 'tugadi';
+  if (d.inDays > 0) return '${d.inDays} kun';
+  String two(int n) => n.toString().padLeft(2, '0');
+  return '${two(d.inHours)}:${two(d.inMinutes % 60)}:${two(d.inSeconds % 60)}';
+}
+
 /// Summani `15 000 so'm` ko'rinishida yozadi.
 String formatSum(int amount) {
   final n = amount.abs().toString();
@@ -320,4 +355,73 @@ String formatSum(int amount) {
     buf.write(n[i]);
   }
   return '$buf so\'m';
+}
+
+/// Obuna qolgan vaqtini HAR SONIYADA yangilab turadigan widget.
+///
+/// TALAB (foydalanuvchi): "obuna tugash vaqti kun, soat, daqiqa va
+/// sekundda ko'rsatilsin".
+///
+/// ── NEGA ALOHIDA WIDGET ─────────────────────────────────────
+///
+/// Sekund har soniyada o'zgaradi, ya'ni kimdir har soniyada qayta
+/// chizishi kerak. Agar buni butun sahifa qilsa — profil, trafik
+/// jadvali, statistika, hammasi har soniyada qaytadan chizilardi.
+///
+/// Shu sabab taymer AYNAN shu kichkina widgetning ichida: faqat
+/// yozuvning o'zi yangilanadi, qolgan ekran tegilmaydi.
+class SubCountdown extends StatefulWidget {
+  /// Qisqa ko'rinish (tor joylar uchun).
+  final bool short;
+  final TextStyle? style;
+
+  /// Obuna yo'q bo'lsa nima yozilsin.
+  final String expired;
+
+  const SubCountdown({
+    super.key,
+    this.short = false,
+    this.style,
+    this.expired = 'Yo\'q',
+  });
+
+  @override
+  State<SubCountdown> createState() => _SubCountdownState();
+}
+
+class _SubCountdownState extends State<SubCountdown> {
+  Timer? _tick;
+
+  @override
+  void initState() {
+    super.initState();
+    _tick = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _tick?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: BillingService.instance,
+      builder: (context, _) {
+        final d = BillingService.instance.left;
+        final text = d <= Duration.zero
+            ? widget.expired
+            : (widget.short ? formatLeftShort(d) : formatLeft(d));
+        return Text(
+          text,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: widget.style,
+        );
+      },
+    );
+  }
 }
