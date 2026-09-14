@@ -57,7 +57,13 @@ dependencies:
   # Ijro uchun ALOHIDA paket olinmadi: `video_player` (ExoPlayer)
   # audio faylni ham o'ynatadi, ya'ni ilovada allaqachon bor va
   # sinalgan dvigatel ishlatiladi.
-  record: ^5.2.1
+  #
+  # NEGA 6.x (5.x EMAS): `record` 5.2.1 eskirgan `record_linux`
+  # (0.7.2) ni tortadi, u esa yangi `record_platform_interface`
+  # bilan mos kelmaydi va ANDROID uchun yig'ishda ham kompilyatsiya
+  # xatosi beradi (`RecordLinux` sinfi interfeysni to'liq
+  # bajarmaydi). 6.2.1 da butun oila o'zaro mos.
+  record: ^6.2.1
 
 dev_dependencies:
   flutter_test:
