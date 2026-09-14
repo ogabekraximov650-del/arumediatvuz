@@ -14,6 +14,7 @@
 // Farqi faqat kimning xabari qaysi tomonda turishida: o'zining
 // xabari O'NGDA, suhbatdoshiniki CHAPDA — Telegram'dagidek.
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -22,10 +23,13 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:record/record.dart';
 
 import '../services/auth_service.dart';
 import '../services/storage_janitor.dart';
 import '../services/support_service.dart';
+import '../services/voice_player.dart';
 import '../theme/app_background.dart';
 import '../widgets/glass.dart';
 import 'media_view_screen.dart';
@@ -85,6 +89,23 @@ class _SupportChatScreenState extends State<SupportChatScreen> {
   final Set<String> _selected = {};
   bool get _selecting => _selected.isNotEmpty;
 
+  // ── OVOZLI XABAR ──────────────────────────────────────────
+  //
+  // TALAB (foydalanuvchi): "chatda ovozli xabar yuborish
+  // tizimini ham qo'sh".
+  //
+  // Mikrofon tugmasi BOSILGANDA yozib olish boshlanadi va
+  // tugmagacha davom etadi (barmoqni ushlab turish SHART EMAS).
+  // Sabab: ushlab turish paytida ro'yxatni surish, ekranni
+  // qulflash yoki tasodifiy qo'yib yuborish yozuvni yo'qotadi —
+  // qo'yib yuborish bilan yozuv tugaydigan tizimda bu eng
+  // ko'p uchraydigan shikoyat.
+  final _rec = AudioRecorder();
+  bool _recording = false;
+  Duration _recLen = Duration.zero;
+  Timer? _recTimer;
+  String? _recPath;
+
   @override
   void initState() {
     super.initState();
@@ -98,6 +119,11 @@ class _SupportChatScreenState extends State<SupportChatScreen> {
 
   @override
   void dispose() {
+    // Ekran yopilsa ovoz ham to'xtaydi — aks holda u orqa fonda
+    // yangrab qolardi.
+    unawaited(VoicePlayer.instance.stop());
+    _recTimer?.cancel();
+    unawaited(_rec.dispose());
     _chat.removeListener(_onData);
     _chat.stopPolling();
     _chat.dispose();
@@ -153,18 +179,40 @@ class _SupportChatScreenState extends State<SupportChatScreen> {
         : await picker.pickImage(source: ImageSource.gallery, imageQuality: 85);
     if (picked == null) return;
 
-    final file = File(picked.path);
-    final size = await file.length();
-    // `image_picker` tanlangan faylni ilovaning vaqtinchalik
-    // papkasiga NUSXALAYDI — yuklash tugashi bilan nusxa
-    // o'chiriladi (`storage_janitor.dart` izohiga qarang).
-    Future<void> dropCopy() => StorageJanitor.dropPicked(picked.path);
-
     final ext = picked.path.split('.').last.toLowerCase();
-    final type = video ? 'video' : 'image';
-    final ct = video
-        ? (ext == 'mkv' ? 'video/x-matroska' : 'video/mp4')
-        : (ext == 'png' ? 'image/png' : 'image/jpeg');
+    await _uploadAndSend(
+      file: File(picked.path),
+      ext: ext,
+      type: video ? 'video' : 'image',
+      contentType: video
+          ? (ext == 'mkv' ? 'video/x-matroska' : 'video/mp4')
+          : (ext == 'png' ? 'image/png' : 'image/jpeg'),
+      // `image_picker` tanlangan faylni ilovaning vaqtinchalik
+      // papkasiga NUSXALAYDI — yuklash tugashi bilan nusxa
+      // o'chiriladi (`storage_janitor.dart` izohiga qarang).
+      cleanup: () => StorageJanitor.dropPicked(picked.path),
+    );
+  }
+
+  /// Faylni B2'ga yuklaydi va xabar qilib yuboradi.
+  ///
+  /// Rasm, video va ovozli xabar — uchovi ham SHU yo'ldan
+  /// o'tadi, farqi faqat turida va uzunligida.
+  Future<void> _uploadAndSend({
+    required File file,
+    required String ext,
+    required String type,
+    required String contentType,
+    int ms = 0,
+    Future<void> Function()? cleanup,
+  }) async {
+    if (_uploading) return;
+    final size = await file.length();
+    Future<void> dropCopy() async {
+      if (cleanup != null) await cleanup();
+    }
+
+    final ct = contentType;
     final name =
         'chat_${DateTime.now().millisecondsSinceEpoch}_${_chat.userId ?? 0}.$ext';
 
@@ -207,15 +255,18 @@ class _SupportChatScreenState extends State<SupportChatScreen> {
 
       // Fayl joyida — endi xabarning o'zi yuboriladi.
       final err = await _chat.send(
-        _input.text.trim(),
+        // Ovozli xabarga matn qo'shilmaydi: yozayotgan matn
+        // o'z holicha qolsin, keyin alohida yuboriladi.
+        type == 'voice' ? '' : _input.text.trim(),
         mediaFile: b2Name,
         mediaType: type,
+        mediaMs: ms,
       );
       if (!mounted) return;
       if (err != null) {
         _snack(err);
       } else {
-        _input.clear();
+        if (type != 'voice') _input.clear();
         _toBottom();
       }
     } catch (e) {
@@ -229,6 +280,102 @@ class _SupportChatScreenState extends State<SupportChatScreen> {
         });
       }
     }
+  }
+
+  // ══════════════════════════════════════════════════════════
+  //  OVOZ YOZIB OLISH
+  // ══════════════════════════════════════════════════════════
+
+  /// Mikrofon bosildi — yozib olish boshlanadi.
+  Future<void> _startRecording() async {
+    if (_recording || _uploading) return;
+    // Ruxsatni paketning o'zi so'raydi. Berilmasa — sababi
+    // aytiladi, jim qolinmaydi.
+    bool allowed = false;
+    try {
+      allowed = await _rec.hasPermission();
+    } catch (_) {}
+    if (!allowed) {
+      if (mounted) _snack('Mikrofonga ruxsat berilmadi');
+      return;
+    }
+    // Ovoz yozilayotganda ijro to'xtaydi — mikrofon va
+    // karnayning bir vaqtda ishlashi keraksiz.
+    await VoicePlayer.instance.stop();
+
+    try {
+      final dir = await getTemporaryDirectory();
+      final path =
+          '${dir.path}/voice_${DateTime.now().millisecondsSinceEpoch}.m4a';
+      await _rec.start(
+        // AAC/m4a — Android ham, iOS ham tug'ma qo'llaydi va
+        // ExoPlayer uni bemalol o'ynatadi.
+        const RecordConfig(
+          encoder: AudioEncoder.aacLc,
+          bitRate: 64000,
+          sampleRate: 44100,
+          numChannels: 1,
+        ),
+        path: path,
+      );
+      _recPath = path;
+      _recLen = Duration.zero;
+      setState(() => _recording = true);
+      _recTimer?.cancel();
+      _recTimer = Timer.periodic(const Duration(milliseconds: 200), (_) {
+        if (!mounted) return;
+        setState(() => _recLen += const Duration(milliseconds: 200));
+        // Juda uzun yozuvni o'zi to'xtatadi: 5 daqiqadan uzun
+        // ovozli xabar yozishmaga to'g'ri kelmaydi.
+        if (_recLen.inMinutes >= 5) _stopRecording(send: true);
+      });
+    } catch (e) {
+      if (mounted) _snack('Yozib bo\'lmadi: $e');
+    }
+  }
+
+  /// Yozishni tugatadi. `send` bo'lsa yuboradi, aks holda
+  /// faylni o'chirib tashlaydi.
+  Future<void> _stopRecording({required bool send}) async {
+    if (!_recording) return;
+    _recTimer?.cancel();
+    _recTimer = null;
+    final len = _recLen;
+    setState(() => _recording = false);
+
+    String? path;
+    try {
+      path = await _rec.stop();
+    } catch (_) {}
+    path ??= _recPath;
+    _recPath = null;
+    if (path == null) return;
+
+    final file = File(path);
+    Future<void> drop() async {
+      try {
+        if (await file.exists()) await file.delete();
+      } catch (_) {}
+    }
+
+    if (!send) {
+      await drop();
+      return;
+    }
+    // Tasodifan bosilgan tugma xabar bo'lib ketmasin.
+    if (len.inMilliseconds < 700) {
+      await drop();
+      if (mounted) _snack('Juda qisqa');
+      return;
+    }
+    await _uploadAndSend(
+      file: file,
+      ext: 'm4a',
+      type: 'voice',
+      contentType: 'audio/mp4',
+      ms: len.inMilliseconds,
+      cleanup: drop,
+    );
   }
 
   void _snack(String text) {
@@ -575,7 +722,78 @@ class _SupportChatScreenState extends State<SupportChatScreen> {
       //
       // Shu sabab bu yerda klaviaturaga umuman tegilmaydi.
       padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
-      child: Row(
+      // Ovoz yozilayotganda qator butunlay boshqacha: vaqt,
+      // bekor qilish va yuborish.
+      child: _recording ? _recordingRow() : _composerRow(),
+    );
+  }
+
+  /// Ovoz yozilayotgandagi qator.
+  Widget _recordingRow() {
+    return Row(
+      children: [
+        // Qizil nuqta "yozilyapti" degani.
+        Container(
+          width: 10,
+          height: 10,
+          decoration: BoxDecoration(
+            color: Colors.red.shade400,
+            shape: BoxShape.circle,
+          ),
+        ),
+        const SizedBox(width: 10),
+        Text(
+          voiceClock(_recLen),
+          style: const TextStyle(
+              color: Colors.white,
+              fontSize: 15,
+              fontWeight: FontWeight.w700),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Text(
+            'Ovoz yozilmoqda...',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+                color: Colors.white.withValues(alpha: 0.45), fontSize: 13),
+          ),
+        ),
+        // Bekor qilish — fayl o'chib ketadi.
+        GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () => _stopRecording(send: false),
+          child: Container(
+            width: 42,
+            height: 42,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: Colors.white.withValues(alpha: 0.10),
+            ),
+            child: Icon(Icons.delete_outline_rounded,
+                size: 20, color: Colors.red.shade300),
+          ),
+        ),
+        const SizedBox(width: 8),
+        GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () => _stopRecording(send: true),
+          child: Container(
+            width: 42,
+            height: 42,
+            decoration: const BoxDecoration(
+              shape: BoxShape.circle,
+              color: AppColors.accent,
+            ),
+            child: const Icon(Icons.send_rounded, size: 19, color: Colors.white),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _composerRow() {
+    return Row(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
           Expanded(
@@ -622,36 +840,42 @@ class _SupportChatScreenState extends State<SupportChatScreen> {
             onVideo: () => _pickAndSend(video: true),
           ),
           const SizedBox(width: 6),
-          GestureDetector(
-            onTap: (_input.text.trim().isEmpty || _sending) ? null : _send,
-            behavior: HitTestBehavior.opaque,
-            child: Container(
-              width: 42,
-              height: 42,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: _input.text.trim().isEmpty
-                    ? Colors.white.withValues(alpha: 0.10)
-                    : AppColors.accent,
+          // ── YUBORISH YOKI MIKROFON ──────────────────────────
+          //
+          // Matn yozilgan bo'lsa — yuborish, bo'sh bo'lsa —
+          // mikrofon (Telegram va WhatsApp ham shunday qiladi).
+          // Shu sabab qatorga qo'shimcha tugma qo'shilmaydi va
+          // joy tig'iz bo'lib qolmaydi.
+          Builder(builder: (context) {
+            final empty = _input.text.trim().isEmpty;
+            return GestureDetector(
+              onTap: _sending
+                  ? null
+                  : (empty ? _startRecording : _send),
+              behavior: HitTestBehavior.opaque,
+              child: Container(
+                width: 42,
+                height: 42,
+                decoration: const BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: AppColors.accent,
+                ),
+                child: _sending
+                    ? const Padding(
+                        padding: EdgeInsets.all(12),
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Colors.white),
+                      )
+                    : Icon(
+                        empty ? Icons.mic_rounded : Icons.send_rounded,
+                        size: empty ? 21 : 19,
+                        color: Colors.white,
+                      ),
               ),
-              child: _sending
-                  ? const Padding(
-                      padding: EdgeInsets.all(12),
-                      child: CircularProgressIndicator(
-                          strokeWidth: 2, color: Colors.white),
-                    )
-                  : Icon(
-                      Icons.send_rounded,
-                      size: 19,
-                      color: _input.text.trim().isEmpty
-                          ? Colors.white38
-                          : Colors.white,
-                    ),
-            ),
-          ),
+            );
+          }),
         ],
-      ),
-    );
+      );
   }
 }
 
@@ -793,8 +1017,8 @@ class _Bubble extends StatelessWidget {
                   maxWidth: MediaQuery.sizeOf(context).width * 0.76,
                 ),
                 padding: EdgeInsets.fromLTRB(
-                    m.hasMedia ? 4 : 13, m.hasMedia ? 4 : 9, 
-                    m.hasMedia ? 4 : 13, 7),
+                    m.isViewable ? 4 : 13, m.isViewable ? 4 : 9,
+                    m.isViewable ? 4 : 13, 7),
                 decoration: BoxDecoration(
                   color: mine
                       ? AppColors.accent.withValues(alpha: 0.92)
@@ -818,8 +1042,8 @@ class _Bubble extends StatelessWidget {
                     if (m.body.isNotEmpty)
                       Padding(
                         padding: EdgeInsets.fromLTRB(
-                            m.hasMedia ? 9 : 0, m.hasMedia ? 7 : 0,
-                            m.hasMedia ? 9 : 0, 0),
+                            m.isViewable ? 9 : 0, m.isViewable ? 7 : 0,
+                            m.isViewable ? 9 : 0, 0),
                         child: Align(
                           alignment: Alignment.centerLeft,
                           child: Text(
@@ -838,7 +1062,7 @@ class _Bubble extends StatelessWidget {
                     // yuborganda vaqti ham ko'rsatilsin".
                     Padding(
                       padding: EdgeInsets.only(
-                          top: 3, right: m.hasMedia ? 9 : 0),
+                          top: 3, right: m.isViewable ? 9 : 0),
                       child: Text(
                         chatTime(m.createdAt),
                         style: TextStyle(
@@ -863,6 +1087,18 @@ class _Bubble extends StatelessWidget {
   /// sodda ko'ruvchi ochiladi (`media_view_screen.dart`).
   Widget _media(BuildContext context) {
     final m = message;
+    // ── OVOZLI XABAR ────────────────────────────────────────
+    //
+    // U ko'ruvchida ochilmaydi — xabarning O'ZIDA ijro etiladi
+    // (Telegram ham shunday qiladi).
+    if (m.isVoice) {
+      return _VoiceBubble(
+        message: m,
+        mine: mine,
+        // Tanlash rejimida bosish TANLAYDI, ijro qilmaydi.
+        onSelect: selecting ? onTap : null,
+      );
+    }
     return GestureDetector(
       // Tanlash rejimida rasm/video OCHILMAYDI — bosish tanlaydi.
       // Aks holda tanlayman deb bosgan odam har safar video
@@ -1021,6 +1257,134 @@ class _AttachButton extends StatelessWidget {
         child: const Icon(Icons.attach_file_rounded,
             size: 20, color: Colors.white70),
       ),
+    );
+  }
+}
+
+
+// ══════════════════════════════════════════════════════════════
+//  OVOZLI XABAR
+// ══════════════════════════════════════════════════════════════
+//
+// Play/pause tugmasi, surib o'tkaziladigan chiziq va vaqt.
+// Ijro YAGONA ijrochida (`VoicePlayer`): boshqa xabar bosilsa
+// bunisi o'zi to'xtaydi.
+
+class _VoiceBubble extends StatelessWidget {
+  final ChatMessage message;
+  final bool mine;
+  final VoidCallback? onSelect;
+
+  const _VoiceBubble({
+    required this.message,
+    required this.mine,
+    this.onSelect,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final m = message;
+    final vp = VoicePlayer.instance;
+    return AnimatedBuilder(
+      animation: vp,
+      builder: (context, _) {
+        final playing = vp.isPlaying(m.id);
+        final opening = vp.isOpening(m.id);
+        final pos = vp.positionOf(m.id);
+        // Uzunlik: ijro ochilgan bo'lsa fayldan, aks holda
+        // xabar bilan kelgan qiymatdan. Ikkovi ham bo'lmasa
+        // chiziq bo'sh turadi.
+        final real = vp.durationOf(m.id);
+        final total = real > Duration.zero
+            ? real
+            : Duration(milliseconds: m.mediaMs);
+        final maxMs = total.inMilliseconds;
+        final posMs = pos.inMilliseconds.clamp(0, maxMs <= 0 ? 0 : maxMs);
+
+        return SizedBox(
+          width: 210,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: onSelect ?? () => vp.toggle(m.id, m.mediaUrl),
+                child: Container(
+                  width: 38,
+                  height: 38,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: mine
+                        ? Colors.white.withValues(alpha: 0.22)
+                        : AppColors.accent,
+                  ),
+                  child: opening
+                      ? const Padding(
+                          padding: EdgeInsets.all(11),
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: Colors.white),
+                        )
+                      : Icon(
+                          playing
+                              ? Icons.pause_rounded
+                              : Icons.play_arrow_rounded,
+                          size: 22,
+                          color: Colors.white,
+                        ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    SliderTheme(
+                      data: SliderTheme.of(context).copyWith(
+                        trackHeight: 3,
+                        thumbShape:
+                            const RoundSliderThumbShape(enabledThumbRadius: 5),
+                        overlayShape:
+                            const RoundSliderOverlayShape(overlayRadius: 12),
+                        activeTrackColor: Colors.white,
+                        inactiveTrackColor: Colors.white.withValues(alpha: 0.3),
+                        thumbColor: Colors.white,
+                      ),
+                      child: SizedBox(
+                        height: 22,
+                        child: Slider(
+                          value: maxMs <= 0 ? 0 : posMs.toDouble(),
+                          max: maxMs <= 0 ? 1 : maxMs.toDouble(),
+                          // Ijro boshlanmagan bo'lsa surib bo'lmaydi —
+                          // surish uchun avval fayl ochilishi kerak.
+                          onChanged: (maxMs <= 0 || !vp.isCurrent(m.id))
+                              ? null
+                              : (x) => vp.seek(
+                                  m.id, Duration(milliseconds: x.round())),
+                        ),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.only(left: 2),
+                      child: Text(
+                        // Yangramayotgan bo'lsa umumiy uzunlik,
+                        // yangrayotganda esa hozirgi nuqta.
+                        vp.isCurrent(m.id) && maxMs > 0
+                            ? '${voiceClock(pos)} / ${voiceClock(total)}'
+                            : voiceClock(total),
+                        style: TextStyle(
+                          color: Colors.white.withValues(alpha: 0.62),
+                          fontSize: 10.5,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 }

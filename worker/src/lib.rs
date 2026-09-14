@@ -452,6 +452,10 @@ async fn init_db(env: &Env) -> bool {
         "ALTER TABLE epizod_db ADD COLUMN yosh INTEGER DEFAULT 0",
         "ALTER TABLE chat_messages ADD COLUMN media_file TEXT DEFAULT ''",
         "ALTER TABLE chat_messages ADD COLUMN media_type TEXT DEFAULT ''",
+        // Ovozli xabarning uzunligi (millisekund). Bo'lmasa ham
+        // ishlaydi, lekin u holda uzunlik faqat ijro boshlangach
+        // ma'lum bo'lardi.
+        "ALTER TABLE chat_messages ADD COLUMN media_ms INTEGER DEFAULT 0",
     ] {
         let _ = turso_exec(env, sql, vec![]).await;
     }
@@ -785,6 +789,7 @@ async fn init_db(env: &Env) -> bool {
             media_file TEXT DEFAULT '',
             -- 'image' yoki 'video'.
             media_type TEXT DEFAULT '',
+            media_ms INTEGER DEFAULT 0,
             created_at INTEGER
         )", vec![]),
         // Suhbat AYNAN shu tartibda so'raladi.
@@ -4924,6 +4929,7 @@ fn chat_msg_public(origin: &str, r: &Value) -> Value {
             format!("{origin}/api/media/{file}")
         },
         "media_type": r["media_type"].as_str().unwrap_or(""),
+        "media_ms": r["media_ms"].as_i64().unwrap_or(0),
         "created_at": r["created_at"].as_i64().unwrap_or(0),
     })
 }
@@ -4936,7 +4942,7 @@ async fn chat_read(
     env: &Env, origin: &str, user: i64, as_admin: bool,
 ) -> Result<Response> {
     let res = turso_exec(env,
-        "SELECT id, from_admin, body, media_file, media_type, created_at
+        "SELECT id, from_admin, body, media_file, media_type, media_ms, created_at
            FROM chat_messages
           WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
         vec![TursoArg::int(user), TursoArg::int(CHAT_LIMIT)]).await?;
@@ -5015,8 +5021,14 @@ async fn chat_send(mut req: Request, env: &Env, origin: &str) -> Result<Response
     let media_type = match b["media_type"].as_str().unwrap_or("") {
         "image" => "image",
         "video" => "video",
+        // TALAB (foydalanuvchi): "chatda ovozli xabar yuborish
+        // tizimini ham qo'sh".
+        "voice" => "voice",
         _ => "",
     };
+    // Ovozli xabarning uzunligi — ilova yozib olganda o'lchaydi.
+    // 0 dan kichik yoki bemaza katta qiymat qabul qilinmaydi.
+    let media_ms = b["media_ms"].as_i64().unwrap_or(0).clamp(0, 3_600_000);
     // Nomi bor-u turi yo'q (yoki aksincha) — yaroqsiz juftlik.
     let has_media = !media_file.is_empty() && !media_type.is_empty();
     if body.is_empty() && !has_media {
@@ -5065,19 +5077,22 @@ async fn chat_send(mut req: Request, env: &Env, origin: &str) -> Result<Response
         body.clone()
     } else if media_type == "video" {
         "Video".to_string()
+    } else if media_type == "voice" {
+        "Ovozli xabar".to_string()
     } else {
         "Rasm".to_string()
     };
     turso_batch(env, &[
         ("INSERT INTO chat_messages
-            (id,user_id,from_admin,body,media_file,media_type,created_at)
-          VALUES (?,?,?,?,?,?,?)",
+            (id,user_id,from_admin,body,media_file,media_type,media_ms,created_at)
+          VALUES (?,?,?,?,?,?,?,?)",
          vec![
             TursoArg::text(&id), TursoArg::int(target),
             TursoArg::int(if from_admin { 1 } else { 0 }),
             TursoArg::text(&body),
             TursoArg::text(if has_media { &media_file } else { "" }),
             TursoArg::text(if has_media { media_type } else { "" }),
+            TursoArg::int(if has_media { media_ms } else { 0 }),
             TursoArg::int(now),
          ]),
         ("INSERT INTO chat_threads
@@ -5106,6 +5121,7 @@ async fn chat_send(mut req: Request, env: &Env, origin: &str) -> Result<Response
             String::new()
         },
         "media_type": if has_media { media_type } else { "" },
+        "media_ms": if has_media { media_ms } else { 0 },
         "created_at": now,
     }))
 }
@@ -5309,6 +5325,8 @@ async fn refresh_thread(env: &Env, user: i64) {
         "Video".to_string()
     } else if mtype == "image" {
         "Rasm".to_string()
+    } else if mtype == "voice" {
+        "Ovozli xabar".to_string()
     } else {
         String::new()
     };
@@ -5482,21 +5500,34 @@ async fn admin_users(req: &Request, env: &Env, origin: &str) -> Result<Response>
     let (sql, args): (String, Vec<TursoArg>) = if search.is_empty() {
         (
             format!(
-                "SELECT id,username,first_name,last_name,avatar_file,
-                        telegram_id,balance,is_banned,created_at,last_login_at
-                   FROM users_db ORDER BY {order} DESC LIMIT ? OFFSET ?"
+                "SELECT u.id AS id, u.username AS username,
+                        u.first_name AS first_name, u.last_name AS last_name,
+                        u.avatar_file AS avatar_file,
+                        u.telegram_id AS telegram_id, u.balance AS balance,
+                        u.is_banned AS is_banned, u.created_at AS created_at,
+                        u.last_login_at AS last_login_at,
+                        COALESCE(s.expires_at,0) AS sub_until
+                   FROM users_db u
+                   LEFT JOIN subs_db s ON s.user_id = u.id
+                  ORDER BY u.{order} DESC LIMIT ? OFFSET ?"
             ),
             vec![TursoArg::int(ADMIN_PAGE), TursoArg::int(page * ADMIN_PAGE)],
         )
     } else {
         (
             format!(
-                "SELECT id,username,first_name,last_name,avatar_file,
-                        telegram_id,balance,is_banned,created_at,last_login_at
-                   FROM users_db
-                  WHERE id = ? OR LOWER(COALESCE(username,'')) LIKE ?
-                     OR LOWER(COALESCE(first_name,'')) LIKE ?
-                  ORDER BY {order} DESC LIMIT ? OFFSET ?"
+                "SELECT u.id AS id, u.username AS username,
+                        u.first_name AS first_name, u.last_name AS last_name,
+                        u.avatar_file AS avatar_file,
+                        u.telegram_id AS telegram_id, u.balance AS balance,
+                        u.is_banned AS is_banned, u.created_at AS created_at,
+                        u.last_login_at AS last_login_at,
+                        COALESCE(s.expires_at,0) AS sub_until
+                   FROM users_db u
+                   LEFT JOIN subs_db s ON s.user_id = u.id
+                  WHERE u.id = ? OR LOWER(COALESCE(u.username,'')) LIKE ?
+                     OR LOWER(COALESCE(u.first_name,'')) LIKE ?
+                  ORDER BY u.{order} DESC LIMIT ? OFFSET ?"
             ),
             vec![
                 TursoArg::int(by_id), TursoArg::text(&like), TursoArg::text(&like),
@@ -5528,6 +5559,9 @@ async fn admin_users(req: &Request, env: &Env, origin: &str) -> Result<Response>
             "banned": o["is_banned"].as_i64().unwrap_or(0) != 0,
             "created_at": o["created_at"].as_i64().unwrap_or(0),
             "last_login_at": o["last_login_at"].as_i64().unwrap_or(0),
+            // Obuna qachon tugaydi (0 — obuna yo'q). Admin
+            // oynasida "hozir necha kun qolgan" shu yerdan.
+            "sub_until": o["sub_until"].as_i64().unwrap_or(0),
         })
     }).collect();
 
@@ -5553,7 +5587,8 @@ async fn admin_users(req: &Request, env: &Env, origin: &str) -> Result<Response>
 ///   * `balance`  — balansga `amount` qo'shadi (manfiy ham bo'ladi);
 ///   * `set_balance` — balansni AYNAN `amount` ga tenglaydi;
 ///   * `ban` / `unban` — bloklash va ochish;
-///   * `sub`      — `days` kunlik obuna beradi (0 — obunani oladi).
+///   * `sub`      — obunaga `days` kun qo'shadi (manfiy bo'lsa ayiradi);
+///   * `sub_clear` — obunani butunlay bekor qiladi.
 ///
 /// Har bir amal `billing_log` ga yoziladi: keyin "bu pul qayerdan
 /// keldi" degan savol tug'ilmasin.
@@ -5599,7 +5634,13 @@ async fn admin_user_action(
                     TursoArg::text(&format!("a{}", random_hex(10))),
                     TursoArg::int(id),
                     TursoArg::int(if action == "balance" { amount } else { left }),
-                    TursoArg::text("Admin tomonidan"),
+                    TursoArg::text(if action == "set_balance" {
+                        "Admin balansni tenglashtirdi"
+                    } else if amount > 0 {
+                        "Admin qo'shdi"
+                    } else {
+                        "Admin yechdi"
+                    }),
                     TursoArg::int(now),
                 ]).await;
             ok_nostore(json!({"ok": true, "balance": left}))
@@ -5622,16 +5663,46 @@ async fn admin_user_action(
             ok_nostore(json!({"ok": true, "banned": on == 1}))
         }
 
+        // ── OBUNA: KUN QO'SHISH VA AYIRISH ───────────────────
+        //
+        // TALAB (foydalanuvchi): "obuna ham shunaqa bo'lsin —
+        // qo'lda necha kunligini yozadi va xohlasa kun qo'shadi,
+        // xohlasa olib tashlaydi".
+        //
+        // `days` musbat bo'lsa qo'shiladi, manfiy bo'lsa ayiriladi.
+        // Ayirilganda muddat hozirgi vaqtdan oldinga tushsa —
+        // obuna butunlay olib tashlanadi (yarim o'chgan holat
+        // qolmasin).
         "sub" => {
             let days = b["days"].as_i64().unwrap_or(0);
-            if days <= 0 {
-                let _ = turso_exec(env, "DELETE FROM subs_db WHERE user_id=?",
-                    vec![TursoArg::int(id)]).await;
-                return ok_nostore(json!({"ok": true, "subscription_until": 0}));
+            if days == 0 {
+                return json_resp(&json!({"error": "Kun soni yo'q"}), 400);
             }
-            // Mavjud obuna USTIGA qo'shiladi.
+            // Muddati o'tgan obuna 0 dan boshlab qo'shiladi.
             let base = sub_until(env, id).await.max(now);
             let until = base + days * 86_400_000;
+
+            if until <= now {
+                let _ = turso_batch(env, &[
+                    ("DELETE FROM subs_db WHERE user_id=?",
+                     vec![TursoArg::int(id)]),
+                    ("INSERT INTO billing_log (id,user_id,kind,amount,days,note,created_at)
+                      VALUES (?,?,'subscription',0,?,?,?)",
+                     vec![
+                        TursoArg::text(&format!("a{}", random_hex(10))),
+                        TursoArg::int(id), TursoArg::int(days),
+                        TursoArg::text("Obuna tugatildi (admin)"),
+                        TursoArg::int(now),
+                     ]),
+                ]).await;
+                return ok_nostore(json!({"ok": true, "subscription_until": 0}));
+            }
+
+            let note = if days > 0 {
+                format!("{days} kun obuna qo'shildi (admin)")
+            } else {
+                format!("{} kun obuna olindi (admin)", -days)
+            };
             let _ = turso_batch(env, &[
                 ("INSERT INTO subs_db (user_id,expires_at,updated_at) VALUES (?,?,?)
                   ON CONFLICT(user_id) DO UPDATE SET
@@ -5642,11 +5713,27 @@ async fn admin_user_action(
                  vec![
                     TursoArg::text(&format!("a{}", random_hex(10))),
                     TursoArg::int(id), TursoArg::int(days),
-                    TursoArg::text(&format!("{days} kunlik obuna (admin)")),
+                    TursoArg::text(&note),
                     TursoArg::int(now),
                  ]),
             ]).await;
             ok_nostore(json!({"ok": true, "subscription_until": until}))
+        }
+
+        // Obunani BUTUNLAY olib tashlash.
+        "sub_clear" => {
+            let _ = turso_batch(env, &[
+                ("DELETE FROM subs_db WHERE user_id=?", vec![TursoArg::int(id)]),
+                ("INSERT INTO billing_log (id,user_id,kind,amount,days,note,created_at)
+                  VALUES (?,?,'subscription',0,0,?,?)",
+                 vec![
+                    TursoArg::text(&format!("a{}", random_hex(10))),
+                    TursoArg::int(id),
+                    TursoArg::text("Obuna bekor qilindi (admin)"),
+                    TursoArg::int(now),
+                 ]),
+            ]).await;
+            ok_nostore(json!({"ok": true, "subscription_until": 0}))
         }
 
         _ => json_resp(&json!({"error": "Noma'lum amal"}), 400),

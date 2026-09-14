@@ -46,13 +46,31 @@ class _MediaViewScreenState extends State<MediaViewScreen> {
   }
 
   Future<void> _open() async {
-    final c = VideoPlayerController.networkUrl(Uri.parse(widget.url));
+    // ── OVOZ BILAN ISHLASHI ──────────────────────────────────
+    //
+    // TALAB (foydalanuvchi): "ovoz bilan video aniq ishlasin".
+    //
+    // `mixWithOthers: false` — pleyer ovoz fokusini O'ZIGA
+    // oladi, ya'ni fon'da musiqa yangrab tursa u to'xtaydi va
+    // video ovozi bo'g'ilib qolmaydi.
+    //
+    // Ovoz balandligi ham ATAYLAB qo'yiladi: paket standart
+    // qiymatga tayanadi, lekin oldingi ijrodan qolgan holat
+    // ba'zan 0 bo'lib qolishi mumkin.
+    final c = VideoPlayerController.networkUrl(
+      Uri.parse(widget.url),
+      videoPlayerOptions: VideoPlayerOptions(
+        allowBackgroundPlayback: false,
+        mixWithOthers: false,
+      ),
+    );
     try {
       await c.initialize();
       if (!mounted) {
         await c.dispose();
         return;
       }
+      await c.setVolume(1.0);
       setState(() => _ctrl = c);
       await c.play();
     } catch (_) {

@@ -102,6 +102,20 @@ jobs:
             echo "✅ INTERNET ruxsati allaqachon bor"
           fi
 
+      # Chatdagi ovozli xabar uchun mikrofon ruxsati. `record`
+      # paketining o'z manifestida ham bor va birlashtirishda
+      # qo'shiladi — bu yerdagi qadam ishonch uchun (paket
+      # almashsa ham ruxsat joyida qoladi).
+      - name: RECORD_AUDIO ruxsatini qo'shish (agar yo'q bo'lsa)
+        run: |
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          if ! grep -q "android.permission.RECORD_AUDIO" "$MANIFEST"; then
+            sed -i '/<manifest /a\    <uses-permission android:name="android.permission.RECORD_AUDIO" />' "$MANIFEST"
+            echo "✅ RECORD_AUDIO ruxsati qo'shildi"
+          else
+            echo "✅ RECORD_AUDIO ruxsati allaqachon bor"
+          fi
+
       # Video kesh-server (lib/services/video_cache_server.dart) ilova
       # ichida mahalliy http://127.0.0.1 manzilda ishlaydi. Android
       # targetSdk 28+ da standart holatda BARCHA shifrlanmagan (cleartext)

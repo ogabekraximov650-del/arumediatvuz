@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import '../theme/app_background.dart';
 import '../widgets/glass.dart';
 import '../services/support_service.dart';
-import 'admin_chats_screen.dart';
 import 'admin_users_screen.dart';
 import 'anime_management_screen.dart';
 
@@ -86,40 +85,34 @@ class AdminScreen extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(height: 12),
-                    // ── FOYDALANUVCHILAR ──────────────────────
-                    _AdminButton(
-                      icon: Icons.people_alt_rounded,
-                      label: 'Foydalanuvchilar',
-                      subtitle: 'Balans, obuna, bloklash va izlash',
-                      onTap: () => Navigator.of(context).push(
-                        MaterialPageRoute<void>(
-                          builder: (_) => const AdminUsersScreen(),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    // ── BARCHA SUHBATLAR ──────────────────────
+                    // ── FOYDALANUVCHILAR VA YOZISHMALAR ────────
                     //
-                    // TALAB: "admin paneliga barcha chatlar
-                    // bo'limini qo'sh, huddi animelarni boshqarish
-                    // bo'limiga kirgandek".
+                    // TALAB (foydalanuvchi): "foydalanuvchi
+                    // boshqaruvini barcha suhbatlarga ulay
+                    // olasanmi, ya'ni bitta bo'lim orqali ishlash
+                    // qulayroq bo'lar edi".
                     //
-                    // O'qilmagan xabar bo'lsa tugmada ham soni
-                    // ko'rinadi — panelga kirmasdan turib bilinadi.
+                    // Ilgari ikkita alohida tugma edi. Endi bitta:
+                    // yozishmalar o'sha ekranda uchinchi varaq
+                    // bo'lib turadi.
+                    //
+                    // O'qilmagan xabar bo'lsa tugmada soni
+                    // ko'rinadi — bo'limga kirmasdan turib
+                    // bilinadi.
                     AnimatedBuilder(
                       animation: UnreadBadge.instance,
                       builder: (context, _) {
                         final n = UnreadBadge.instance.count;
                         return _AdminButton(
-                          icon: Icons.forum_rounded,
-                          label: 'Barcha suhbatlar',
+                          icon: Icons.people_alt_rounded,
+                          label: 'Foydalanuvchilar',
                           subtitle: n > 0
                               ? '$n ta o\'qilmagan xabar'
-                              : 'Foydalanuvchilar bilan yozishma',
+                              : 'Balans, obuna, bloklash, yozishma',
                           badge: n,
                           onTap: () => Navigator.of(context).push(
                             MaterialPageRoute<void>(
-                              builder: (_) => const AdminChatsScreen(),
+                              builder: (_) => const AdminUsersScreen(),
                             ),
                           ),
                         );

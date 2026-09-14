@@ -52,6 +52,9 @@ class AdminUser {
   final int createdAt;
   final int lastLoginAt;
 
+  /// Obuna qachon tugaydi (0 — obuna yo'q).
+  final int subUntil;
+
   const AdminUser({
     required this.id,
     required this.username,
@@ -63,7 +66,19 @@ class AdminUser {
     required this.banned,
     required this.createdAt,
     required this.lastLoginAt,
+    this.subUntil = 0,
   });
+
+  /// Obunadan necha kun qolgan (0 — obuna yo'q yoki tugagan).
+  int get subDaysLeft {
+    final ms = subUntil - DateTime.now().millisecondsSinceEpoch;
+    if (ms <= 0) return 0;
+    // Boshlangan kun ham sanaladi: 1.2 kun qolgan bo'lsa
+    // "2 kun" deyilgani "1 kun" deyilganidan to'g'riroq.
+    return (ms / 86400000).ceil();
+  }
+
+  bool get hasSub => subDaysLeft > 0;
 
   String get name {
     final n = '$firstName $lastName'.trim();
@@ -83,6 +98,7 @@ class AdminUser {
         banned: j['banned'] == true,
         createdAt: ((j['created_at'] as num?) ?? 0).toInt(),
         lastLoginAt: ((j['last_login_at'] as num?) ?? 0).toInt(),
+        subUntil: ((j['sub_until'] as num?) ?? 0).toInt(),
       );
 }
 
@@ -258,6 +274,9 @@ class AdminUsersController extends ChangeNotifier {
           banned: j.containsKey('banned') ? j['banned'] == true : old.banned,
           createdAt: old.createdAt,
           lastLoginAt: old.lastLoginAt,
+          subUntil: j.containsKey('subscription_until')
+              ? ((j['subscription_until'] as num?) ?? 0).toInt()
+              : old.subUntil,
         );
         notifyListeners();
       }

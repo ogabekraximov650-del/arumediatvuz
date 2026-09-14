@@ -10,13 +10,22 @@
 // bo'lim bilan balansni qo'lda to'ldirish, bloklash va yana boshqa
 // funksiyalar bo'lsin — o'zing kerakli narsalarni qo'sh".
 //
+// ── BITTA BO'LIM ────────────────────────────────────────────
+//
+// TALAB (foydalanuvchi): "foydalanuvchi boshqaruvini barcha
+// suhbatlarga ulay olasanmi, ya'ni bitta bo'lim orqali ishlash
+// qulayroq bo'lar edi".
+//
+// Shu sabab yozishmalar ro'yxati ham SHU EKRANDA, uchinchi
+// varaq bo'lib turadi. Admin panelida endi bitta tugma:
+// odam ham, u bilan yozishma ham shu yerdan topiladi.
+//
 // ── QANDAY AMALLAR BOR ──────────────────────────────────────
 //
 // Qatorga bosilsa pastdan oyna chiqadi:
 //
-//   * Balansga qo'shish (qo'lda summa yozib);
-//   * Balansni aynan tenglash (xato tuzatish uchun);
-//   * Obuna berish (1 / 5 / 10 / 30 kun yoki olib tashlash);
+//   * Balansga summa qo'shish yoki AYIRISH (qo'lda yoziladi);
+//   * Obunaga kun qo'shish yoki AYIRISH (qo'lda yoziladi);
 //   * Bloklash / ochish;
 //   * Profilini to'liq ko'rish;
 //   * Yozishmani ochish.
@@ -33,10 +42,25 @@ import 'package:flutter/services.dart';
 import '../services/admin_users_service.dart';
 import '../services/billing_service.dart' show formatSum;
 import '../services/format.dart';
+import '../services/support_service.dart';
 import '../theme/app_background.dart';
 import '../widgets/glass.dart';
 import 'public_profile_screen.dart';
 import 'support_chat_screen.dart';
+
+/// Ekrandagi uchta varaq.
+///
+/// Birinchi ikkitasi FOYDALANUVCHILAR ro'yxati (qaysi vaqt
+/// bo'yicha terilishi bilan farq qiladi), uchinchisi esa
+/// YOZISHMALAR.
+enum _Tab {
+  registered('Yangi'),
+  online('Onlayn'),
+  chats('Suhbatlar');
+
+  final String label;
+  const _Tab(this.label);
+}
 
 class AdminUsersScreen extends StatefulWidget {
   const AdminUsersScreen({super.key});
@@ -47,8 +71,11 @@ class AdminUsersScreen extends StatefulWidget {
 
 class _AdminUsersScreenState extends State<AdminUsersScreen> {
   final _ctrl = AdminUsersController();
+  final _threads = ChatThreadsController();
   final _search = TextEditingController();
   final _scroll = ScrollController();
+
+  _Tab _tab = _Tab.registered;
 
   /// Izlash HAR HARFDA emas, yozish to'xtagach yuboriladi.
   Timer? _debounce;
@@ -59,6 +86,11 @@ class _AdminUsersScreenState extends State<AdminUsersScreen> {
     // Avval DISK (darhol), keyin tarmoq.
     _ctrl.loadFromDisk();
     _ctrl.load();
+    // Yozishmalar ham shu ekranda — varaq ochilishini kutmasdan
+    // yuklanadi, chunki ustidagi o'qilmaganlar soni darhol
+    // kerak bo'ladi.
+    _threads.loadFromDisk();
+    _threads.load();
     _scroll.addListener(() {
       if (!_scroll.hasClients) return;
       final left = _scroll.position.maxScrollExtent - _scroll.position.pixels;
@@ -70,9 +102,41 @@ class _AdminUsersScreenState extends State<AdminUsersScreen> {
   void dispose() {
     _debounce?.cancel();
     _ctrl.dispose();
+    _threads.dispose();
     _search.dispose();
     _scroll.dispose();
     super.dispose();
+  }
+
+  void _setTab(_Tab t) {
+    if (_tab == t) return;
+    setState(() => _tab = t);
+    switch (t) {
+      case _Tab.registered:
+        _ctrl.setSort(UserSort.registered);
+      case _Tab.online:
+        _ctrl.setSort(UserSort.online);
+      case _Tab.chats:
+        _threads.load(force: true);
+    }
+  }
+
+  /// Yozishmani ochadi va qaytilganda ro'yxatni yangilaydi.
+  Future<void> _openChat(int userId, String name, String photo) async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => SupportChatScreen(
+          userId: userId,
+          title: name,
+          photoUrl: photo,
+        ),
+      ),
+    );
+    // O'qilmaganlar soni o'zgargan va tartib siljigan bo'lishi
+    // mumkin.
+    if (!mounted) return;
+    await _threads.load(force: true);
+    await UnreadBadge.instance.refresh();
   }
 
   void _onSearch(String q) {
@@ -107,12 +171,15 @@ class _AdminUsersScreenState extends State<AdminUsersScreen> {
         body: SafeArea(
           top: false,
           child: AnimatedBuilder(
-            animation: _ctrl,
+            animation: Listenable.merge([_ctrl, _threads]),
             builder: (context, _) => Column(
               children: [
-                _searchBox(),
+                // Izlash faqat ODAMLAR ro'yxatida mantiqli.
+                if (_tab != _Tab.chats) _searchBox(),
                 _sortTabs(),
-                Expanded(child: _list()),
+                Expanded(
+                  child: _tab == _Tab.chats ? _chatList() : _list(),
+                ),
               ],
             ),
           ),
@@ -172,52 +239,223 @@ class _AdminUsersScreenState extends State<AdminUsersScreen> {
     );
   }
 
-  // ── IKKI RO'YXAT ──────────────────────────────────────────
+  // ── UCHTA VARAQ ───────────────────────────────────────────
+  //
+  // Ikkita odamlar ro'yxati va bitta yozishmalar ro'yxati.
+  // Suhbatlar varag'ining yonida o'qilmagan xabarlar soni
+  // turadi — admin qaysi varaqda bo'lsa ham ko'rinadi.
   Widget _sortTabs() {
+    final unread = _threads.items.fold<int>(0, (n, t) => n + t.unread);
     return Padding(
       padding: const EdgeInsets.fromLTRB(14, 0, 14, 8),
       child: Row(
         children: [
-          for (final s in UserSort.values) ...[
+          for (final t in _Tab.values) ...[
             Expanded(
               child: GestureDetector(
-                onTap: () => _ctrl.setSort(s),
+                onTap: () => _setTab(t),
                 behavior: HitTestBehavior.opaque,
                 child: AnimatedContainer(
                   duration: const Duration(milliseconds: 180),
                   padding: const EdgeInsets.symmetric(vertical: 9),
                   decoration: BoxDecoration(
-                    color: _ctrl.sort == s
+                    color: _tab == t
                         ? AppColors.accent
                         : Colors.white.withValues(alpha: 0.07),
                     borderRadius: BorderRadius.circular(12),
                     border: Border.all(
-                      color: _ctrl.sort == s
+                      color: _tab == t
                           ? AppColors.accent
                           : Colors.white.withValues(alpha: 0.12),
                     ),
                   ),
-                  child: Text(
-                    s.label,
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      color: _ctrl.sort == s
-                          ? Colors.white
-                          : Colors.white.withValues(alpha: 0.65),
-                      fontSize: 13,
-                      fontWeight: _ctrl.sort == s
-                          ? FontWeight.w800
-                          : FontWeight.w600,
-                    ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Flexible(
+                        child: Text(
+                          t.label,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: _tab == t
+                                ? Colors.white
+                                : Colors.white.withValues(alpha: 0.65),
+                            fontSize: 13,
+                            fontWeight: _tab == t
+                                ? FontWeight.w800
+                                : FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                      if (t == _Tab.chats && unread > 0) ...[
+                        const SizedBox(width: 5),
+                        Container(
+                          constraints: const BoxConstraints(minWidth: 17),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 5, vertical: 1),
+                          decoration: BoxDecoration(
+                            color: _tab == t
+                                ? Colors.white
+                                : AppColors.accent,
+                            borderRadius: BorderRadius.circular(9),
+                          ),
+                          child: Text(
+                            '$unread',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              color: _tab == t
+                                  ? AppColors.accent
+                                  : Colors.white,
+                              fontSize: 10,
+                              fontWeight: FontWeight.w900,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ],
                   ),
                 ),
               ),
             ),
-            if (s != UserSort.values.last) const SizedBox(width: 8),
+            if (t != _Tab.values.last) const SizedBox(width: 8),
           ],
         ],
       ),
     );
+  }
+
+  // ── YOZISHMALAR RO'YXATI ──────────────────────────────────
+  //
+  // Tartib SERVERDA hisoblanadi (`chat_threads.last_at DESC`),
+  // ilovada emas: ilova 200 tasini oladi, saralash ilovada bo'lsa
+  // 201-suhbatdagi yangi xabar ro'yxatga umuman tushmasdi.
+  Widget _chatList() {
+    if (_threads.isLoading) {
+      return Center(
+        child: CircularProgressIndicator(
+          strokeWidth: 2,
+          valueColor: AlwaysStoppedAnimation(AppColors.accent),
+        ),
+      );
+    }
+    final rows = _threads.items;
+    return RefreshIndicator(
+      onRefresh: () => _threads.load(force: true),
+      color: AppColors.accent,
+      backgroundColor: AppColors.card,
+      child: rows.isEmpty
+          ? ListView(
+              physics: const BouncingScrollPhysics(
+                  parent: AlwaysScrollableScrollPhysics()),
+              children: [
+                SizedBox(
+                  height: 320,
+                  child: Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.forum_outlined,
+                            size: 52,
+                            color: Colors.white.withValues(alpha: 0.2)),
+                        const SizedBox(height: 12),
+                        Text(
+                          _threads.error ?? 'Hali hech kim yozmagan',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                              color: Colors.white.withValues(alpha: 0.45),
+                              fontSize: 13.5),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            )
+          : ListView.builder(
+              physics: const BouncingScrollPhysics(
+                  parent: AlwaysScrollableScrollPhysics()),
+              padding: const EdgeInsets.fromLTRB(12, 2, 12, 24),
+              itemCount: rows.length,
+              itemBuilder: (context, i) => Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: _ThreadRow(
+                  thread: rows[i],
+                  onTap: () =>
+                      _openChat(rows[i].userId, rows[i].name, rows[i].photoUrl),
+                  // Uzoq bosilsa — butun yozishma o'chiriladi.
+                  onLongPress: () => _confirmDeleteThread(rows[i]),
+                ),
+              ),
+            ),
+    );
+  }
+
+  /// Butun yozishmani o'chirish (tasdiq bilan).
+  Future<void> _confirmDeleteThread(ChatThread t) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      barrierColor: Colors.black54,
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.transparent,
+        insetPadding: const EdgeInsets.symmetric(horizontal: 28),
+        child: Glass(
+          borderRadius: 22,
+          padding: const EdgeInsets.fromLTRB(22, 22, 22, 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.delete_forever_rounded,
+                  size: 42, color: Colors.red.shade300),
+              const SizedBox(height: 12),
+              Text(
+                '${t.name} bilan butun yozishma o\'chirilsinmi?',
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                    color: Colors.white, fontSize: 15, height: 1.4),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                'Bu amalni ortga qaytarib bo\'lmaydi.',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.55),
+                    fontSize: 12.5),
+              ),
+              const SizedBox(height: 18),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: () => Navigator.of(ctx).pop(false),
+                      child: const Text('Yo\'q'),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: FilledButton(
+                      onPressed: () => Navigator.of(ctx).pop(true),
+                      style: FilledButton.styleFrom(
+                          backgroundColor: Colors.red.shade600),
+                      child: const Text('O\'chirish'),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (ok != true || !mounted) return;
+    final err = await _threads.removeThread(t.userId);
+    if (!mounted) return;
+    if (err != null) {
+      _say(err);
+      return;
+    }
+    await UnreadBadge.instance.refresh();
   }
 
   Widget _list() {
@@ -308,11 +546,7 @@ class _AdminUsersScreenState extends State<AdminUsersScreen> {
         user: u,
         onBalance: () {
           Navigator.pop(ctx);
-          _askAmount(u, add: true);
-        },
-        onSetBalance: () {
-          Navigator.pop(ctx);
-          _askAmount(u, add: false);
+          _askAmount(u);
         },
         onSub: () {
           Navigator.pop(ctx);
@@ -332,24 +566,37 @@ class _AdminUsersScreenState extends State<AdminUsersScreen> {
         },
         onChat: () {
           Navigator.pop(ctx);
-          Navigator.of(context).push(
-            MaterialPageRoute<void>(
-              builder: (_) => SupportChatScreen(
-                userId: u.id,
-                title: u.name,
-                photoUrl: u.photoUrl,
-              ),
-            ),
-          );
+          _openChat(u.id, u.name, u.photoUrl);
         },
       ),
     );
   }
 
-  /// Summa so'raydi (qo'shish yoki aynan tenglash).
-  Future<void> _askAmount(AdminUser u, {required bool add}) async {
+  // ══════════════════════════════════════════════════════════
+  //  QO'LDA SUMMA / KUN KIRITISH
+  // ══════════════════════════════════════════════════════════
+  //
+  // TALAB (foydalanuvchi): "foydalanuvchi balansidan qo'lda
+  // summani kiritib olib tashlash yoki qo'shish mumkin bo'lsin,
+  // hozirgidek tahrirlash emas. Obuna ham shunaqa bo'lsin —
+  // qo'lda necha kunligini yozadi va xohlasa kun qo'shadi,
+  // xohlasa olib tashlaydi".
+  //
+  // Ya'ni bitta oyna: son yoziladi, keyin QO'SHISH yoki AYIRISH
+  // tugmasi bosiladi. Manfiy son yozish shart emas va "yangi
+  // qiymatga tenglash" degan chalkash amal ham yo'q.
+
+  /// Son so'raydigan umumiy oyna. Qaytaradi: (son, qo'shilsinmi).
+  Future<(int, bool)?> _askNumber({
+    required String title,
+    required String subtitle,
+    required String hint,
+    required String addLabel,
+    required String subLabel,
+    Widget? extra,
+  }) async {
     final ctrl = TextEditingController();
-    final n = await showDialog<int>(
+    final res = await showDialog<(int, bool)>(
       context: context,
       builder: (ctx) => Dialog(
         backgroundColor: Colors.transparent,
@@ -362,7 +609,7 @@ class _AdminUsersScreenState extends State<AdminUsersScreen> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Text(
-                add ? 'Balansga qo\'shish' : 'Balansni tenglash',
+                title,
                 textAlign: TextAlign.center,
                 style: const TextStyle(
                     color: Colors.white,
@@ -371,7 +618,7 @@ class _AdminUsersScreenState extends State<AdminUsersScreen> {
               ),
               const SizedBox(height: 4),
               Text(
-                '${u.name} · hozir ${formatSum(u.balance)}',
+                subtitle,
                 textAlign: TextAlign.center,
                 style: TextStyle(
                     color: Colors.white.withValues(alpha: 0.55),
@@ -382,14 +629,14 @@ class _AdminUsersScreenState extends State<AdminUsersScreen> {
                 controller: ctrl,
                 autofocus: true,
                 keyboardType: TextInputType.number,
-                // Qo'shishda manfiy ham bo'ladi (xato tuzatish).
+                // Faqat musbat son: yo'nalishni TUGMA hal qiladi.
                 inputFormatters: [
-                  FilteringTextInputFormatter.allow(RegExp(r'[0-9-]')),
+                  FilteringTextInputFormatter.digitsOnly,
                   LengthLimitingTextInputFormatter(9),
                 ],
                 style: const TextStyle(color: Colors.white, fontSize: 16),
                 decoration: InputDecoration(
-                  hintText: add ? 'Masalan 10000' : 'Yangi balans',
+                  hintText: hint,
                   hintStyle:
                       TextStyle(color: Colors.white.withValues(alpha: 0.35)),
                   filled: true,
@@ -400,26 +647,48 @@ class _AdminUsersScreenState extends State<AdminUsersScreen> {
                   ),
                 ),
               ),
-              const SizedBox(height: 16),
+              const SizedBox(height: 14),
               Row(
                 children: [
                   Expanded(
-                    child: OutlinedButton(
-                      onPressed: () => Navigator.of(ctx).pop(),
-                      child: const Text('Bekor'),
+                    child: OutlinedButton.icon(
+                      onPressed: () {
+                        final n = int.tryParse(ctrl.text.trim()) ?? 0;
+                        if (n > 0) Navigator.of(ctx).pop((n, false));
+                      },
+                      icon: const Icon(Icons.remove_rounded, size: 18),
+                      label: Text(subLabel,
+                          maxLines: 1, overflow: TextOverflow.ellipsis),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: Colors.red.shade300,
+                        side: BorderSide(color: Colors.red.shade300),
+                      ),
                     ),
                   ),
                   const SizedBox(width: 10),
                   Expanded(
-                    child: FilledButton(
+                    child: FilledButton.icon(
                       style: FilledButton.styleFrom(
                           backgroundColor: AppColors.accent),
-                      onPressed: () => Navigator.of(ctx)
-                          .pop(int.tryParse(ctrl.text.trim())),
-                      child: const Text('Tasdiqlash'),
+                      onPressed: () {
+                        final n = int.tryParse(ctrl.text.trim()) ?? 0;
+                        if (n > 0) Navigator.of(ctx).pop((n, true));
+                      },
+                      icon: const Icon(Icons.add_rounded, size: 18),
+                      label: Text(addLabel,
+                          maxLines: 1, overflow: TextOverflow.ellipsis),
                     ),
                   ),
                 ],
+              ),
+              if (extra != null) ...[
+                const SizedBox(height: 8),
+                extra,
+              ],
+              const SizedBox(height: 4),
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: const Text('Bekor'),
               ),
             ],
           ),
@@ -427,82 +696,64 @@ class _AdminUsersScreenState extends State<AdminUsersScreen> {
       ),
     );
     ctrl.dispose();
-    if (n == null || !mounted) return;
-    final err = await _ctrl.act(
-      u.id,
-      add ? 'balance' : 'set_balance',
-      amount: n,
-    );
-    _say(err ?? 'Balans yangilandi');
+    return res;
   }
 
-  /// Obuna kunlarini so'raydi.
-  Future<void> _askDays(AdminUser u) async {
-    const days = [1, 5, 10, 30];
-    final picked = await showModalBottomSheet<int>(
-      context: context,
-      backgroundColor: Colors.transparent,
-      builder: (ctx) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(14, 0, 14, 14),
-          child: Glass(
-            borderRadius: 20,
-            blur: 18,
-            padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                const Text(
-                  'Obuna berish',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 16,
-                      fontWeight: FontWeight.w700),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  'Mavjud obuna ustiga qo\'shiladi',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                      color: Colors.white.withValues(alpha: 0.5),
-                      fontSize: 12),
-                ),
-                const SizedBox(height: 14),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  alignment: WrapAlignment.center,
-                  children: [
-                    for (final d in days)
-                      FilledButton(
-                        style: FilledButton.styleFrom(
-                            backgroundColor: AppColors.accent),
-                        onPressed: () => Navigator.of(ctx).pop(d),
-                        child: Text('$d kun'),
-                      ),
-                  ],
-                ),
-                const SizedBox(height: 10),
-                OutlinedButton(
-                  onPressed: () => Navigator.of(ctx).pop(0),
-                  child: Text(
-                    'Obunani olib tashlash',
-                    style: TextStyle(color: Colors.red.shade300),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
+  /// Balansga summa qo'shadi yoki ayiradi.
+  Future<void> _askAmount(AdminUser u) async {
+    final res = await _askNumber(
+      title: 'Balansni o\'zgartirish',
+      subtitle: '${u.name} · hozir ${formatSum(u.balance)}',
+      hint: 'Masalan 10000',
+      addLabel: 'Qo\'shish',
+      subLabel: 'Ayirish',
     );
-    if (picked == null || !mounted) return;
-    final err = await _ctrl.act(u.id, 'sub', days: picked);
+    if (res == null || !mounted) return;
+    final (n, add) = res;
+    final err = await _ctrl.act(u.id, 'balance', amount: add ? n : -n);
+    if (!mounted) return;
     _say(err ??
-        (picked > 0 ? '$picked kunlik obuna berildi' : 'Obuna olib tashlandi'));
+        (add
+            ? '${formatSum(n)} qo\'shildi'
+            : '${formatSum(n)} yechib olindi'));
   }
+
+  /// Obunaga kun qo'shadi yoki ayiradi.
+  Future<void> _askDays(AdminUser u) async {
+    final left = u.subDaysLeft;
+    final res = await _askNumber(
+      title: 'Obuna muddati',
+      subtitle: left > 0
+          ? '${u.name} · hozir $left kun qolgan'
+          : '${u.name} · obunasi yo\'q',
+      hint: 'Necha kun',
+      addLabel: 'Kun qo\'shish',
+      subLabel: 'Kun ayirish',
+      // Butunlay bekor qilish alohida turadi: u kun bilan emas,
+      // BIR YO'LA ishlaydi.
+      extra: left > 0
+          ? TextButton(
+              onPressed: () => Navigator.of(context).pop((0, false)),
+              child: Text(
+                'Obunani butunlay bekor qilish',
+                style: TextStyle(color: Colors.red.shade300, fontSize: 13),
+              ),
+            )
+          : null,
+    );
+    if (res == null || !mounted) return;
+    final (n, add) = res;
+    if (n == 0) {
+      final err = await _ctrl.act(u.id, 'sub_clear');
+      if (!mounted) return;
+      _say(err ?? 'Obuna bekor qilindi');
+      return;
+    }
+    final err = await _ctrl.act(u.id, 'sub', days: add ? n : -n);
+    if (!mounted) return;
+    _say(err ?? (add ? '$n kun qo\'shildi' : '$n kun olib tashlandi'));
+  }
+
 
   Future<void> _confirmBan(AdminUser u) async {
     final ban = !u.banned;
@@ -758,7 +1009,6 @@ class _Avatar extends StatelessWidget {
 class _ActionSheet extends StatelessWidget {
   final AdminUser user;
   final VoidCallback onBalance;
-  final VoidCallback onSetBalance;
   final VoidCallback onSub;
   final VoidCallback onBan;
   final VoidCallback onProfile;
@@ -767,7 +1017,6 @@ class _ActionSheet extends StatelessWidget {
   const _ActionSheet({
     required this.user,
     required this.onBalance,
-    required this.onSetBalance,
     required this.onSub,
     required this.onBan,
     required this.onProfile,
@@ -820,7 +1069,9 @@ class _ActionSheet extends StatelessWidget {
                       const SizedBox(height: 3),
                       Text(
                         'ID ${user.id} · ${formatSum(user.balance)}'
+                        '${user.hasSub ? ' · obuna ${user.subDaysLeft} kun' : ''}'
                         '${user.banned ? ' · bloklangan' : ''}',
+                        textAlign: TextAlign.center,
                         style: TextStyle(
                             color: Colors.white.withValues(alpha: 0.55),
                             fontSize: 12.5),
@@ -829,9 +1080,10 @@ class _ActionSheet extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: 10),
-                _tile(Icons.add_card_rounded, 'Balansga qo\'shish', onBalance),
-                _tile(Icons.edit_rounded, 'Balansni tenglash', onSetBalance),
-                _tile(Icons.workspace_premium_rounded, 'Obuna berish', onSub),
+                _tile(Icons.account_balance_wallet_rounded,
+                    'Balansni o\'zgartirish', onBalance),
+                _tile(Icons.workspace_premium_rounded,
+                    'Obuna muddati', onSub),
                 _tile(Icons.forum_rounded, 'Yozishmani ochish', onChat),
                 _tile(Icons.person_rounded, 'Profilini ko\'rish', onProfile),
                 _tile(
@@ -861,6 +1113,138 @@ class _ActionSheet extends StatelessWidget {
         ),
       ),
       onTap: onTap,
+    );
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+//  YOZISHMALAR RO'YXATIDAGI BITTA QATOR
+// ══════════════════════════════════════════════════════════════
+//
+// Telegram'dagidek: rasm, ism, oxirgi xabar, vaqti va
+// o'qilmaganlar soni. Rasmga bosilsa profil ochiladi.
+
+class _ThreadRow extends StatelessWidget {
+  final ChatThread thread;
+  final VoidCallback onTap;
+  final VoidCallback onLongPress;
+
+  const _ThreadRow({
+    required this.thread,
+    required this.onTap,
+    required this.onLongPress,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final t = thread;
+    return GestureDetector(
+      onLongPress: onLongPress,
+      child: GlassTappable(
+        onTap: onTap,
+        child: Glass(
+          borderRadius: 16,
+          blur: 12,
+          padding: const EdgeInsets.fromLTRB(12, 10, 14, 10),
+          child: Row(
+            children: [
+              GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => PublicProfileScreen(userId: t.userId),
+                  ),
+                ),
+                child: _Avatar(url: t.photoUrl, name: t.name, banned: false),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            t.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 14.5,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          chatTime(t.lastAt),
+                          style: TextStyle(
+                            color: Colors.white.withValues(alpha: 0.42),
+                            fontSize: 11,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 3),
+                    Row(
+                      children: [
+                        // Oxirgi xabarni admin yozgan bo'lsa —
+                        // "Siz:" (Telegram ham shunday qiladi).
+                        if (t.lastFromAdmin)
+                          Text(
+                            'Siz: ',
+                            style: TextStyle(
+                              color: Colors.white.withValues(alpha: 0.42),
+                              fontSize: 12.5,
+                            ),
+                          ),
+                        Expanded(
+                          child: Text(
+                            t.lastBody,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: Colors.white.withValues(
+                                  alpha: t.unread > 0 ? 0.88 : 0.55),
+                              fontSize: 12.5,
+                              fontWeight: t.unread > 0
+                                  ? FontWeight.w600
+                                  : FontWeight.w400,
+                            ),
+                          ),
+                        ),
+                        if (t.unread > 0) ...[
+                          const SizedBox(width: 8),
+                          Container(
+                            constraints: const BoxConstraints(minWidth: 20),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: AppColors.accent,
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Text(
+                              '${t.unread}',
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 11,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

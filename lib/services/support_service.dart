@@ -43,8 +43,14 @@ class ChatMessage {
   /// Rasm yoki video manzili (bo'sh — oddiy matn).
   final String mediaUrl;
 
-  /// `image` yoki `video`.
+  /// `image`, `video` yoki `voice`.
   final String mediaType;
+
+  /// Ovozli xabarning uzunligi (millisekund).
+  ///
+  /// Yozib olinganda o'lchanadi va xabar bilan birga saqlanadi —
+  /// shu sabab uzunlik faylni yuklamasdan turib ko'rinadi.
+  final int mediaMs;
 
   const ChatMessage({
     required this.id,
@@ -53,10 +59,16 @@ class ChatMessage {
     required this.createdAt,
     this.mediaUrl = '',
     this.mediaType = '',
+    this.mediaMs = 0,
   });
 
   bool get hasMedia => mediaUrl.isNotEmpty && mediaType.isNotEmpty;
   bool get isVideo => mediaType == 'video';
+  bool get isVoice => mediaType == 'voice';
+
+  /// Rasm yoki video (ya'ni ko'ruvchida ochiladigan narsa).
+  /// Ovozli xabar bunga KIRMAYDI — u xabarning o'zida ijro etiladi.
+  bool get isViewable => hasMedia && !isVoice;
 
   static ChatMessage fromJson(Map<String, dynamic> j) => ChatMessage(
         id: '${j['id'] ?? ''}',
@@ -65,6 +77,7 @@ class ChatMessage {
         createdAt: ((j['created_at'] as num?) ?? 0).toInt(),
         mediaUrl: '${j['media_url'] ?? ''}',
         mediaType: '${j['media_type'] ?? ''}',
+        mediaMs: ((j['media_ms'] as num?) ?? 0).toInt(),
       );
 }
 
@@ -327,6 +340,7 @@ class ChatController extends ChangeNotifier {
     String body, {
     String mediaFile = '',
     String mediaType = '',
+    int mediaMs = 0,
   }) async {
     final text = body.trim();
     if (text.isEmpty && mediaFile.isEmpty) return null;
@@ -340,6 +354,7 @@ class ChatController extends ChangeNotifier {
               if (userId != null) 'user_id': userId,
               if (mediaFile.isNotEmpty) 'media_file': mediaFile,
               if (mediaType.isNotEmpty) 'media_type': mediaType,
+              if (mediaMs > 0) 'media_ms': mediaMs,
             }),
           )
           .timeout(const Duration(seconds: 20));

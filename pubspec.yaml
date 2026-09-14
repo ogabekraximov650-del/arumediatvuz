@@ -49,6 +49,15 @@ dependencies:
   # olmaydi. Bu paket esa havolani ANIQ paketga yubora oladi,
   # shu sabab ilova o'zi ro'yxat ko'rsatib, tanlashni so'raydi.
   android_intent_plus: ^6.1.0
+  # ── OVOZLI XABAR ────────────────────────────────────────────
+  # Chatda ovoz yozib yuborish uchun. Android'da MediaRecorder
+  # (AAC/m4a), iOS'da AVAudioRecorder ustida ishlaydi va mikrofon
+  # ruxsatini o'zi so'raydi.
+  #
+  # Ijro uchun ALOHIDA paket olinmadi: `video_player` (ExoPlayer)
+  # audio faylni ham o'ynatadi, ya'ni ilovada allaqachon bor va
+  # sinalgan dvigatel ishlatiladi.
+  record: ^5.2.1
 
 dev_dependencies:
   flutter_test:
