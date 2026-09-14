@@ -17,6 +17,8 @@
 // Rasm esa shunchaki ko'rsatiladi: barmoq bilan kattalashtirsa
 // bo'ladi (`InteractiveViewer`).
 
+import 'dart:async';
+
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
@@ -39,10 +41,53 @@ class _MediaViewScreenState extends State<MediaViewScreen> {
 
   bool get _isVideo => widget.type == 'video';
 
+  // ── NEGA ALOHIDA NOTIFIER'LAR ─────────────────────────────
+  //
+  // TOPILGAN XATO (foydalanuvchi: "chatdagi video pleyerdagidek
+  // tez va silliq ishlamayapti, sekin va qotib ishlayapti").
+  //
+  // Ilgari pastdagi chiziq to'g'ridan-to'g'ri pleyerning O'ZINI
+  // tinglardi. Pleyer esa holatini SEKUNDIGA O'NLAB MARTA
+  // yangilaydi — ya'ni `Slider`, `SliderTheme` va ikkita yozuv
+  // har safar qaytadan quriladi. Ustiga video sirtining o'zi ham
+  // shu daraxt ichida edi, ya'ni har yangilanishda u ham qayta
+  // chizilishga tekshirilardi.
+  //
+  // Endi ekranga faqat IKKITA kichik qiymat beriladi: pozitsiya
+  // (har 250 ms da) va "ijro ketyaptimi" belgisi (faqat
+  // O'ZGARGANDA). Video sirti esa `RepaintBoundary` ichida —
+  // chiziq harakatlansa ham unga tegilmaydi.
+  final ValueNotifier<Duration> _pos = ValueNotifier(Duration.zero);
+  final ValueNotifier<bool> _playing = ValueNotifier(false);
+  Timer? _tick;
+
+  /// Barmoq chiziqni surayapti.
+  ///
+  /// SEK SURISH PAYTIDA EMAS, QO'YIB YUBORILGANDA bajariladi:
+  /// aks holda barmoq harakatlanganda sekundiga o'nlab `seekTo`
+  /// ketardi va pleyer har safar buferni tashlab qaytadan
+  /// yuklashga tushardi — "qotib qolish" hissi aynan shundan.
+  /// Anime pleyeri ham aynan shunday ishlaydi (surish tugaganda
+  /// bir marta).
+  ///
+  /// `setState` ATAYLAB ishlatilmaydi: surish davomida faqat
+  /// pastdagi chiziq yangilanadi, video sirtiga tegilmaydi.
+  bool _dragging = false;
+
   @override
   void initState() {
     super.initState();
     if (_isVideo) _open();
+  }
+
+  void _startTicker(VideoPlayerController c) {
+    _tick?.cancel();
+    _tick = Timer.periodic(const Duration(milliseconds: 250), (_) {
+      if (!mounted) return;
+      final v = c.value;
+      if (!_dragging) _pos.value = v.position;
+      if (_playing.value != v.isPlaying) _playing.value = v.isPlaying;
+    });
   }
 
   Future<void> _open() async {
@@ -91,6 +136,7 @@ class _MediaViewScreenState extends State<MediaViewScreen> {
       }
       await c.setVolume(1.0);
       setState(() => _ctrl = c);
+      _startTicker(c);
       await c.play();
     } catch (_) {
       await c.dispose();
@@ -100,6 +146,9 @@ class _MediaViewScreenState extends State<MediaViewScreen> {
 
   @override
   void dispose() {
+    _tick?.cancel();
+    _pos.dispose();
+    _playing.dispose();
     _ctrl?.dispose();
     super.dispose();
   }
@@ -166,6 +215,7 @@ class _MediaViewScreenState extends State<MediaViewScreen> {
         child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white54),
       );
     }
+    final total = c.value.duration.inMilliseconds;
     return Column(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
@@ -176,21 +226,35 @@ class _MediaViewScreenState extends State<MediaViewScreen> {
               child: Stack(
                 alignment: Alignment.center,
                 children: [
-                  VideoPlayer(c),
+                  // Video sirti ALOHIDA qatlamda: pastdagi chiziq
+                  // harakatlansa ham unga tegilmaydi.
+                  RepaintBoundary(child: VideoPlayer(c)),
                   // ── FAQAT PLAY/PAUSE ──────────────────────────
                   //
                   // Butun kadr bosiladi — kichkina tugmani izlab
-                  // o'tirmaydi.
+                  // o'tirmaydi. `setState` CHAQIRILMAYDI: aks holda
+                  // har bosishda butun ekran (video sirti bilan
+                  // birga) qaytadan qurilardi.
                   GestureDetector(
                     behavior: HitTestBehavior.opaque,
-                    onTap: () => setState(
-                        () => c.value.isPlaying ? c.pause() : c.play()),
-                    child: ValueListenableBuilder<VideoPlayerValue>(
-                      valueListenable: c,
-                      builder: (context, v, _) => AnimatedOpacity(
+                    onTap: () {
+                      final wasPlaying = c.value.isPlaying;
+                      if (wasPlaying) {
+                        c.pause();
+                      } else {
+                        c.play();
+                      }
+                      // Belgi DARHOL almashadi — pleyerning javobi
+                      // kutilmaydi. Taymer keyin haqiqiy holat
+                      // bilan tekislab qo'yadi.
+                      _playing.value = !wasPlaying;
+                    },
+                    child: ValueListenableBuilder<bool>(
+                      valueListenable: _playing,
+                      builder: (context, playing, child) => AnimatedOpacity(
                         // Ijro ketayotganda tugma so'nadi — kadrni
                         // to'sib turmasin.
-                        opacity: v.isPlaying ? 0.0 : 1.0,
+                        opacity: playing ? 0.0 : 1.0,
                         duration: const Duration(milliseconds: 180),
                         child: Container(
                           width: 62,
@@ -202,7 +266,7 @@ class _MediaViewScreenState extends State<MediaViewScreen> {
                                 color: Colors.white.withValues(alpha: 0.25)),
                           ),
                           child: Icon(
-                            v.isPlaying
+                            playing
                                 ? Icons.pause_rounded
                                 : Icons.play_arrow_rounded,
                             size: 36,
@@ -218,48 +282,67 @@ class _MediaViewScreenState extends State<MediaViewScreen> {
           ),
         ),
         // ── PASTDAGI PROGRESS CHIZIG'I ────────────────────────
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 0, 16, 28),
-          child: ValueListenableBuilder<VideoPlayerValue>(
-            valueListenable: c,
-            builder: (context, v, _) {
-              final total = v.duration.inMilliseconds;
-              final pos = v.position.inMilliseconds.clamp(0, total);
-              return Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  SliderTheme(
-                    data: SliderTheme.of(context).copyWith(
-                      trackHeight: 3,
-                      thumbShape:
-                          const RoundSliderThumbShape(enabledThumbRadius: 6),
-                      overlayShape:
-                          const RoundSliderOverlayShape(overlayRadius: 14),
-                      activeTrackColor: Colors.white,
-                      inactiveTrackColor: Colors.white24,
-                      thumbColor: Colors.white,
+        //
+        // Faqat SHU qism qayta chiziladi (har 250 ms da).
+        RepaintBoundary(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 28),
+            child: ValueListenableBuilder<Duration>(
+              valueListenable: _pos,
+              builder: (context, position, _) {
+                final shown =
+                    position.inMilliseconds.clamp(0, total).toDouble();
+                return Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    SliderTheme(
+                      data: SliderTheme.of(context).copyWith(
+                        trackHeight: 3,
+                        thumbShape:
+                            const RoundSliderThumbShape(enabledThumbRadius: 6),
+                        overlayShape:
+                            const RoundSliderOverlayShape(overlayRadius: 14),
+                        activeTrackColor: Colors.white,
+                        inactiveTrackColor: Colors.white24,
+                        thumbColor: Colors.white,
+                      ),
+                      child: Slider(
+                        value: total <= 0 ? 0 : shown,
+                        max: total <= 0 ? 1 : total.toDouble(),
+                        // ── SEK FAQAT QO'YIB YUBORILGANDA ────────
+                        //
+                        // Surish davomida faqat TUTQICH siljiydi,
+                        // pleyerga tegilmaydi. Aks holda sekundiga
+                        // o'nlab `seekTo` ketib, pleyer har safar
+                        // buferni tashlar va qaytadan yuklardi —
+                        // "sekin va qotib ishlaydi" hissi aynan
+                        // shundan edi.
+                        onChangeStart: (_) => _dragging = true,
+                        // Surish davomida FAQAT tutqich siljiydi.
+                        onChanged: (x) =>
+                            _pos.value = Duration(milliseconds: x.round()),
+                        onChangeEnd: (x) {
+                          _dragging = false;
+                          _pos.value = Duration(milliseconds: x.round());
+                          c.seekTo(Duration(milliseconds: x.round()));
+                        },
+                      ),
                     ),
-                    child: Slider(
-                      value: total <= 0 ? 0 : pos.toDouble(),
-                      max: total <= 0 ? 1 : total.toDouble(),
-                      onChanged: (x) =>
-                          c.seekTo(Duration(milliseconds: x.round())),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(_clock(Duration(milliseconds: shown.round())),
+                            style: const TextStyle(
+                                color: Colors.white70, fontSize: 12)),
+                        Text(_clock(c.value.duration),
+                            style: const TextStyle(
+                                color: Colors.white70, fontSize: 12)),
+                      ],
                     ),
-                  ),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(_clock(v.position),
-                          style: const TextStyle(
-                              color: Colors.white70, fontSize: 12)),
-                      Text(_clock(v.duration),
-                          style: const TextStyle(
-                              color: Colors.white70, fontSize: 12)),
-                    ],
-                  ),
-                ],
-              );
-            },
+                  ],
+                );
+              },
+            ),
           ),
         ),
       ],
