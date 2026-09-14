@@ -725,12 +725,33 @@ fn chunk_name(index: u64) -> String {
 
 /// Diskdagi kutilgan bo'lak hajmi: shifrlash yoqilgan bo'lsa PKCS7
 /// to'ldirish sabab asl (ochiq) hajmdan katta bo'ladi.
-fn chunk_on_disk_len(plain_len: u64) -> u64 {
-    if crypto::is_enabled() {
-        crypto::encrypted_size(plain_len)
-    } else {
-        plain_len
-    }
+/// ── DISKDAGI BO'LAK TO'LIQMI (IKKALA KO'RINISHDA HAM) ─────────
+///
+/// TOPILGAN XATO (foydalanuvchi: "10 soniya anime ko'rdim lekin
+/// 8 MB trafik ketdi; ilovadan chiqib qayta kirsam trafik o'zidan
+/// o'zi ko'payib ketyapti").
+///
+/// SABAB — shifrlash holatining KELISHMOVCHILIGI:
+///
+///   * `write_full_chunk` har bir bo'lak uchun ALOHIDA qaraydi:
+///     kalit chiqsa shifrlab, chiqmasa OCHIQ holda yozadi;
+///   * tekshiruv esa UMUMIY `crypto::is_enabled()` bayrog'iga
+///     qaraydi va faqat BITTA uzunlikni to'g'ri deb biladi.
+///
+/// Kalit Android Keystore'dan olinadi va u ba'zan kechikadi yoki
+/// umuman chiqmaydi. Shunda bo'laklar ochiq holda yoziladi, keyingi
+/// ochilishda esa kalit chiqadi — va `scan_and_clean` diskdagi
+/// HAMMA bo'lakni "uzunligi noto'g'ri" deb O'CHIRIB tashlaydi.
+///
+/// Natija: foydalanuvchi ko'rgan narsa — ilova har ochilganda
+/// videoni QAYTADAN yuklab oladi. Aynan shuning uchun 6 MB yuklanib,
+/// diskda 663 KB qolgan edi.
+///
+/// YECHIM: uzunlik IKKALA ko'rinishning biriga to'g'ri kelsa —
+/// bo'lak to'liq hisoblanadi. Shifrlash yoqilgani yoki yo'qligi
+/// endi diskdagi keshni umuman buzmaydi.
+fn chunk_len_ok(on_disk: u64, plain_len: u64) -> bool {
+    on_disk == plain_len || on_disk == crypto::encrypted_size(plain_len)
 }
 
 /// Bo'lak diskda TO'LIQ turibdimi (shifr ochilmaydi — faqat fayl
@@ -741,7 +762,7 @@ fn chunk_cached(dir: &PathBuf, index: u64, total: u64) -> bool {
         return false;
     }
     fs::metadata(dir.join(chunk_name(index)))
-        .map(|m| m.len() == chunk_on_disk_len(plain))
+        .map(|m| chunk_len_ok(m.len(), plain))
         .unwrap_or(false)
 }
 
@@ -751,11 +772,15 @@ fn chunk_cached(dir: &PathBuf, index: u64, total: u64) -> bool {
 /// deb talqin qilib, bo'lakni qaytadan yuklab oladi.
 fn read_cached_chunk(dir: &PathBuf, key: &str, index: u64, expected_len: usize) -> Option<Vec<u8>> {
     let raw = fs::read(dir.join(chunk_name(index))).ok()?;
-    if raw.len() as u64 != chunk_on_disk_len(expected_len as u64) {
-        return None;
-    }
-    if !crypto::is_enabled() {
+    let want = expected_len as u64;
+    // Qaysi ko'rinishda yozilgani UZUNLIKDAN bilinadi — umumiy
+    // bayroqdan emas (`chunk_len_ok` izohiga qarang).
+    if raw.len() as u64 == want {
+        // Ochiq holda yozilgan (kalit o'sha paytda tayyor emasdi).
         return Some(raw);
+    }
+    if raw.len() as u64 != crypto::encrypted_size(want) {
+        return None;
     }
     let (k, iv) = crypto::derive_chunk_key_iv(key, index)?;
     let plain = crypto::decrypt_chunk(&raw, &k, &iv)?;
@@ -1308,7 +1333,7 @@ fn scan_and_clean(dir: &PathBuf, total: u64) -> (HashSet<u64>, u64) {
         let plain = chunk_plain_len(i, total);
         let path = dir.join(chunk_name(i));
         let Ok(m) = fs::metadata(&path) else { continue };
-        if m.len() == chunk_on_disk_len(plain) {
+        if chunk_len_ok(m.len(), plain) {
             have.insert(i);
             have_bytes += plain;
             // Bo'lak to'liq — undan qolgan "qoldiq" fayl (agar bo'lsa)

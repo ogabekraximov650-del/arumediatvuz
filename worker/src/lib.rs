@@ -680,6 +680,61 @@ async fn init_db(env: &Env) -> bool {
             noted_at INTEGER
         )", vec![]),
 
+        // ══════════════════════════════════════════════════════
+        //  IZOHLAR
+        // ══════════════════════════════════════════════════════
+        //
+        // TALAB (foydalanuvchi): "bo'limlar oynasidan keyin izohlar
+        // oynasi bo'lsin va xuddi YouTube'dek — izoh yozish, izohga
+        // javob qaytarish, layk bosish".
+        //
+        // ── BITTA JADVAL: IZOH HAM, JAVOB HAM ─────────────────
+        //
+        // Javob — bu `parent_id` to'ldirilgan oddiy izoh. Alohida
+        // jadval kerak emas va bu tartibni ham soddalashtiradi:
+        // bitta so'rov bilan ham izohlar, ham javoblar olinadi.
+        //
+        // CHUQURLIK BIR DARAJA (YouTube'dagidek): javobga javob
+        // yozilsa ham u O'SHA bosh izohga biriktiriladi. Aks holda
+        // "javobning javobining javobi" ekranga sig'masdi.
+        //
+        // `likes` — AYRIM ustun. Uni har safar `comment_likes` dan
+        // sanash mumkin edi, lekin ro'yxatdagi har bir izoh uchun
+        // alohida hisob degani — 20 ta izoh = 20 ta og'ir so'rov.
+        // Ustun esa layk bosilganda BIR MARTA yangilanadi.
+        ("CREATE TABLE IF NOT EXISTS comments_db (
+            id TEXT PRIMARY KEY,
+            anime_id INTEGER, season_id INTEGER,
+            user_id INTEGER,
+            -- Bosh izoh uchun bo'sh satr, javob uchun bosh izohning
+            -- `id` si.
+            parent_id TEXT DEFAULT '',
+            body TEXT,
+            likes INTEGER DEFAULT 0,
+            reply_count INTEGER DEFAULT 0,
+            -- O'chirilgan izoh QATOR sifatida qoladi: javoblari
+            -- yetim qolmasin va hisoblar buzilmasin.
+            deleted INTEGER DEFAULT 0,
+            created_at INTEGER,
+            edited_at INTEGER DEFAULT 0
+        )", vec![]),
+        // Ro'yxat AYNAN shu tartibda so'raladi: bitta bo'limning
+        // bosh izohlari, yangisidan eskisiga.
+        ("CREATE INDEX IF NOT EXISTS idx_comments_season
+            ON comments_db(anime_id, season_id, parent_id, created_at DESC)",
+         vec![]),
+
+        // ── LAYK: BIR ODAM — BIR MARTA ────────────────────────
+        //
+        // Birlamchi kalit (izoh + odam) laykni TAKRORLASHNI
+        // butunlay imkonsiz qiladi: ikki marta bosilsa ikkinchisi
+        // bazaga umuman tushmaydi. Shu sabab hisob hech qachon
+        // haqiqatdan chetga chiqmaydi.
+        ("CREATE TABLE IF NOT EXISTS comment_likes (
+            comment_id TEXT, user_id INTEGER, created_at INTEGER,
+            PRIMARY KEY (comment_id, user_id)
+        )", vec![]),
+
         // ── ESKI TRAFIK RAQAMI BIR MARTA TOZALANADI ───────────
         //
         // TALAB (foydalanuvchi): "bosh sahifadagi eski soxta
@@ -743,6 +798,81 @@ async fn init_db(env: &Env) -> bool {
                                WHERE cfg_key='stats_reset_v3')", vec![]),
         ("INSERT OR IGNORE INTO app_config (cfg_key,cfg_value)
           VALUES ('stats_reset_v3','1')", vec![]),
+
+        // ══════════════════════════════════════════════════════
+        //  TO'LIQ TOZALASH — FAQAT ANIME MA'LUMOTI QOLADI
+        // ══════════════════════════════════════════════════════
+        //
+        // TALAB (foydalanuvchi): "anime rasmi va video fayllari va
+        // Turso'dagi anime ma'lumotlaridan boshqa hamma narsani
+        // tozalab tashla".
+        //
+        // QOLADI: `anime_db`, `season_db`, `epizod_db`,
+        // `season_janr` — ya'ni anime, bo'lim va qismlarning O'ZI,
+        // shu jumladan rasm va video fayllarining nomlari. B2'dagi
+        // fayllarga UMUMAN tegilmaydi.
+        //
+        // O'CHADI: hamma foydalanuvchi va ularga tegishli har
+        // narsa — hisoblar, sessiyalar, tomosha tarixi, baholar,
+        // sevimlilar, statistika, to'lovlar, obunalar va
+        // sinxronlash izlari.
+        //
+        // TEGILMAYDI: `app_config` — u foydalanuvchi ma'lumoti
+        // emas, tizim sozlamasi (Telegram webhook siri va shu
+        // yerdagi bir martalik belgilarning o'zi). Uni o'chirish
+        // webhookni buzardi va bu tozalashni HAR SAFAR qayta
+        // ishga tushirardi.
+        //
+        // ── BO'LIM VA QISM HISOBLARI HAM NOLLANADI ───────────
+        //
+        // TOPILGAN XATO (foydalanuvchi: "nimaga 3 marta ko'rilgan
+        // deyapti, mendan boshqa hech kim ko'rmadiku"): oldingi
+        // tozalashda `season_db` nollangan, `epizod_db` esa
+        // NOLLANMAGAN edi. Shu sabab bitta ekranda ikki xil raqam
+        // turardi — tepada 3, pastda 1. Endi ikkovi ham nollanadi.
+        //
+        // Belgi qo'yilgani uchun bu FAQAT BIR MARTA bajariladi.
+        ("DELETE FROM users_db WHERE NOT EXISTS
+            (SELECT 1 FROM app_config WHERE cfg_key='wipe_all_v4')", vec![]),
+        ("DELETE FROM sessions_db WHERE NOT EXISTS
+            (SELECT 1 FROM app_config WHERE cfg_key='wipe_all_v4')", vec![]),
+        ("DELETE FROM login_tokens WHERE NOT EXISTS
+            (SELECT 1 FROM app_config WHERE cfg_key='wipe_all_v4')", vec![]),
+        ("DELETE FROM watch_history_db WHERE NOT EXISTS
+            (SELECT 1 FROM app_config WHERE cfg_key='wipe_all_v4')", vec![]),
+        ("DELETE FROM ratings_db WHERE NOT EXISTS
+            (SELECT 1 FROM app_config WHERE cfg_key='wipe_all_v4')", vec![]),
+        ("DELETE FROM favorites_db WHERE NOT EXISTS
+            (SELECT 1 FROM app_config WHERE cfg_key='wipe_all_v4')", vec![]),
+        ("DELETE FROM stats_hourly WHERE NOT EXISTS
+            (SELECT 1 FROM app_config WHERE cfg_key='wipe_all_v4')", vec![]),
+        ("DELETE FROM stats_daily WHERE NOT EXISTS
+            (SELECT 1 FROM app_config WHERE cfg_key='wipe_all_v4')", vec![]),
+        ("DELETE FROM sync_batches WHERE NOT EXISTS
+            (SELECT 1 FROM app_config WHERE cfg_key='wipe_all_v4')", vec![]),
+        ("DELETE FROM payments_db WHERE NOT EXISTS
+            (SELECT 1 FROM app_config WHERE cfg_key='wipe_all_v4')", vec![]),
+        ("DELETE FROM subs_db WHERE NOT EXISTS
+            (SELECT 1 FROM app_config WHERE cfg_key='wipe_all_v4')", vec![]),
+        ("DELETE FROM billing_log WHERE NOT EXISTS
+            (SELECT 1 FROM app_config WHERE cfg_key='wipe_all_v4')", vec![]),
+        ("DELETE FROM orphan_files WHERE NOT EXISTS
+            (SELECT 1 FROM app_config WHERE cfg_key='wipe_all_v4')", vec![]),
+        ("DELETE FROM comments_db WHERE NOT EXISTS
+            (SELECT 1 FROM app_config WHERE cfg_key='wipe_all_v4')", vec![]),
+        ("DELETE FROM comment_likes WHERE NOT EXISTS
+            (SELECT 1 FROM app_config WHERE cfg_key='wipe_all_v4')", vec![]),
+        // Anime ma'lumoti QOLADI, faqat unga yopishgan hisoblar
+        // nollanadi.
+        ("UPDATE season_db SET views_total=0, watch_ms_total=0,
+                fav_count=0, rating_sum=0, rating_count=0
+            WHERE NOT EXISTS
+            (SELECT 1 FROM app_config WHERE cfg_key='wipe_all_v4')", vec![]),
+        ("UPDATE epizod_db SET views_total=0, watch_ms_total=0
+            WHERE NOT EXISTS
+            (SELECT 1 FROM app_config WHERE cfg_key='wipe_all_v4')", vec![]),
+        ("INSERT OR IGNORE INTO app_config (cfg_key,cfg_value)
+          VALUES ('wipe_all_v4','1')", vec![]),
     ]).await.is_ok();
     ok
 }
@@ -2466,7 +2596,10 @@ fn yosh_of(v: &Value) -> i64 {
             .unwrap_or(0),
         _ => 0,
     };
-    if (1..=21).contains(&n) { n } else { 0 }
+    // Admin raqamni QO'LDA yozadi, shu sabab oraliq keng: 1 dan
+    // 99 gacha. Undan tashqarisi (xato bosilgan raqam) 0 bo'ladi —
+    // ya'ni kartochkada belgi umuman ko'rsatilmaydi.
+    if (1..=99).contains(&n) { n } else { 0 }
 }
 
 /// Bo'limning yosh chegarasini QISMLARDAGI eng kattasiga tenglaydi.
@@ -4253,6 +4386,303 @@ async fn billing_subscribe(mut req: Request, env: &Env) -> Result<Response> {
     }))
 }
 
+
+// ═══════════════════════════════════════════════════════════════
+//  IZOHLAR
+// ═══════════════════════════════════════════════════════════════
+//
+// TALAB (foydalanuvchi): "bo'limlar oynasidan keyin izohlar degan
+// oyna qo'sh va xuddi YouTube'dek — izoh yozish, izohga javob
+// qaytarish, izohga layk bosish; katta platformalardek to'g'ri va
+// barqaror ishlasin".
+//
+// ── "BARQAROR" NIMA DEGANI ──────────────────────────────────
+//
+// Uchta narsa kafolatlanadi:
+//
+//   1. LAYK HECH QACHON IKKI MARTA SANALMAYDI. `comment_likes`
+//      ning birlamchi kaliti (izoh + odam) buni bazaning O'ZIDA
+//      imkonsiz qiladi — tarmoq uzilib so'rov ikki marta kelsa
+//      ham hisob qimirlamaydi.
+//
+//   2. HISOBLAR SURILMAYDI. `likes` va `reply_count` faqat
+//      qator HAQIQATAN qo'shilgan/o'chirilganda o'zgaradi
+//      (`RETURNING` bilan tekshiriladi), "ehtimol bo'lgandir"
+//      degan taxmin bilan emas.
+//
+//   3. O'CHIRILGAN IZOH JAVOBLARINI YETIM QOLDIRMAYDI. Qator
+//      o'chirilmaydi, faqat `deleted=1` qilinadi va matni
+//      bo'shatiladi — javoblar joyida turaveradi.
+//
+// ── SO'ROVLAR SONI ──────────────────────────────────────────
+//
+// Ro'yxat BITTA so'rovda keladi: izohlar, mualliflari va "men
+// layk bosganmi" belgisi — hammasi bitta `JOIN` bilan. Ilgari
+// bunday ekranlar har bir izoh uchun alohida so'rov qilardi.
+
+/// Bitta izohning eng uzun uzunligi.
+const COMMENT_MAX: usize = 1000;
+
+/// Bir sahifada nechta izoh.
+const COMMENT_PAGE: i64 = 30;
+
+/// Izoh qatorini ilova kutgan ko'rinishga aylantiradi.
+fn comment_public(origin: &str, r: &Value) -> Value {
+    let deleted = r["deleted"].as_i64().unwrap_or(0) != 0;
+    let uid = r["user_id"].as_i64().unwrap_or(0);
+    let avatar = r["avatar_file"].as_str().unwrap_or("");
+    let photo = if avatar.is_empty() {
+        format!("{origin}/api/avatar/{uid}")
+    } else {
+        format!("{origin}/api/image/{avatar}")
+    };
+    json!({
+        "id": r["id"].as_str().unwrap_or(""),
+        "parent_id": r["parent_id"].as_str().unwrap_or(""),
+        "user_id": uid,
+        "first_name": r["first_name"].as_str().unwrap_or(""),
+        "username": r["username"].as_str().unwrap_or(""),
+        "photo_url": photo,
+        // O'chirilgan izohning matni UMUMAN yuborilmaydi.
+        "body": if deleted { "" } else { r["body"].as_str().unwrap_or("") },
+        "likes": r["likes"].as_i64().unwrap_or(0),
+        "reply_count": r["reply_count"].as_i64().unwrap_or(0),
+        "liked": r["liked"].as_i64().unwrap_or(0) != 0,
+        "deleted": deleted,
+        "created_at": r["created_at"].as_i64().unwrap_or(0),
+        "edited_at": r["edited_at"].as_i64().unwrap_or(0),
+    })
+}
+
+/// Izohlarni o'qish uchun umumiy so'rov.
+///
+/// `parent` bo'sh bo'lsa — bosh izohlar, aks holda o'sha izohning
+/// javoblari. `me` — "men layk bosganmi" belgisi uchun.
+const COMMENT_SELECT: &str =
+    "SELECT c.id, c.parent_id, c.user_id, c.body, c.likes,
+            c.reply_count, c.deleted, c.created_at, c.edited_at,
+            u.first_name AS first_name, u.username AS username,
+            u.avatar_file AS avatar_file,
+            (SELECT COUNT(*) FROM comment_likes l
+              WHERE l.comment_id = c.id AND l.user_id = ?) AS liked
+       FROM comments_db c
+       LEFT JOIN users_db u ON u.id = c.user_id
+      WHERE c.anime_id = ? AND c.season_id = ? AND c.parent_id = ?
+      ORDER BY c.created_at DESC
+      LIMIT ? OFFSET ?";
+
+/// GET /api/comments/:anime/:season[/:parent]
+async fn comments_list(
+    req: &Request, env: &Env, origin: &str,
+    aid: i64, sid: i64, parent: &str,
+) -> Result<Response> {
+    // Izohlarni O'QISH uchun kirish SHART EMAS — ular ochiq.
+    // Kirilgan bo'lsa "men layk bosganman" belgisi ham keladi.
+    let me = session_user(env, &bearer(req)).await?
+        .and_then(|u| u["id"].as_i64())
+        .unwrap_or(0);
+    let url = req.url()?;
+    let page: i64 = url.query_pairs()
+        .find(|(k, _)| k == "page")
+        .and_then(|(_, v)| v.parse().ok())
+        .unwrap_or(0)
+        .max(0);
+
+    let res = turso_exec(env, COMMENT_SELECT, vec![
+        TursoArg::int(me), TursoArg::int(aid), TursoArg::int(sid),
+        TursoArg::text(parent),
+        TursoArg::int(COMMENT_PAGE), TursoArg::int(page * COMMENT_PAGE),
+    ]).await?;
+
+    let cols = res["cols"].as_array().cloned().unwrap_or_default();
+    let rows = res["rows"].as_array().cloned().unwrap_or_default();
+    let items: Vec<Value> = rows.iter()
+        .map(|r| comment_public(origin, &row_to_obj(&cols, r.as_array().unwrap_or(&vec![]))))
+        .collect();
+
+    ok_nostore(json!({
+        "items": items,
+        "page": page,
+        // Ro'yxat to'liq kelgan bo'lsa — yana bor bo'lishi mumkin.
+        "has_more": items.len() as i64 >= COMMENT_PAGE,
+    }))
+}
+
+/// POST /api/comments — yangi izoh yoki javob.
+async fn comments_add(mut req: Request, env: &Env, origin: &str) -> Result<Response> {
+    let Some(u) = session_user(env, &bearer(&req)).await? else {
+        return json_resp(&json!({"error": "unauthorized"}), 401);
+    };
+    let me = u["id"].as_i64().unwrap_or(0);
+    if u["is_banned"].as_i64().unwrap_or(0) != 0 {
+        return json_resp(&json!({"error": "Sizga izoh yozish taqiqlangan"}), 403);
+    }
+
+    let b: Value = req.json().await.unwrap_or(json!({}));
+    let aid = b["anime_id"].as_i64().unwrap_or(0);
+    let sid = b["season_id"].as_i64().unwrap_or(0);
+    let body = b["body"].as_str().unwrap_or("").trim().to_string();
+    if body.is_empty() {
+        return json_resp(&json!({"error": "Izoh bo'sh"}), 400);
+    }
+    // Uzunlik BELGI bo'yicha cheklanadi (bayt emas): o'zbekcha
+    // harflar ikki bayt egallaydi va bayt bilan cheklansa yozuv
+    // o'rtasidan kesilib qolardi.
+    let body: String = body.chars().take(COMMENT_MAX).collect();
+
+    // ── JAVOB BOSH IZOHGA BIRIKTIRILADI ───────────────────────
+    //
+    // Javobga javob yozilsa, u o'sha BOSH izohning javobi bo'ladi
+    // (YouTube ham shunday). Shu sabab kelgan `parent_id` ning
+    // o'zi javob bo'lsa, uning bosh izohi olinadi.
+    let want_parent = b["parent_id"].as_str().unwrap_or("").trim().to_string();
+    let mut parent = String::new();
+    if !want_parent.is_empty() {
+        let p = turso_exec(env,
+            "SELECT id, parent_id FROM comments_db
+              WHERE id=? AND anime_id=? AND season_id=?",
+            vec![TursoArg::text(&want_parent), TursoArg::int(aid), TursoArg::int(sid)],
+        ).await?;
+        let Some(row) = first_row(&p) else {
+            return json_resp(&json!({"error": "Izoh topilmadi"}), 404);
+        };
+        let pp = row["parent_id"].as_str().unwrap_or("");
+        parent = if pp.is_empty() {
+            row["id"].as_str().unwrap_or("").to_string()
+        } else {
+            pp.to_string()
+        };
+    } else if !season_exists(env, aid, sid).await {
+        return json_resp(&json!({"error": "Bo'lim topilmadi"}), 404);
+    }
+
+    let id = format!("c{}", random_hex(12));
+    let now = now_ms();
+    turso_exec(env,
+        "INSERT INTO comments_db
+            (id,anime_id,season_id,user_id,parent_id,body,
+             likes,reply_count,deleted,created_at,edited_at)
+         VALUES (?,?,?,?,?,?,0,0,0,?,0)",
+        vec![
+            TursoArg::text(&id), TursoArg::int(aid), TursoArg::int(sid),
+            TursoArg::int(me), TursoArg::text(&parent), TursoArg::text(&body),
+            TursoArg::int(now),
+        ]).await?;
+
+    // Javob bo'lsa — bosh izohning hisobi oshadi.
+    if !parent.is_empty() {
+        let _ = turso_exec(env,
+            "UPDATE comments_db SET reply_count=reply_count+1 WHERE id=?",
+            vec![TursoArg::text(&parent)]).await;
+    }
+
+    let avatar = u["avatar_file"].as_str().unwrap_or("");
+    let photo = if avatar.is_empty() {
+        format!("{origin}/api/avatar/{me}")
+    } else {
+        format!("{origin}/api/image/{avatar}")
+    };
+    created(json!({
+        "id": id,
+        "parent_id": parent,
+        "user_id": me,
+        "first_name": u["first_name"].as_str().unwrap_or(""),
+        "username": u["username"].as_str().unwrap_or(""),
+        "photo_url": photo,
+        "body": body,
+        "likes": 0,
+        "reply_count": 0,
+        "liked": false,
+        "deleted": false,
+        "created_at": now,
+        "edited_at": 0,
+    }))
+}
+
+/// Bunday bo'lim bormi (o'ylab topilgan izohlar tushmasin).
+async fn season_exists(env: &Env, aid: i64, sid: i64) -> bool {
+    turso_exec(env,
+        "SELECT COUNT(*) FROM season_db WHERE anime_id=? AND season_id=?",
+        vec![TursoArg::int(aid), TursoArg::int(sid)]).await
+        .map(|r| scalar(&r) > 0)
+        .unwrap_or(false)
+}
+
+/// POST /api/comments/like — laykni yoqadi/o'chiradi.
+///
+/// Javob HAR DOIM yakuniy holatni qaytaradi, ya'ni ilova o'zi
+/// hisoblab o'tirmaydi va ikkovi hech qachon farq qilmaydi.
+async fn comments_like(mut req: Request, env: &Env) -> Result<Response> {
+    let Some(u) = session_user(env, &bearer(&req)).await? else {
+        return json_resp(&json!({"error": "unauthorized"}), 401);
+    };
+    let me = u["id"].as_i64().unwrap_or(0);
+    let b: Value = req.json().await.unwrap_or(json!({}));
+    let id = b["id"].as_str().unwrap_or("").trim().to_string();
+    if id.is_empty() {
+        return json_resp(&json!({"error": "id yo'q"}), 400);
+    }
+
+    // ── QO'SHISH SHARTLI ──────────────────────────────────────
+    //
+    // Birlamchi kalit tufayli takroriy layk qatorga TEGMAYDI va
+    // `RETURNING` hech narsa qaytarmaydi — ya'ni hisob ham
+    // oshmaydi. So'rov ikki marta kelsa ham natija bir xil.
+    let now = now_ms();
+    let ins = turso_exec(env,
+        "INSERT INTO comment_likes (comment_id,user_id,created_at)
+         VALUES (?,?,?) ON CONFLICT(comment_id,user_id) DO NOTHING
+         RETURNING comment_id",
+        vec![TursoArg::text(&id), TursoArg::int(me), TursoArg::int(now)],
+    ).await?;
+
+    let liked = if first_row(&ins).is_some() {
+        let _ = turso_exec(env,
+            "UPDATE comments_db SET likes=likes+1 WHERE id=?",
+            vec![TursoArg::text(&id)]).await;
+        true
+    } else {
+        // Allaqachon bosilgan — bu ikkinchi bosish, ya'ni bekor
+        // qilish. O'chirish ham SHARTLI: qator qaytmasa hisobga
+        // tegilmaydi.
+        let del = turso_exec(env,
+            "DELETE FROM comment_likes WHERE comment_id=? AND user_id=?
+             RETURNING comment_id",
+            vec![TursoArg::text(&id), TursoArg::int(me)]).await?;
+        if first_row(&del).is_some() {
+            let _ = turso_exec(env,
+                "UPDATE comments_db SET likes=MAX(likes-1,0) WHERE id=?",
+                vec![TursoArg::text(&id)]).await;
+        }
+        false
+    };
+
+    let cur = turso_exec(env,
+        "SELECT likes FROM comments_db WHERE id=?",
+        vec![TursoArg::text(&id)]).await?;
+    let likes = first_row(&cur).and_then(|r| r["likes"].as_i64()).unwrap_or(0);
+    ok_nostore(json!({"ok": true, "liked": liked, "likes": likes}))
+}
+
+/// DELETE /api/comments/:id — FAQAT o'z izohini.
+async fn comments_delete(req: &Request, env: &Env, id: &str) -> Result<Response> {
+    let Some(u) = session_user(env, &bearer(req)).await? else {
+        return json_resp(&json!({"error": "unauthorized"}), 401);
+    };
+    let me = u["id"].as_i64().unwrap_or(0);
+
+    // Qator O'CHIRILMAYDI — belgilanadi. Sabab: javoblari va
+    // hisoblari joyida qolishi kerak (yuqoridagi izohga qarang).
+    let res = turso_exec(env,
+        "UPDATE comments_db SET deleted=1, body='' 
+          WHERE id=? AND user_id=? AND deleted=0 RETURNING id",
+        vec![TursoArg::text(id), TursoArg::int(me)]).await?;
+    if first_row(&res).is_none() {
+        return json_resp(&json!({"error": "Izoh topilmadi"}), 404);
+    }
+    ok_nostore(json!({"ok": true}))
+}
+
 /// GET /api/billing — balans, obuna, faol havolalar va tarix.
 async fn billing_state(req: Request, env: &Env) -> Result<Response> {
     let Some(u) = session_user(env, &bearer(&req)).await? else {
@@ -5120,7 +5550,11 @@ async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
         || path == "/api/favorites"
         || path == "/api/me/stats"
         || path == "/api/sync"
-        || path.starts_with("/api/billing");
+        || path.starts_with("/api/billing")
+        // Izohlarda "men layk bosganmi" belgisi bor — ya'ni javob
+        // HAR BIR ODAM uchun boshqacha. Uni chekkada keshlash
+        // boshqa odamning belgisini ko'rsatib qo'yardi.
+        || path.starts_with("/api/comments");
     let write = matches!(method, Method::Post | Method::Put | Method::Delete) && !auth_path;
     let mut resp = route(req, env, ctx).await?;
 
@@ -5242,6 +5676,33 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
     }
     if path == "/api/billing/subscribe" && method == Method::Post {
         return billing_subscribe(req, &env).await;
+    }
+
+    // ── IZOHLAR ───────────────────────────────────────────────
+    //
+    // O'qish OCHIQ (kirmagan odam ham ko'radi), yozish esa faqat
+    // kirgan odamga.
+    if path == "/api/comments" && method == Method::Post {
+        return comments_add(req, &env, &origin).await;
+    }
+    if path == "/api/comments/like" && method == Method::Post {
+        return comments_like(req, &env).await;
+    }
+    if let Some(rest) = path.strip_prefix("/api/comments/") {
+        let parts: Vec<&str> = rest.split('/').collect();
+        // /api/comments/:anime/:season[/:parent]
+        if (parts.len() == 2 || parts.len() == 3) && method == Method::Get {
+            if let (Ok(a), Ok(sd)) =
+                (parts[0].parse::<i64>(), parts[1].parse::<i64>())
+            {
+                let parent = if parts.len() == 3 { parts[2] } else { "" };
+                return comments_list(&req, &env, &origin, a, sd, parent).await;
+            }
+        }
+        // /api/comments/:id — o'z izohini o'chirish
+        if parts.len() == 1 && method == Method::Delete {
+            return comments_delete(&req, &env, parts[0]).await;
+        }
     }
 
     // ── SHAXSIY STATISTIKA VA SEVIMLILAR RO'YXATI ─────────────

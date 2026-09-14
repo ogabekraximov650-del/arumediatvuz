@@ -117,6 +117,7 @@ import 'package:http/http.dart' as http;
 import 'package:video_player/video_player.dart';
 
 import '../services/app_settings.dart';
+import '../services/comments_service.dart';
 import '../services/download_manager.dart';
 import '../services/rust_bridge.dart';
 import '../services/video_cache_server.dart';
@@ -127,6 +128,7 @@ import '../services/watch_history.dart';
 import '../services/watch_progress.dart';
 import '../theme/app_background.dart';
 import '../widgets/glass.dart';
+import '../widgets/comments_tab.dart';
 
 const String _apiBase = 'https://aniraxuzapp.ogabekraximov650.workers.dev';
 
@@ -350,7 +352,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     WidgetsBinding.instance.addObserver(this);
     // Tartib (foydalanuvchi talabi): Ma'lumot | Qismlar | Bo'limlar,
     // va ochilganda MA'LUMOT oynasi turadi.
-    _tabCtrl = TabController(length: 3, vsync: this);
+    _tabCtrl = TabController(length: 4, vsync: this);
     _tabPages = PageController();
 
     _watchConnectivity();
@@ -360,8 +362,70 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   }
 
 
+  // ══════════════════════════════════════════════════════════
+  //  OYNALAR ORASIDA O'TISH
+  // ══════════════════════════════════════════════════════════
+  //
+  // TOPILGAN XATO (foydalanuvchi: "Ma'lumot oynasidan Bo'limlar
+  // oynasiga bittada o'tib bo'lmayapti").
+  //
+  // SABAB: `animateToPage` uzoq oynaga o'tishda ORADAGI oynadan
+  // sirg'alib o'tadi va o'sha payt `onPageChanged(1)` ishlaydi.
+  // U esa tab tugmasini ORQAGA, 1-oynaga qaytarardi. Natijada
+  // bosilgan tugma bilan ko'rinayotgan oyna bir-biriga zid bo'lib
+  // qolar va o'tish "ishlamagandek" tuyulardi.
+  //
+  // Endi ikki narsa qilinadi:
+  //   * qo'shni bo'lmagan oynaga `jumpTo` bilan TO'G'RIDAN o'tiladi
+  //     (oradagi oyna umuman ko'rsatilmaydi — tezroq ham);
+  //   * o'tish davomida `onPageChanged` tab tugmasiga TEGMAYDI.
+  bool _tabJumping = false;
+
+  void _goToTab(int i) {
+    if (!_tabPages.hasClients) return;
+    final cur = (_tabPages.page ?? _tabPages.initialPage.toDouble()).round();
+    if (cur == i) return;
+    _tabJumping = true;
+    if ((cur - i).abs() > 1) {
+      _tabPages.jumpToPage(i);
+      _tabJumping = false;
+    } else {
+      _tabPages
+          .animateToPage(
+            i,
+            duration: const Duration(milliseconds: 260),
+            curve: Curves.easeOutCubic,
+          )
+          .whenComplete(() => _tabJumping = false);
+    }
+  }
+
+  /// Izohlar — pleyer ochilganda BIR MARTA yaratiladi.
+  ///
+  /// NEGA `initState` DA, `build` DA EMAS: `build` har kadrda
+  /// ishlaydi va u yerda nazoratchini almashtirish (eskisini
+  /// `dispose` qilib yangisini yasash) oynani O'CHIRILGAN
+  /// nazoratchiga bog'lab qo'yishi mumkin edi.
+  ///
+  /// Bo'lim bu ekran ichida almashmaydi — boshqa bo'lim tanlansa
+  /// YANGI pleyer ochiladi (`_buildSeasonsTab`), ya'ni nazoratchi
+  /// ham yangisi bo'ladi.
+  bool _commentsMade = false;
+  late final CommentsController _comments = () {
+    _commentsMade = true;
+    return CommentsController(
+      animeId: _seasonNum('anime_id'),
+      seasonId: _seasonNum('season_id'),
+    );
+  }();
+
+  Widget _buildCommentsTab() => CommentsTab(controller: _comments);
+
   @override
   void dispose() {
+    // `late final` — Izohlar oynasi umuman ochilmagan bo'lsa
+    // nazoratchi yaratilmagan ham bo'ladi.
+    if (_commentsMade) _comments.dispose();
     WidgetsBinding.instance.removeObserver(this);
     // Tarixga BITTA so'rov aynan shu yerda ketadi. Javob
     // kutilmaydi: ekran allaqachon yopilyapti, yozuv esa
@@ -2779,15 +2843,12 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                     dividerColor: Colors.transparent,
                     // Tartib (foydalanuvchi talabi):
                     // Ma'lumot | Qismlar | Bo'limlar.
-                    onTap: (i) => _tabPages.animateToPage(
-                      i,
-                      duration: const Duration(milliseconds: 260),
-                      curve: Curves.easeOutCubic,
-                    ),
+                    onTap: _goToTab,
                     tabs: const [
                       Tab(height: 32, text: 'Ma\'lumot'),
                       Tab(height: 32, text: 'Qismlar'),
                       Tab(height: 32, text: 'Bo\'limlar'),
+                      Tab(height: 32, text: 'Izohlar'),
                     ],
                   ),
                 ),
@@ -2841,7 +2902,12 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                     // telefondagi qotish aynan shundan edi).
                     allowImplicitScrolling: true,
                     onPageChanged: (i) {
-                      if (_tabCtrl.index != i) _tabCtrl.animateTo(i);
+                      // Tugma bosilgan bo'lsa `_tabCtrl` allaqachon
+                      // to'g'ri joyda — bu yerda tegilmaydi
+                      // (`_goToTab` izohiga qarang).
+                      if (!_tabJumping && _tabCtrl.index != i) {
+                        _tabCtrl.animateTo(i);
+                      }
                       // "Qismlar" oynasi birinchi marta ochilganda
                       // ro'yxat hali qurilmagan bo'ladi — joriy
                       // qismni o'rtaga olib kelamiz.
@@ -2854,6 +2920,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                       _KeepAlivePage(child: _buildInfoTab(tavsif.toString())),
                       _KeepAlivePage(child: _buildEpisodeTab()),
                       _KeepAlivePage(child: _buildSeasonsTab()),
+                      _KeepAlivePage(child: _buildCommentsTab()),
                     ],
                   ),
                 ),

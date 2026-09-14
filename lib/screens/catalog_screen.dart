@@ -240,7 +240,8 @@ class _CatalogScreenState extends State<CatalogScreen> {
       animation: Listenable.merge(
           [SeasonsRepo.instance, OfflineLibrary.instance]),
       builder: (context, _) {
-        return Stack(
+        return LayoutBuilder(builder: (context, box) {
+          return Stack(
           children: [
             Column(
               children: [
@@ -259,6 +260,8 @@ class _CatalogScreenState extends State<CatalogScreen> {
                     onPageChanged: _onPageChanged,
                     itemCount: _tabs.length,
                     itemBuilder: (context, i) => _Grid(
+                      // Oxirgi qator tugma va panel ostida qolmasin.
+                      bottomPad: _filterBottom(context, box.maxHeight) + 56,
                       rows: _listFor(_tabs[i]),
                       loading: SeasonsRepo.instance.isLoading,
                       filtered: !_filter.isEmpty,
@@ -272,16 +275,26 @@ class _CatalogScreenState extends State<CatalogScreen> {
             // ── FILTRLASH TUGMASI ──────────────────────────────
             //
             // TALAB: "sahifaning pastki qismida, sahifa tugmalari
-            // oynasi ustida, oynaga yopishgan holda".
+            // oynasiga YOPISHIB tursin".
             //
-            // Balandlik QO'LDA yozilmaydi: u panelning O'ZI
-            // hisoblanadigan joydan olinadi (`bottomNavHeight`),
-            // aks holda chekinishi katta qurilmada tugma panel
-            // ORTIDA qolib ketardi.
+            // TOPILGAN XATO: tugma panelga yopishmay, o'rtada osilib
+            // qolgan edi. Sabab — chekinish IKKI MARTA hisoblangan.
+            //
+            // `Scaffold(extendBody: true)` bo'lsa sahifa tanasi panel
+            // ORTIGA cho'ziladi va tugmani ko'tarish uchun butun panel
+            // balandligi kerak. Agar cho'zilmasa — tana allaqachon
+            // panelning TEPASIDA tugaydi va hech narsa qo'shish shart
+            // emas. Ilgari ikkinchi holatda ham butun panel balandligi
+            // qo'shilardi — tugma o'sha bo'yicha yuqoriga sakrardi.
+            //
+            // Endi taxmin qilinmaydi, O'LCHANADI: ekran balandligidan
+            // tananing haqiqiy balandligi ayiriladi. Ayirma — tana
+            // tagida allaqachon "yeyilgan" joy. Qolgani esa tugmani
+            // panel ustiga qo'yish uchun kerak bo'lgan masofa.
             Positioned(
               left: 0,
               right: 0,
-              bottom: bottomNavHeight(context) + 10,
+              bottom: _filterBottom(context, box.maxHeight),
               child: Center(
                 child: _FilterButton(
                   count: _filter.count,
@@ -292,8 +305,27 @@ class _CatalogScreenState extends State<CatalogScreen> {
             ),
           ],
         );
+        });
       },
     );
+  }
+
+  /// Tugma pastdan qancha yuqorida tursin (yuqoridagi izohga qarang).
+  ///
+  /// `bodyHeight` — sahifa tanasining HAQIQIY balandligi.
+  double _filterBottom(BuildContext context, double bodyHeight) {
+    final view = View.of(context);
+    final dpr = view.devicePixelRatio <= 0 ? 1.0 : view.devicePixelRatio;
+    final screen = view.physicalSize.height / dpr;
+    final top = view.padding.top / dpr;
+
+    // Tana tagida allaqachon bo'sh qolgan joy.
+    final eaten = screen - top - bodyHeight;
+    final need = bottomNavHeight(context) - eaten;
+
+    // 8 — panel bilan tugma orasidagi ozgina nafas. Manfiy chiqsa
+    // (o'lchov kutilmagan bo'lsa) tugma baribir ko'rinib turadi.
+    return need < 8 ? 8.0 : need + 8;
   }
 }
 
@@ -448,12 +480,15 @@ class _TabBar extends StatelessWidget {
 // ══════════════════════════════════════════════════════════════
 
 class _Grid extends StatelessWidget {
+  /// Pastdagi bo'sh joy: "Filtrlash" tugmasi va sahifa tugmalari.
+  final double bottomPad;
   final List<Map<String, dynamic>> rows;
   final bool loading;
   final bool filtered;
   final Future<void> Function() onRefresh;
 
   const _Grid({
+    required this.bottomPad,
     required this.rows,
     required this.loading,
     required this.filtered,
@@ -512,11 +547,7 @@ class _Grid extends StatelessWidget {
           : GridView.builder(
               physics: const BouncingScrollPhysics(
                   parent: AlwaysScrollableScrollPhysics()),
-              // Pastda "Filtrlash" tugmasi va sahifa tugmalari
-              // turadi — oxirgi qator ular ostida qolmasin.
-              // 56 — tugmaning balandligi va atrofidagi bo'sh joy.
-              padding: EdgeInsets.fromLTRB(
-                  16, 6, 16, bottomNavHeight(context) + 56),
+              padding: EdgeInsets.fromLTRB(16, 6, 16, bottomPad),
               gridDelegate:
                   const SliverGridDelegateWithFixedCrossAxisCount(
                 crossAxisCount: 2,

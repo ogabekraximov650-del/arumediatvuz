@@ -69,6 +69,31 @@ Future<void> _main() async {
   // fon'da tekshiriladi.
   await AuthService.instance.restore();
 
+  // ── BIR MARTALIK TOZALASH (foydalanuvchi talabi) ────────────
+  //
+  // TALAB: "anime rasmi va video fayllari va Turso'dagi anime
+  // ma'lumotlaridan boshqa hamma narsani tozalab tashla".
+  //
+  // Serverda bu `worker/src/lib.rs` -> `wipe_all_v4` da bajariladi.
+  // Telefonda esa anime ro'yxatining KESHI eskirib qoladi: undagi
+  // ko'rishlar va reyting raqamlari nollanishdan OLDINGI holat
+  // bo'lardi va ekranda eski son turib qolardi.
+  //
+  // Shu sabab kesh bir marta tashlanadi. Belgi qo'yilgani uchun
+  // bu faqat BIR MARTA bo'ladi — keyingi ochilishlarda ilova
+  // avvalgidek keshdan darhol to'ladi.
+  //
+  // Shaxsiy ma'lumotlar (tarix, sevimlilar, trafik) alohida
+  // tozalanmaydi: serverda hisoblar o'chirilgani uchun odam
+  // qaytib kirganda YANGI raqam oladi va u bilan birga toza
+  // papka ochiladi (`account_data.dart` -> `switchTo`).
+  if (RustCore.instance.getCachedList('wipe_v4') == null) {
+    RustCore.instance.clearCache();
+    RustCore.instance.saveListCache('wipe_v4', [
+      {'at': DateTime.now().millisecondsSinceEpoch}
+    ]);
+  }
+
   // Obuna muddati diskdan o'qiladi — TARMOQSIZ. Obunasi yo'q
   // odam anime ko'ra olmaydi, shu sabab bu ma'lumot ilova
   // ochilishi bilan ma'lum bo'lishi kerak, aks holda pul
