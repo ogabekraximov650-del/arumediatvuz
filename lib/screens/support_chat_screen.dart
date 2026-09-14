@@ -74,6 +74,31 @@ class _SupportChatScreenState extends State<SupportChatScreen> {
   bool _uploading = false;
   double _upProgress = 0;
 
+  // ── YUKLANAYOTGAN FAYL CHAT OYNASIDA ──────────────────────
+  //
+  // TALAB (foydalanuvchi): "video, ovozli xabar yoki rasm
+  // yuborganda to'g'ridan-to'g'ri chat oynasida ko'rinsin va
+  // progress chizig'i play/pause tugmasi atrofida aylanib
+  // kattalashsin, huddi Telegramdagidek".
+  //
+  // Shu sabab yuklash davomida ro'yxatning oxiriga VAQTINCHALIK
+  // puffak qo'yiladi: rasm bo'lsa o'zi ko'rinadi, video va ovoz
+  // uchun esa tugma atrofida aylana to'lib boradi.
+  String _upType = '';
+  String _upPath = '';
+  int _upMs = 0;
+
+  // ── PASTDAN TORTIB YANGILASH ──────────────────────────────
+  //
+  // TALAB (foydalanuvchi): "chatdagi xabarlarni yuqoriga
+  // ko'tarsa pastda aylanadigan narsa chiqsin va serverdan
+  // chatga xabar kelgan-kelmaganini tekshirsin".
+  //
+  // Ro'yxatning oxiridan tashqariga chiqilgan masofa yig'iladi;
+  // yetarli bo'lsa serverga so'rov ketadi.
+  double _pullUp = 0;
+  bool _pullBusy = false;
+
   // ── TANLASH REJIMI ────────────────────────────────────────
   //
   // TALAB (foydalanuvchi): "xabarni bittalab emas — ustiga bosib
@@ -146,6 +171,33 @@ class _SupportChatScreenState extends State<SupportChatScreen> {
     }
   }
 
+  /// Ro'yxat pastdan tortildimi — shunda yangilanadi.
+  bool _onScroll(ScrollNotification n) {
+    if (_pullBusy) return false;
+    if (n is OverscrollNotification) {
+      // Musbat `overscroll` — OXIRIDAN tashqariga chiqish.
+      if (n.overscroll > 0) {
+        _pullUp += n.overscroll;
+        if (_pullUp > 90) {
+          _pullUp = 0;
+          unawaited(_pullRefresh());
+        }
+      }
+    } else if (n is ScrollEndNotification) {
+      _pullUp = 0;
+    }
+    return false;
+  }
+
+  Future<void> _pullRefresh() async {
+    if (_pullBusy) return;
+    setState(() => _pullBusy = true);
+    await _chat.load(force: true);
+    await UnreadBadge.instance.refresh();
+    if (!mounted) return;
+    setState(() => _pullBusy = false);
+  }
+
   void _toBottom({bool jump = false}) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_scroll.hasClients) return;
@@ -162,7 +214,21 @@ class _SupportChatScreenState extends State<SupportChatScreen> {
     });
   }
 
-  bool get _isAdmin => AuthService.instance.user?.isAdmin == true;
+  /// O'chirish MUMKINMI.
+  ///
+  /// TALAB (foydalanuvchi): "foydalanuvchi support chatda
+  /// yuborgan narsalarini o'chira olmasin, o'chirish faqat admin
+  /// panelida mumkin bo'lsin".
+  ///
+  /// Shu sabab ikkita shart: admin bo'lishi VA suhbat admin
+  /// panelidan ochilgan bo'lishi (`userId` berilgan). Admin o'z
+  /// profilidan "Admin bilan bog'lanish"ni ochsa — u yerda ham
+  /// o'chirish yo'q.
+  ///
+  /// Server ham shunday tekshiradi (admin bo'lmasa 403), ya'ni
+  /// o'zgartirilgan ilova bilan ham o'chirib bo'lmaydi.
+  bool get _canDelete =>
+      AuthService.instance.user?.isAdmin == true && widget.userId != null;
 
   /// Rasm yoki video tanlab, B2'ga yuklaydi va xabar qilib
   /// yuboradi.
@@ -219,7 +285,11 @@ class _SupportChatScreenState extends State<SupportChatScreen> {
     setState(() {
       _uploading = true;
       _upProgress = 0;
+      _upType = type;
+      _upPath = file.path;
+      _upMs = ms;
     });
+    _toBottom();
 
     try {
       final tok = await http
@@ -277,6 +347,9 @@ class _SupportChatScreenState extends State<SupportChatScreen> {
         setState(() {
           _uploading = false;
           _upProgress = 0;
+          _upType = '';
+          _upPath = '';
+          _upMs = 0;
         });
       }
     }
@@ -395,7 +468,7 @@ class _SupportChatScreenState extends State<SupportChatScreen> {
   /// (Server ham shunday: o'chirish so'rovi admin bo'lmasa 403
   /// qaytaradi — ya'ni o'zgartirilgan ilova ham o'chira olmaydi.)
   void _toggleSelect(ChatMessage m) {
-    if (!_isAdmin) return;
+    if (!_canDelete) return;
     setState(() {
       if (!_selected.remove(m.id)) _selected.add(m.id);
     });
@@ -411,7 +484,7 @@ class _SupportChatScreenState extends State<SupportChatScreen> {
 
   /// ADMIN: TANLANGAN xabarlarni butunlay o'chiradi.
   Future<void> _deleteSelected() async {
-    if (!_isAdmin || _selected.isEmpty) return;
+    if (!_canDelete || _selected.isEmpty) return;
     final n = _selected.length;
     final ok = await _confirm(n == 1
         ? 'Xabar butunlay o\'chirilsinmi?'
@@ -426,7 +499,7 @@ class _SupportChatScreenState extends State<SupportChatScreen> {
 
   /// Ha/Yo'q so'raydigan oyna.
   Future<bool?> _confirm(String text) async {
-    if (!_isAdmin) return false;
+    if (!_canDelete) return false;
     final ok = await showDialog<bool>(
       context: context,
       barrierColor: Colors.black54,
@@ -612,7 +685,7 @@ class _SupportChatScreenState extends State<SupportChatScreen> {
       );
     }
     final items = _chat.items;
-    if (items.isEmpty) {
+    if (items.isEmpty && !_uploading) {
       return Center(
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 32),
@@ -640,13 +713,47 @@ class _SupportChatScreenState extends State<SupportChatScreen> {
       );
     }
 
-    return ListView.builder(
+    return NotificationListener<ScrollNotification>(
+      // ── PASTDAN TORTIB YANGILASH ────────────────────────
+      //
+      // TALAB (foydalanuvchi): "chatdagi xabarlarni yuqoriga
+      // ko'tarsa pastda aylanadigan narsa chiqsin va serverdan
+      // chatga xabar kelgan-kelmaganini tekshirsin".
+      //
+      // Ro'yxatda eng yangi xabar PASTDA turadi, ya'ni "yuqoriga
+      // ko'tarish" — ro'yxatning OXIRIDAN tashqariga chiqish.
+      // Shu sabab oddiy `RefreshIndicator` yaramaydi (u faqat
+      // tepadan ishlaydi) va tekshiruv qo'lda qilinadi.
+      onNotification: _onScroll,
+      child: ListView.builder(
       controller: _scroll,
       physics: const BouncingScrollPhysics(
           parent: AlwaysScrollableScrollPhysics()),
       padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-      itemCount: items.length,
+      // Oxirida: yuklanayotgan fayl va (kerak bo'lsa) aylana.
+      itemCount: items.length + (_uploading ? 1 : 0) + (_pullBusy ? 1 : 0),
       itemBuilder: (context, i) {
+        if (i >= items.length + (_uploading ? 1 : 0)) {
+          return const Padding(
+            padding: EdgeInsets.symmetric(vertical: 14),
+            child: Center(
+              child: SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(
+                    strokeWidth: 2, color: Colors.white54),
+              ),
+            ),
+          );
+        }
+        if (i >= items.length) {
+          return _UploadingBubble(
+            type: _upType,
+            path: _upPath,
+            progress: _upProgress,
+            ms: _upMs,
+          );
+        }
         final m = items[i];
         // O'z xabarim o'ngda. Admin ekranida "o'ziniki" — admin
         // yozganlari; foydalanuvchi ekranida esa aksincha.
@@ -684,7 +791,7 @@ class _SupportChatScreenState extends State<SupportChatScreen> {
                   ),
           // Admin uzoq bosib TANLAYDI, keyin qolganlarini oddiy
           // bosib qo'shadi. Foydalanuvchida ikkovi ham ishlamaydi.
-          onLongPress: _isAdmin ? () => _toggleSelect(m) : null,
+          onLongPress: _canDelete ? () => _toggleSelect(m) : null,
           onTap: _selecting ? () => _toggleSelect(m) : null,
           selected: _selected.contains(m.id),
           selecting: _selecting,
@@ -698,6 +805,7 @@ class _SupportChatScreenState extends State<SupportChatScreen> {
           ),
         );
       },
+      ),
     );
   }
 
@@ -836,6 +944,9 @@ class _SupportChatScreenState extends State<SupportChatScreen> {
           _AttachButton(
             uploading: _uploading,
             progress: _upProgress,
+            // Progress endi CHAT PUFFAGIDA ko'rinadi; tugmada
+            // faqat "band" holati qoladi.
+            showProgress: false,
             onImage: () => _pickAndSend(video: false),
             onVideo: () => _pickAndSend(video: true),
           ),
@@ -1073,17 +1184,20 @@ class _Bubble extends StatelessWidget {
                               fontSize: 10.5,
                             ),
                           ),
-                          // ── HALI YUBORILMAGAN ─────────────────
+                          // ── YUBORILISH BELGISI ────────────────
                           //
-                          // Xabar ekranda DARHOL paydo bo'ladi,
-                          // serverning javobi esa keyin keladi.
-                          // Shu oraliqda yonida soat turadi —
-                          // Telegram ham shunday qiladi.
-                          if (m.pending) ...[
+                          // TALAB (foydalanuvchi): "pastida vaqt
+                          // ikoni aylanib tursin va yuborilgach
+                          // Telegramdagidek bitta ✓ tursin, admin
+                          // o'qiganidan keyingina ✓✓ ikkita
+                          // bo'lsin".
+                          //
+                          // Belgi FAQAT o'z xabaringizda turadi:
+                          // suhbatdoshning xabari yonida uning
+                          // "o'qildi" holati ma'nosiz.
+                          if (mine) ...[
                             const SizedBox(width: 4),
-                            Icon(Icons.schedule_rounded,
-                                size: 11,
-                                color: Colors.white.withValues(alpha: 0.6)),
+                            _SendState(pending: m.pending, seen: m.seen),
                           ],
                         ],
                       ),
@@ -1178,6 +1292,12 @@ class _Bubble extends StatelessWidget {
 class _AttachButton extends StatelessWidget {
   final bool uploading;
   final double progress;
+
+  /// Progress tugmada ko'rsatilsinmi.
+  ///
+  /// Endi u CHAT PUFFAGIDA ko'rinadi (foydalanuvchi talabi), shu
+  /// sabab tugmada faqat "band" holati qoladi.
+  final bool showProgress;
   final VoidCallback onImage;
   final VoidCallback onVideo;
 
@@ -1186,10 +1306,19 @@ class _AttachButton extends StatelessWidget {
     required this.progress,
     required this.onImage,
     required this.onVideo,
+    this.showProgress = true,
   });
 
   @override
   Widget build(BuildContext context) {
+    if (uploading && !showProgress) {
+      return SizedBox(
+        width: 42,
+        height: 42,
+        child: Icon(Icons.attach_file_rounded,
+            size: 20, color: Colors.white.withValues(alpha: 0.25)),
+      );
+    }
     if (uploading) {
       final pct = (progress.clamp(0.0, 1.0) * 100).round();
       return SizedBox(
@@ -1402,6 +1531,251 @@ class _VoiceBubble extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+
+// ══════════════════════════════════════════════════════════════
+//  YUBORILISH BELGISI
+// ══════════════════════════════════════════════════════════════
+//
+// Uch holat:
+//   * yuborilmoqda — AYLANIB turgan soat;
+//   * yuborildi    — bitta ✓;
+//   * o'qildi      — ikkita ✓✓.
+
+class _SendState extends StatefulWidget {
+  final bool pending;
+  final bool seen;
+
+  const _SendState({required this.pending, required this.seen});
+
+  @override
+  State<_SendState> createState() => _SendStateState();
+}
+
+class _SendStateState extends State<_SendState>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _spin = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1400),
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.pending) _spin.repeat();
+  }
+
+  @override
+  void didUpdateWidget(covariant _SendState old) {
+    super.didUpdateWidget(old);
+    // Yuborilib bo'lgach aylanish to'xtaydi — bekor aylanayotgan
+    // animatsiya batareyani yeydi.
+    if (widget.pending && !_spin.isAnimating) {
+      _spin.repeat();
+    } else if (!widget.pending && _spin.isAnimating) {
+      _spin.stop();
+    }
+  }
+
+  @override
+  void dispose() {
+    _spin.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final color = Colors.white.withValues(alpha: widget.seen ? 0.95 : 0.6);
+    if (widget.pending) {
+      return RotationTransition(
+        turns: _spin,
+        child: Icon(Icons.schedule_rounded, size: 12, color: color),
+      );
+    }
+    // Ikkita belgi bir-biriga QISMAN kirib turadi — Telegramda
+    // ham shunday, alohida ikkita ✓ bo'lib ko'rinmaydi.
+    if (widget.seen) {
+      return SizedBox(
+        width: 17,
+        height: 12,
+        child: Stack(
+          children: [
+            Icon(Icons.check_rounded, size: 12, color: color),
+            Positioned(
+              left: 5,
+              child: Icon(Icons.check_rounded, size: 12, color: color),
+            ),
+          ],
+        ),
+      );
+    }
+    return Icon(Icons.check_rounded, size: 12, color: color);
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+//  YUKLANAYOTGAN FAYL
+// ══════════════════════════════════════════════════════════════
+//
+// TALAB (foydalanuvchi): "video, ovozli xabar yoki rasm
+// yuborganda to'g'ridan-to'g'ri chat oynasida ko'rinsin va
+// progress chizig'i play/pause tugmasi atrofida aylanib
+// kattalashsin, huddi Telegramdagidek".
+//
+// Ya'ni fayl yuborilmasdan TURIB puffak bo'lib paydo bo'ladi:
+// rasm bo'lsa o'zi ko'rinadi (telefondagi faylidan, tarmoq
+// kutilmaydi), video va ovoz uchun esa tugma atrofida aylana
+// to'lib boradi. Pastda aylanuvchi soat — "hali yuborilmadi".
+
+class _UploadingBubble extends StatelessWidget {
+  final String type;
+  final String path;
+  final double progress;
+  final int ms;
+
+  const _UploadingBubble({
+    required this.type,
+    required this.path,
+    required this.progress,
+    required this.ms,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final p = progress.clamp(0.0, 1.0);
+    final image = type == 'image';
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.end,
+        children: [
+          Container(
+            constraints: BoxConstraints(
+              maxWidth: MediaQuery.sizeOf(context).width * 0.76,
+            ),
+            padding: EdgeInsets.fromLTRB(
+                image ? 4 : 13, image ? 4 : 9, image ? 4 : 13, 7),
+            decoration: BoxDecoration(
+              color: AppColors.accent.withValues(alpha: 0.92),
+              borderRadius: const BorderRadius.only(
+                topLeft: Radius.circular(16),
+                topRight: Radius.circular(16),
+                bottomLeft: Radius.circular(16),
+                bottomRight: Radius.circular(4),
+              ),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (image)
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(13),
+                    child: Stack(
+                      alignment: Alignment.center,
+                      children: [
+                        ConstrainedBox(
+                          constraints: const BoxConstraints(
+                              maxHeight: 240, minWidth: 150),
+                          child: Image.file(File(path), fit: BoxFit.cover),
+                        ),
+                        Container(color: Colors.black38),
+                        _Ring(progress: p),
+                      ],
+                    ),
+                  )
+                else if (type == 'video')
+                  SizedBox(
+                    height: 150,
+                    width: 220,
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: 0.35),
+                        borderRadius: BorderRadius.circular(13),
+                      ),
+                      child: Center(child: _Ring(progress: p)),
+                    ),
+                  )
+                else
+                  SizedBox(
+                    width: 210,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _Ring(progress: p, size: 38),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            voiceClock(Duration(milliseconds: ms)),
+                            style: TextStyle(
+                              color: Colors.white.withValues(alpha: 0.85),
+                              fontSize: 12,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                // Pastda aylanuvchi soat — hali yuborilmadi.
+                const Padding(
+                  padding: EdgeInsets.only(top: 4, right: 4),
+                  child: _SendState(pending: true, seen: false),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Play tugmasi atrofida aylanib KATTALASHADIGAN progress.
+class _Ring extends StatelessWidget {
+  final double progress;
+  final double size;
+
+  const _Ring({required this.progress, this.size = 52});
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: size,
+      height: size,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          Container(
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.55),
+              shape: BoxShape.circle,
+            ),
+          ),
+          SizedBox(
+            width: size,
+            height: size,
+            child: CircularProgressIndicator(
+              // Hali bitta ham bayt ketmagan bo'lsa cheksiz
+              // (aylanuvchi) ko'rinish: soxta 0% turmaydi.
+              value: progress <= 0 ? null : progress,
+              strokeWidth: 3,
+              backgroundColor: Colors.white.withValues(alpha: 0.18),
+              valueColor: const AlwaysStoppedAnimation(Colors.white),
+            ),
+          ),
+          Text(
+            '${(progress * 100).round()}',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: size > 44 ? 13 : 10,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../theme/app_background.dart';
 import '../widgets/glass.dart';
+import '../services/admin_users_service.dart';
 import '../services/support_service.dart';
 import 'admin_users_screen.dart';
 import 'anime_management_screen.dart';
@@ -118,6 +119,13 @@ class AdminScreen extends StatelessWidget {
                         );
                       },
                     ),
+                    const SizedBox(height: 12),
+                    // ── B2 TOZALASH ───────────────────────────
+                    //
+                    // TALAB (foydalanuvchi): "B2'da qolib ketgan
+                    // eski fayllarni tozalab tashla, ya'ni
+                    // animega tegishli bo'lmagan fayllarni".
+                    const _B2CleanButton(),
                   ],
                 ),
               ),
@@ -207,6 +215,149 @@ class _AdminButton extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+
+// ══════════════════════════════════════════════════════════════
+//  B2 TOZALASH
+// ══════════════════════════════════════════════════════════════
+//
+// Yetim fayl — bazada unga ISHORA QILADIGAN birorta qator
+// qolmagan fayl. U hech qachon ochilmaydi, lekin ombor uchun pul
+// yeb turadi.
+//
+// Ikki qadam: avval SANAB ko'rsatiladi (hech narsa o'chirilmaydi),
+// tasdiqlangandan keyingina o'chiriladi. Pul va fayl — ortga
+// qaytarib bo'lmaydigan ish.
+
+class _B2CleanButton extends StatefulWidget {
+  const _B2CleanButton();
+
+  @override
+  State<_B2CleanButton> createState() => _B2CleanButtonState();
+}
+
+class _B2CleanButtonState extends State<_B2CleanButton> {
+  bool _busy = false;
+  int _done = 0;
+
+  String _mb(int bytes) =>
+      '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+
+  Future<void> _run() async {
+    if (_busy) return;
+    setState(() {
+      _busy = true;
+      _done = 0;
+    });
+    // 1) Avval faqat SANAYMIZ.
+    final scan = await b2Cleanup(dry: true);
+    if (!mounted) return;
+    if (scan.error != null) {
+      setState(() => _busy = false);
+      _say(scan.error!);
+      return;
+    }
+    if (scan.deleted == 0) {
+      setState(() => _busy = false);
+      _say('Yetim fayl topilmadi — hammasi joyida');
+      return;
+    }
+    final ok = await showDialog<bool>(
+      context: context,
+      barrierColor: Colors.black54,
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.transparent,
+        insetPadding: const EdgeInsets.symmetric(horizontal: 28),
+        child: Glass(
+          borderRadius: 22,
+          padding: const EdgeInsets.fromLTRB(22, 22, 22, 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.cleaning_services_rounded,
+                  size: 40, color: Colors.orange.shade300),
+              const SizedBox(height: 12),
+              Text(
+                '${scan.deleted} ta yetim fayl topildi '
+                '(${_mb(scan.freed)}).\nO\'chirilsinmi?',
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                    color: Colors.white, fontSize: 15, height: 1.4),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                'Animega, profil rasmlariga va yozishmaga tegishli '
+                'fayllarga tegilmaydi. Bu amalni ortga qaytarib '
+                'bo\'lmaydi.',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.55),
+                    fontSize: 12.5),
+              ),
+              const SizedBox(height: 18),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: () => Navigator.of(ctx).pop(false),
+                      child: const Text('Yo\'q'),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: FilledButton(
+                      style: FilledButton.styleFrom(
+                          backgroundColor: Colors.red.shade600),
+                      onPressed: () => Navigator.of(ctx).pop(true),
+                      child: const Text('Tozalash'),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (ok != true || !mounted) {
+      setState(() => _busy = false);
+      return;
+    }
+    // 2) Haqiqatan o'chiramiz.
+    final res = await b2Cleanup(
+      onStep: (n) {
+        if (mounted) setState(() => _done = n);
+      },
+    );
+    if (!mounted) return;
+    setState(() => _busy = false);
+    _say(res.error ??
+        '${res.deleted} ta fayl o\'chirildi (${_mb(res.freed)} bo\'shadi)');
+  }
+
+  void _say(String text) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: AppColors.card,
+        content: Text(text, style: const TextStyle(color: Colors.white)),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return _AdminButton(
+      icon: Icons.cleaning_services_rounded,
+      label: 'B2 tozalash',
+      subtitle: _busy
+          ? (_done > 0 ? '$_done ta o\'chirildi...' : 'Sanalmoqda...')
+          : 'Ishlatilmayotgan fayllarni o\'chirish',
+      onTap: _busy ? () {} : _run,
     );
   }
 }

@@ -456,6 +456,8 @@ async fn init_db(env: &Env) -> bool {
         // ishlaydi, lekin u holda uzunlik faqat ijro boshlangach
         // ma'lum bo'lardi.
         "ALTER TABLE chat_messages ADD COLUMN media_ms INTEGER DEFAULT 0",
+        // Suhbatdosh xabarni O'QIGANMI (bitta / ikkita belgi).
+        "ALTER TABLE chat_messages ADD COLUMN seen INTEGER DEFAULT 0",
     ] {
         let _ = turso_exec(env, sql, vec![]).await;
     }
@@ -790,6 +792,7 @@ async fn init_db(env: &Env) -> bool {
             -- 'image' yoki 'video'.
             media_type TEXT DEFAULT '',
             media_ms INTEGER DEFAULT 0,
+            seen INTEGER DEFAULT 0,
             created_at INTEGER
         )", vec![]),
         // Suhbat AYNAN shu tartibda so'raladi.
@@ -2752,6 +2755,224 @@ async fn b2_delete_checked(env: &Env, value: &str) -> bool {
         Ok(resp) => resp.status_code() == 200,
         Err(_) => false,
     }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  B2'DAGI YETIM FAYLLARNI TOZALASH
+// ═══════════════════════════════════════════════════════════════
+//
+// TALAB (foydalanuvchi): "B2'da qolib ketgan eski fayllarni
+// tozalab tashla, ya'ni animega tegishli bo'lmagan fayllarni".
+//
+// ── YETIM FAYL NIMA ─────────────────────────────────────────
+//
+// Bazada unga ISHORA QILADIGAN birorta qator qolmagan fayl.
+// Bunday fayl hech qachon ochilmaydi, lekin ombor uchun pul yeb
+// turadi. Ilgari yozishmadagi rasm/video o'chirilganda faqat
+// bazadagi qator o'chirilar, fayl esa qolib ketardi — ular
+// aynan shunday to'planib qolgan.
+//
+// ── QAYSI QATORLAR "ISHORA" HISOBLANADI ─────────────────────
+//
+//   anime_db.photo_url, season_db.photo_url,
+//   epizod_db.url_360p / 480p / 720p / 1080p,
+//   users_db.avatar_file, chat_messages.media_file.
+//
+// ── XAVFSIZLIK ──────────────────────────────────────────────
+//
+// 1. Faqat admin (`admin_only`).
+// 2. YANGI fayllarga TEGILMAYDI: hozirgina yuklangan, lekin
+//    hali bazaga yozilmagan fayl (yuklash davom etayotgan
+//    bo'lishi mumkin) o'chib ketmasin. Chegara — 2 soat.
+// 3. `dry=true` bo'lsa HECH NARSA o'chirilmaydi, faqat sanaladi.
+//    Avval shu bilan ko'rib olish mumkin.
+// 4. Bir chaqiruvda eng ko'pi `B2_CLEAN_MAX` ta fayl o'chiriladi
+//    va davomi uchun kursor qaytadi — worker'ning bitta
+//    so'rovdan chiqadigan ichki so'rovlari chegarasidan
+//    oshmaslik uchun.
+
+/// Bir chaqiruvda eng ko'pi shuncha fayl o'chiriladi.
+const B2_CLEAN_MAX: usize = 40;
+
+/// Shundan yangi fayllarga tegilmaydi (yuklash davom etayotgan
+/// bo'lishi mumkin).
+const B2_CLEAN_MIN_AGE_MS: i64 = 2 * 60 * 60 * 1000;
+
+/// POST /api/admin/b2-cleanup
+async fn b2_cleanup(mut req: Request, env: &Env) -> Result<Response> {
+    if let Some(deny) = admin_only(&req, env).await? {
+        return Ok(deny);
+    }
+    let b: Value = req.json().await.unwrap_or(json!({}));
+    let dry = b["dry"] == json!(true);
+    let start = b["start"].as_str().unwrap_or("").to_string();
+
+    // ── 1) BAZADAGI HAMMA ISHORANI YIG'AMIZ ──────────────────
+    let res = turso_many(env, &[
+        ("SELECT photo_url FROM anime_db", vec![]),
+        ("SELECT photo_url FROM season_db", vec![]),
+        ("SELECT url_360p, url_480p, url_720p, url_1080p FROM epizod_db", vec![]),
+        ("SELECT avatar_file FROM users_db", vec![]),
+        ("SELECT media_file FROM chat_messages", vec![]),
+    ]).await?;
+
+    let mut keep: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for r in res.iter() {
+        if let Some(rows) = r["rows"].as_array() {
+            for row in rows {
+                if let Some(cells) = row.as_array() {
+                    for c in cells {
+                        if let Some(v) = c["value"].as_str() {
+                            let n = bare_name(v);
+                            if !n.is_empty() {
+                                keep.insert(n);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Bazada birorta ham ishora topilmasa — bu shubhali holat
+    // (masalan so'rov yiqilgan). Bunday paytda HECH NARSA
+    // o'chirilmaydi: butun omborni o'chirib yuborishdan ko'ra
+    // hech narsa qilmagan yaxshi.
+    if keep.is_empty() && !dry {
+        return json_resp(
+            &json!({"error": "Bazadan ro'yxat olinmadi — tozalash bekor qilindi"}),
+            500,
+        );
+    }
+
+    // ── 2) B2'DAGI FAYLLARNI RO'YXATLAB CHIQAMIZ ─────────────
+    let auth = b2_auth(env).await?;
+    let api_url = auth["apiInfo"]["storageApi"]["apiUrl"].as_str().unwrap_or("").to_string();
+    let token = auth["authorizationToken"].as_str().unwrap_or("").to_string();
+    let acct = auth["accountId"].as_str().unwrap_or("").to_string();
+    let bid = b2_bucket_id(&api_url, &token, &acct).await?;
+
+    let now = now_ms();
+    let mut cursor = start;
+    let mut checked: i64 = 0;
+    let mut deleted: i64 = 0;
+    let mut freed: i64 = 0;
+    let mut too_new: i64 = 0;
+    let mut next = String::new();
+    let mut done = false;
+
+    // Ro'yxat sahifalab keladi. Bir chaqiruvda bir necha sahifa
+    // ko'riladi, lekin o'chirish soni chegaralangan.
+    'outer: for _ in 0..4 {
+        let h = Headers::new();
+        h.set("Authorization", &token)?;
+        let url = if cursor.is_empty() {
+            format!("{api_url}/b2api/v3/b2_list_file_names?bucketId={bid}&maxFileCount=1000")
+        } else {
+            format!(
+                "{api_url}/b2api/v3/b2_list_file_names?bucketId={bid}&maxFileCount=1000&startFileName={}",
+                urlencoding(&cursor)
+            )
+        };
+        let list_req = Request::new_with_init(
+            &url,
+            RequestInit::new().with_method(Method::Get).with_headers(h),
+        )?;
+        let mut lr = Fetch::Request(list_req).send().await?;
+        if lr.status_code() != 200 {
+            return json_resp(&json!({"error": "B2 ro'yxati olinmadi"}), 502);
+        }
+        let d: Value = lr.json().await?;
+        let files = d["files"].as_array().cloned().unwrap_or_default();
+
+        for f in &files {
+            let name = f["fileName"].as_str().unwrap_or("").to_string();
+            if name.is_empty() {
+                continue;
+            }
+            checked += 1;
+            if keep.contains(&name) {
+                continue;
+            }
+            // Hozirgina yuklangan faylga tegilmaydi.
+            let up = f["uploadTimestamp"].as_i64().unwrap_or(0);
+            if up > 0 && now - up < B2_CLEAN_MIN_AGE_MS {
+                too_new += 1;
+                continue;
+            }
+            let size = f["contentLength"].as_i64().unwrap_or(0);
+            if dry {
+                deleted += 1;
+                freed += size;
+                continue;
+            }
+            let fid = f["fileId"].as_str().unwrap_or("");
+            if fid.is_empty() {
+                continue;
+            }
+            let h2 = Headers::new();
+            h2.set("Authorization", &token)?;
+            h2.set("Content-Type", "application/json")?;
+            let del = Request::new_with_init(
+                &format!("{api_url}/b2api/v3/b2_delete_file_version"),
+                RequestInit::new().with_method(Method::Post).with_headers(h2).with_body(
+                    Some(json!({"fileName": name, "fileId": fid}).to_string().into()),
+                ),
+            )?;
+            if let Ok(r) = Fetch::Request(del).send().await {
+                if r.status_code() == 200 {
+                    deleted += 1;
+                    freed += size;
+                }
+            }
+            if deleted as usize >= B2_CLEAN_MAX {
+                // Davomi keyingi chaqiruvda — shu fayldan
+                // boshlanadi.
+                next = name;
+                break 'outer;
+            }
+        }
+
+        match d["nextFileName"].as_str() {
+            Some(n) if !n.is_empty() => cursor = n.to_string(),
+            _ => {
+                done = true;
+                break 'outer;
+            }
+        }
+    }
+    if next.is_empty() && !done {
+        next = cursor;
+    }
+
+    ok_nostore(json!({
+        "checked": checked,
+        "deleted": deleted,
+        "freed": freed,
+        "too_new": too_new,
+        "kept": keep.len(),
+        "next": next,
+        "done": done,
+        "dry": dry,
+    }))
+}
+
+/// So'rov manzilida ishlatish uchun eng zarur belgilarni
+/// o'zgartiradi (B2 fayl nomlari odatda oddiy, lekin bo'sh joy
+/// va `+` uchrashi mumkin).
+fn urlencoding(v: &str) -> String {
+    let mut out = String::with_capacity(v.len());
+    for ch in v.chars() {
+        match ch {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' | '/' => out.push(ch),
+            _ => {
+                let mut buf = [0u8; 4];
+                for b in ch.encode_utf8(&mut buf).as_bytes() {
+                    out.push_str(&format!("%{b:02X}"));
+                }
+            }
+        }
+    }
+    out
 }
 
 async fn b2_delete_epizod_files(env: &Env, ep: &Value) {
@@ -5040,6 +5261,8 @@ fn chat_msg_public(origin: &str, r: &Value) -> Value {
         },
         "media_type": r["media_type"].as_str().unwrap_or(""),
         "media_ms": r["media_ms"].as_i64().unwrap_or(0),
+        // Suhbatdosh o'qiganmi: ilovada bitta yoki ikkita belgi.
+        "seen": r["seen"].as_i64().unwrap_or(0) != 0,
         "created_at": r["created_at"].as_i64().unwrap_or(0),
     })
 }
@@ -5061,7 +5284,7 @@ async fn chat_read(
 ) -> Result<Response> {
     let res = if since > 0 {
         turso_exec(env,
-            "SELECT id, from_admin, body, media_file, media_type, media_ms, created_at
+            "SELECT id, from_admin, body, media_file, media_type, media_ms, seen, created_at
                FROM chat_messages
               WHERE user_id = ? AND created_at > ?
               ORDER BY created_at DESC LIMIT ?",
@@ -5069,7 +5292,7 @@ async fn chat_read(
                  TursoArg::int(CHAT_LIMIT)]).await?
     } else {
         turso_exec(env,
-            "SELECT id, from_admin, body, media_file, media_type, media_ms, created_at
+            "SELECT id, from_admin, body, media_file, media_type, media_ms, seen, created_at
                FROM chat_messages
               WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
             vec![TursoArg::int(user), TursoArg::int(CHAT_LIMIT)]).await?
@@ -5082,12 +5305,56 @@ async fn chat_read(
         .collect();
 
     // O'qildi. Qator yo'q bo'lsa yangilanadigan narsa ham yo'q.
-    let col = if as_admin { "unread_admin" } else { "unread_user" };
-    let _ = turso_exec(env,
-        &format!("UPDATE chat_threads SET {col}=0 WHERE user_id=?"),
-        vec![TursoArg::int(user)]).await;
+    // ── IKKITA BELGI (✓✓) ────────────────────────────────
+    //
+    // TALAB (foydalanuvchi): "yuborilgach Telegramdagidek bitta
+    // ✓ tursin va admin o'qiganidan keyingina ✓✓ ikkita bo'lsin".
+    //
+    // Ya'ni "o'qildi" belgisi SUHBATDOSHNING xabarlariga
+    // qo'yiladi: admin ochsa — foydalanuvchining xabarlariga,
+    // foydalanuvchi ochsa — adminning xabarlariga.
+    let other = if as_admin { 0 } else { 1 };
+    let _ = turso_batch(env, &[
+        (if as_admin {
+            "UPDATE chat_threads SET unread_admin=0 WHERE user_id=?"
+         } else {
+            "UPDATE chat_threads SET unread_user=0 WHERE user_id=?"
+         },
+         vec![TursoArg::int(user)]),
+        ("UPDATE chat_messages SET seen=1
+           WHERE user_id=? AND from_admin=? AND seen=0",
+         vec![TursoArg::int(user), TursoArg::int(other)]),
+    ]).await;
 
-    ok_nostore(json!({"items": items, "since": since}))
+    // ── ESKI XABARLARNING BELGISI ─────────────────────────
+    //
+    // TOPILGAN MASALA: `since` bilan faqat YANGI xabarlar
+    // qaytadi. Lekin "o'qildi" belgisi ESKI xabarlarga
+    // qo'yiladi — ya'ni ✓ hech qachon ✓✓ ga aylanmasdi.
+    //
+    // Shu sabab javobga o'z xabarlaringizdan O'QILGANLARINING
+    // ro'yxati ham qo'shiladi. U atigi raqamlar ro'yxati, ya'ni
+    // arzon.
+    let mine = if as_admin { 1 } else { 0 };
+    let seen_res = turso_exec(env,
+        "SELECT id FROM chat_messages
+          WHERE user_id=? AND from_admin=? AND seen=1
+          ORDER BY created_at DESC LIMIT ?",
+        vec![TursoArg::int(user), TursoArg::int(mine),
+             TursoArg::int(CHAT_LIMIT)]).await?;
+    let seen_ids: Vec<String> = seen_res["rows"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|r| r.as_array())
+                .filter_map(|r| r.first())
+                .filter_map(|c| c["value"].as_str())
+                .map(|v| v.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    ok_nostore(json!({"items": items, "since": since, "seen_ids": seen_ids}))
 }
 
 /// GET /api/chat — o'z yozishmasi (foydalanuvchi tomoni).
@@ -5263,6 +5530,7 @@ async fn chat_send(mut req: Request, env: &Env, origin: &str) -> Result<Response
         },
         "media_type": if has_media { media_type } else { "" },
         "media_ms": if has_media { media_ms } else { 0 },
+        "seen": false,
         "created_at": now,
     }))
 }
@@ -5343,11 +5611,28 @@ async fn chat_wait(req: &Request, env: &Env) -> Result<Response> {
         _ => me,
     };
 
+    // ── NIMA KUZATILADI ──────────────────────────────────
+    //
+    // Ikkita son: eng oxirgi xabar vaqti VA o'qilgan xabarlar
+    // soni. Ikkinchisi kerak, chunki suhbatdosh eski xabarni
+    // o'qiganda yangi xabar paydo bo'lmaydi — faqat belgi
+    // o'zgaradi (✓ -> ✓✓), va usiz ilova buni sezmasdi.
+    let seen_before: i64 = q("seen").parse().unwrap_or(-1);
     let (sql, args): (&str, Vec<TursoArg>) = if watch_all {
-        ("SELECT COALESCE(MAX(last_at),0) FROM chat_threads", vec![])
+        ("SELECT COALESCE(MAX(last_at),0), 0 FROM chat_threads", vec![])
     } else {
-        ("SELECT COALESCE(MAX(created_at),0) FROM chat_messages WHERE user_id=?",
+        ("SELECT COALESCE(MAX(created_at),0),
+                 COUNT(CASE WHEN seen=1 THEN 1 END)
+            FROM chat_messages WHERE user_id=?",
          vec![TursoArg::int(target)])
+    };
+
+    let cell = |res: &Value, i: usize| -> i64 {
+        let c = &res["rows"][0][i];
+        match c["value"].as_str() {
+            Some(v) => v.parse::<i64>().unwrap_or(0),
+            None => c.as_i64().unwrap_or(0),
+        }
     };
 
     for i in 0..CHAT_WAIT_TICKS {
@@ -5357,12 +5642,13 @@ async fn chat_wait(req: &Request, env: &Env) -> Result<Response> {
             Delay::from(core::time::Duration::from_millis(CHAT_WAIT_STEP_MS)).await;
         }
         let res = turso_exec(env, sql, args.clone()).await?;
-        let last = scalar(&res);
-        if last > since {
-            return ok_nostore(json!({"new": true, "last": last}));
+        let last = cell(&res, 0);
+        let seen = cell(&res, 1);
+        if last > since || (seen_before >= 0 && seen != seen_before) {
+            return ok_nostore(json!({"new": true, "last": last, "seen": seen}));
         }
     }
-    ok_nostore(json!({"new": false, "last": since}))
+    ok_nostore(json!({"new": false, "last": since, "seen": seen_before.max(0)}))
 }
 
 /// GET /api/chat/threads — ADMIN uchun barcha suhbatlar.
@@ -5444,13 +5730,26 @@ async fn chat_del_message(req: &Request, env: &Env, id: &str) -> Result<Response
     if !is_admin(&u) {
         return json_resp(&json!({"error": "forbidden"}), 403);
     }
+    // ── B2'DAGI FAYL HAM O'CHADI ─────────────────────────
+    //
+    // TOPILGAN XATO (foydalanuvchi savoli: "yuborilgan video,
+    // rasm yoki ovozli xabarni o'chirganda B2'dan ham o'chadimi").
+    //
+    // O'CHMASDI: faqat bazadagi qator o'chirilardi. Fayl esa
+    // B2'da qolib ketardi va uni endi HECH KIM o'chira olmasdi —
+    // unga ishora qilgan yagona qator ham yo'q bo'lgan bo'lardi.
+    // Ya'ni fayl abadiy yotib, ombor uchun pul yeb turardi.
     let row = turso_exec(env,
-        "DELETE FROM chat_messages WHERE id=? RETURNING user_id",
+        "DELETE FROM chat_messages WHERE id=? RETURNING user_id, media_file",
         vec![TursoArg::text(id)]).await?;
     let Some(r) = first_row(&row) else {
         return json_resp(&json!({"error": "Xabar topilmadi"}), 404);
     };
     let owner = r["user_id"].as_i64().unwrap_or(0);
+    let file = r["media_file"].as_str().unwrap_or("");
+    if !file.is_empty() {
+        b2_delete(env, file).await;
+    }
 
     // Suhbat qatoridagi "oxirgi xabar" endi boshqa bo'lishi
     // mumkin — u qayta hisoblanadi. Hech narsa qolmasa suhbatning
@@ -5517,9 +5816,30 @@ async fn chat_del_many(mut req: Request, env: &Env) -> Result<Response> {
         })
         .unwrap_or_default();
 
+    // B2'dagi fayllar ham o'chiriladi (yuqoridagi izohga qarang).
+    let files_res = turso_exec(env,
+        &format!("SELECT media_file FROM chat_messages
+                   WHERE id IN ({holes}) AND media_file <> ''"),
+        args.clone()).await?;
+    let files: Vec<String> = files_res["rows"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|r| r.as_array())
+                .filter_map(|r| r.first())
+                .filter_map(|c| c["value"].as_str())
+                .map(|v| v.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+
     turso_exec(env,
         &format!("DELETE FROM chat_messages WHERE id IN ({holes})"),
         args).await?;
+
+    for f in files {
+        b2_delete(env, &f).await;
+    }
 
     for o in owners {
         refresh_thread(env, o).await;
@@ -5535,10 +5855,32 @@ async fn chat_del_thread(req: &Request, env: &Env, user: i64) -> Result<Response
     if !is_admin(&u) {
         return json_resp(&json!({"error": "forbidden"}), 403);
     }
+    // B2'dagi fayllar ham o'chiriladi (`chat_del_message`
+    // izohiga qarang).
+    let files_res = turso_exec(env,
+        "SELECT media_file FROM chat_messages
+          WHERE user_id=? AND media_file <> ''",
+        vec![TursoArg::int(user)]).await?;
+    let files: Vec<String> = files_res["rows"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|r| r.as_array())
+                .filter_map(|r| r.first())
+                .filter_map(|c| c["value"].as_str())
+                .map(|v| v.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+
     turso_batch(env, &[
         ("DELETE FROM chat_messages WHERE user_id=?", vec![TursoArg::int(user)]),
         ("DELETE FROM chat_threads WHERE user_id=?", vec![TursoArg::int(user)]),
     ]).await?;
+
+    for f in files {
+        b2_delete(env, &f).await;
+    }
     ok_nostore(json!({"ok": true}))
 }
 
@@ -7025,6 +7367,9 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
     }
 
     // ── ADMIN: FOYDALANUVCHILARNI BOSHQARISH ──────────────────
+    if path == "/api/admin/b2-cleanup" && method == Method::Post {
+        return b2_cleanup(req, &env).await;
+    }
     if path == "/api/admin/users" && method == Method::Get {
         return admin_users(&req, &env, &origin).await;
     }

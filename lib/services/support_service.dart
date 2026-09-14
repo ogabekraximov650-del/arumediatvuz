@@ -61,6 +61,12 @@ class ChatMessage {
   /// belgi yo'qoladi. Shu yerda ham xuddi shunday.
   final bool pending;
 
+  /// Suhbatdosh xabarni O'QIGANMI.
+  ///
+  /// TALAB (foydalanuvchi): "yuborilgach Telegramdagidek bitta ✓
+  /// tursin va admin o'qiganidan keyingina ✓✓ ikkita bo'lsin".
+  final bool seen;
+
   const ChatMessage({
     required this.id,
     required this.fromAdmin,
@@ -70,7 +76,19 @@ class ChatMessage {
     this.mediaType = '',
     this.mediaMs = 0,
     this.pending = false,
+    this.seen = false,
   });
+
+  ChatMessage markSeen() => ChatMessage(
+        id: id,
+        fromAdmin: fromAdmin,
+        body: body,
+        createdAt: createdAt,
+        mediaUrl: mediaUrl,
+        mediaType: mediaType,
+        mediaMs: mediaMs,
+        seen: true,
+      );
 
   bool get hasMedia => mediaUrl.isNotEmpty && mediaType.isNotEmpty;
   bool get isVideo => mediaType == 'video';
@@ -88,6 +106,7 @@ class ChatMessage {
         mediaUrl: '${j['media_url'] ?? ''}',
         mediaType: '${j['media_type'] ?? ''}',
         mediaMs: ((j['media_ms'] as num?) ?? 0).toInt(),
+        seen: j['seen'] == true,
       );
 
   Map<String, dynamic> toJson() => {
@@ -98,6 +117,7 @@ class ChatMessage {
         'media_url': mediaUrl,
         'media_type': mediaType,
         'media_ms': mediaMs,
+        'seen': seen,
       };
 }
 
@@ -278,6 +298,10 @@ class ChatController extends ChangeNotifier {
   /// Oxirgi ko'rilgan xabar vaqti — kutish shundan boshlanadi.
   int get _lastAt => _items.isEmpty ? 0 : _items.last.createdAt;
 
+  /// Nechta xabar o'qilgan. Server shu son o'zgarganda ham
+  /// javob qaytaradi — ✓ dan ✓✓ ga o'tish shu orqali ko'rinadi.
+  int get _seenCount => _items.where((m) => m.seen).length;
+
   void startPolling() {
     if (_watching) return;
     _watching = true;
@@ -297,7 +321,7 @@ class ChatController extends ChangeNotifier {
         continue;
       }
       try {
-        final uri = Uri.parse('$_base/wait?since=$_lastAt'
+        final uri = Uri.parse('$_base/wait?since=$_lastAt&seen=$_seenCount'
             '${userId != null ? '&user_id=$userId' : ''}');
         final r = await http
             .get(uri, headers: _headers())
@@ -358,6 +382,23 @@ class ChatController extends ChangeNotifier {
         final raw = ((j['items'] as List?) ?? [])
             .cast<Map<String, dynamic>>();
         final rows = raw.map(ChatMessage.fromJson).toList();
+
+        // ── ESKI XABARLARNING "O'QILDI" BELGISI ───────────
+        //
+        // `since` bilan faqat YANGI xabarlar keladi, "o'qildi"
+        // belgisi esa ESKI xabarlarga qo'yiladi. Server shu
+        // sabab o'qilganlarning RAQAMLARINI ham yuboradi.
+        final seenIds =
+            ((j['seen_ids'] as List?) ?? []).map((e) => '$e').toSet();
+        if (seenIds.isNotEmpty) {
+          for (var i = 0; i < _items.length; i++) {
+            final m = _items[i];
+            if (!m.seen && seenIds.contains(m.id)) {
+              _items[i] = m.markSeen();
+            }
+          }
+        }
+
         if (since > 0) {
           // Qo'shimcha xabarlar — oxiriga qo'shiladi.
           // Takrorlanmasin: sekin tarmoqda bitta javob ikki

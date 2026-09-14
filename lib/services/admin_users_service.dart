@@ -286,3 +286,80 @@ class AdminUsersController extends ChangeNotifier {
     }
   }
 }
+
+// ══════════════════════════════════════════════════════════════
+//  B2'DAGI YETIM FAYLLARNI TOZALASH
+// ══════════════════════════════════════════════════════════════
+//
+// TALAB (foydalanuvchi): "B2'da qolib ketgan eski fayllarni
+// tozalab tashla, ya'ni animega tegishli bo'lmagan fayllarni".
+//
+// Yetim fayl — bazada unga ISHORA QILADIGAN birorta qator
+// qolmagan fayl. U hech qachon ochilmaydi, lekin ombor uchun pul
+// yeb turadi.
+//
+// Server bir chaqiruvda cheklangan sonda o'chiradi va davomi
+// uchun kursor qaytaradi — shu sabab bu yerda TUGAGUNCHA
+// takrorlanadi.
+
+class B2CleanResult {
+  final int checked;
+  final int deleted;
+  final int freed;
+  final String? error;
+
+  const B2CleanResult({
+    this.checked = 0,
+    this.deleted = 0,
+    this.freed = 0,
+    this.error,
+  });
+}
+
+Future<B2CleanResult> b2Cleanup({
+  bool dry = false,
+  void Function(int deleted)? onStep,
+}) async {
+  var checked = 0;
+  var deleted = 0;
+  var freed = 0;
+  var start = '';
+  try {
+    // Cheksiz aylanishdan himoya: 200 qadam ham yetib ortadi.
+    for (var step = 0; step < 200; step++) {
+      final r = await http
+          .post(
+            Uri.parse('$kApiBase/api/admin/b2-cleanup'),
+            headers: _headers(json: true),
+            body: jsonEncode({'dry': dry, 'start': start}),
+          )
+          .timeout(const Duration(seconds: 60));
+      final j = jsonDecode(r.body) as Map<String, dynamic>;
+      if (r.statusCode != 200) {
+        return B2CleanResult(
+          checked: checked,
+          deleted: deleted,
+          freed: freed,
+          error: '${j['error'] ?? 'Tozalanmadi (${r.statusCode})'}',
+        );
+      }
+      checked += ((j['checked'] as num?) ?? 0).toInt();
+      deleted += ((j['deleted'] as num?) ?? 0).toInt();
+      freed += ((j['freed'] as num?) ?? 0).toInt();
+      onStep?.call(deleted);
+      if (j['done'] == true) break;
+      final next = '${j['next'] ?? ''}';
+      // Kursor siljimasa — to'xtaymiz (aks holda cheksiz aylanish).
+      if (next.isEmpty || next == start) break;
+      start = next;
+    }
+    return B2CleanResult(checked: checked, deleted: deleted, freed: freed);
+  } catch (_) {
+    return B2CleanResult(
+      checked: checked,
+      deleted: deleted,
+      freed: freed,
+      error: 'Internet yo\'q',
+    );
+  }
+}
