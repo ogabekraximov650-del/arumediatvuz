@@ -401,9 +401,37 @@ class _SupportChatScreenState extends State<SupportChatScreen> {
         // O'z xabarim o'ngda. Admin ekranida "o'ziniki" — admin
         // yozganlari; foydalanuvchi ekranida esa aksincha.
         final mine = _chat.isAdminView ? m.fromAdmin : !m.fromAdmin;
+        // ── SUHBATDOSH RASMI XABAR YONIDA ──────────────────
+        //
+        // TALAB (foydalanuvchi): "admin bilan gaplashadigan chat
+        // ichida izohlardagidek adminga foydalanuvchi profili
+        // ko'rinib tursin, ustiga bosib profilni ko'rish mumkin
+        // bo'lsin".
+        //
+        // Rasm faqat SUHBATDOSHNING xabari yonida turadi (o'z
+        // xabarining yonida o'z rasmini ko'rsatishning ma'nosi
+        // yo'q — Telegram ham shunday qiladi).
+        //
+        // Ketma-ket kelgan xabarlarda rasm faqat OXIRGISIDA
+        // chiziladi: aks holda bir xil rasm ustma-ust takrorlanib,
+        // ro'yxat g'ijimlanib ketardi.
+        final next = i + 1 < items.length ? items[i + 1] : null;
+        final lastOfGroup =
+            next == null || next.fromAdmin != m.fromAdmin;
         return _Bubble(
           message: m,
           mine: mine,
+          avatarUrl: mine ? '' : widget.photoUrl,
+          avatarName: mine ? '' : widget.title,
+          showAvatar: !mine && lastOfGroup,
+          onAvatarTap: widget.userId == null
+              ? null
+              : () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) =>
+                          PublicProfileScreen(userId: widget.userId!),
+                    ),
+                  ),
           // Admin istalgan xabarni uzoq bosib o'chira oladi.
           onLongPress: _isAdmin ? () => _deleteMessage(m) : null,
           onOpenMedia: () => Navigator.of(context).push(
@@ -521,11 +549,16 @@ class _SupportChatScreenState extends State<SupportChatScreen> {
 class _TitleAvatar extends StatelessWidget {
   final String url;
   final String name;
-  const _TitleAvatar({required this.url, required this.name});
+  final double size;
+
+  const _TitleAvatar({
+    required this.url,
+    required this.name,
+    this.size = 34,
+  });
 
   @override
   Widget build(BuildContext context) {
-    const size = 34.0;
     final letter = name.trim().isEmpty
         ? '?'
         : name.trim().characters.first.toUpperCase();
@@ -538,7 +571,7 @@ class _TitleAvatar extends StatelessWidget {
         letter,
         style: TextStyle(
           color: Colors.white.withValues(alpha: 0.7),
-          fontSize: 14,
+          fontSize: size * 0.42,
           fontWeight: FontWeight.w800,
         ),
       ),
@@ -552,7 +585,7 @@ class _TitleAvatar extends StatelessWidget {
             : CachedNetworkImage(
                 imageUrl: url,
                 fit: BoxFit.cover,
-                memCacheWidth: 110,
+                memCacheWidth: (size * 3).round(),
                 placeholder: (_, __) => fallback,
                 errorWidget: (_, __, ___) => fallback,
               ),
@@ -566,6 +599,14 @@ class _Bubble extends StatelessWidget {
   final ChatMessage message;
   final bool mine;
 
+  /// Suhbatdoshning rasmi (o'z xabarida bo'sh).
+  final String avatarUrl;
+  final String avatarName;
+
+  /// Guruhdagi OXIRGI xabarmi — rasm faqat shunda chiziladi.
+  final bool showAvatar;
+  final VoidCallback? onAvatarTap;
+
   /// Admin uchun — uzoq bosilganda o'chirish.
   final VoidCallback? onLongPress;
   final VoidCallback onOpenMedia;
@@ -574,6 +615,10 @@ class _Bubble extends StatelessWidget {
     required this.message,
     required this.mine,
     required this.onOpenMedia,
+    this.avatarUrl = '',
+    this.avatarName = '',
+    this.showAvatar = false,
+    this.onAvatarTap,
     this.onLongPress,
   });
 
@@ -585,7 +630,28 @@ class _Bubble extends StatelessWidget {
       child: Row(
         mainAxisAlignment:
             mine ? MainAxisAlignment.end : MainAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.end,
         children: [
+          if (!mine) ...[
+            // Rasm chizilmasa ham JOYI saqlanadi — aks holda
+            // guruhdagi xabarlar bir-biriga nisbatan siljib
+            // ketardi.
+            SizedBox(
+              width: 30,
+              child: showAvatar
+                  ? GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: onAvatarTap,
+                      child: _TitleAvatar(
+                        url: avatarUrl,
+                        name: avatarName,
+                        size: 30,
+                      ),
+                    )
+                  : null,
+            ),
+            const SizedBox(width: 7),
+          ],
           Flexible(
             child: GestureDetector(
               onLongPress: onLongPress,
