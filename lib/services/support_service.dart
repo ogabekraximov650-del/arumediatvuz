@@ -39,18 +39,31 @@ class ChatMessage {
   final String body;
   final int createdAt;
 
+  /// Rasm yoki video manzili (bo'sh — oddiy matn).
+  final String mediaUrl;
+
+  /// `image` yoki `video`.
+  final String mediaType;
+
   const ChatMessage({
     required this.id,
     required this.fromAdmin,
     required this.body,
     required this.createdAt,
+    this.mediaUrl = '',
+    this.mediaType = '',
   });
+
+  bool get hasMedia => mediaUrl.isNotEmpty && mediaType.isNotEmpty;
+  bool get isVideo => mediaType == 'video';
 
   static ChatMessage fromJson(Map<String, dynamic> j) => ChatMessage(
         id: '${j['id'] ?? ''}',
         fromAdmin: j['from_admin'] == true,
         body: '${j['body'] ?? ''}',
         createdAt: ((j['created_at'] as num?) ?? 0).toInt(),
+        mediaUrl: '${j['media_url'] ?? ''}',
+        mediaType: '${j['media_type'] ?? ''}',
       );
 }
 
@@ -255,10 +268,26 @@ class ChatController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// ADMIN: xabarni o'chiradi va ro'yxatdan darhol olib tashlaydi.
+  Future<String?> removeMessage(String id) async {
+    final err = await deleteChatMessage(id);
+    if (err != null) return err;
+    _items.removeWhere((m) => m.id == id);
+    notifyListeners();
+    return null;
+  }
+
   /// Xabar yuboradi. Xato bo'lsa matn qaytadi.
-  Future<String?> send(String body) async {
+  ///
+  /// `mediaFile` — B2'ga allaqachon yuklangan faylning NOMI,
+  /// `mediaType` esa `image` yoki `video`.
+  Future<String?> send(
+    String body, {
+    String mediaFile = '',
+    String mediaType = '',
+  }) async {
     final text = body.trim();
-    if (text.isEmpty) return null;
+    if (text.isEmpty && mediaFile.isEmpty) return null;
     try {
       final r = await http
           .post(
@@ -267,6 +296,8 @@ class ChatController extends ChangeNotifier {
             body: jsonEncode({
               'body': text,
               if (userId != null) 'user_id': userId,
+              if (mediaFile.isNotEmpty) 'media_file': mediaFile,
+              if (mediaType.isNotEmpty) 'media_type': mediaType,
             }),
           )
           .timeout(const Duration(seconds: 20));
@@ -288,6 +319,42 @@ class ChatController extends ChangeNotifier {
 //  ADMIN: BARCHA SUHBATLAR
 // ══════════════════════════════════════════════════════════════
 
+/// ADMIN: bitta xabarni butunlay o'chiradi.
+///
+/// TALAB (foydalanuvchi): "admin panelda kelgan xabarni va chatni
+/// butunlay o'chirib tashlashi mumkin bo'lsin".
+Future<String?> deleteChatMessage(String id) async {
+  try {
+    final r = await http
+        .delete(Uri.parse('$_base/message/$id'), headers: _headers())
+        .timeout(const Duration(seconds: 20));
+    if (r.statusCode != 200) {
+      final j = jsonDecode(r.body) as Map<String, dynamic>;
+      return '${j['error'] ?? 'O\'chirilmadi'}';
+    }
+    return null;
+  } catch (_) {
+    return 'Internet yo\'q';
+  }
+}
+
+/// ADMIN: butun yozishmani o'chiradi.
+Future<String?> deleteChatThread(int userId) async {
+  try {
+    final r = await http
+        .delete(Uri.parse('$_base/thread/$userId'), headers: _headers())
+        .timeout(const Duration(seconds: 20));
+    if (r.statusCode != 200) {
+      final j = jsonDecode(r.body) as Map<String, dynamic>;
+      return '${j['error'] ?? 'O\'chirilmadi'}';
+    }
+    return null;
+  } catch (_) {
+    return 'Internet yo\'q';
+  }
+}
+
+
 class ChatThreadsController extends ChangeNotifier {
   final List<ChatThread> _items = [];
   List<ChatThread> get items => List.unmodifiable(_items);
@@ -299,6 +366,15 @@ class ChatThreadsController extends ChangeNotifier {
   bool get isLoading => _loading && _items.isEmpty;
   bool get hasData => _loaded;
   String? get error => _error;
+
+  /// ADMIN: butun yozishmani o'chiradi va ro'yxatdan oladi.
+  Future<String?> removeThread(int userId) async {
+    final err = await deleteChatThread(userId);
+    if (err != null) return err;
+    _items.removeWhere((t) => t.userId == userId);
+    notifyListeners();
+    return null;
+  }
 
   Future<void> load({bool force = false}) async {
     if (_loading) return;
@@ -328,6 +404,19 @@ class ChatThreadsController extends ChangeNotifier {
     _loading = false;
     notifyListeners();
   }
+}
+
+/// To'liq vaqt: `14:32 · 12.09.2026`.
+///
+/// TALAB (foydalanuvchi): "adminga xabar yuborganda yoki izoh
+/// yozganda vaqti ham ko'rsatilsin". Qisqa ko'rinish (`chatTime`)
+/// ro'yxat uchun, bu esa xabarning O'ZI ostida turadi.
+String fullTime(int ms) {
+  if (ms <= 0) return '';
+  final d = DateTime.fromMillisecondsSinceEpoch(ms);
+  String two(int n) => n.toString().padLeft(2, '0');
+  return '${two(d.hour)}:${two(d.minute)} · '
+      '${two(d.day)}.${two(d.month)}.${d.year}';
 }
 
 /// Telegram'dagidek qisqa vaqt: bugun — soat, aks holda sana.

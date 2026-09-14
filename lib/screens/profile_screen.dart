@@ -1639,22 +1639,14 @@ class _UnreadDot extends StatefulWidget {
 }
 
 class _UnreadDotState extends State<_UnreadDot> {
-  Timer? _tick;
-
   @override
   void initState() {
     super.initState();
+    // Sahifa ochilganda darhol bir marta. Doimiy yangilash esa
+    // `root_screen.dart` da, butun ilova uchun bitta taymerda —
+    // aks holda ikkovi ham so'rab, so'rovlar ikki barobar
+    // bo'lardi.
     UnreadBadge.instance.refresh();
-    _tick = Timer.periodic(
-      const Duration(seconds: 30),
-      (_) => UnreadBadge.instance.refresh(),
-    );
-  }
-
-  @override
-  void dispose() {
-    _tick?.cancel();
-    super.dispose();
   }
 
   @override

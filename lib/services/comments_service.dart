@@ -297,9 +297,22 @@ class CommentsController extends ChangeNotifier {
       final r = await http
           .delete(Uri.parse('$_base/$id'), headers: _headers())
           .timeout(const Duration(seconds: 20));
+      final j = jsonDecode(r.body) as Map<String, dynamic>;
       if (r.statusCode != 200) {
-        final j = jsonDecode(r.body) as Map<String, dynamic>;
         return '${j['error'] ?? 'O\'chirilmadi'}';
+      }
+      // ── JAVOB O'CHDI — BOSH IZOHNING HISOBI KAMAYADI ────────
+      //
+      // TOPILGAN XATO (foydalanuvchi: "izoh o'chirilsa ham bitta
+      // javob deb chiqmasligi kerak"). Server `parent_id` ni
+      // qaytaradi, ya'ni qaysi izohning hisobi kamayishini ilova
+      // taxmin qilmaydi.
+      final parent = '${j['parent_id'] ?? ''}';
+      if (parent.isNotEmpty) {
+        final idx = _items.indexWhere((x) => x.id == parent);
+        if (idx >= 0 && _items[idx].replyCount > 0) {
+          _items[idx].replyCount -= 1;
+        }
       }
       _items.removeWhere((c) => c.id == id);
       for (final list in _replies.values) {
@@ -379,6 +392,22 @@ class CommentsController extends ChangeNotifier {
     }
     return null;
   }
+}
+
+/// Aniq vaqt: `14:32` (bugun) yoki `12.09.2026`.
+///
+/// TALAB (foydalanuvchi): "izoh yozganda vaqti ham ko'rsatilsin".
+/// "7 daqiqa oldin" ko'z uchun qulay, lekin aniq vaqtni bermaydi —
+/// shu sabab yonida shu ham turadi.
+String commentClock(int ms) {
+  if (ms <= 0) return '';
+  final d = DateTime.fromMillisecondsSinceEpoch(ms);
+  final now = DateTime.now();
+  String two(int n) => n.toString().padLeft(2, '0');
+  if (d.year == now.year && d.month == now.month && d.day == now.day) {
+    return '${two(d.hour)}:${two(d.minute)}';
+  }
+  return '${two(d.day)}.${two(d.month)}.${d.year} ${two(d.hour)}:${two(d.minute)}';
 }
 
 /// "3 daqiqa oldin" ko'rinishidagi vaqt.

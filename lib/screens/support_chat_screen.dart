@@ -14,11 +14,22 @@
 // Farqi faqat kimning xabari qaysi tomonda turishida: o'zining
 // xabari O'NGDA, suhbatdoshiniki CHAPDA — Telegram'dagidek.
 
-import 'package:flutter/material.dart';
+import 'dart:convert';
+import 'dart:io';
 
+import 'package:cached_network_image/cached_network_image.dart';
+import 'package:dio/dio.dart';
+import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+import 'package:image_picker/image_picker.dart';
+
+import '../services/auth_service.dart';
+import '../services/storage_janitor.dart';
 import '../services/support_service.dart';
 import '../theme/app_background.dart';
 import '../widgets/glass.dart';
+import 'media_view_screen.dart';
+import 'public_profile_screen.dart';
 
 class SupportChatScreen extends StatefulWidget {
   /// Admin boshqa odamning suhbatini ochsa — o'sha odamning raqami.
@@ -27,10 +38,14 @@ class SupportChatScreen extends StatefulWidget {
   /// Sarlavhada ko'rinadigan nom.
   final String title;
 
+  /// Sarlavhadagi kichik rasm (admin ko'rinishida).
+  final String photoUrl;
+
   const SupportChatScreen({
     super.key,
     this.userId,
     this.title = 'Admin bilan bog\'lanish',
+    this.photoUrl = '',
   });
 
   @override
@@ -42,6 +57,18 @@ class _SupportChatScreenState extends State<SupportChatScreen> {
   final _input = TextEditingController();
   final _scroll = ScrollController();
   bool _sending = false;
+
+  // ── FAYL YUKLASH HOLATI ──────────────────────────────────
+  //
+  // TALAB (foydalanuvchi): "video yoki rasm yuborilayotganda
+  // huddi admin video yuklagandagidek progress chiziqi va foiz
+  // ko'rsatilsin, lekin progress chizig'i AYLANA ko'rinishda
+  // bo'lsin".
+  //
+  // Shu sabab bu yerda ikkita son: 0..1 oralig'idagi ulush
+  // (aylana shuni chizadi) va ko'rsatiladigan foiz.
+  bool _uploading = false;
+  double _upProgress = 0;
 
   @override
   void initState() {
@@ -92,6 +119,163 @@ class _SupportChatScreenState extends State<SupportChatScreen> {
     });
   }
 
+  bool get _isAdmin => AuthService.instance.user?.isAdmin == true;
+
+  /// Rasm yoki video tanlab, B2'ga yuklaydi va xabar qilib
+  /// yuboradi.
+  ///
+  /// Yo'l admin panelidagi video yuklash bilan BIR XIL: worker
+  /// bir martalik B2 token beradi, fayl esa TO'G'RIDAN B2'ga
+  /// oqim bo'lib ketadi (`dio`). Ya'ni fayl worker orqali
+  /// o'tmaydi va xotiraga to'liq yuklanmaydi.
+  Future<void> _pickAndSend({required bool video}) async {
+    if (_uploading) return;
+    final picker = ImagePicker();
+    final picked = video
+        ? await picker.pickVideo(source: ImageSource.gallery)
+        : await picker.pickImage(source: ImageSource.gallery, imageQuality: 85);
+    if (picked == null) return;
+
+    final file = File(picked.path);
+    final size = await file.length();
+    // `image_picker` tanlangan faylni ilovaning vaqtinchalik
+    // papkasiga NUSXALAYDI — yuklash tugashi bilan nusxa
+    // o'chiriladi (`storage_janitor.dart` izohiga qarang).
+    Future<void> dropCopy() => StorageJanitor.dropPicked(picked.path);
+
+    final ext = picked.path.split('.').last.toLowerCase();
+    final type = video ? 'video' : 'image';
+    final ct = video
+        ? (ext == 'mkv' ? 'video/x-matroska' : 'video/mp4')
+        : (ext == 'png' ? 'image/png' : 'image/jpeg');
+    final name =
+        'chat_${DateTime.now().millisecondsSinceEpoch}_${_chat.userId ?? 0}.$ext';
+
+    setState(() {
+      _uploading = true;
+      _upProgress = 0;
+    });
+
+    try {
+      final tok = await http
+          .post(Uri.parse('$kApiBase/api/upload-token'))
+          .timeout(const Duration(seconds: 25));
+      if (tok.statusCode != 200) throw 'Token olinmadi';
+      final td = jsonDecode(tok.body) as Map<String, dynamic>;
+
+      final res = await Dio().post(
+        td['uploadUrl'] as String,
+        data: file.openRead(),
+        options: Options(
+          headers: {
+            'Authorization': td['authorizationToken'],
+            'X-Bz-File-Name': name,
+            'Content-Type': ct,
+            'X-Bz-Content-Sha1': 'do_not_verify',
+            'Content-Length': size,
+          },
+          receiveDataWhenStatusError: true,
+        ),
+        onSendProgress: (sent, total) {
+          if (!mounted) return;
+          setState(() =>
+              _upProgress = total > 0 ? sent / total : sent / (size == 0 ? 1 : size));
+        },
+      );
+      if (res.statusCode != 200) throw 'B2 xato (${res.statusCode})';
+      final data = res.data is String
+          ? jsonDecode(res.data as String)
+          : res.data as Map;
+      final b2Name = '${data['fileName']}';
+
+      // Fayl joyida — endi xabarning o'zi yuboriladi.
+      final err = await _chat.send(
+        _input.text.trim(),
+        mediaFile: b2Name,
+        mediaType: type,
+      );
+      if (!mounted) return;
+      if (err != null) {
+        _snack(err);
+      } else {
+        _input.clear();
+        _toBottom();
+      }
+    } catch (e) {
+      if (mounted) _snack('Yuborilmadi: $e');
+    } finally {
+      await dropCopy();
+      if (mounted) {
+        setState(() {
+          _uploading = false;
+          _upProgress = 0;
+        });
+      }
+    }
+  }
+
+  void _snack(String text) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: AppColors.card,
+        content: Text(text, style: const TextStyle(color: Colors.white)),
+      ),
+    );
+  }
+
+  /// ADMIN: xabarni butunlay o'chiradi (uzoq bosilganda).
+  Future<void> _deleteMessage(ChatMessage m) async {
+    if (!_isAdmin) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      barrierColor: Colors.black54,
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.transparent,
+        insetPadding: const EdgeInsets.symmetric(horizontal: 28),
+        child: Glass(
+          borderRadius: 22,
+          padding: const EdgeInsets.fromLTRB(22, 22, 22, 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'Xabar butunlay o\'chirilsinmi?',
+                textAlign: TextAlign.center,
+                style:
+                    TextStyle(color: Colors.white, fontSize: 15, height: 1.4),
+              ),
+              const SizedBox(height: 18),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: () => Navigator.of(ctx).pop(false),
+                      child: const Text('Yo\'q'),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: FilledButton(
+                      onPressed: () => Navigator.of(ctx).pop(true),
+                      style: FilledButton.styleFrom(
+                          backgroundColor: Colors.red.shade600),
+                      child: const Text('Ha'),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (ok != true) return;
+    final err = await _chat.removeMessage(m.id);
+    if (err != null) _snack(err);
+  }
+
   Future<void> _send() async {
     if (_sending) return;
     final text = _input.text.trim();
@@ -101,13 +285,7 @@ class _SupportChatScreenState extends State<SupportChatScreen> {
     if (!mounted) return;
     setState(() => _sending = false);
     if (err != null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          behavior: SnackBarBehavior.floating,
-          backgroundColor: AppColors.card,
-          content: Text(err, style: const TextStyle(color: Colors.white)),
-        ),
-      );
+      _snack(err);
       return;
     }
     _input.clear();
@@ -124,11 +302,36 @@ class _SupportChatScreenState extends State<SupportChatScreen> {
           backgroundColor: Colors.transparent,
           elevation: 0,
           iconTheme: const IconThemeData(color: Colors.white),
-          title: Text(
-            widget.title,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(color: Colors.white, fontSize: 17),
+          titleSpacing: 0,
+          title: Row(
+            children: [
+              // ── RASMGA BOSSA — PROFIL ─────────────────────────
+              //
+              // TALAB: "chatdagi profil rasmi ustiga bosganda
+              // profili ochilib profil to'liq ko'rinsin".
+              if (widget.userId != null) ...[
+                GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) =>
+                          PublicProfileScreen(userId: widget.userId!),
+                    ),
+                  ),
+                  child: _TitleAvatar(
+                      url: widget.photoUrl, name: widget.title),
+                ),
+                const SizedBox(width: 10),
+              ],
+              Expanded(
+                child: Text(
+                  widget.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: Colors.white, fontSize: 17),
+                ),
+              ),
+            ],
           ),
         ),
         body: SafeArea(
@@ -198,7 +401,20 @@ class _SupportChatScreenState extends State<SupportChatScreen> {
         // O'z xabarim o'ngda. Admin ekranida "o'ziniki" — admin
         // yozganlari; foydalanuvchi ekranida esa aksincha.
         final mine = _chat.isAdminView ? m.fromAdmin : !m.fromAdmin;
-        return _Bubble(message: m, mine: mine);
+        return _Bubble(
+          message: m,
+          mine: mine,
+          // Admin istalgan xabarni uzoq bosib o'chira oladi.
+          onLongPress: _isAdmin ? () => _deleteMessage(m) : null,
+          onOpenMedia: () => Navigator.of(context).push(
+            MaterialPageRoute<void>(
+              builder: (_) => MediaViewScreen(
+                url: m.mediaUrl,
+                type: m.mediaType,
+              ),
+            ),
+          ),
+        );
       },
     );
   }
@@ -211,16 +427,33 @@ class _SupportChatScreenState extends State<SupportChatScreen> {
           top: BorderSide(color: Colors.white.withValues(alpha: 0.08)),
         ),
       ),
-      padding: EdgeInsets.fromLTRB(
-        12,
-        8,
-        12,
-        // Klaviatura ochilganda qator uning ustida turadi.
-        8 + MediaQuery.viewInsetsOf(context).bottom,
-      ),
+      // ── KLAVIATURA JOYINI `Scaffold` O'ZI OCHADI ──────────
+      //
+      // TOPILGAN XATO (foydalanuvchi: "yozadigan oyna judayam
+      // yuqoriga ko'tarilib ketgan").
+      //
+      // `Scaffold` standart holatda `resizeToAvoidBottomInset:
+      // true` bilan ishlaydi, ya'ni klaviatura ochilganda TANANI
+      // o'zi qisqartiradi. Bu yerda esa ustiga YANA klaviatura
+      // balandligi qo'shilardi — natijada qator ikki barobar
+      // yuqoriga sakrab, ekranning tepasiga chiqib ketardi.
+      //
+      // Shu sabab bu yerda klaviaturaga umuman tegilmaydi.
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
+          // ── RASM / VIDEO BIRIKTIRISH ────────────────────────
+          //
+          // Yuklash ketayotganda tugma o'rnida AYLANA progress va
+          // uning ichida foiz turadi (foydalanuvchi talabi).
+          _AttachButton(
+            uploading: _uploading,
+            progress: _upProgress,
+            onImage: () => _pickAndSend(video: false),
+            onVideo: () => _pickAndSend(video: true),
+          ),
+          const SizedBox(width: 6),
           Expanded(
             child: Container(
               decoration: BoxDecoration(
@@ -284,15 +517,69 @@ class _SupportChatScreenState extends State<SupportChatScreen> {
   }
 }
 
+/// Sarlavhadagi kichik rasm.
+class _TitleAvatar extends StatelessWidget {
+  final String url;
+  final String name;
+  const _TitleAvatar({required this.url, required this.name});
+
+  @override
+  Widget build(BuildContext context) {
+    const size = 34.0;
+    final letter = name.trim().isEmpty
+        ? '?'
+        : name.trim().characters.first.toUpperCase();
+    final fallback = Container(
+      width: size,
+      height: size,
+      alignment: Alignment.center,
+      color: AppColors.cardAlt,
+      child: Text(
+        letter,
+        style: TextStyle(
+          color: Colors.white.withValues(alpha: 0.7),
+          fontSize: 14,
+          fontWeight: FontWeight.w800,
+        ),
+      ),
+    );
+    return ClipOval(
+      child: SizedBox(
+        width: size,
+        height: size,
+        child: url.isEmpty
+            ? fallback
+            : CachedNetworkImage(
+                imageUrl: url,
+                fit: BoxFit.cover,
+                memCacheWidth: 110,
+                placeholder: (_, __) => fallback,
+                errorWidget: (_, __, ___) => fallback,
+              ),
+      ),
+    );
+  }
+}
+
 /// Bitta xabar puffagi.
 class _Bubble extends StatelessWidget {
   final ChatMessage message;
   final bool mine;
 
-  const _Bubble({required this.message, required this.mine});
+  /// Admin uchun — uzoq bosilganda o'chirish.
+  final VoidCallback? onLongPress;
+  final VoidCallback onOpenMedia;
+
+  const _Bubble({
+    required this.message,
+    required this.mine,
+    required this.onOpenMedia,
+    this.onLongPress,
+  });
 
   @override
   Widget build(BuildContext context) {
+    final m = message;
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
       child: Row(
@@ -300,52 +587,237 @@ class _Bubble extends StatelessWidget {
             mine ? MainAxisAlignment.end : MainAxisAlignment.start,
         children: [
           Flexible(
-            child: Container(
-              constraints: BoxConstraints(
-                maxWidth: MediaQuery.sizeOf(context).width * 0.76,
-              ),
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 13, vertical: 9),
-              decoration: BoxDecoration(
-                color: mine
-                    ? AppColors.accent.withValues(alpha: 0.92)
-                    : Colors.white.withValues(alpha: 0.09),
-                borderRadius: BorderRadius.only(
-                  topLeft: const Radius.circular(16),
-                  topRight: const Radius.circular(16),
-                  bottomLeft: Radius.circular(mine ? 16 : 4),
-                  bottomRight: Radius.circular(mine ? 4 : 16),
+            child: GestureDetector(
+              onLongPress: onLongPress,
+              child: Container(
+                constraints: BoxConstraints(
+                  maxWidth: MediaQuery.sizeOf(context).width * 0.76,
                 ),
-                border: mine
-                    ? null
-                    : Border.all(
-                        color: Colors.white.withValues(alpha: 0.10)),
+                padding: EdgeInsets.fromLTRB(
+                    m.hasMedia ? 4 : 13, m.hasMedia ? 4 : 9, 
+                    m.hasMedia ? 4 : 13, 7),
+                decoration: BoxDecoration(
+                  color: mine
+                      ? AppColors.accent.withValues(alpha: 0.92)
+                      : Colors.white.withValues(alpha: 0.09),
+                  borderRadius: BorderRadius.only(
+                    topLeft: const Radius.circular(16),
+                    topRight: const Radius.circular(16),
+                    bottomLeft: Radius.circular(mine ? 16 : 4),
+                    bottomRight: Radius.circular(mine ? 4 : 16),
+                  ),
+                  border: mine
+                      ? null
+                      : Border.all(
+                          color: Colors.white.withValues(alpha: 0.10)),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (m.hasMedia) _media(context),
+                    if (m.body.isNotEmpty)
+                      Padding(
+                        padding: EdgeInsets.fromLTRB(
+                            m.hasMedia ? 9 : 0, m.hasMedia ? 7 : 0,
+                            m.hasMedia ? 9 : 0, 0),
+                        child: Align(
+                          alignment: Alignment.centerLeft,
+                          child: Text(
+                            m.body,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 14,
+                              height: 1.38,
+                            ),
+                          ),
+                        ),
+                      ),
+                    // ── VAQT ────────────────────────────────────
+                    //
+                    // TALAB (foydalanuvchi): "adminga xabar
+                    // yuborganda vaqti ham ko'rsatilsin".
+                    Padding(
+                      padding: EdgeInsets.only(
+                          top: 3, right: m.hasMedia ? 9 : 0),
+                      child: Text(
+                        chatTime(m.createdAt),
+                        style: TextStyle(
+                          color: Colors.white.withValues(alpha: 0.6),
+                          fontSize: 10.5,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
               ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    message.body,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 14,
-                      height: 1.38,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Rasm yoki videoning kichik ko'rinishi.
+  ///
+  /// Video uchun qora fon va o'rtada play belgisi — bosilganda
+  /// sodda ko'ruvchi ochiladi (`media_view_screen.dart`).
+  Widget _media(BuildContext context) {
+    final m = message;
+    return GestureDetector(
+      onTap: onOpenMedia,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(13),
+        child: Container(
+          constraints: const BoxConstraints(maxHeight: 240, minWidth: 150),
+          color: Colors.black.withValues(alpha: 0.35),
+          child: m.isVideo
+              ? SizedBox(
+                  height: 150,
+                  width: 220,
+                  child: Center(
+                    child: Container(
+                      width: 52,
+                      height: 52,
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: 0.55),
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                            color: Colors.white.withValues(alpha: 0.3)),
+                      ),
+                      child: const Icon(Icons.play_arrow_rounded,
+                          size: 32, color: Colors.white),
                     ),
                   ),
-                  const SizedBox(height: 3),
-                  Text(
-                    chatTime(message.createdAt),
-                    style: TextStyle(
-                      color: Colors.white.withValues(alpha: 0.55),
-                      fontSize: 10.5,
+                )
+              : CachedNetworkImage(
+                  imageUrl: m.mediaUrl,
+                  fit: BoxFit.cover,
+                  memCacheWidth: 700,
+                  placeholder: (_, __) => const SizedBox(
+                    height: 150,
+                    width: 220,
+                    child: Center(
+                      child: SizedBox(
+                        width: 22,
+                        height: 22,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Colors.white54),
+                      ),
                     ),
+                  ),
+                  errorWidget: (_, __, ___) => const SizedBox(
+                    height: 150,
+                    width: 220,
+                    child: Icon(Icons.broken_image_outlined,
+                        color: Colors.white38),
+                  ),
+                ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Biriktirish tugmasi — yuklash ketayotganda AYLANA progress.
+class _AttachButton extends StatelessWidget {
+  final bool uploading;
+  final double progress;
+  final VoidCallback onImage;
+  final VoidCallback onVideo;
+
+  const _AttachButton({
+    required this.uploading,
+    required this.progress,
+    required this.onImage,
+    required this.onVideo,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (uploading) {
+      final pct = (progress.clamp(0.0, 1.0) * 100).round();
+      return SizedBox(
+        width: 42,
+        height: 42,
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            // Aylana progress — talab AYNAN shunday edi.
+            SizedBox(
+              width: 42,
+              height: 42,
+              child: CircularProgressIndicator(
+                // Hali bitta ham bayt ketmagan bo'lsa cheksiz
+                // (aylanuvchi) ko'rinish: soxta 0% turmaydi.
+                value: progress <= 0 ? null : progress.clamp(0.0, 1.0),
+                strokeWidth: 3,
+                backgroundColor: Colors.white.withValues(alpha: 0.12),
+                valueColor: AlwaysStoppedAnimation(AppColors.accent),
+              ),
+            ),
+            Text(
+              '$pct',
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 11,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => showModalBottomSheet<void>(
+        context: context,
+        backgroundColor: Colors.transparent,
+        builder: (ctx) => SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(14, 0, 14, 14),
+            child: Glass(
+              borderRadius: 20,
+              blur: 18,
+              padding: const EdgeInsets.symmetric(vertical: 6),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  ListTile(
+                    leading: const Icon(Icons.image_rounded,
+                        color: Colors.white70),
+                    title: const Text('Rasm yuborish',
+                        style: TextStyle(color: Colors.white)),
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      onImage();
+                    },
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.videocam_rounded,
+                        color: Colors.white70),
+                    title: const Text('Video yuborish',
+                        style: TextStyle(color: Colors.white)),
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      onVideo();
+                    },
                   ),
                 ],
               ),
             ),
           ),
-        ],
+        ),
+      ),
+      child: Container(
+        width: 42,
+        height: 42,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: Colors.white.withValues(alpha: 0.08),
+        ),
+        child: const Icon(Icons.attach_file_rounded,
+            size: 20, color: Colors.white70),
       ),
     );
   }

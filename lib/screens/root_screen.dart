@@ -52,6 +52,7 @@ class _RootScreenState extends State<RootScreen>
   // sakramaydi: tugma har doim oradagi hamma belgini birin-ketin
   // kattalashtirib o'tadi.
   late final Ticker _navTicker;
+  Timer? _unreadTimer;
   double _navFrom = 0;
   double _navTo = 0;
 
@@ -72,6 +73,20 @@ class _RootScreenState extends State<RootScreen>
     // chiqarilgan bo'lishi mumkin).
     WidgetsBinding.instance.addObserver(this);
     _navTicker = createTicker(_onNavTick);
+
+    // ── O'QILMAGAN XABARLAR NUQTASI ──────────────────────────
+    //
+    // Taymer AYNAN shu yerda: nuqta ham pastki paneldagi "Profil"
+    // tugmasida, ham profil sahifasida, ham admin panelida
+    // ko'rinadi. Ilgari u profil sahifasining ichida edi va
+    // "sahifa qurilganmi" degan tasodifga bog'liq bo'lib qolardi.
+    //
+    // So'rov juda kichik — faqat SON qaytadi (`/api/chat/unread`).
+    unawaited(UnreadBadge.instance.refresh());
+    _unreadTimer = Timer.periodic(
+      const Duration(seconds: 30),
+      (_) => UnreadBadge.instance.refresh(),
+    );
 
     // ── ADMIN PANELIGA QAYTISH ───────────────────────────────
     //
@@ -120,6 +135,7 @@ class _RootScreenState extends State<RootScreen>
 
   @override
   void dispose() {
+    _unreadTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     _navTicker.dispose();
     _navPos.dispose();
@@ -358,6 +374,48 @@ double bottomNavHeight(BuildContext context) {
   return inset + 74;
 }
 
+/// Ikonka va uning o'ng yuqorisidagi kichik nuqta.
+///
+/// Nuqta ikonkaning O'LCHAMIGA ta'sir qilmaydi (`Stack` +
+/// `clipBehavior: none`), ya'ni yonidagi tugmalar qimirlamaydi.
+class _IconWithDot extends StatelessWidget {
+  final IconData icon;
+  final Color color;
+  final bool dot;
+
+  const _IconWithDot({
+    required this.icon,
+    required this.color,
+    required this.dot,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        Icon(icon, size: 22, color: color),
+        if (dot)
+          Positioned(
+            right: -2,
+            top: -1,
+            child: Container(
+              width: 9,
+              height: 9,
+              decoration: BoxDecoration(
+                color: AppColors.accent,
+                shape: BoxShape.circle,
+                // Panelning o'zi ham qizg'ish bo'lishi mumkin —
+                // oq halqa nuqtani har qanday fonda ajratib turadi.
+                border: Border.all(color: Colors.white, width: 1.4),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
 class _BottomNav extends StatefulWidget {
   final int currentIndex;
 
@@ -505,10 +563,32 @@ class _BottomNavState extends State<_BottomNav>
                               child: Column(
                                 mainAxisAlignment: MainAxisAlignment.center,
                                 children: [
+                                  // ── O'QILMAGAN XABAR NUQTASI ──
+                                  //
+                                  // TALAB (foydalanuvchi): "admin
+                                  // foydalanuvchiga xabar yuborgan
+                                  // bo'lsa profil TUGMASINING ustida
+                                  // ham nuqta yonib turishi kerak",
+                                  // va admin uchun ham xuddi shunday.
+                                  //
+                                  // Manba bitta (`UnreadBadge`), ya'ni
+                                  // profil sahifasidagi nuqta bilan
+                                  // bu nuqta hech qachon bir-biriga
+                                  // zid bo'lib qolmaydi.
                                   Transform.scale(
                                     scale: scale,
-                                    child: Icon(_items[i].icon,
-                                        size: 22, color: color),
+                                    child: _items[i].label == 'Profil'
+                                        ? AnimatedBuilder(
+                                            animation: UnreadBadge.instance,
+                                            builder: (context, child) =>
+                                                _IconWithDot(
+                                              icon: _items[i].icon,
+                                              color: color,
+                                              dot: UnreadBadge.instance.has,
+                                            ),
+                                          )
+                                        : Icon(_items[i].icon,
+                                            size: 22, color: color),
                                   ),
                                   // ── YOZUV HAM SILLIQ OCHILADI ──
                                   //

@@ -23,6 +23,7 @@ import 'package:flutter/material.dart';
 
 import '../services/auth_service.dart';
 import '../services/comments_service.dart';
+import '../screens/public_profile_screen.dart';
 import 'glass.dart';
 
 class CommentsTab extends StatefulWidget {
@@ -256,13 +257,19 @@ class _CommentsTabState extends State<CommentsTab> {
           top: BorderSide(color: Colors.white.withValues(alpha: 0.08)),
         ),
       ),
-      padding: EdgeInsets.fromLTRB(
-        12,
-        8,
-        12,
-        // Klaviatura ochilganda qator uning ustida turadi.
-        8 + MediaQuery.viewInsetsOf(context).bottom,
-      ),
+      // ── KLAVIATURA JOYINI `Scaffold` O'ZI OCHADI ──────────
+      //
+      // TOPILGAN XATO (foydalanuvchi: "yozadigan oyna judayam
+      // yuqoriga ko'tarilib ketgan").
+      //
+      // `Scaffold` standart holatda `resizeToAvoidBottomInset:
+      // true` bilan ishlaydi, ya'ni klaviatura ochilganda TANANI
+      // o'zi qisqartiradi. Bu yerda esa ustiga YANA klaviatura
+      // balandligi qo'shilardi — natijada qator ikki barobar
+      // yuqoriga sakrab, ekranning tepasiga chiqib ketardi.
+      //
+      // Shu sabab bu yerda klaviaturaga umuman tegilmaydi.
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -523,7 +530,18 @@ class _CommentRow extends StatelessWidget {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _Avatar(url: c.photoUrl, size: size, name: c.name),
+        // ── PROFILGA O'TISH ────────────────────────────────────
+        //
+        // TALAB (foydalanuvchi): "izoh yozgan odamning profiliga
+        // bosib profilni ko'rsa bo'ladigan qil".
+        //
+        // Rasm ham, ism ham bosiladi — odam qaysinisini bossa ham
+        // ishlaydi.
+        GestureDetector(
+          onTap: () => _openProfile(context, c.userId),
+          behavior: HitTestBehavior.opaque,
+          child: _Avatar(url: c.photoUrl, size: size, name: c.name),
+        ),
         const SizedBox(width: 10),
         Expanded(
           child: Column(
@@ -533,23 +551,37 @@ class _CommentRow extends StatelessWidget {
               Row(
                 children: [
                   Flexible(
-                    child: Text(
-                      c.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: Colors.white.withValues(alpha: 0.92),
-                        fontSize: small ? 12 : 12.5,
-                        fontWeight: FontWeight.w700,
+                    child: GestureDetector(
+                      onTap: () => _openProfile(context, c.userId),
+                      behavior: HitTestBehavior.opaque,
+                      child: Text(
+                        c.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: Colors.white.withValues(alpha: 0.92),
+                          fontSize: small ? 12 : 12.5,
+                          fontWeight: FontWeight.w700,
+                        ),
                       ),
                     ),
                   ),
                   const SizedBox(width: 6),
-                  Text(
-                    commentAgo(c.createdAt),
-                    style: TextStyle(
-                      color: Colors.white.withValues(alpha: 0.38),
-                      fontSize: 11,
+                  // ── QANCHA VAQT OLDIN VA AYNAN QACHON ────────
+                  //
+                  // TALAB (foydalanuvchi): "izoh yozganda vaqti ham
+                  // ko'rsatilsin". "7 daqiqa oldin" — tez o'qish
+                  // uchun, yonidagi soat esa aniq vaqt uchun.
+                  Flexible(
+                    child: Text(
+                      '${commentAgo(c.createdAt)} · '
+                      '${commentClock(c.createdAt)}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.38),
+                        fontSize: 11,
+                      ),
                     ),
                   ),
                 ],
@@ -599,6 +631,16 @@ class _CommentRow extends StatelessWidget {
       ],
     );
   }
+}
+
+/// Izoh muallifining profilini ochadi.
+void _openProfile(BuildContext context, int userId) {
+  if (userId <= 0) return;
+  Navigator.of(context).push(
+    MaterialPageRoute<void>(
+      builder: (_) => PublicProfileScreen(userId: userId),
+    ),
+  );
 }
 
 class _LikeButton extends StatelessWidget {
