@@ -3,6 +3,7 @@ import '../theme/app_background.dart';
 import '../widgets/glass.dart';
 import '../services/support_service.dart';
 import 'admin_chats_screen.dart';
+import 'admin_users_screen.dart';
 import 'anime_management_screen.dart';
 
 class AdminScreen extends StatelessWidget {
@@ -81,6 +82,18 @@ class AdminScreen extends StatelessWidget {
                               ),
                             );
                           },
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    // ── FOYDALANUVCHILAR ──────────────────────
+                    _AdminButton(
+                      icon: Icons.people_alt_rounded,
+                      label: 'Foydalanuvchilar',
+                      subtitle: 'Balans, obuna, bloklash va izlash',
+                      onTap: () => Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) => const AdminUsersScreen(),
                         ),
                       ),
                     ),

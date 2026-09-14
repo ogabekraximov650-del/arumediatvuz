@@ -5240,6 +5240,249 @@ async fn public_profile(
     ok_nostore(out)
 }
 
+
+// ═══════════════════════════════════════════════════════════════
+//  FOYDALANUVCHILARNI BOSHQARISH (ADMIN)
+// ═══════════════════════════════════════════════════════════════
+//
+// TALAB (foydalanuvchi): "admin paneliga foydalanuvchilarni
+// boshqaradigan bo'lim qo'sh: oxirgi ro'yxatdan o'tgan va oxirgi
+// onlayn bo'lgan vaqti bo'yicha ikkita ro'yxat, yuqorida ID yoki
+// username bilan izlash, balansni qo'lda to'ldirish, bloklash va
+// yana kerakli narsalar".
+//
+// ── HAR BIR AMAL SERVERDA TEKSHIRILADI ──────────────────────
+//
+// Ilovadagi "admin paneli" tugmasi shunchaki ekranni ko'rsatadi.
+// Haqiqiy to'siq esa SHU YERDA: har bir so'rovda `is_admin`
+// qayta tekshiriladi. Ya'ni o'zgartirilgan ilova bilan begona
+// odam birovning balansini o'zgartira olmaydi.
+
+/// Bir sahifada nechta foydalanuvchi.
+const ADMIN_PAGE: i64 = 40;
+
+/// Faqat admin o'tadigan tekshiruv.
+///
+/// Muvaffaqiyatli bo'lsa `None`, aks holda tayyor rad javobi.
+async fn admin_only(req: &Request, env: &Env) -> Result<Option<Response>> {
+    let Some(u) = session_user(env, &bearer(req)).await? else {
+        return Ok(Some(json_resp(&json!({"error": "unauthorized"}), 401)?));
+    };
+    if !is_admin(&u) {
+        return Ok(Some(json_resp(&json!({"error": "forbidden"}), 403)?));
+    }
+    Ok(None)
+}
+
+/// GET /api/admin/users?sort=new|online&q=...&page=N
+async fn admin_users(req: &Request, env: &Env, origin: &str) -> Result<Response> {
+    if let Some(deny) = admin_only(req, env).await? {
+        return Ok(deny);
+    }
+    let url = req.url()?;
+    let q = |k: &str| -> String {
+        url.query_pairs()
+            .find(|(n, _)| n == k)
+            .map(|(_, v)| v.to_string())
+            .unwrap_or_default()
+    };
+
+    // ── IKKI RO'YXAT ──────────────────────────────────────────
+    //
+    // `new`    — oxirgi ro'yxatdan o'tganlar (`created_at`);
+    // `online` — oxirgi onlayn bo'lganlar (`last_login_at`).
+    //
+    // Ustun nomi FOYDALANUVCHIDAN kelmaydi — bu yerda ikkita
+    // aniq qiymatdan biriga aylantiriladi. Aks holda so'rovga
+    // begona matn qo'shib yuborish mumkin bo'lardi.
+    let order = if q("sort") == "new" { "created_at" } else { "last_login_at" };
+
+    let search = q("q").trim().to_string();
+    let page: i64 = q("page").parse().unwrap_or(0).max(0);
+
+    // ── IZLASH: ID YOKI USERNAME ──────────────────────────────
+    //
+    // Raqam yozilsa — ID bo'yicha aniq moslik; matn yozilsa —
+    // username ichidan qidiriladi. Ikkovi ham bitta maydondan
+    // ishlaydi, foydalanuvchi qaysi turini yozganini o'ylab
+    // o'tirmaydi.
+    let by_id: i64 = search.parse().unwrap_or(0);
+    let like = format!("%{}%", search.to_lowercase());
+
+    let (sql, args): (String, Vec<TursoArg>) = if search.is_empty() {
+        (
+            format!(
+                "SELECT id,username,first_name,last_name,avatar_file,
+                        telegram_id,balance,is_banned,created_at,last_login_at
+                   FROM users_db ORDER BY {order} DESC LIMIT ? OFFSET ?"
+            ),
+            vec![TursoArg::int(ADMIN_PAGE), TursoArg::int(page * ADMIN_PAGE)],
+        )
+    } else {
+        (
+            format!(
+                "SELECT id,username,first_name,last_name,avatar_file,
+                        telegram_id,balance,is_banned,created_at,last_login_at
+                   FROM users_db
+                  WHERE id = ? OR LOWER(COALESCE(username,'')) LIKE ?
+                     OR LOWER(COALESCE(first_name,'')) LIKE ?
+                  ORDER BY {order} DESC LIMIT ? OFFSET ?"
+            ),
+            vec![
+                TursoArg::int(by_id), TursoArg::text(&like), TursoArg::text(&like),
+                TursoArg::int(ADMIN_PAGE), TursoArg::int(page * ADMIN_PAGE),
+            ],
+        )
+    };
+
+    let res = turso_exec(env, &sql, args).await?;
+    let cols = res["cols"].as_array().cloned().unwrap_or_default();
+    let rows = res["rows"].as_array().cloned().unwrap_or_default();
+    let items: Vec<Value> = rows.iter().map(|r| {
+        let o = row_to_obj(&cols, r.as_array().unwrap_or(&vec![]));
+        let uid = o["id"].as_i64().unwrap_or(0);
+        let avatar = o["avatar_file"].as_str().unwrap_or("");
+        let photo = if avatar.is_empty() {
+            format!("{origin}/api/avatar/{uid}")
+        } else {
+            format!("{origin}/api/image/{avatar}")
+        };
+        json!({
+            "id": uid,
+            "username": o["username"].as_str().unwrap_or(""),
+            "first_name": o["first_name"].as_str().unwrap_or(""),
+            "last_name": o["last_name"].as_str().unwrap_or(""),
+            "photo_url": photo,
+            "telegram_id": o["telegram_id"].as_i64().unwrap_or(0),
+            "balance": o["balance"].as_i64().unwrap_or(0),
+            "banned": o["is_banned"].as_i64().unwrap_or(0) != 0,
+            "created_at": o["created_at"].as_i64().unwrap_or(0),
+            "last_login_at": o["last_login_at"].as_i64().unwrap_or(0),
+        })
+    }).collect();
+
+    // Umumiy son — ro'yxat tepasida ko'rsatish uchun (izlashsiz).
+    let total = if search.is_empty() {
+        turso_exec(env, "SELECT COUNT(*) FROM users_db", vec![]).await
+            .map(|r| scalar(&r)).unwrap_or(0)
+    } else {
+        items.len() as i64
+    };
+
+    ok_nostore(json!({
+        "items": items,
+        "page": page,
+        "total": total,
+        "has_more": items.len() as i64 >= ADMIN_PAGE,
+    }))
+}
+
+/// POST /api/admin/user/:id — bitta foydalanuvchi ustida amal.
+///
+/// Tanadagi `action`:
+///   * `balance`  — balansga `amount` qo'shadi (manfiy ham bo'ladi);
+///   * `set_balance` — balansni AYNAN `amount` ga tenglaydi;
+///   * `ban` / `unban` — bloklash va ochish;
+///   * `sub`      — `days` kunlik obuna beradi (0 — obunani oladi).
+///
+/// Har bir amal `billing_log` ga yoziladi: keyin "bu pul qayerdan
+/// keldi" degan savol tug'ilmasin.
+async fn admin_user_action(
+    mut req: Request, env: &Env, id: i64,
+) -> Result<Response> {
+    if let Some(deny) = admin_only(&req, env).await? {
+        return Ok(deny);
+    }
+    let b: Value = req.json().await.unwrap_or(json!({}));
+    let action = b["action"].as_str().unwrap_or("");
+    let now = now_ms();
+
+    match action {
+        "balance" | "set_balance" => {
+            let amount = b["amount"].as_i64().unwrap_or(0);
+            let row = if action == "balance" {
+                if amount == 0 {
+                    return json_resp(&json!({"error": "Summa yo'q"}), 400);
+                }
+                turso_exec(env,
+                    "UPDATE users_db SET balance=MAX(COALESCE(balance,0)+?,0)
+                      WHERE id=? RETURNING balance",
+                    vec![TursoArg::int(amount), TursoArg::int(id)]).await?
+            } else {
+                if amount < 0 {
+                    return json_resp(&json!({"error": "Manfiy bo'lmasin"}), 400);
+                }
+                turso_exec(env,
+                    "UPDATE users_db SET balance=? WHERE id=? RETURNING balance",
+                    vec![TursoArg::int(amount), TursoArg::int(id)]).await?
+            };
+            let Some(r) = first_row(&row) else {
+                return json_resp(&json!({"error": "Foydalanuvchi topilmadi"}), 404);
+            };
+            let left = r["balance"].as_i64().unwrap_or(0);
+            // Jurnalga yoziladi — foydalanuvchi ham Tarix oynasida
+            // ko'radi va "pul qayerdan keldi" degan savol qolmaydi.
+            let _ = turso_exec(env,
+                "INSERT INTO billing_log (id,user_id,kind,amount,days,note,created_at)
+                 VALUES (?,?,'topup',?,0,?,?)",
+                vec![
+                    TursoArg::text(&format!("a{}", random_hex(10))),
+                    TursoArg::int(id),
+                    TursoArg::int(if action == "balance" { amount } else { left }),
+                    TursoArg::text("Admin tomonidan"),
+                    TursoArg::int(now),
+                ]).await;
+            ok_nostore(json!({"ok": true, "balance": left}))
+        }
+
+        "ban" | "unban" => {
+            let on = if action == "ban" { 1 } else { 0 };
+            let row = turso_exec(env,
+                "UPDATE users_db SET is_banned=? WHERE id=? RETURNING is_banned",
+                vec![TursoArg::int(on), TursoArg::int(id)]).await?;
+            if first_row(&row).is_none() {
+                return json_resp(&json!({"error": "Foydalanuvchi topilmadi"}), 404);
+            }
+            // Bloklangan odamning sessiyalari DARHOL yopiladi —
+            // aks holda u chiqmaguncha ilovadan foydalanaverardi.
+            if on == 1 {
+                let _ = turso_exec(env, "DELETE FROM sessions_db WHERE user_id=?",
+                    vec![TursoArg::int(id)]).await;
+            }
+            ok_nostore(json!({"ok": true, "banned": on == 1}))
+        }
+
+        "sub" => {
+            let days = b["days"].as_i64().unwrap_or(0);
+            if days <= 0 {
+                let _ = turso_exec(env, "DELETE FROM subs_db WHERE user_id=?",
+                    vec![TursoArg::int(id)]).await;
+                return ok_nostore(json!({"ok": true, "subscription_until": 0}));
+            }
+            // Mavjud obuna USTIGA qo'shiladi.
+            let base = sub_until(env, id).await.max(now);
+            let until = base + days * 86_400_000;
+            let _ = turso_batch(env, &[
+                ("INSERT INTO subs_db (user_id,expires_at,updated_at) VALUES (?,?,?)
+                  ON CONFLICT(user_id) DO UPDATE SET
+                     expires_at=excluded.expires_at, updated_at=excluded.updated_at",
+                 vec![TursoArg::int(id), TursoArg::int(until), TursoArg::int(now)]),
+                ("INSERT INTO billing_log (id,user_id,kind,amount,days,note,created_at)
+                  VALUES (?,?,'subscription',0,?,?,?)",
+                 vec![
+                    TursoArg::text(&format!("a{}", random_hex(10))),
+                    TursoArg::int(id), TursoArg::int(days),
+                    TursoArg::text(&format!("{days} kunlik obuna (admin)")),
+                    TursoArg::int(now),
+                 ]),
+            ]).await;
+            ok_nostore(json!({"ok": true, "subscription_until": until}))
+        }
+
+        _ => json_resp(&json!({"error": "Noma'lum amal"}), 400),
+    }
+}
+
 /// GET /api/billing — balans, obuna, faol havolalar va tarix.
 async fn billing_state(req: Request, env: &Env) -> Result<Response> {
     let Some(u) = session_user(env, &bearer(&req)).await? else {
@@ -6114,7 +6357,10 @@ async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
         || path.starts_with("/api/comments")
         // Yozishma HAR BIR ODAM uchun boshqacha va u katalogga
         // umuman aloqasi yo'q — keshni kuydirmaydi.
-        || path.starts_with("/api/chat");
+        || path.starts_with("/api/chat")
+        // Admin amallari katalogga aloqasi yo'q — keshni
+        // kuydirmaydi.
+        || path.starts_with("/api/admin/");
     let write = matches!(method, Method::Post | Method::Put | Method::Delete) && !auth_path;
     let mut resp = route(req, env, ctx).await?;
 
@@ -6266,6 +6512,18 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
     if method == Method::Delete {
         if let Some(mid) = path.strip_prefix("/api/chat/message/") {
             return chat_del_message(&req, &env, mid).await;
+        }
+    }
+
+    // ── ADMIN: FOYDALANUVCHILARNI BOSHQARISH ──────────────────
+    if path == "/api/admin/users" && method == Method::Get {
+        return admin_users(&req, &env, &origin).await;
+    }
+    if method == Method::Post {
+        if let Some(idv) = path.strip_prefix("/api/admin/user/") {
+            if let Ok(uid) = idv.parse::<i64>() {
+                return admin_user_action(req, &env, uid).await;
+            }
         }
     }
 
