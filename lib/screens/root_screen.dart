@@ -25,6 +25,9 @@ class RootScreen extends StatefulWidget {
   State<RootScreen> createState() => _RootScreenState();
 }
 
+/// `IndexedStack` dagi Katalog sahifasining raqami.
+const int _catalogTab = 2;
+
 class _RootScreenState extends State<RootScreen>
     with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   int _index = 0;
@@ -319,10 +322,35 @@ class _RootScreenState extends State<RootScreen>
             ],
           ),
         ),
-        bottomNavigationBar: _BottomNav(
-          currentIndex: _index,
-          position: _navPos,
-          onTap: _onTabTap,
+        // ── PANEL VA UNGA YOPISHGAN TUGMA ────────────────────
+        //
+        // TALAB (foydalanuvchi): "Filtrlash tugmasi pastdagi
+        // sahifa tugmalari oynasiga yopishib tursin".
+        //
+        // Tugma AYNAN shu yerda, panel bilan BITTA ustunda
+        // chiziladi — ya'ni orasidagi masofa hisoblanmaydi,
+        // shunchaki 10 nuqta bo'sh joy (`CatalogFilterBar`
+        // izohiga qarang). Katalogdan chiqilsa tugma o'zi
+        // yo'qoladi.
+        bottomNavigationBar: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Faqat Katalog sahifasida. `IndexedStack` hamma
+            // sahifani tirik saqlaydi, ya'ni Katalogdan chiqilsa
+            // ham u "men bormar" deb turaveradi — shuning uchun
+            // ko'rsatishni SAHIFA RAQAMI hal qiladi.
+            if (_index == _catalogTab)
+              AnimatedBuilder(
+                animation: CatalogFilterBar.instance,
+                builder: (context, _) =>
+                    CatalogFilterBar.instance.build(context),
+              ),
+            _BottomNav(
+              currentIndex: _index,
+              position: _navPos,
+              onTap: _onTabTap,
+            ),
+          ],
         ),
       ),
     );

@@ -33,7 +33,6 @@ import '../services/seasons_repo.dart';
 import '../widgets/aru_logo.dart';
 import '../widgets/glass.dart';
 import 'home_screen.dart' show SeasonCard, openSeasonFromAnywhere;
-import 'root_screen.dart' show bottomNavHeight;
 
 /// Tepadagi bitta bo'lim (tab).
 enum _Tab {
@@ -109,13 +108,26 @@ class _CatalogScreenState extends State<CatalogScreen> {
   void initState() {
     super.initState();
     SeasonsRepo.instance.load();
+    // Tugma pastki panelning YONIDA chiziladi (`CatalogFilterBar`
+    // izohiga qarang) — shu sabab u yerga o'zimizni tanishtiramiz.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _publish());
   }
 
   @override
   void dispose() {
+    CatalogFilterBar.instance.hide();
     _pages.dispose();
     _tabScroll.dispose();
     super.dispose();
+  }
+
+  /// Tugmaning holatini pastki panelga uzatadi.
+  void _publish() {
+    CatalogFilterBar.instance.show(
+      count: _filter.count,
+      onOpen: _openFilter,
+      onClear: _clearFilter,
+    );
   }
 
   /// Tugma bosildi — sahifa suzib o'tadi.
@@ -230,9 +242,13 @@ class _CatalogScreenState extends State<CatalogScreen> {
     );
     if (res == null || !mounted) return;
     setState(() => _filter = res);
+    _publish();
   }
 
-  void _clearFilter() => setState(() => _filter = const CatalogFilter());
+  void _clearFilter() {
+    setState(() => _filter = const CatalogFilter());
+    _publish();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -240,94 +256,37 @@ class _CatalogScreenState extends State<CatalogScreen> {
       animation: Listenable.merge(
           [SeasonsRepo.instance, OfflineLibrary.instance]),
       builder: (context, _) {
-        return LayoutBuilder(builder: (context, box) {
-          return Stack(
+        return Column(
           children: [
-            Column(
-              children: [
-                _Header(offline: OfflineLibrary.instance.isOffline),
-                _TabBar(
-                  tabs: _tabs,
-                  index: _index,
-                  keys: _tabKeys,
-                  controller: _tabScroll,
-                  onTap: _goTo,
-                ),
-                Expanded(
-                  // Barmoq bilan surib o'tkaziladi (talab).
-                  child: PageView.builder(
-                    controller: _pages,
-                    onPageChanged: _onPageChanged,
-                    itemCount: _tabs.length,
-                    itemBuilder: (context, i) => _Grid(
-                      // Oxirgi qator tugma va panel ostida qolmasin.
-                      bottomPad: _filterBottom(context, box.maxHeight) + 56,
-                      rows: _listFor(_tabs[i]),
-                      loading: SeasonsRepo.instance.isLoading,
-                      filtered: !_filter.isEmpty,
-                      onRefresh: SeasonsRepo.instance.refresh,
-                    ),
-                  ),
-                ),
-              ],
+            _Header(offline: OfflineLibrary.instance.isOffline),
+            _TabBar(
+              tabs: _tabs,
+              index: _index,
+              keys: _tabKeys,
+              controller: _tabScroll,
+              onTap: _goTo,
             ),
-
-            // ── FILTRLASH TUGMASI ──────────────────────────────
-            //
-            // TALAB: "sahifaning pastki qismida, sahifa tugmalari
-            // oynasiga YOPISHIB tursin".
-            //
-            // TOPILGAN XATO: tugma panelga yopishmay, o'rtada osilib
-            // qolgan edi. Sabab — chekinish IKKI MARTA hisoblangan.
-            //
-            // `Scaffold(extendBody: true)` bo'lsa sahifa tanasi panel
-            // ORTIGA cho'ziladi va tugmani ko'tarish uchun butun panel
-            // balandligi kerak. Agar cho'zilmasa — tana allaqachon
-            // panelning TEPASIDA tugaydi va hech narsa qo'shish shart
-            // emas. Ilgari ikkinchi holatda ham butun panel balandligi
-            // qo'shilardi — tugma o'sha bo'yicha yuqoriga sakrardi.
-            //
-            // Endi taxmin qilinmaydi, O'LCHANADI: ekran balandligidan
-            // tananing haqiqiy balandligi ayiriladi. Ayirma — tana
-            // tagida allaqachon "yeyilgan" joy. Qolgani esa tugmani
-            // panel ustiga qo'yish uchun kerak bo'lgan masofa.
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: _filterBottom(context, box.maxHeight),
-              child: Center(
-                child: _FilterButton(
-                  count: _filter.count,
-                  onTap: _openFilter,
-                  onClear: _clearFilter,
+            Expanded(
+              // Barmoq bilan surib o'tkaziladi (talab).
+              child: PageView.builder(
+                controller: _pages,
+                onPageChanged: _onPageChanged,
+                itemCount: _tabs.length,
+                itemBuilder: (context, i) => _Grid(
+                  rows: _listFor(_tabs[i]),
+                  loading: SeasonsRepo.instance.isLoading,
+                  filtered: !_filter.isEmpty,
+                  onRefresh: SeasonsRepo.instance.refresh,
                 ),
               ),
             ),
           ],
         );
-        });
       },
     );
   }
-
-  /// Tugma pastdan qancha yuqorida tursin (yuqoridagi izohga qarang).
-  ///
-  /// `bodyHeight` — sahifa tanasining HAQIQIY balandligi.
-  double _filterBottom(BuildContext context, double bodyHeight) {
-    final view = View.of(context);
-    final dpr = view.devicePixelRatio <= 0 ? 1.0 : view.devicePixelRatio;
-    final screen = view.physicalSize.height / dpr;
-    final top = view.padding.top / dpr;
-
-    // Tana tagida allaqachon bo'sh qolgan joy.
-    final eaten = screen - top - bodyHeight;
-    final need = bottomNavHeight(context) - eaten;
-
-    // 8 — panel bilan tugma orasidagi ozgina nafas. Manfiy chiqsa
-    // (o'lchov kutilmagan bo'lsa) tugma baribir ko'rinib turadi.
-    return need < 8 ? 8.0 : need + 8;
-  }
 }
+
 
 // ══════════════════════════════════════════════════════════════
 //  TEPA: LOGOTIP VA NOM
@@ -480,15 +439,12 @@ class _TabBar extends StatelessWidget {
 // ══════════════════════════════════════════════════════════════
 
 class _Grid extends StatelessWidget {
-  /// Pastdagi bo'sh joy: "Filtrlash" tugmasi va sahifa tugmalari.
-  final double bottomPad;
   final List<Map<String, dynamic>> rows;
   final bool loading;
   final bool filtered;
   final Future<void> Function() onRefresh;
 
   const _Grid({
-    required this.bottomPad,
     required this.rows,
     required this.loading,
     required this.filtered,
@@ -547,7 +503,10 @@ class _Grid extends StatelessWidget {
           : GridView.builder(
               physics: const BouncingScrollPhysics(
                   parent: AlwaysScrollableScrollPhysics()),
-              padding: EdgeInsets.fromLTRB(16, 6, 16, bottomPad),
+              // Pastda "Filtrlash" tugmasi turadi (u pastki
+              // panelga yopishgan) — oxirgi qator uning ostida
+              // qolmasin.
+              padding: const EdgeInsets.fromLTRB(16, 6, 16, 24),
               gridDelegate:
                   const SliverGridDelegateWithFixedCrossAxisCount(
                 crossAxisCount: 2,
@@ -574,6 +533,80 @@ class _Grid extends StatelessWidget {
 // Filtr yoqilgan bo'lsa tugmada nechta shart tanlangani yoziladi
 // va YONIDA X chiqadi — foydalanuvchi talabi: "X ni bosib filtr
 // tozalanadi".
+
+// ══════════════════════════════════════════════════════════════
+//  TUGMA QAYERDA CHIZILADI
+// ══════════════════════════════════════════════════════════════
+//
+// TALAB (foydalanuvchi, ikki marta): "Filtrlash tugmasi pastdagi
+// sahifa tugmalari oynasiga YOPISHIB tursin".
+//
+// ── NEGA HISOBLASH TASHLANDI ────────────────────────────────
+//
+// Ilgari tugma Katalog sahifasining ichida, `Stack` ustida
+// turardi va panelgacha bo'lgan masofa HISOBLANARDI (tizim
+// chekinishi, panel balandligi, tana panel ortiga cho'zilganmi
+// yoki yo'qmi). Har bir hisob-kitobda bitta noma'lum qolar va
+// tugma har safar noto'g'ri joyda chiqardi.
+//
+// Endi hech narsa hisoblanmaydi: tugma AYNAN panelning O'ZI
+// bilan bitta ustunda chiziladi (`root_screen.dart` ->
+// `bottomNavigationBar`). Ular yonma-yon tursa, orasidagi masofa
+// ham aniq — qurilma qanaqa bo'lishidan qat'iy nazar.
+//
+// Katalog sahifasi esa shu yerga faqat HOLATNI beradi: nechta
+// shart tanlangan va bosilganda nima qilish kerak.
+class CatalogFilterBar extends ChangeNotifier {
+  CatalogFilterBar._();
+  static final CatalogFilterBar instance = CatalogFilterBar._();
+
+  bool _visible = false;
+  int _count = 0;
+  VoidCallback? _onOpen;
+  VoidCallback? _onClear;
+
+  bool get visible => _visible && _onOpen != null;
+  int get count => _count;
+
+  void show({
+    required int count,
+    required VoidCallback onOpen,
+    required VoidCallback onClear,
+  }) {
+    _visible = true;
+    _count = count;
+    _onOpen = onOpen;
+    _onClear = onClear;
+    notifyListeners();
+  }
+
+  void hide() {
+    if (!_visible) return;
+    _visible = false;
+    _onOpen = null;
+    _onClear = null;
+    notifyListeners();
+  }
+
+  void open() => _onOpen?.call();
+  void clear() => _onClear?.call();
+
+  /// Panel ustida chiziladigan tugma.
+  Widget build(BuildContext context) {
+    if (!visible) return const SizedBox.shrink();
+    return Padding(
+      // Panel bilan tugma orasidagi yagona masofa — shu 10 nuqta.
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Center(
+        child: _FilterButton(
+          count: _count,
+          onTap: open,
+          onClear: clear,
+        ),
+      ),
+    );
+  }
+}
 
 class _FilterButton extends StatelessWidget {
   final int count;
