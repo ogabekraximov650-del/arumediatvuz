@@ -950,6 +950,7 @@ class _QualitySheetState extends State<_QualitySheet> {
                 size: _sizes[url] ?? 0,
                 starting: _justStarted.contains(url),
                 onDownload: () => _start(url),
+                onPause: () => _pause(url),
               ),
               if (url != urls.last) const SizedBox(height: 10),
             ],
@@ -963,6 +964,21 @@ class _QualitySheetState extends State<_QualitySheet> {
     // Tugma DARHOL o'zgaradi — yadrodan javob kutilmaydi.
     setState(() => _justStarted.add(url));
     DownloadManager.instance.download(url);
+    DownloadsIndex.instance.refreshStats();
+    unawaited(DownloadsIndex.instance.refresh());
+  }
+
+  /// Yuklashni pauza qiladi (foydalanuvchi talabi).
+  ///
+  /// Olingan bo'laklar diskda QOLADI — "Davom ettirish" xuddi shu
+  /// joydan davom etadi, hech narsa qaytadan yuklanmaydi.
+  ///
+  /// `_justStarted` dan ham chiqariladi: aks holda tugma
+  /// "endigina bosilgan" deb hisoblanib "To'xtatish" holicha
+  /// qolib ketardi.
+  void _pause(String url) {
+    setState(() => _justStarted.remove(url));
+    DownloadManager.instance.pause(url);
     DownloadsIndex.instance.refreshStats();
     unawaited(DownloadsIndex.instance.refresh());
   }
@@ -1124,11 +1140,25 @@ class _QualityRow extends StatelessWidget {
   final bool starting;
   final VoidCallback onDownload;
 
+  /// ── TO'XTATISH ──────────────────────────────────────────
+  ///
+  /// TALAB (foydalanuvchi): "yuklab olish yoki davom etish
+  /// tugmasini bosganda to'xtatish degan tugma chiqsin yuklab
+  /// olishni pauza qilish uchun".
+  ///
+  /// Ilgari yuklash ketayotganda tugma "Yuklanmoqda" deb
+  /// O'CHIRILARDI — ya'ni boshlangan yuklashni to'xtatishning
+  /// hech qanday yo'li yo'q edi. Endi o'sha joyda "To'xtatish"
+  /// turadi. Olingan qism joyida qoladi: keyin "Davom ettirish"
+  /// xuddi shu joydan davom etadi.
+  final VoidCallback onPause;
+
   const _QualityRow({
     required this.url,
     required this.size,
     required this.starting,
     required this.onDownload,
+    required this.onPause,
   });
 
   @override
@@ -1177,17 +1207,30 @@ class _QualityRow extends StatelessWidget {
                 style: FilledButton.styleFrom(
                   padding: const EdgeInsets.symmetric(horizontal: 14),
                   minimumSize: const Size(0, 38),
-                  backgroundColor: AppColors.accent,
+                  // To'xtatish — IKKILAMCHI tugma: u qizil
+                  // "Yuklab olish" bilan bir xil ko'rinsa,
+                  // boshlash va to'xtatish bir-biriga o'xshab
+                  // ketardi va xato bosilardi.
+                  backgroundColor: busy
+                      ? Colors.white.withValues(alpha: 0.14)
+                      : AppColors.accent,
                 ),
-                // Yuklash ketayotganda tugma bosilmaydi — ikki
-                // marta bosish hech narsani tezlashtirmaydi.
-                onPressed: busy ? null : onDownload,
-                child: Text(
-                  busy
-                      ? 'Yuklanmoqda'
-                      : (started ? 'Davom ettirish' : 'Yuklab olish'),
-                  style: const TextStyle(
-                      fontSize: 12.5, fontWeight: FontWeight.w700),
+                onPressed: busy ? onPause : onDownload,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (busy) ...[
+                      const Icon(Icons.pause_rounded, size: 15),
+                      const SizedBox(width: 5),
+                    ],
+                    Text(
+                      busy
+                          ? 'To\'xtatish'
+                          : (started ? 'Davom ettirish' : 'Yuklab olish'),
+                      style: const TextStyle(
+                          fontSize: 12.5, fontWeight: FontWeight.w700),
+                    ),
+                  ],
                 ),
               ),
           ],
