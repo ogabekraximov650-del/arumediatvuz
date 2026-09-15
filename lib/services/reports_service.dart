@@ -53,6 +53,23 @@ const int kReportMaxLength = 2000;
 Future<String?> sendCommentReport({
   required String commentId,
   required String reason,
+}) =>
+    _sendReport(kind: 'comment', targetId: commentId, reason: reason);
+
+/// Shaxsiy yozishmadagi xabarga shikoyat yuboradi.
+///
+/// TALAB (foydalanuvchi): shaxsiy chatda ham "yuborilgan xabarga
+/// shikoyat qilish" bo'lsin.
+Future<String?> sendDmReport({
+  required String messageId,
+  required String reason,
+}) =>
+    _sendReport(kind: 'dm', targetId: messageId, reason: reason);
+
+Future<String?> _sendReport({
+  required String kind,
+  required String targetId,
+  required String reason,
 }) async {
   if (AuthService.instance.sessionToken == null) {
     return 'Shikoyat yuborish uchun hisobingizga kiring';
@@ -67,8 +84,8 @@ Future<String?> sendCommentReport({
           Uri.parse('$_base/reports'),
           headers: _headers(json: true),
           body: jsonEncode({
-            'kind': 'comment',
-            'target_id': commentId,
+            'kind': kind,
+            'target_id': targetId,
             'reason': text,
           }),
         )
@@ -182,7 +199,11 @@ class AdminReport {
   });
 
   /// "Shikoyat qayerdan kelgan" (foydalanuvchi talabi).
-  String get sourceLabel => kind == 'comment' ? 'Izohdan' : kind;
+  String get sourceLabel => switch (kind) {
+        'comment' => 'Izohdan',
+        'dm' => 'Shaxsiy yozishmadan',
+        _ => kind,
+      };
 
   static AdminReport fromJson(Map<String, dynamic> j) => AdminReport(
         id: '${j['id'] ?? ''}',

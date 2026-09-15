@@ -799,8 +799,7 @@ async fn init_db(env: &Env) -> bool {
         // izoh QAYSI bo'limda yozilgani.
         ("CREATE TABLE IF NOT EXISTS reports_db (
             id TEXT PRIMARY KEY,
-            -- Hozircha faqat 'comment'. Keyinchalik boshqa manba
-            -- (profil, yozishma) qo'shilsa shu ustun ajratadi.
+            -- 'comment' — izoh, 'dm' — shaxsiy xabar.
             kind TEXT DEFAULT 'comment',
             target_id TEXT DEFAULT '',
             target_body TEXT DEFAULT '',
@@ -875,6 +874,84 @@ async fn init_db(env: &Env) -> bool {
         // Suhbat AYNAN shu tartibda so'raladi.
         ("CREATE INDEX IF NOT EXISTS idx_chat_msgs
             ON chat_messages(user_id, created_at DESC)", vec![]),
+
+        // ══════════════════════════════════════════════════════
+        //  SHAXSIY YOZISHMALAR (foydalanuvchilar o'rtasida)
+        // ══════════════════════════════════════════════════════
+        //
+        // TALAB (foydalanuvchi): "balans to'ldirish tugmasi tagiga
+        // suhbatlar degan tugma qo'sh ... bitta foydalanuvchi
+        // boshqa do'stlari bilan gaplasha olsin. Faqat barcha
+        // shaxsiy chatlar admin panelida ko'rinishi kerak ...
+        // bu biroz noto'g'ri lekin xavfsizlik va nomaqbul hatti
+        // harakatlarni oldini olish uchun zarur. Bu funksiya
+        // obunasi bor vaqtda ishlaydi".
+        //
+        // ── NEGA ADMIN BILAN YOZISHMADAN AYRIM JADVAL ─────────
+        //
+        // `chat_messages` da suhbat EGASI bitta (`user_id`) va
+        // ikkinchi tomon har doim admin. Bu yerda esa IKKI odam
+        // teng: "kim kimga yozdi" degan savolga javob kerak va
+        // suhbat ikkovining juftligi bilan aniqlanadi.
+        //
+        // ── SUHBAT RAQAMI ─────────────────────────────────────
+        //
+        // `dm_id` = kichik va katta ID'lar juftligi, masalan
+        // "7:19". Tartib DOIM o'sish bo'yicha, shu sabab kim
+        // birinchi yozganidan qat'i nazar bitta suhbatga bitta
+        // raqam tegadi (`dm_key` izohiga qarang).
+        ("CREATE TABLE IF NOT EXISTS dm_messages (
+            id TEXT PRIMARY KEY,
+            dm_id TEXT,
+            from_id INTEGER,
+            to_id INTEGER,
+            body TEXT DEFAULT '',
+            -- B2'dagi fayl nomi (rasm, video yoki ovoz).
+            media_file TEXT DEFAULT '',
+            -- 'image' | 'video' | 'voice'
+            media_type TEXT DEFAULT '',
+            -- Ovozli xabar uzunligi (ms).
+            media_ms INTEGER DEFAULT 0,
+            -- Suhbatdosh o'qiganmi (bitta / ikkita belgi).
+            seen INTEGER DEFAULT 0,
+            created_at INTEGER
+        )", vec![]),
+        ("CREATE INDEX IF NOT EXISTS idx_dm_msgs
+            ON dm_messages(dm_id, created_at DESC)", vec![]),
+
+        // Suhbat qatori — ro'yxat uchun. Har juftlikka BITTA qator.
+        //
+        // `unread_a` / `unread_b`: `user_a` har doim KICHIK ID,
+        // `user_b` KATTA. Shunda "mening o'qilmaganlarim" qaysi
+        // ustun ekani ikkilanishsiz aniqlanadi.
+        ("CREATE TABLE IF NOT EXISTS dm_threads (
+            dm_id TEXT PRIMARY KEY,
+            user_a INTEGER,
+            user_b INTEGER,
+            last_body TEXT DEFAULT '',
+            last_at INTEGER DEFAULT 0,
+            last_from INTEGER DEFAULT 0,
+            unread_a INTEGER DEFAULT 0,
+            unread_b INTEGER DEFAULT 0
+        )", vec![]),
+        // Ro'yxat: mening suhbatlarim, yangisi tepada.
+        ("CREATE INDEX IF NOT EXISTS idx_dm_thread_a
+            ON dm_threads(user_a, last_at DESC)", vec![]),
+        ("CREATE INDEX IF NOT EXISTS idx_dm_thread_b
+            ON dm_threads(user_b, last_at DESC)", vec![]),
+
+        // Xabarga bosilgan reaksiyalar (Telegramdagidek).
+        //
+        // Birlamchi kalit (xabar + odam): bir odam bitta xabarga
+        // BITTA reaksiya qo'yadi. Boshqasini bossa — almashadi,
+        // ikkinchisi qo'shilmaydi.
+        ("CREATE TABLE IF NOT EXISTS dm_reactions (
+            msg_id TEXT,
+            user_id INTEGER,
+            emoji TEXT,
+            created_at INTEGER,
+            PRIMARY KEY (msg_id, user_id)
+        )", vec![]),
 
         // ── ESKI TRAFIK RAQAMI BIR MARTA TOZALANADI ───────────
         //
@@ -6447,6 +6524,14 @@ async fn report_add(mut req: Request, env: &Env) -> Result<Response> {
     if target.is_empty() {
         return json_resp(&json!({"error": "Nimaga shikoyat qilinayotgani noma'lum"}), 400);
     }
+    // Shikoyat manbasi: izoh yoki shaxsiy xabar.
+    //
+    // TALAB (foydalanuvchi): shaxsiy yozishmada ham "yuborilgan
+    // xabarga shikoyat qilish" bo'lsin.
+    let kind = match b["kind"].as_str().unwrap_or("comment") {
+        "dm" => "dm",
+        _ => "comment",
+    };
     let reason = b["reason"].as_str().unwrap_or("").trim().to_string();
     if reason.chars().count() < REPORT_MIN {
         return json_resp(&json!({
@@ -6469,18 +6554,46 @@ async fn report_add(mut req: Request, env: &Env) -> Result<Response> {
         }), 429);
     }
 
-    // ── IZOHNI TOPAMIZ VA NUSXASINI OLAMIZ ───────────────────
-    let c = turso_exec(env,
-        "SELECT id, user_id, body, anime_id, season_id
-           FROM comments_db WHERE id=?",
-        vec![TursoArg::text(&target)]).await?;
-    let Some(row) = first_row(&c) else {
-        return json_resp(&json!({"error": "Izoh topilmadi"}), 404);
+    // ── NIMAGA SHIKOYAT: NUSXASINI OLAMIZ ────────────────────
+    //
+    // Matn va muallif SHIKOYAT KELGAN PAYTDAGI holatda saqlanadi
+    // — keyin o'chirilsa ham admin nimadan shikoyat qilinganini
+    // ko'radi.
+    let row = if kind == "dm" {
+        // Shaxsiy xabar. Shikoyat qiluvchi SHU suhbatning
+        // tomoni bo'lishi shart — begona yozishmaga shikoyat
+        // qilib bo'lmasin.
+        let m = turso_exec(env,
+            "SELECT id, from_id, to_id, body FROM dm_messages WHERE id=?",
+            vec![TursoArg::text(&target)]).await?;
+        let Some(m) = first_row(&m) else {
+            return json_resp(&json!({"error": "Xabar topilmadi"}), 404);
+        };
+        if m["from_id"].as_i64().unwrap_or(0) != me
+            && m["to_id"].as_i64().unwrap_or(0) != me
+        {
+            return json_resp(&json!({"error": "forbidden"}), 403);
+        }
+        json!({
+            "user_id": m["from_id"].as_i64().unwrap_or(0),
+            "body": m["body"].as_str().unwrap_or(""),
+            "anime_id": 0,
+            "season_id": 0,
+        })
+    } else {
+        let c = turso_exec(env,
+            "SELECT id, user_id, body, anime_id, season_id
+               FROM comments_db WHERE id=?",
+            vec![TursoArg::text(&target)]).await?;
+        let Some(row) = first_row(&c) else {
+            return json_resp(&json!({"error": "Izoh topilmadi"}), 404);
+        };
+        row
     };
     let author = row["user_id"].as_i64().unwrap_or(0);
     if author == me {
         return json_resp(&json!({
-            "error": "O'z izohingizga shikoyat qila olmaysiz"
+            "error": "O'zingizga shikoyat qila olmaysiz"
         }), 400);
     }
 
@@ -6490,11 +6603,11 @@ async fn report_add(mut req: Request, env: &Env) -> Result<Response> {
     // foydalanuvchiga TUSHUNARLI javob beradi (baza xatosi emas).
     let dup = turso_exec(env,
         "SELECT COUNT(*) FROM reports_db
-          WHERE kind='comment' AND target_id=? AND reporter_id=?",
-        vec![TursoArg::text(&target), TursoArg::int(me)]).await?;
+          WHERE kind=? AND target_id=? AND reporter_id=?",
+        vec![TursoArg::text(kind), TursoArg::text(&target), TursoArg::int(me)]).await?;
     if scalar(&dup) > 0 {
         return json_resp(&json!({
-            "error": "Siz bu izohga allaqachon shikoyat qilgansiz"
+            "error": "Siz bunga allaqachon shikoyat qilgansiz"
         }), 409);
     }
 
@@ -6502,9 +6615,10 @@ async fn report_add(mut req: Request, env: &Env) -> Result<Response> {
         "INSERT INTO reports_db
             (id,kind,target_id,target_body,target_user_id,
              anime_id,season_id,reporter_id,reason,created_at)
-         VALUES (?,'comment',?,?,?,?,?,?,?,?)",
+         VALUES (?,?,?,?,?,?,?,?,?,?)",
         vec![
             TursoArg::text(&format!("r{}", random_hex(12))),
+            TursoArg::text(kind),
             TursoArg::text(&target),
             TursoArg::text(row["body"].as_str().unwrap_or("")),
             TursoArg::int(author),
@@ -6707,6 +6821,758 @@ async fn me_privacy(mut req: Request, env: &Env) -> Result<Response> {
     turso_exec(env, "UPDATE users_db SET show_stats=? WHERE id=?",
         vec![TursoArg::int(if on { 1 } else { 0 }), TursoArg::int(me)]).await?;
     ok_nostore(json!({"ok": true, "show_stats": on}))
+}
+
+// ══════════════════════════════════════════════════════════════
+//  SHAXSIY YOZISHMALAR (foydalanuvchilar o'rtasida)
+// ══════════════════════════════════════════════════════════════
+//
+// TALAB (foydalanuvchi): "bitta foydalanuvchi boshqa do'stlari
+// bilan gaplasha olsin ... barcha shaxsiy chatlar admin panelida
+// ko'rinishi kerak ... bu funksiya obunasi bor vaqtda ishlaydi ...
+// yuborilgan xabarga shikoyat qilish, reaksiya bildirish, ovozli,
+// rasm va video xabar yuborish, yuborgan xabarini o'chirish".
+//
+// ── UCHTA QOIDA SERVERDA ────────────────────────────────────
+//
+//   1. OBUNA. Yozish uchun obuna SHART. O'qish esa ochiq —
+//      obunasi tugagan odam eski yozishmalarini ko'ra oladi,
+//      lekin yangi xabar yubora olmaydi. Aks holda obuna
+//      tugagan zahoti odam suhbatlaridan ayrilib qolardi.
+//
+//   2. FAQAT O'Z SUHBATI. Har so'rovda suhbat raqami ikki
+//      tomondan quriladi va so'rovchi ulardan biri ekani
+//      tekshiriladi. O'zgartirilgan ilova bilan begona
+//      yozishmani ocha olmaydi.
+//
+//   3. ADMIN HAMMASINI KO'RADI. Foydalanuvchi talabi: xavfsizlik
+//      va nomaqbul hatti-harakatlarning oldini olish uchun.
+//      Admin faqat O'QIY oladi — boshqaning nomidan yozolmaydi.
+
+/// Ikki odam orasidagi suhbat raqami.
+///
+/// Kichik ID doim oldinda: kim birinchi yozganidan qat'i nazar
+/// bitta suhbatga bitta raqam tegadi. Aks holda "7:19" va "19:7"
+/// ikki xil suhbat bo'lib ketardi.
+fn dm_key(a: i64, b: i64) -> String {
+    if a <= b { format!("{a}:{b}") } else { format!("{b}:{a}") }
+}
+
+/// Obunasi faolmi (yozish uchun shart).
+async fn dm_can_write(env: &Env, user: i64) -> bool {
+    sub_until(env, user).await > now_ms()
+}
+
+/// GET /api/dm/threads — mening suhbatlarim.
+///
+/// Yangi xabar tepada. Har qatorda suhbatdoshning ismi va rasmi
+/// — ro'yxat uchun kerak bo'lgan hamma narsa BITTA so'rovda
+/// keladi.
+async fn dm_threads(req: &Request, env: &Env, origin: &str) -> Result<Response> {
+    let Some(u) = session_user(env, &bearer(req)).await? else {
+        return json_resp(&json!({"error": "unauthorized"}), 401);
+    };
+    let me = u["id"].as_i64().unwrap_or(0);
+
+    // Suhbatdosh qaysi ustunda ekani `user_a = me` shartiga
+    // qarab hal qilinadi — shu sabab `CASE`.
+    let res = turso_exec(env,
+        "SELECT t.dm_id, t.last_body, t.last_at, t.last_from,
+                CASE WHEN t.user_a=? THEN t.user_b ELSE t.user_a END AS other_id,
+                CASE WHEN t.user_a=? THEN t.unread_a ELSE t.unread_b END AS unread,
+                o.first_name AS first_name, o.username AS username,
+                o.avatar_file AS avatar_file
+           FROM dm_threads t
+           LEFT JOIN users_db o
+             ON o.id = CASE WHEN t.user_a=? THEN t.user_b ELSE t.user_a END
+          WHERE t.user_a=? OR t.user_b=?
+          ORDER BY t.last_at DESC
+          LIMIT 200",
+        vec![
+            TursoArg::int(me), TursoArg::int(me), TursoArg::int(me),
+            TursoArg::int(me), TursoArg::int(me),
+        ]).await?;
+
+    let cols = res["cols"].as_array().cloned().unwrap_or_default();
+    let rows = res["rows"].as_array().cloned().unwrap_or_default();
+    let items: Vec<Value> = rows.iter().map(|r| {
+        let o = row_to_obj(&cols, r.as_array().unwrap_or(&vec![]));
+        let oid = o["other_id"].as_i64().unwrap_or(0);
+        let avatar = o["avatar_file"].as_str().unwrap_or("");
+        let photo = if avatar.is_empty() {
+            format!("{origin}/api/avatar/{oid}")
+        } else {
+            format!("{origin}/api/image/{avatar}")
+        };
+        json!({
+            "user_id": oid,
+            "first_name": o["first_name"].as_str().unwrap_or(""),
+            "username": o["username"].as_str().unwrap_or(""),
+            "photo_url": photo,
+            "last_body": o["last_body"].as_str().unwrap_or(""),
+            "last_at": o["last_at"].as_i64().unwrap_or(0),
+            "last_mine": o["last_from"].as_i64().unwrap_or(0) == me,
+            "unread": o["unread"].as_i64().unwrap_or(0),
+        })
+    }).collect();
+
+    ok_nostore(json!({"items": items}))
+}
+
+/// GET /api/dm/search?q=username — odam qidirish.
+///
+/// TALAB (foydalanuvchi): "tepada username bilan izlash uchun
+/// lupa bo'lsin (ism bilan izlab bo'lmaydi)".
+///
+/// ATAYLAB faqat username: ism takrorlanadi va uni izlash
+/// begona odamlarni chiqarib yuborardi. Username esa noyob va
+/// odam uni o'zi aytadi.
+async fn dm_search(req: &Request, env: &Env, origin: &str) -> Result<Response> {
+    let Some(u) = session_user(env, &bearer(req)).await? else {
+        return json_resp(&json!({"error": "unauthorized"}), 401);
+    };
+    let me = u["id"].as_i64().unwrap_or(0);
+    let url = req.url()?;
+    let q = url.query_pairs()
+        .find(|(k, _)| k == "q")
+        .map(|(_, v)| v.trim().trim_start_matches('@').to_lowercase())
+        .unwrap_or_default();
+    if q.len() < 2 {
+        return ok_nostore(json!({"items": []}));
+    }
+
+    // Bloklangan odam ro'yxatda chiqmaydi va o'zim ham.
+    let res = turso_exec(env,
+        "SELECT id, first_name, username, avatar_file
+           FROM users_db
+          WHERE LOWER(username) LIKE ? AND id <> ? AND is_banned = 0
+          ORDER BY LENGTH(username) ASC
+          LIMIT 20",
+        vec![TursoArg::text(&format!("%{q}%")), TursoArg::int(me)]).await?;
+
+    let cols = res["cols"].as_array().cloned().unwrap_or_default();
+    let rows = res["rows"].as_array().cloned().unwrap_or_default();
+    let items: Vec<Value> = rows.iter().map(|r| {
+        let o = row_to_obj(&cols, r.as_array().unwrap_or(&vec![]));
+        let id = o["id"].as_i64().unwrap_or(0);
+        let avatar = o["avatar_file"].as_str().unwrap_or("");
+        json!({
+            "user_id": id,
+            "first_name": o["first_name"].as_str().unwrap_or(""),
+            "username": o["username"].as_str().unwrap_or(""),
+            "photo_url": if avatar.is_empty() {
+                format!("{origin}/api/avatar/{id}")
+            } else {
+                format!("{origin}/api/image/{avatar}")
+            },
+        })
+    }).collect();
+
+    ok_nostore(json!({"items": items}))
+}
+
+/// GET /api/dm/unread — qizil nuqta uchun.
+///
+/// TALAB (foydalanuvchi): "suhbatlardan kimdir foydalanuvchiga
+/// xabar yuborsa qizil nuqta yonib tursin, huddi support
+/// chatdagidek".
+///
+/// Ataylab juda kichik javob: bu so'rov tez-tez qilinadi.
+async fn dm_unread(req: &Request, env: &Env) -> Result<Response> {
+    let Some(u) = session_user(env, &bearer(req)).await? else {
+        return json_resp(&json!({"error": "unauthorized"}), 401);
+    };
+    let me = u["id"].as_i64().unwrap_or(0);
+    let res = turso_exec(env,
+        "SELECT COALESCE(SUM(CASE WHEN user_a=? THEN unread_a ELSE unread_b END),0)
+           FROM dm_threads WHERE user_a=? OR user_b=?",
+        vec![TursoArg::int(me), TursoArg::int(me), TursoArg::int(me)]).await?;
+    ok_nostore(json!({"unread": scalar(&res)}))
+}
+
+/// Bitta shaxsiy xabarni ilova kutgan ko'rinishga aylantiradi.
+fn dm_msg_public(origin: &str, r: &Value, me: i64) -> Value {
+    let file = r["media_file"].as_str().unwrap_or("");
+    let mtype = r["media_type"].as_str().unwrap_or("");
+    let has = !file.is_empty() && !mtype.is_empty();
+    json!({
+        "id": r["id"].as_str().unwrap_or(""),
+        "mine": r["from_id"].as_i64().unwrap_or(0) == me,
+        "from_id": r["from_id"].as_i64().unwrap_or(0),
+        "body": r["body"].as_str().unwrap_or(""),
+        "media_url": if has { format!("{origin}/api/media/{file}") } else { String::new() },
+        "media_type": if has { mtype } else { "" },
+        "media_ms": r["media_ms"].as_i64().unwrap_or(0),
+        "seen": r["seen"].as_i64().unwrap_or(0) != 0,
+        "created_at": r["created_at"].as_i64().unwrap_or(0),
+        // Reaksiyalar `emoji:son` ko'rinishida vergul bilan
+        // yig'ilgan (`GROUP_CONCAT`) — ilova uni ajratadi.
+        "reactions": r["reactions"].as_str().unwrap_or(""),
+        // Men qo'ygan reaksiya (bo'sh — qo'ymaganman).
+        "my_reaction": r["my_reaction"].as_str().unwrap_or(""),
+    })
+}
+
+/// Suhbat xabarlarini o'qiydi va o'qilgan deb belgilaydi.
+async fn dm_read(
+    env: &Env, origin: &str, me: i64, other: i64, since: i64,
+) -> Result<Response> {
+    let dm = dm_key(me, other);
+
+    // Reaksiyalar xabarlar bilan BIRGA keladi: har xabar uchun
+    // alohida so'rov 200 ta so'rov degani bo'lardi.
+    let sql = if since > 0 {
+        "SELECT m.id, m.from_id, m.body, m.media_file, m.media_type,
+                m.media_ms, m.seen, m.created_at,
+                (SELECT GROUP_CONCAT(x.emoji || ':' || x.n)
+                   FROM (SELECT emoji, COUNT(*) AS n FROM dm_reactions
+                          WHERE msg_id = m.id GROUP BY emoji) x) AS reactions,
+                (SELECT emoji FROM dm_reactions
+                  WHERE msg_id = m.id AND user_id = ?) AS my_reaction
+           FROM dm_messages m
+          WHERE m.dm_id = ? AND m.created_at > ?
+          ORDER BY m.created_at DESC LIMIT ?"
+    } else {
+        "SELECT m.id, m.from_id, m.body, m.media_file, m.media_type,
+                m.media_ms, m.seen, m.created_at,
+                (SELECT GROUP_CONCAT(x.emoji || ':' || x.n)
+                   FROM (SELECT emoji, COUNT(*) AS n FROM dm_reactions
+                          WHERE msg_id = m.id GROUP BY emoji) x) AS reactions,
+                (SELECT emoji FROM dm_reactions
+                  WHERE msg_id = m.id AND user_id = ?) AS my_reaction
+           FROM dm_messages m
+          WHERE m.dm_id = ?
+          ORDER BY m.created_at DESC LIMIT ?"
+    };
+    let mut args = vec![TursoArg::int(me), TursoArg::text(&dm)];
+    if since > 0 { args.push(TursoArg::int(since)); }
+    args.push(TursoArg::int(CHAT_LIMIT));
+
+    let res = turso_exec(env, sql, args).await?;
+    let cols = res["cols"].as_array().cloned().unwrap_or_default();
+    let rows = res["rows"].as_array().cloned().unwrap_or_default();
+    // Eskisidan yangisiga — suhbat tartibida.
+    let items: Vec<Value> = rows.iter().rev()
+        .map(|r| dm_msg_public(origin, &row_to_obj(&cols, r.as_array().unwrap_or(&vec![])), me))
+        .collect();
+
+    // O'QILDI. `user_a` kichik ID bo'lgani uchun qaysi ustun
+    // meniki ekani aniq.
+    let first = me.min(other) == me;
+    let _ = turso_batch(env, &[
+        (if first {
+            "UPDATE dm_threads SET unread_a=0 WHERE dm_id=?"
+         } else {
+            "UPDATE dm_threads SET unread_b=0 WHERE dm_id=?"
+         },
+         vec![TursoArg::text(&dm)]),
+        ("UPDATE dm_messages SET seen=1
+           WHERE dm_id=? AND to_id=? AND seen=0",
+         vec![TursoArg::text(&dm), TursoArg::int(me)]),
+    ]).await;
+
+    // ── O'CHIRILGAN XABARLAR VA BELGILAR ─────────────────────
+    //
+    // `since` bilan faqat YANGI xabarlar qaytadi, lekin xabar
+    // o'chirilishi yoki "o'qildi" belgisi o'zgarishi mumkin —
+    // ikkovi ham yangi xabar tug'dirmaydi. Shu sabab suhbatdagi
+    // BARCHA raqamlar ham yuboriladi (arzon) va ilova ro'yxatini
+    // shunga qarab tozalaydi. Bu admin yozishmasidagi yechim
+    // bilan bir xil (`chat_read` izohiga qarang).
+    let ids_res = turso_exec(env,
+        "SELECT id, from_id, seen FROM dm_messages
+          WHERE dm_id=? ORDER BY created_at DESC LIMIT ?",
+        vec![TursoArg::text(&dm), TursoArg::int(CHAT_LIMIT)]).await?;
+    let ic = ids_res["cols"].as_array().cloned().unwrap_or_default();
+    let ir = ids_res["rows"].as_array().cloned().unwrap_or_default();
+    let mut all_ids: Vec<String> = Vec::new();
+    let mut seen_ids: Vec<String> = Vec::new();
+    for r in &ir {
+        let o = row_to_obj(&ic, r.as_array().unwrap_or(&vec![]));
+        let id = o["id"].as_str().unwrap_or("").to_string();
+        if id.is_empty() { continue; }
+        // O'z xabarlarimdan O'QILGANLARI (✓ -> ✓✓).
+        if o["from_id"].as_i64().unwrap_or(0) == me
+            && o["seen"].as_i64().unwrap_or(0) == 1
+        {
+            seen_ids.push(id.clone());
+        }
+        all_ids.push(id);
+    }
+
+    ok_nostore(json!({
+        "items": items,
+        "all_ids": all_ids,
+        "seen_ids": seen_ids,
+    }))
+}
+
+/// GET /api/dm/thread/:user_id — bitta suhbat.
+async fn dm_open(req: &Request, env: &Env, origin: &str, other: i64) -> Result<Response> {
+    let Some(u) = session_user(env, &bearer(req)).await? else {
+        return json_resp(&json!({"error": "unauthorized"}), 401);
+    };
+    let me = u["id"].as_i64().unwrap_or(0);
+    if other <= 0 || other == me {
+        return json_resp(&json!({"error": "Suhbatdosh topilmadi"}), 400);
+    }
+    dm_read(env, origin, me, other, since_of(req)).await
+}
+
+/// POST /api/dm — shaxsiy xabar yuborish.
+async fn dm_send(mut req: Request, env: &Env, origin: &str) -> Result<Response> {
+    let Some(u) = session_user(env, &bearer(&req)).await? else {
+        return json_resp(&json!({"error": "unauthorized"}), 401);
+    };
+    let me = u["id"].as_i64().unwrap_or(0);
+    if u["is_banned"].as_i64().unwrap_or(0) != 0 {
+        return json_resp(&json!({"error": "Sizga yozish taqiqlangan"}), 403);
+    }
+
+    let b: Value = req.json().await.unwrap_or(json!({}));
+    let other = b["to"].as_i64().unwrap_or(0);
+    if other <= 0 || other == me {
+        return json_resp(&json!({"error": "Suhbatdosh topilmadi"}), 400);
+    }
+
+    // ── OBUNA SHART (foydalanuvchi talabi) ───────────────────
+    if !dm_can_write(env, me).await {
+        return json_resp(&json!({
+            "error": "Suhbat uchun obuna kerak"
+        }), 402);
+    }
+
+    // Suhbatdosh bor va bloklanmaganmi.
+    let who = turso_exec(env,
+        "SELECT id, is_banned FROM users_db WHERE id=?",
+        vec![TursoArg::int(other)]).await?;
+    let Some(w) = first_row(&who) else {
+        return json_resp(&json!({"error": "Suhbatdosh topilmadi"}), 404);
+    };
+    if w["is_banned"].as_i64().unwrap_or(0) != 0 {
+        return json_resp(&json!({"error": "Bu foydalanuvchi bloklangan"}), 403);
+    }
+
+    let body: String = b["body"].as_str().unwrap_or("")
+        .trim().chars().take(CHAT_MAX).collect();
+    let media_file = bare_name(b["media_file"].as_str().unwrap_or("")).trim().to_string();
+    let media_type = match b["media_type"].as_str().unwrap_or("") {
+        "image" => "image",
+        "video" => "video",
+        "voice" => "voice",
+        _ => "",
+    };
+    let media_ms = b["media_ms"].as_i64().unwrap_or(0).clamp(0, 3_600_000);
+    let has_media = !media_file.is_empty() && !media_type.is_empty();
+    if body.is_empty() && !has_media {
+        return json_resp(&json!({"error": "Xabar bo'sh"}), 400);
+    }
+
+    let dm = dm_key(me, other);
+    let (a, bb) = (me.min(other), me.max(other));
+    // O'qilmagan qaysi tomonga qo'shiladi: XABAR OLUVCHIGA.
+    let (inc_a, inc_b) = if other == a { (1, 0) } else { (0, 1) };
+    let now = now_ms();
+    let id = format!("d{}", random_hex(12));
+    let label = if !body.is_empty() {
+        body.clone()
+    } else if media_type == "video" {
+        "Video".to_string()
+    } else if media_type == "voice" {
+        "Ovozli xabar".to_string()
+    } else {
+        "Rasm".to_string()
+    };
+
+    turso_batch(env, &[
+        ("INSERT INTO dm_messages
+            (id,dm_id,from_id,to_id,body,media_file,media_type,media_ms,seen,created_at)
+          VALUES (?,?,?,?,?,?,?,?,0,?)",
+         vec![
+            TursoArg::text(&id), TursoArg::text(&dm),
+            TursoArg::int(me), TursoArg::int(other), TursoArg::text(&body),
+            TursoArg::text(if has_media { &media_file } else { "" }),
+            TursoArg::text(if has_media { media_type } else { "" }),
+            TursoArg::int(if has_media { media_ms } else { 0 }),
+            TursoArg::int(now),
+         ]),
+        ("INSERT INTO dm_threads
+            (dm_id,user_a,user_b,last_body,last_at,last_from,unread_a,unread_b)
+          VALUES (?,?,?,?,?,?,?,?)
+          ON CONFLICT(dm_id) DO UPDATE SET
+             last_body=excluded.last_body,
+             last_at=excluded.last_at,
+             last_from=excluded.last_from,
+             unread_a=unread_a+excluded.unread_a,
+             unread_b=unread_b+excluded.unread_b",
+         vec![
+            TursoArg::text(&dm), TursoArg::int(a), TursoArg::int(bb),
+            TursoArg::text(&label), TursoArg::int(now), TursoArg::int(me),
+            TursoArg::int(inc_a), TursoArg::int(inc_b),
+         ]),
+    ]).await?;
+
+    created(json!({
+        "id": id,
+        "mine": true,
+        "from_id": me,
+        "body": body,
+        "media_url": if has_media {
+            format!("{origin}/api/media/{media_file}")
+        } else {
+            String::new()
+        },
+        "media_type": if has_media { media_type } else { "" },
+        "media_ms": if has_media { media_ms } else { 0 },
+        "seen": false,
+        "created_at": now,
+        "reactions": "",
+        "my_reaction": "",
+    }))
+}
+
+/// GET /api/dm/wait?user_id=N&since=..&seen=..&count=..
+///
+/// Xabar DARHOL yetib borsin: server javobni yangilik paydo
+/// bo'lgunicha ushlab turadi (admin yozishmasidagi bilan bir xil
+/// usul — `chat_wait` izohiga qarang).
+async fn dm_wait(req: &Request, env: &Env) -> Result<Response> {
+    let Some(u) = session_user(env, &bearer(req)).await? else {
+        return json_resp(&json!({"error": "unauthorized"}), 401);
+    };
+    let me = u["id"].as_i64().unwrap_or(0);
+    let url = req.url()?;
+    let q = |k: &str| -> String {
+        url.query_pairs().find(|(n, _)| n == k)
+            .map(|(_, v)| v.to_string()).unwrap_or_default()
+    };
+    let other: i64 = q("user_id").parse().unwrap_or(0);
+
+    // Suhbat ochiq bo'lmasa — BUTUN ro'yxat kuzatiladi
+    // (suhbatlar oynasi uchun).
+    let watch_all = other <= 0;
+    let since: i64 = q("since").parse().unwrap_or(0);
+    let seen_before: i64 = q("seen").parse().unwrap_or(-1);
+    let count_before: i64 = q("count").parse().unwrap_or(-1);
+
+    let dm = dm_key(me, other);
+    let (sql, args): (&str, Vec<TursoArg>) = if watch_all {
+        ("SELECT COALESCE(MAX(last_at),0), 0, COUNT(*)
+            FROM dm_threads WHERE user_a=? OR user_b=?",
+         vec![TursoArg::int(me), TursoArg::int(me)])
+    } else {
+        // Oyna CHAT_LIMIT bilan chegaralangan — ilova ham
+        // shuncha saqlaydi, ya'ni sonlar teng chiqadi.
+        ("SELECT COALESCE(MAX(created_at),0),
+                 COUNT(CASE WHEN seen=1 THEN 1 END),
+                 COUNT(*)
+            FROM (SELECT created_at, seen FROM dm_messages
+                   WHERE dm_id=? ORDER BY created_at DESC LIMIT ?)",
+         vec![TursoArg::text(&dm), TursoArg::int(CHAT_LIMIT)])
+    };
+
+    let cell = |res: &Value, i: usize| -> i64 {
+        let c = &res["rows"][0][i];
+        match c["value"].as_str() {
+            Some(v) => v.parse::<i64>().unwrap_or(0),
+            None => c.as_i64().unwrap_or(0),
+        }
+    };
+
+    for i in 0..CHAT_WAIT_TICKS {
+        if i > 0 {
+            Delay::from(core::time::Duration::from_millis(CHAT_WAIT_STEP_MS)).await;
+        }
+        let res = turso_exec(env, sql, args.clone()).await?;
+        let last = cell(&res, 0);
+        let seen = cell(&res, 1);
+        let count = cell(&res, 2);
+        if last > since
+            || (seen_before >= 0 && seen != seen_before)
+            || (count_before >= 0 && count != count_before)
+        {
+            return ok_nostore(json!({
+                "new": true, "last": last, "seen": seen, "count": count,
+            }));
+        }
+    }
+    ok_nostore(json!({
+        "new": false,
+        "last": since,
+        "seen": seen_before.max(0),
+        "count": count_before.max(0),
+    }))
+}
+
+/// POST /api/dm/react — reaksiya qo'yish yoki olib tashlash.
+///
+/// TALAB (foydalanuvchi): "reaksiya bildirish" (Telegramdagidek).
+///
+/// Bir odam bitta xabarga BITTA reaksiya qo'yadi: boshqasini
+/// bossa almashadi, xuddi shunisini qayta bossa olib tashlanadi.
+async fn dm_react(mut req: Request, env: &Env) -> Result<Response> {
+    let Some(u) = session_user(env, &bearer(&req)).await? else {
+        return json_resp(&json!({"error": "unauthorized"}), 401);
+    };
+    let me = u["id"].as_i64().unwrap_or(0);
+    let b: Value = req.json().await.unwrap_or(json!({}));
+    let msg = b["id"].as_str().unwrap_or("").trim().to_string();
+    if msg.is_empty() {
+        return json_resp(&json!({"error": "Xabar topilmadi"}), 400);
+    }
+    // Emoji ro'yxati YOPIQ: ixtiyoriy matn kelsa u reaksiya emas,
+    // yozuv bo'lib qolardi.
+    let emoji = match b["emoji"].as_str().unwrap_or("") {
+        e @ ("\u{2764}" | "\u{1F44D}" | "\u{1F44E}" | "\u{1F602}"
+            | "\u{1F62E}" | "\u{1F622}" | "\u{1F525}" | "\u{1F389}") => e,
+        _ => "",
+    };
+
+    // Xabar SHU odamning suhbatidami — begona xabarga reaksiya
+    // qo'yib bo'lmasin.
+    let own = turso_exec(env,
+        "SELECT from_id, to_id FROM dm_messages WHERE id=?",
+        vec![TursoArg::text(&msg)]).await?;
+    let Some(m) = first_row(&own) else {
+        return json_resp(&json!({"error": "Xabar topilmadi"}), 404);
+    };
+    if m["from_id"].as_i64().unwrap_or(0) != me
+        && m["to_id"].as_i64().unwrap_or(0) != me
+    {
+        return json_resp(&json!({"error": "forbidden"}), 403);
+    }
+
+    if emoji.is_empty() {
+        // Bo'sh emoji — olib tashlash.
+        turso_exec(env,
+            "DELETE FROM dm_reactions WHERE msg_id=? AND user_id=?",
+            vec![TursoArg::text(&msg), TursoArg::int(me)]).await?;
+        return ok_nostore(json!({"ok": true, "emoji": ""}));
+    }
+
+    // Xuddi shunisi turgan bo'lsa — olib tashlanadi (ikkinchi
+    // bosish "bekor qilish" degani).
+    let cur = turso_exec(env,
+        "SELECT emoji FROM dm_reactions WHERE msg_id=? AND user_id=?",
+        vec![TursoArg::text(&msg), TursoArg::int(me)]).await?;
+    if let Some(c) = first_row(&cur) {
+        if c["emoji"].as_str().unwrap_or("") == emoji {
+            turso_exec(env,
+                "DELETE FROM dm_reactions WHERE msg_id=? AND user_id=?",
+                vec![TursoArg::text(&msg), TursoArg::int(me)]).await?;
+            return ok_nostore(json!({"ok": true, "emoji": ""}));
+        }
+    }
+
+    turso_exec(env,
+        "INSERT INTO dm_reactions (msg_id,user_id,emoji,created_at)
+         VALUES (?,?,?,?)
+         ON CONFLICT(msg_id,user_id) DO UPDATE SET
+            emoji=excluded.emoji, created_at=excluded.created_at",
+        vec![
+            TursoArg::text(&msg), TursoArg::int(me),
+            TursoArg::text(emoji), TursoArg::int(now_ms()),
+        ]).await?;
+    ok_nostore(json!({"ok": true, "emoji": emoji}))
+}
+
+/// DELETE /api/dm/message/:id — O'Z xabarini o'chirish.
+///
+/// TALAB (foydalanuvchi): "yuborgan xabarini o'chirish".
+///
+/// FAQAT yuborgan odam o'chira oladi (yoki admin —
+/// nomaqbul xabarni olib tashlash uchun). B2'dagi fayl ham
+/// o'chadi, aks holda u abadiy yotib ombor uchun pul yerdi.
+async fn dm_del_message(req: &Request, env: &Env, id: &str) -> Result<Response> {
+    let Some(u) = session_user(env, &bearer(req)).await? else {
+        return json_resp(&json!({"error": "unauthorized"}), 401);
+    };
+    let me = u["id"].as_i64().unwrap_or(0);
+    let row = if is_admin(&u) {
+        turso_exec(env,
+            "DELETE FROM dm_messages WHERE id=? RETURNING dm_id, media_file",
+            vec![TursoArg::text(id)]).await?
+    } else {
+        turso_exec(env,
+            "DELETE FROM dm_messages WHERE id=? AND from_id=?
+              RETURNING dm_id, media_file",
+            vec![TursoArg::text(id), TursoArg::int(me)]).await?
+    };
+    let Some(r) = first_row(&row) else {
+        return json_resp(&json!({"error": "Xabar topilmadi"}), 404);
+    };
+    let file = r["media_file"].as_str().unwrap_or("").to_string();
+    let dm = r["dm_id"].as_str().unwrap_or("").to_string();
+
+    let _ = turso_exec(env, "DELETE FROM dm_reactions WHERE msg_id=?",
+        vec![TursoArg::text(id)]).await;
+    if !file.is_empty() {
+        b2_delete(env, &file).await;
+    }
+    refresh_dm_thread(env, &dm).await;
+    ok_nostore(json!({"ok": true}))
+}
+
+/// Suhbat qatorini xabarlarga qarab qayta hisoblaydi.
+async fn refresh_dm_thread(env: &Env, dm: &str) {
+    if dm.is_empty() { return; }
+    let last = turso_exec(env,
+        "SELECT body, media_type, created_at, from_id FROM dm_messages
+          WHERE dm_id=? ORDER BY created_at DESC LIMIT 1",
+        vec![TursoArg::text(dm)]).await;
+    let row = last.ok().and_then(|r| first_row(&r));
+    let Some(r) = row else {
+        // Bitta ham xabar qolmadi — suhbat ro'yxatdan chiqadi.
+        let _ = turso_exec(env, "DELETE FROM dm_threads WHERE dm_id=?",
+            vec![TursoArg::text(dm)]).await;
+        return;
+    };
+    let body = r["body"].as_str().unwrap_or("");
+    let mtype = r["media_type"].as_str().unwrap_or("");
+    let label = if !body.is_empty() {
+        body.to_string()
+    } else if mtype == "video" {
+        "Video".to_string()
+    } else if mtype == "voice" {
+        "Ovozli xabar".to_string()
+    } else if mtype == "image" {
+        "Rasm".to_string()
+    } else {
+        String::new()
+    };
+    // O'qilmaganlar ham qayta sanaladi: o'qilmagan xabar
+    // o'chirilsa nuqta yonib turaverardi.
+    let _ = turso_exec(env,
+        "UPDATE dm_threads SET last_body=?, last_at=?, last_from=?,
+                unread_a = (SELECT COUNT(*) FROM dm_messages
+                             WHERE dm_id=? AND to_id=user_a AND seen=0),
+                unread_b = (SELECT COUNT(*) FROM dm_messages
+                             WHERE dm_id=? AND to_id=user_b AND seen=0)
+          WHERE dm_id=?",
+        vec![
+            TursoArg::text(&label),
+            TursoArg::int(r["created_at"].as_i64().unwrap_or(0)),
+            TursoArg::int(r["from_id"].as_i64().unwrap_or(0)),
+            TursoArg::text(dm), TursoArg::text(dm), TursoArg::text(dm),
+        ]).await;
+}
+
+/// GET /api/admin/dm/threads — ADMIN: BARCHA shaxsiy suhbatlar.
+///
+/// TALAB (foydalanuvchi): "faqat barcha shaxsiy chatlar admin
+/// panelida ko'rinishi kerak, ya'ni ikkala profil rasmi bitta
+/// ro'yxatda turadi va ustiga bossa ikkalasini yuborgan xabarlari
+/// chiqadi. Bu biroz noto'g'ri lekin xavfsizlik va nomaqbul
+/// hatti-harakatlarni oldini olish uchun zarur".
+///
+/// Admin faqat O'QIY oladi — boshqaning nomidan yoza olmaydi
+/// (`dm_send` da suhbat raqami har doim YOZAYOTGAN odamdan
+/// quriladi).
+async fn admin_dm_threads(req: &Request, env: &Env, origin: &str) -> Result<Response> {
+    let Some(u) = session_user(env, &bearer(req)).await? else {
+        return json_resp(&json!({"error": "unauthorized"}), 401);
+    };
+    if !is_admin(&u) {
+        return json_resp(&json!({"error": "forbidden"}), 403);
+    }
+    let url = req.url()?;
+    let page: i64 = url.query_pairs()
+        .find(|(k, _)| k == "page")
+        .and_then(|(_, v)| v.parse().ok())
+        .unwrap_or(0).max(0);
+
+    let res = turso_exec(env,
+        "SELECT t.dm_id, t.user_a, t.user_b, t.last_body, t.last_at,
+                a.first_name AS a_first, a.username AS a_username,
+                a.avatar_file AS a_avatar,
+                b.first_name AS b_first, b.username AS b_username,
+                b.avatar_file AS b_avatar,
+                (SELECT COUNT(*) FROM dm_messages m WHERE m.dm_id = t.dm_id)
+                  AS msg_count
+           FROM dm_threads t
+           LEFT JOIN users_db a ON a.id = t.user_a
+           LEFT JOIN users_db b ON b.id = t.user_b
+          ORDER BY t.last_at DESC
+          LIMIT ? OFFSET ?",
+        vec![TursoArg::int(ADMIN_PAGE), TursoArg::int(page * ADMIN_PAGE)]).await?;
+
+    let cols = res["cols"].as_array().cloned().unwrap_or_default();
+    let rows = res["rows"].as_array().cloned().unwrap_or_default();
+    let photo = |id: i64, file: &str| -> String {
+        if file.is_empty() {
+            format!("{origin}/api/avatar/{id}")
+        } else {
+            format!("{origin}/api/image/{file}")
+        }
+    };
+    let items: Vec<Value> = rows.iter().map(|r| {
+        let o = row_to_obj(&cols, r.as_array().unwrap_or(&vec![]));
+        let ida = o["user_a"].as_i64().unwrap_or(0);
+        let idb = o["user_b"].as_i64().unwrap_or(0);
+        json!({
+            "dm_id": o["dm_id"].as_str().unwrap_or(""),
+            "last_body": o["last_body"].as_str().unwrap_or(""),
+            "last_at": o["last_at"].as_i64().unwrap_or(0),
+            "msg_count": o["msg_count"].as_i64().unwrap_or(0),
+            // Ikkala tomon — ro'yxatda ikkala rasm ko'rinadi
+            // (foydalanuvchi talabi).
+            "a": {
+                "id": ida,
+                "first_name": o["a_first"].as_str().unwrap_or(""),
+                "username": o["a_username"].as_str().unwrap_or(""),
+                "photo_url": photo(ida, o["a_avatar"].as_str().unwrap_or("")),
+            },
+            "b": {
+                "id": idb,
+                "first_name": o["b_first"].as_str().unwrap_or(""),
+                "username": o["b_username"].as_str().unwrap_or(""),
+                "photo_url": photo(idb, o["b_avatar"].as_str().unwrap_or("")),
+            },
+        })
+    }).collect();
+
+    let total = turso_exec(env, "SELECT COUNT(*) FROM dm_threads", vec![]).await
+        .map(|r| scalar(&r)).unwrap_or(0);
+
+    ok_nostore(json!({
+        "items": items,
+        "page": page,
+        "total": total,
+        "has_more": items.len() as i64 >= ADMIN_PAGE,
+    }))
+}
+
+/// GET /api/admin/dm/:dm_id — ADMIN: bitta suhbatning xabarlari.
+///
+/// `mine` belgisi bu yerda ma'nosiz (admin ikkovidan biri emas),
+/// shu sabab har xabarda `from_id` beriladi va ilova uni suhbat
+/// egalari bilan solishtiradi.
+async fn admin_dm_open(req: &Request, env: &Env, origin: &str, dm: &str) -> Result<Response> {
+    let Some(u) = session_user(env, &bearer(req)).await? else {
+        return json_resp(&json!({"error": "unauthorized"}), 401);
+    };
+    if !is_admin(&u) {
+        return json_resp(&json!({"error": "forbidden"}), 403);
+    }
+    let res = turso_exec(env,
+        "SELECT m.id, m.from_id, m.body, m.media_file, m.media_type,
+                m.media_ms, m.seen, m.created_at,
+                (SELECT GROUP_CONCAT(x.emoji || ':' || x.n)
+                   FROM (SELECT emoji, COUNT(*) AS n FROM dm_reactions
+                          WHERE msg_id = m.id GROUP BY emoji) x) AS reactions,
+                '' AS my_reaction
+           FROM dm_messages m
+          WHERE m.dm_id = ?
+          ORDER BY m.created_at DESC LIMIT ?",
+        vec![TursoArg::text(dm), TursoArg::int(CHAT_LIMIT)]).await?;
+
+    let cols = res["cols"].as_array().cloned().unwrap_or_default();
+    let rows = res["rows"].as_array().cloned().unwrap_or_default();
+    // `me = 0` — hech bir xabar "meniki" bo'lmaydi.
+    let items: Vec<Value> = rows.iter().rev()
+        .map(|r| dm_msg_public(origin, &row_to_obj(&cols, r.as_array().unwrap_or(&vec![])), 0))
+        .collect();
+    ok_nostore(json!({"items": items}))
 }
 
 /// GET /api/user/:id — OMMAVIY profil.
@@ -8088,7 +8954,9 @@ async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
         // kuydirmaydi.
         || path.starts_with("/api/admin/")
         // Shikoyat yuborish ham katalogga tegmaydi.
-        || path.starts_with("/api/reports");
+        || path.starts_with("/api/reports")
+        // Shaxsiy yozishma HAR BIR ODAM uchun boshqacha.
+        || path.starts_with("/api/dm");
     let write = matches!(method, Method::Post | Method::Put | Method::Delete) && !auth_path;
     let mut resp = route(req, env, ctx).await?;
 
@@ -8268,6 +9136,43 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
             if let Ok(uid) = idv.parse::<i64>() {
                 return admin_user_action(req, &env, uid).await;
             }
+        }
+    }
+
+    // ── SHAXSIY YOZISHMALAR ───────────────────────────────────
+    if path == "/api/dm" && method == Method::Post {
+        return dm_send(req, &env, &origin).await;
+    }
+    if method == Method::Get {
+        match path {
+            "/api/dm/threads" => return dm_threads(&req, &env, &origin).await,
+            "/api/dm/search" => return dm_search(&req, &env, &origin).await,
+            "/api/dm/unread" => return dm_unread(&req, &env).await,
+            "/api/dm/wait" => return dm_wait(&req, &env).await,
+            _ => {}
+        }
+        if let Some(idv) = path.strip_prefix("/api/dm/thread/") {
+            if let Ok(uid) = idv.parse::<i64>() {
+                return dm_open(&req, &env, &origin, uid).await;
+            }
+        }
+    }
+    if path == "/api/dm/react" && method == Method::Post {
+        return dm_react(req, &env).await;
+    }
+    if method == Method::Delete {
+        if let Some(mid) = path.strip_prefix("/api/dm/message/") {
+            return dm_del_message(&req, &env, mid).await;
+        }
+    }
+    // ADMIN: barcha shaxsiy suhbatlar (foydalanuvchi talabi —
+    // xavfsizlik uchun).
+    if method == Method::Get {
+        if path == "/api/admin/dm/threads" {
+            return admin_dm_threads(&req, &env, &origin).await;
+        }
+        if let Some(dm) = path.strip_prefix("/api/admin/dm/") {
+            return admin_dm_open(&req, &env, &origin, dm).await;
         }
     }
 
