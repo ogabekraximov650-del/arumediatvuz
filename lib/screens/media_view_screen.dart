@@ -22,6 +22,7 @@ import 'dart:async';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
+import '../services/image_cache.dart';
 
 class MediaViewScreen extends StatefulWidget {
   final String url;
@@ -172,6 +173,7 @@ class _MediaViewScreenState extends State<MediaViewScreen> {
       minScale: 1,
       maxScale: 4,
       child: CachedNetworkImage(
+        cacheManager: AppImageCache.manager,
         imageUrl: widget.url,
         fit: BoxFit.contain,
         placeholder: (_, __) => const SizedBox(

@@ -25,6 +25,7 @@ import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
+import '../services/image_cache.dart';
 
 import '../services/auth_service.dart';
 import '../services/screen_guard.dart';
@@ -1034,6 +1035,7 @@ class _TitleAvatar extends StatelessWidget {
         child: url.isEmpty
             ? fallback
             : CachedNetworkImage(
+                cacheManager: AppImageCache.manager,
                 imageUrl: url,
                 fit: BoxFit.cover,
                 memCacheWidth: (size * 3).round(),
@@ -1266,6 +1268,7 @@ class _Bubble extends StatelessWidget {
                   ),
                 )
               : CachedNetworkImage(
+                  cacheManager: AppImageCache.manager,
                   imageUrl: m.mediaUrl,
                   fit: BoxFit.cover,
                   memCacheWidth: 700,

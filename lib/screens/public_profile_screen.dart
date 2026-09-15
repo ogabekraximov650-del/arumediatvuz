@@ -25,6 +25,7 @@
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
+import '../services/image_cache.dart';
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
@@ -452,6 +453,7 @@ class _Avatar extends StatelessWidget {
         child: url.isEmpty
             ? fallback
             : CachedNetworkImage(
+                cacheManager: AppImageCache.manager,
                 imageUrl: url,
                 fit: BoxFit.cover,
                 memCacheWidth: 300,

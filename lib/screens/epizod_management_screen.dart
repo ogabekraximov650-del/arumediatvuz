@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../services/image_cache.dart';
 
 import '../services/rust_bridge.dart';
 import 'package:http/http.dart' as http;
@@ -6,7 +7,6 @@ import 'dart:convert';
 import '../theme/app_background.dart';
 import '../widgets/glass.dart';
 import 'add_epizod_screen.dart';
-import 'package:cached_network_image/cached_network_image.dart';
 
 const String _apiBase = 'https://aniraxuzapp.ogabekraximov650.workers.dev';
 
@@ -205,7 +205,8 @@ class _EpizodManagementScreenState extends State<EpizodManagementScreen> {
                               ? DecorationImage(
                                   // 48 dp -> 144 px.
                                   image: ResizeImage(
-                                    CachedNetworkImageProvider(seasonPhoto),
+                                    appImageProvider(
+                              seasonPhoto),
                                     width: 144,
                                     allowUpscaling: false,
                                   ),

@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
+import '../services/image_cache.dart';
 import '../theme/app_background.dart';
 import '../widgets/glass.dart';
-import 'package:cached_network_image/cached_network_image.dart';
 
 class AnimeDetailScreen extends StatelessWidget {
   final Map<String, dynamic> anime;
@@ -52,7 +52,8 @@ class AnimeDetailScreen extends StatelessWidget {
                           // ya'ni sifat yo'qolmaydi, lekin undan
                           // kattaroq manba keraksiz xotira egallamaydi.
                           image: ResizeImage(
-                            CachedNetworkImageProvider(
+                            appImageProvider(
+                              
                               anime['photo_url'] ?? '',
                             ),
                             width: 1080,

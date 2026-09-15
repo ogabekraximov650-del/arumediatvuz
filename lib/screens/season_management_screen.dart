@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../services/image_cache.dart';
 
 import '../services/disk_cache.dart';
 import 'package:http/http.dart' as http;
@@ -7,7 +8,6 @@ import '../theme/app_background.dart';
 import '../widgets/glass.dart';
 import 'add_season_screen.dart';
 import 'epizod_management_screen.dart';
-import 'package:cached_network_image/cached_network_image.dart';
 
 const String API_BASE = 'https://aniraxuzapp.ogabekraximov650.workers.dev';
 
@@ -225,7 +225,8 @@ class _SeasonManagementScreenState extends State<SeasonManagementScreen> {
                             // o'lchamini cheklaydi, ya'ni 1080p poster
                             // ham xotiraga kichik holda tushadi.)
                             image: ResizeImage(
-                              CachedNetworkImageProvider(animePhoto ?? ''),
+                              appImageProvider(
+                              animePhoto ?? ''),
                               width: 144,
                               allowUpscaling: false,
                             ),
@@ -331,7 +332,8 @@ class _SeasonManagementScreenState extends State<SeasonManagementScreen> {
                                                 image: DecorationImage(
                                                   // 64 dp -> 192 px.
                                                   image: ResizeImage(
-                                                    CachedNetworkImageProvider(
+                                                    appImageProvider(
+                              
                                                         s['photo_url'] ?? ''),
                                                     width: 192,
                                                     allowUpscaling: false,

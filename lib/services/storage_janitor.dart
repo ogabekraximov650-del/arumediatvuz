@@ -45,7 +45,14 @@ class StorageJanitor {
   /// `libCachedImageData` — posterlar keshi (`cached_network_image`).
   /// U o'zini o'zi cheklaydi va uni o'chirish har safar posterlarni
   /// qaytadan yuklab olishga majbur qilardi — ya'ni trafik sarfi.
+  ///
+  /// `aru_images` — ilovaning O'Z posterlar keshi
+  /// (`image_cache.dart`). U `libCachedImageData` ning o'rnini
+  /// egalladi: odatiy keshda eng ko'pi 200 ta fayl turardi va
+  /// poster undan tez chiqib ketib, qayta yuklanardi.
   static const Set<String> _keep = {
+    'aru_images',
+    'aru_images.db',
     'libCachedImageData',
     'libCachedImageData.db',
   };

@@ -1032,6 +1032,58 @@ async fn init_db(env: &Env) -> bool {
             (SELECT 1 FROM app_config WHERE cfg_key='wipe_all_v4')", vec![]),
         ("INSERT OR IGNORE INTO app_config (cfg_key,cfg_value)
           VALUES ('wipe_all_v4','1')", vec![]),
+
+        // ══════════════════════════════════════════════════════
+        //  STATISTIKANI BUTUNLAY TOZALASH (v5)
+        // ══════════════════════════════════════════════════════
+        //
+        // TALAB (foydalanuvchi): "statistikani butunlay tozalab
+        // tashla — kim qaysi animeni yoki epizodni ko'rgani, baho
+        // bergani, saqlagani va hokazo barchasini".
+        //
+        // O'CHADI:
+        //   * `watch_history_db` — kim nimani ko'rgani (qatorning
+        //     O'ZI ham, nafaqat raqamlari);
+        //   * `ratings_db` — kim nimaga baho bergani;
+        //   * `favorites_db` — kim nimani saqlagani;
+        //   * `stats_hourly` / `stats_daily` — umumiy chelaklar;
+        //   * `sync_batches` — sinxronlash izlari (paket
+        //     raqamlari; ularsiz telefon o'z paketini qaytadan
+        //     yuborishi mumkin, lekin yuboradigan narsasi
+        //     qolmaydi).
+        //
+        // NOLLANADI: bo'lim va qism hisoblagichlari, shu jumladan
+        // baho yig'indisi va sevimlilar soni; profildagi shaxsiy
+        // trafik.
+        //
+        // TEGILMAYDI: hisoblarning O'ZI (`users_db`), sessiyalar,
+        // anime ma'lumoti, B2'dagi fayllar, to'lovlar va obunalar.
+        //
+        // Belgi qo'yilgani uchun bu FAQAT BIR MARTA bajariladi.
+        ("DELETE FROM watch_history_db WHERE NOT EXISTS
+            (SELECT 1 FROM app_config WHERE cfg_key='wipe_stats_v5')", vec![]),
+        ("DELETE FROM ratings_db WHERE NOT EXISTS
+            (SELECT 1 FROM app_config WHERE cfg_key='wipe_stats_v5')", vec![]),
+        ("DELETE FROM favorites_db WHERE NOT EXISTS
+            (SELECT 1 FROM app_config WHERE cfg_key='wipe_stats_v5')", vec![]),
+        ("DELETE FROM stats_hourly WHERE NOT EXISTS
+            (SELECT 1 FROM app_config WHERE cfg_key='wipe_stats_v5')", vec![]),
+        ("DELETE FROM stats_daily WHERE NOT EXISTS
+            (SELECT 1 FROM app_config WHERE cfg_key='wipe_stats_v5')", vec![]),
+        ("DELETE FROM sync_batches WHERE NOT EXISTS
+            (SELECT 1 FROM app_config WHERE cfg_key='wipe_stats_v5')", vec![]),
+        ("UPDATE season_db SET views_total=0, watch_ms_total=0,
+                fav_count=0, rating_sum=0, rating_count=0
+            WHERE NOT EXISTS
+            (SELECT 1 FROM app_config WHERE cfg_key='wipe_stats_v5')", vec![]),
+        ("UPDATE epizod_db SET views_total=0, watch_ms_total=0
+            WHERE NOT EXISTS
+            (SELECT 1 FROM app_config WHERE cfg_key='wipe_stats_v5')", vec![]),
+        ("UPDATE users_db SET traffic_bytes=0
+            WHERE NOT EXISTS
+            (SELECT 1 FROM app_config WHERE cfg_key='wipe_stats_v5')", vec![]),
+        ("INSERT OR IGNORE INTO app_config (cfg_key,cfg_value)
+          VALUES ('wipe_stats_v5','1')", vec![]),
     ]).await.is_ok();
     ok
 }
@@ -1250,6 +1302,24 @@ async fn b2_get_upload_url(env: &Env) -> Result<Value> {
 const FULL_CACHE_MAX: u64 = 12 * 1024 * 1024; // 12 MiB
 const CHUNK_CACHE_SECONDS: u64 = 400 * 24 * 60 * 60; // 400 kun
 
+/// ── MIJOZ (TELEFON) KESHI ─────────────────────────────────────
+///
+/// TOPILGAN XATO (foydalanuvchi: "anime posteri diskda saqlanishi
+/// kerak edi, lekin har safar ilovaga kirganda qayta yuklanyapti").
+///
+/// Sabab: javobda `max-age=86400` turardi — ya'ni BIR KUN. Ertasi
+/// kuni `cached_network_image` faylni "eskirgan" deb bilib, uni
+/// qaytadan yuklab olardi. Ustiga `ETag` ham yo'q edi, shu sabab
+/// "o'zgarmagan" degan arzon javob ham chiqmasdi — har safar
+/// to'liq rasm.
+///
+/// B2'dagi fayl nomi HECH QACHON qayta ishlatilmaydi (poster
+/// almashtirilsa YANGI nom yoziladi va eskisi o'chiriladi), ya'ni
+/// bitta nom = bitta o'zgarmas mazmun. Shuning uchun `immutable`
+/// to'g'ri va xavfsiz: telefon faylni bir marta yuklab oladi va
+/// boshqa so'ramaydi.
+const CLIENT_CACHE: &str = "public, max-age=31536000, immutable";
+
 /// "bytes=START-END?" ni (start, end_yoki_None) ga ajratadi.
 fn parse_range(range: &str) -> Option<(u64, Option<u64>)> {
     let r = range.strip_prefix("bytes=")?;
@@ -1442,7 +1512,7 @@ async fn media_from_cache(
         let h = resp.headers_mut();
         h.set("Content-Type", &ct)?;
         h.set("Accept-Ranges", "bytes")?;
-        h.set("Cache-Control", "public, max-age=86400")?;
+        h.set("Cache-Control", CLIENT_CACHE)?;
         h.set("Content-Length", &len.to_string())?;
         if range.is_some() {
             h.set("Content-Range", &format!("bytes {start}-{end}/{total}"))?;
@@ -1502,7 +1572,7 @@ async fn b2_media_direct(
         let h = resp.headers_mut();
         h.set("Content-Type", &ct)?;
         h.set("Accept-Ranges", "bytes")?;
-        h.set("Cache-Control", "public, max-age=86400")?;
+        h.set("Cache-Control", CLIENT_CACHE)?;
         h.set("Content-Length", &len.to_string())?;
         h.set("Content-Range", &format!("bytes {start}-{end}/{total_str}"))?;
         h.set("X-Cache", "MISS-MEDIA")?;
@@ -2686,7 +2756,7 @@ async fn b2_proxy_range(
     let h = resp.headers_mut();
     h.set("Content-Type", &ct)?;
     h.set("Accept-Ranges", "bytes")?;
-    h.set("Cache-Control", "public, max-age=86400")?;
+    h.set("Cache-Control", CLIENT_CACHE)?;
     h.set("Content-Length", &got.to_string())?;
     h.set("Content-Range", &format!("bytes {req_start}-{actual_end}/{total_str}"))?;
     h.set("X-Cache", "MISS")?;
@@ -2724,7 +2794,7 @@ async fn b2_proxy_full(env: &Env, file_name: &str) -> Result<Response> {
         let h = resp.headers_mut();
         h.set("Content-Type", &ct)?;
         h.set("Accept-Ranges", "bytes")?;
-        h.set("Cache-Control", "public, max-age=86400")?;
+        h.set("Cache-Control", CLIENT_CACHE)?;
         if let Some(len) = cl {
             h.set("Content-Length", &len.to_string())?;
         }
@@ -2760,7 +2830,7 @@ async fn b2_proxy_full(env: &Env, file_name: &str) -> Result<Response> {
         let h = resp.headers_mut();
         h.set("Content-Type", &ct)?;
         h.set("Accept-Ranges", "bytes")?;
-        h.set("Cache-Control", "public, max-age=86400")?;
+        h.set("Cache-Control", CLIENT_CACHE)?;
         h.set("Content-Length", &len.to_string())?;
         return Ok(resp);
     }
@@ -2779,7 +2849,7 @@ async fn b2_proxy_full(env: &Env, file_name: &str) -> Result<Response> {
     let h = resp.headers_mut();
     h.set("Content-Type", &ct)?;
     h.set("Accept-Ranges", "bytes")?;
-    h.set("Cache-Control", "public, max-age=86400")?;
+    h.set("Cache-Control", CLIENT_CACHE)?;
     if total > 0 {
         h.set("Content-Length", &total.to_string())?;
     }
@@ -4528,11 +4598,25 @@ async fn sync_route(mut req: Request, env: &Env) -> Result<Response> {
 
     let mut old_hist: std::collections::HashMap<(i64, i64, i64), (i64, i64)> =
         std::collections::HashMap::new();
+    // ── SHU ODAM ALLAQACHON KO'RGAN BO'LIMLAR ─────────────────
+    //
+    // TOPILGAN XATO (foydalanuvchi: "ikkita hisob bor edi, lekin
+    // animedagi ko'rishlar soni yo'q joydan 3 ta bo'lib qoldi").
+    //
+    // Sabab: bo'limning `views_total` i HAR BIR QISM uchun alohida
+    // oshardi. Bitta odam 3 ta qismni ko'rsa — bo'limda "3 ta
+    // ko'rish" chiqardi, go'yo uch kishi ko'rgandek.
+    //
+    // To'g'ri qoida: BO'LIM darajasida bitta odam = BITTA ko'rish.
+    // Qism (`epizod_db`) darajasida esa ilgarigidek qoladi — u
+    // yerda "qaysi qism necha marta ko'rilgan" kerak.
+    let mut seen_seasons: std::collections::HashSet<(i64, i64)> =
+        std::collections::HashSet::new();
     for r in rows_of(&pre[1]) {
-        old_hist.insert(
-            (num(&r, "anime_id"), num(&r, "season_id"), num(&r, "epizod_id")),
-            (num(&r, "watched_ms").max(0), num(&r, "view_count").max(0)),
-        );
+        let (a, sn, e) = (num(&r, "anime_id"), num(&r, "season_id"), num(&r, "epizod_id"));
+        let views = num(&r, "view_count").max(0);
+        if views > 0 { seen_seasons.insert((a, sn)); }
+        old_hist.insert((a, sn, e), (num(&r, "watched_ms").max(0), views));
     }
     let mut old_rate: std::collections::HashMap<(i64, i64), i64> =
         std::collections::HashMap::new();
@@ -4609,6 +4693,10 @@ async fn sync_route(mut req: Request, env: &Env) -> Result<Response> {
             TursoArg::int(at),
         ]);
 
+        // Bo'lim hisobiga faqat shu odamning BIRINCHI ko'rishi
+        // qo'shiladi (yuqoridagi `seen_seasons` izohiga qarang).
+        let season_view_inc = if view_inc > 0 && seen_seasons.insert((aid, sid)) { 1 } else { 0 };
+
         if view_inc > 0 || delta > 0 {
             total_views += view_inc;
             total_watch += delta;
@@ -4616,7 +4704,7 @@ async fn sync_route(mut req: Request, env: &Env) -> Result<Response> {
             e.0 += view_inc;
             e.1 += delta;
             let s = seasons.entry((aid, sid)).or_default();
-            s.views += view_inc;
+            s.views += season_view_inc;
             s.watch += delta;
         }
     }

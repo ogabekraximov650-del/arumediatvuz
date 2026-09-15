@@ -22,6 +22,7 @@ import 'dart:async';
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
+import '../services/image_cache.dart';
 
 import '../services/auth_service.dart';
 import '../services/comments_service.dart';
@@ -1327,6 +1328,7 @@ class _Avatar extends StatelessWidget {
         child: url.isEmpty
             ? fallback
             : CachedNetworkImage(
+                cacheManager: AppImageCache.manager,
                 imageUrl: url,
                 fit: BoxFit.cover,
                 // Rasm kichkina — xotirada ham kichik tursin.

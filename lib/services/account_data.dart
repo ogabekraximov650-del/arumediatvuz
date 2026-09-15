@@ -47,6 +47,7 @@ import 'support_service.dart';
 import 'rust_bridge.dart';
 import 'season_info.dart';
 import 'stats_service.dart';
+import 'image_cache.dart';
 import 'sync_queue.dart';
 import 'traffic_service.dart';
 import 'watch_history.dart';
@@ -223,7 +224,10 @@ class AccountData {
       for (final e in tmp.listSync()) {
         final name = e.uri.pathSegments
             .lastWhere((s) => s.isNotEmpty, orElse: () => '');
-        if (!name.startsWith('libCachedImageData')) continue;
+        if (!name.startsWith('libCachedImageData') &&
+            !name.startsWith(AppImageCache.key)) {
+          continue;
+        }
         try {
           if (e is File) {
             e.deleteSync();

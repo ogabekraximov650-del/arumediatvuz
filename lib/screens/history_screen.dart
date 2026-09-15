@@ -36,6 +36,7 @@ import 'dart:typed_data';
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
+import '../services/image_cache.dart';
 
 import '../services/download_manager.dart';
 import '../services/format.dart';
@@ -612,6 +613,7 @@ class _DownloadRow extends StatelessWidget {
                       _Frame(item: h)
                     else if (item.poster.isNotEmpty)
                       CachedNetworkImage(
+                        cacheManager: AppImageCache.manager,
                         imageUrl: item.poster,
                         fit: BoxFit.cover,
                         placeholder: (_, __) =>
@@ -1934,6 +1936,7 @@ class _FrameState extends State<_Frame> {
     final url = widget.item.poster;
     if (url.isEmpty) return Container(color: AppColors.cardAlt);
     return CachedNetworkImage(
+      cacheManager: AppImageCache.manager,
       imageUrl: url,
       fit: BoxFit.cover,
       placeholder: (_, __) => Container(color: AppColors.cardAlt),

@@ -118,6 +118,40 @@ Future<void> _main() async {
     ]);
   }
 
+  // ── STATISTIKA BIR MARTA TOZALANADI (v5) ────────────────────
+  //
+  // TALAB: "statistikani butunlay tozalab tashla — kim qaysi
+  // animeni yoki epizodni ko'rgani, baho bergani, saqlagani va
+  // hokazo barchasini".
+  //
+  // Serverda bu `worker/src/lib.rs` -> `wipe_stats_v5` da
+  // bajariladi. Faqat serverni tozalash YETARLI EMAS: telefonda
+  //
+  //   * tomosha tarixi va sevimlilar nusxasi diskda yotadi —
+  //     ekranda eski ro'yxat turib qolardi;
+  //   * YUBORILMAGAN NAVBAT (`sync_queue`) ham yotadi — u
+  //     keyingi ulanishda serverga ketib, endigina tozalangan
+  //     ma'lumotni QAYTA TIKLAB qo'yardi.
+  //
+  // Shu sabab ikkovi ham shu yerda bo'shatiladi. Belgi qo'yilgani
+  // uchun bu faqat BIR MARTA bo'ladi.
+  if (RustCore.instance.getCachedList('stats_wipe_v5') == null) {
+    final uid = AuthService.instance.user?.id ?? 0;
+    for (final key in [
+      'watch_history_$uid',
+      'favorites',
+      'my_stats',
+      'app_stats',
+      'sync_queue',
+      'sync_state',
+    ]) {
+      RustCore.instance.saveListCache(key, const <Map<String, dynamic>>[]);
+    }
+    RustCore.instance.saveListCache('stats_wipe_v5', [
+      {'at': DateTime.now().millisecondsSinceEpoch}
+    ]);
+  }
+
   // Obuna muddati diskdan o'qiladi — TARMOQSIZ. Obunasi yo'q
   // odam anime ko'ra olmaydi, shu sabab bu ma'lumot ilova
   // ochilishi bilan ma'lum bo'lishi kerak, aks holda pul

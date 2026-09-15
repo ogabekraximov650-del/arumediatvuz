@@ -38,6 +38,7 @@ import 'dart:async';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import '../services/image_cache.dart';
 
 import '../services/admin_users_service.dart';
 import '../services/billing_service.dart' show formatSum;
@@ -1432,6 +1433,7 @@ class _Avatar extends StatelessWidget {
             child: url.isEmpty
                 ? fallback
                 : CachedNetworkImage(
+                    cacheManager: AppImageCache.manager,
                     imageUrl: url,
                     fit: BoxFit.cover,
                     memCacheWidth: 140,

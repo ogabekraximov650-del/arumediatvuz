@@ -115,6 +115,7 @@ import 'package:http/http.dart' as http;
 // u endi YUKLAB OLISH tugmasiga xizmat qiladi (va yuklab olingan
 // videoni oflayn ko'rsatadi), ijro oqimiga aralashmaydi.
 import 'package:video_player/video_player.dart';
+import '../services/image_cache.dart';
 
 import '../services/app_settings.dart';
 import '../services/billing_service.dart';
@@ -4410,6 +4411,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                   ClipRRect(
                     borderRadius: BorderRadius.circular(8),
                     child: CachedNetworkImage(
+                        cacheManager: AppImageCache.manager,
                         imageUrl: photoUrl,
                         width: 50,
                         height: 50,

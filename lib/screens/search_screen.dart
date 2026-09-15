@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
+import '../services/image_cache.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 import '../widgets/glass.dart';
 import '../services/rust_bridge.dart';
 import 'anime_detail_screen.dart';
-import 'package:cached_network_image/cached_network_image.dart';
 
 const String API_BASE = 'https://aniraxuzapp.ogabekraximov650.workers.dev';
 
@@ -219,7 +219,8 @@ class _SeasonSearchCard extends StatelessWidget {
                   image: DecorationImage(
                     // Ikki ustunli katak ~166 dp keng -> 540 px.
                     image: ResizeImage(
-                      CachedNetworkImageProvider(season['photo_url'] ?? ''),
+                      appImageProvider(
+                              season['photo_url'] ?? ''),
                       width: 540,
                       allowUpscaling: false,
                     ),

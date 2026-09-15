@@ -19,6 +19,16 @@ dependencies:
   connectivity_plus: ^7.3.1
   path_provider: ^2.1.4
   cached_network_image: ^3.4.1
+  # ── POSTERLAR KESHI ─────────────────────────────────────────
+  # `cached_network_image` allaqachon shu paketni ishlatadi, lekin
+  # ODATIY sozlama bilan: keshda ENG KO'PI 200 ta fayl turadi va
+  # 201-chisi kelganda eng eskisi o'chiriladi. Posterlar, avatarlar
+  # va izohlardagi rasmlar birgalikda bu chegaradan tez oshib
+  # ketadi — shu sabab poster har ochilishda qaytadan yuklanardi.
+  #
+  # O'z sozlamamizni berish uchun paket ochiq yoziladi
+  # (`image_cache.dart`).
+  flutter_cache_manager: ^3.3.1
   # Video yuklashda real-time progress uchun
   dio: ^5.4.0
   # ── VIDEO PLEYER ────────────────────────────────────────────

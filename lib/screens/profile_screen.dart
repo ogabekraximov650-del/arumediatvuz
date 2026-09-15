@@ -4,6 +4,7 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
+import '../services/image_cache.dart';
 
 import '../services/admin_badges.dart';
 import '../services/app_build.dart';
@@ -1654,6 +1655,7 @@ class _AvatarState extends State<_Avatar> {
     final image = user.photoUrl.isEmpty
         ? fallback
         : CachedNetworkImage(
+            cacheManager: AppImageCache.manager,
             imageUrl: user.photoUrl,
             width: _size,
             height: _size,

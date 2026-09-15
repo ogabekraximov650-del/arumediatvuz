@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../services/image_cache.dart';
 
 import '../services/disk_cache.dart';
 import 'package:http/http.dart' as http;
@@ -7,7 +8,6 @@ import '../theme/app_background.dart';
 import '../widgets/glass.dart';
 import 'add_anime_screen.dart';
 import 'season_management_screen.dart';
-import 'package:cached_network_image/cached_network_image.dart';
 
 const String API_BASE = 'https://aniraxuzapp.ogabekraximov650.workers.dev';
 
@@ -303,7 +303,8 @@ class _AnimeManagementScreenState extends State<AnimeManagementScreen> {
                                                     image: DecorationImage(
                                                       // 76 dp -> 228 px.
                                                       image: ResizeImage(
-                                                        CachedNetworkImageProvider(
+                                                        appImageProvider(
+                              
                                                             anime['photo_url'] ??
                                                                 ''),
                                                         width: 228,

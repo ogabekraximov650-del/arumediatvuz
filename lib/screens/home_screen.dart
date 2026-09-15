@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:cached_network_image/cached_network_image.dart';
+import '../services/image_cache.dart';
 import '../widgets/aru_logo.dart';
 import '../widgets/glass.dart';
 import '../widgets/stats_banner.dart';
@@ -425,6 +426,7 @@ class SeasonCard extends StatelessWidget {
               // Rasm
               if (photoUrl != null && photoUrl.isNotEmpty)
                 CachedNetworkImage(
+                  cacheManager: AppImageCache.manager,
                   imageUrl: photoUrl,
                   fit: BoxFit.cover,
                   // Katak ikki ustunli gridda ~166 dp keng — 540 px
