@@ -69,24 +69,16 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
   final _nameCtrl = TextEditingController();
 
   // ══════════════════════════════════════════════════════════
-  //  YOSH CHEGARASI
+  //  YOSH CHEGARASI BU YERDA EMAS
   // ══════════════════════════════════════════════════════════
   //
-  // TALAB (foydalanuvchi): "epizod qo'shish sahifasiga qism nomi
-  // tagiga yosh chegarasini yozadigan oyna qo'sh" va keyin
-  // "yosh chegarasi QO'LDA yozilsin".
+  // TALAB (foydalanuvchi): "epizod qo'shish oynasidagi yosh
+  // chegarasini yozadigan joyni olib tashla va bo'lim qo'shish
+  // oynasiga qo'sh — yosh chegarasi bitta BO'LIM uchun amal
+  // qiladi".
   //
-  // Ya'ni tayyor tugmalar emas — oddiy yozuv oynasi. Admin
-  // istalgan raqamni yozadi (`16`, `18`, `21` ...).
-  //
-  // Faqat RAQAM qabul qilinadi (`FilteringTextInputFormatter`):
-  // yozuvga `+` yoki bo'sh joy tushib qolsa, bir qismda `18+`,
-  // boshqasida `18 +` bo'lib, ro'yxatda ikki xil belgi chiqardi.
-  // `+` ni ilova O'ZI qo'shib ko'rsatadi.
-  //
-  // Bo'sh qoldirilsa — "belgilanmagan": kartochkada hech qanday
-  // belgi ko'rsatilmaydi.
-  final _yoshCtrl = TextEditingController();
+  // Shu sabab bu ekranda yosh oynasi YO'Q va serverga `yosh`
+  // yuborilmaydi. U `add_season_screen.dart` da.
 
   // ══════════════════════════════════════════════════════════
   //  OPENINGNI O'TKAZIB YUBORISH — VAQT OYNALARI
@@ -139,8 +131,6 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
       }
       _numberCtrl.text = (ep['epizod_number'] ?? '').toString();
       _nameCtrl.text = ep['epizod_name'] ?? '';
-      final y = int.tryParse('${ep['yosh'] ?? 0}') ?? 0;
-      if (y > 0) _yoshCtrl.text = '$y';
       for (final q in _qualities) {
         // Worker GET javobida to'liq URL keladi — bare nomga qaytaramiz,
         // saqlashda serverga aynan shu (bare) holida yuboriladi.
@@ -154,7 +144,6 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
   void dispose() {
     _numberCtrl.dispose();
     _nameCtrl.dispose();
-    _yoshCtrl.dispose();
     for (final c in _introFrom) {
       c.dispose();
     }
@@ -380,7 +369,6 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
         'season_id': widget.seasonId,
         'epizod_number': int.tryParse(_numberCtrl.text) ?? 0,
         'epizod_name': _nameCtrl.text,
-        'yosh': int.tryParse(_yoshCtrl.text.trim()) ?? 0,
         'url_360p': _qualities[0].url ?? '',
         'size_360p': _qualities[0].size ?? '',
         'url_480p': _qualities[1].url ?? '',
@@ -502,11 +490,6 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
 
                       _buildTextField('Epizod nomi (ixtiyoriy)', _nameCtrl,
                           Icons.title_rounded),
-                      const SizedBox(height: 12),
-
-                      // Qism nomining TAGIDA — foydalanuvchi aytgan
-                      // joyda.
-                      _buildYoshCard(),
                       const SizedBox(height: 20),
 
                       // ── 4 ta sifat yuklash oynasi ──
@@ -675,53 +658,6 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
           hintStyle: TextStyle(
               color: Colors.white.withValues(alpha: 0.3), fontSize: 13),
           border: InputBorder.none,
-        ),
-      ),
-    );
-  }
-
-  /// Yosh chegarasi — QO'LDA yoziladigan oyna.
-  ///
-  /// O'ngida yozilgan raqam `18+` ko'rinishida darhol ko'rsatilib
-  /// turadi: admin nimani saqlayotganini yozayotgan paytda ko'radi.
-  Widget _buildYoshCard() {
-    return Glass(
-      borderRadius: 14,
-      blur: 14,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-      child: TextField(
-        controller: _yoshCtrl,
-        keyboardType: TextInputType.number,
-        // Faqat raqam — ko'pi bilan ikki xona.
-        inputFormatters: [
-          FilteringTextInputFormatter.digitsOnly,
-          LengthLimitingTextInputFormatter(2),
-        ],
-        style: const TextStyle(color: Colors.white),
-        onChanged: (_) => setState(() {}),
-        decoration: InputDecoration(
-          hintText: 'Yosh chegarasi (masalan 18)',
-          hintStyle: TextStyle(color: Colors.white.withValues(alpha: 0.4)),
-          prefixIcon: const Icon(Icons.shield_outlined, color: Colors.white54),
-          border: InputBorder.none,
-          // Yozilgan raqam qanday ko'rinishini ko'rsatib turadi.
-          suffixIcon: _yoshCtrl.text.trim().isEmpty
-              ? null
-              : Padding(
-                  padding: const EdgeInsets.only(right: 12),
-                  child: Align(
-                    alignment: Alignment.centerRight,
-                    widthFactor: 1,
-                    child: Text(
-                      '${_yoshCtrl.text.trim()}+',
-                      style: const TextStyle(
-                        color: AppColors.accent,
-                        fontSize: 15,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                  ),
-                ),
         ),
       ),
     );

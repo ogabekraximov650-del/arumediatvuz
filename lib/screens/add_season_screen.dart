@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'dart:io';
 import 'dart:async';
@@ -33,6 +34,29 @@ class _AddSeasonScreenState extends State<AddSeasonScreen> {
   final _tarjimonCtrl = TextEditingController();
   final _yiliCtrl = TextEditingController();
   final _tavsifCtrl = TextEditingController();
+
+  // ══════════════════════════════════════════════════════════
+  //  YOSH CHEGARASI
+  // ══════════════════════════════════════════════════════════
+  //
+  // TALAB (foydalanuvchi): "epizod qo'shish oynasidagi yosh
+  // chegarasini yozadigan joyni olib tashla va bo'lim qo'shish
+  // oynasiga qo'sh — yosh chegarasi bitta BO'LIM uchun amal
+  // qiladi".
+  //
+  // Ilgari chegara HAR BIR QISMga alohida yozilardi va bo'limniki
+  // qismlardagi eng kattasi deb hisoblanardi. Bu ortiqcha ish edi:
+  // bitta bo'limning barcha qismlari bir xil chegarada bo'ladi.
+  // Endi u shu yerda BIR MARTA yoziladi.
+  //
+  // Faqat RAQAM qabul qilinadi (`FilteringTextInputFormatter`):
+  // yozuvga `+` yoki bo'sh joy tushib qolsa, bir bo'limda `18+`,
+  // boshqasida `18 +` bo'lib, ro'yxatda ikki xil belgi chiqardi.
+  // `+` ni ilova O'ZI qo'shib ko'rsatadi.
+  //
+  // Bo'sh qoldirilsa — "belgilanmagan": kartochkada hech qanday
+  // belgi ko'rsatilmaydi.
+  final _yoshCtrl = TextEditingController();
 
   /// Tanlangan janrlar. Endi qo'lda yozilmaydi — tugmalar
   /// bosiladi (`lib/data/janrlar.dart`).
@@ -71,6 +95,8 @@ class _AddSeasonScreenState extends State<AddSeasonScreen> {
       _tarjimonCtrl.text = s['tarjimon'] ?? '';
       _yiliCtrl.text = s['yili'] ?? '';
       _tavsifCtrl.text = s['tavsif'] ?? '';
+      final yosh = int.tryParse('${s['yosh'] ?? 0}') ?? 0;
+      if (yosh > 0) _yoshCtrl.text = '$yosh';
       // Eski yozuvlarda janrlar vergul bilan ajratilgan matn.
       for (final part in (s['janri'] ?? '').toString().split(',')) {
         final t = part.trim();
@@ -91,6 +117,7 @@ class _AddSeasonScreenState extends State<AddSeasonScreen> {
     _tarjimonCtrl.dispose();
     _yiliCtrl.dispose();
     _tavsifCtrl.dispose();
+    _yoshCtrl.dispose();
     super.dispose();
   }
 
@@ -210,6 +237,8 @@ class _AddSeasonScreenState extends State<AddSeasonScreen> {
         'turi': _turi,
         'holati': _holati,
         'tavsif': _tavsifCtrl.text,
+        // Yosh chegarasi — butun bo'lim uchun.
+        'yosh': int.tryParse(_yoshCtrl.text.trim()) ?? 0,
       });
 
       final res = method == 'POST'
@@ -371,6 +400,10 @@ class _AddSeasonScreenState extends State<AddSeasonScreen> {
                       _buildTextField(
                           'Yili', _yiliCtrl, Icons.calendar_today_outlined,
                           keyboardType: TextInputType.number),
+                      const SizedBox(height: 12),
+
+                      // Yosh chegarasi — BO'LIM uchun bir marta.
+                      _buildYoshCard(),
                       const SizedBox(height: 12),
                       _buildSectionLabel('Janri'),
                       const SizedBox(height: 8),
@@ -545,6 +578,53 @@ class _AddSeasonScreenState extends State<AddSeasonScreen> {
           ),
         );
       }).toList(),
+    );
+  }
+
+  /// Yosh chegarasi — QO'LDA yoziladigan oyna.
+  ///
+  /// O'ngida yozilgan raqam `18+` ko'rinishida darhol ko'rsatilib
+  /// turadi: admin nimani saqlayotganini yozayotgan paytda ko'radi.
+  Widget _buildYoshCard() {
+    return Glass(
+      borderRadius: 14,
+      blur: 14,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      child: TextField(
+        controller: _yoshCtrl,
+        keyboardType: TextInputType.number,
+        // Faqat raqam — ko'pi bilan ikki xona.
+        inputFormatters: [
+          FilteringTextInputFormatter.digitsOnly,
+          LengthLimitingTextInputFormatter(2),
+        ],
+        style: const TextStyle(color: Colors.white),
+        onChanged: (_) => setState(() {}),
+        decoration: InputDecoration(
+          hintText: 'Yosh chegarasi (masalan 18)',
+          hintStyle: TextStyle(color: Colors.white.withValues(alpha: 0.4)),
+          prefixIcon: const Icon(Icons.shield_outlined, color: Colors.white54),
+          border: InputBorder.none,
+          // Yozilgan raqam qanday ko'rinishini ko'rsatib turadi.
+          suffixIcon: _yoshCtrl.text.trim().isEmpty
+              ? null
+              : Padding(
+                  padding: const EdgeInsets.only(right: 12),
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    widthFactor: 1,
+                    child: Text(
+                      '${_yoshCtrl.text.trim()}+',
+                      style: const TextStyle(
+                        color: AppColors.accent,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                ),
+        ),
+      ),
     );
   }
 

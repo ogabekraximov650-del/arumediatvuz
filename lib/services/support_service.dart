@@ -302,6 +302,29 @@ class ChatController extends ChangeNotifier {
   /// javob qaytaradi — ✓ dan ✓✓ ga o'tish shu orqali ko'rinadi.
   int get _seenCount => _items.where((m) => m.seen).length;
 
+  /// Ekrandagi HAQIQIY xabarlar soni (yuborilayotgan vaqtinchalik
+  /// nusxalar hisobga olinmaydi — ular serverda hali yo'q).
+  ///
+  /// Server shu son o'zgarganda ham javob qaytaradi. Aynan shu
+  /// narsa admin O'CHIRGAN xabarni sezishga imkon beradi:
+  /// o'chirilganda yangi xabar paydo bo'lmaydi va eng oxirgi vaqt
+  /// ham ortmaydi — faqat SON kamayadi.
+  int get _liveCount => _items.where((m) => !m.pending).length;
+
+  /// Ekrandagi eng ESKI xabar vaqti.
+  ///
+  /// Uzun yozishmada o'rtadagi xabar o'chirilsa SON o'zgarmaydi
+  /// (o'rniga bittasi pastdan ko'tariladi) — lekin eng eski
+  /// xabar vaqti o'zgaradi. Server shu ikkovini ham tekshiradi.
+  int get _oldestAt {
+    var oldest = 0;
+    for (final m in _items) {
+      if (m.pending) continue;
+      if (oldest == 0 || m.createdAt < oldest) oldest = m.createdAt;
+    }
+    return oldest;
+  }
+
   void startPolling() {
     if (_watching) return;
     _watching = true;
@@ -322,6 +345,7 @@ class ChatController extends ChangeNotifier {
       }
       try {
         final uri = Uri.parse('$_base/wait?since=$_lastAt&seen=$_seenCount'
+            '&count=$_liveCount&oldest=$_oldestAt'
             '${userId != null ? '&user_id=$userId' : ''}');
         final r = await http
             .get(uri, headers: _headers())
@@ -399,6 +423,30 @@ class ChatController extends ChangeNotifier {
           }
         }
 
+        // ── ADMIN O'CHIRGAN XABARLAR ──────────────────────
+        //
+        // TOPILGAN XATO (foydalanuvchi): "Support chatda admin
+        // o'chirgan yozishmalar foydalanuvchi chatidan o'chib
+        // ketmayabdi".
+        //
+        // SABABI: `since` bilan faqat YANGI xabarlar kelardi.
+        // O'chirish esa yangi xabar tug'dirmaydi — ya'ni ilova
+        // uni sezmasdi va xabar ekranda ham, diskdagi nusxada
+        // ham qolib ketardi.
+        //
+        // ENDI: server suhbatda HOZIR turgan barcha xabarlarning
+        // raqamlarini yuboradi. Shu ro'yxatda yo'q xabar —
+        // o'chirilgan xabar, u darhol olib tashlanadi. Yuborilish
+        // arafasidagi vaqtinchalik nusxalarga tegilmaydi: ular
+        // serverda hali yo'q, lekin o'chirilgan ham emas.
+        var removed = false;
+        if (j['all_ids'] is List) {
+          final live = (j['all_ids'] as List).map((e) => '$e').toSet();
+          final before = _items.length;
+          _items.removeWhere((m) => !m.pending && !live.contains(m.id));
+          removed = _items.length != before;
+        }
+
         if (since > 0) {
           // Qo'shimcha xabarlar — oxiriga qo'shiladi.
           // Takrorlanmasin: sekin tarmoqda bitta javob ikki
@@ -410,9 +458,16 @@ class ChatController extends ChangeNotifier {
             // bo'lsa — u serverdan kelgani bilan almashadi.
             _items.removeWhere((m) => m.pending);
             _items.addAll(fresh);
+          }
+          // Diskdagi nusxa yangi xabar kelganda HAM, xabar
+          // o'chirilganda HAM qayta yoziladi — aks holda ilova
+          // keyingi safar ochilganda o'chirilgan xabar diskdan
+          // qaytib chiqardi.
+          if (fresh.isNotEmpty || removed) {
             _saveDisk();
           }
-        } else if (rows.length != _items.length ||
+        } else if (removed ||
+            rows.length != _items.length ||
             (rows.isNotEmpty &&
                 _items.isNotEmpty &&
                 rows.last.id != _items.last.id)) {

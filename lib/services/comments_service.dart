@@ -102,6 +102,22 @@ class Comment {
         replyCount: ((j['reply_count'] as num?) ?? 0).toInt(),
         liked: j['liked'] == true,
       );
+
+  /// Diskka yozish uchun — `fromJson` bilan bir xil kalitlar.
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'parent_id': parentId,
+        'user_id': userId,
+        'first_name': firstName,
+        'username': username,
+        'photo_url': photoUrl,
+        'body': body,
+        'created_at': createdAt,
+        'deleted': deleted,
+        'likes': likes,
+        'reply_count': replyCount,
+        'liked': liked,
+      };
 }
 
 /// Bitta bo'limning izohlari.
@@ -197,6 +213,14 @@ class CommentsController extends ChangeNotifier {
   /// nusxa qolgan bo'lishi mumkin — shu sabab bu yerda ham
   /// tekshiriladi.
   static bool _alive(Map<String, dynamic> j) => j['deleted'] != true;
+
+  /// Bosh ro'yxatni diskka qayta yozadi.
+  ///
+  /// Izoh o'chirilganda chaqiriladi: aks holda diskdagi eski
+  /// nusxa o'chirilgan izohni qaytarib chiqarardi.
+  void _saveDisk() {
+    DiskCache.write(_diskKey, _items.map((c) => c.toJson()).toList());
+  }
 
   Future<void> load({bool force = false}) async {
     if (_loading) return;
@@ -356,11 +380,29 @@ class CommentsController extends ChangeNotifier {
           _items[idx].replyCount -= 1;
         }
       }
+      // ── IZOH BILAN BIRGA JAVOBLARI HAM KETADI ──────────────
+      //
+      // TALAB (foydalanuvchi): "kimdir izoh yozgan bo'lsa va
+      // izohni o'chirsa, izohga berilgan javoblar va bosilgan
+      // layklar o'chirib tashlansin".
+      //
+      // Server o'chirilgan izohning javoblarini ham, ikkalasiga
+      // bosilgan layklarni ham o'chiradi. Ekranda esa shu
+      // o'zgarish DARHOL ko'rinishi kerak — tarmoq javobini
+      // kutib turmasdan.
       _items.removeWhere((c) => c.id == id);
       for (final list in _replies.values) {
         list.removeWhere((c) => c.id == id);
       }
+      // O'chirilgan izohga ochib qo'yilgan javoblar ro'yxati ham
+      // ma'nosini yo'qotdi.
       _replies.remove(id);
+      // ── DISKDAGI NUSXA ─────────────────────────────────────
+      //
+      // TOPILGAN XATO: o'chirilgan izoh diskda qolib ketardi va
+      // ilova qayta ochilganda ro'yxatda YANA chiqardi (tarmoq
+      // javobi kelguncha, ya'ni har safar bir necha soniya).
+      _saveDisk();
       notifyListeners();
       return null;
     } catch (_) {

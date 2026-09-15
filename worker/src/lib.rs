@@ -348,9 +348,10 @@ async fn init_db(env: &Env) -> bool {
             rating_sum INTEGER DEFAULT 0,
             rating_count INTEGER DEFAULT 0,
             -- Yosh chegarasi: 0 — belgilanmagan, aks holda 6/12/16/18...
-            -- Bo'limniki — QISMLARDAGI eng kattasi (pastdagi
-            -- `sync_season_yosh` izohiga qarang). Kartochkada
-            -- 18+ ko'rinishida chiqadi.
+            -- Admin uni BO'LIM qo'shish oynasida yozadi va u butun
+            -- bo'limga amal qiladi (foydalanuvchi talabi: yosh
+            -- chegarasi bitta bo'lim uchun amal qiladi).
+            -- Kartochkada 18+ ko'rinishida chiqadi.
             yosh INTEGER DEFAULT 0,
             created_at INTEGER,
             PRIMARY KEY (anime_id, season_id)
@@ -397,8 +398,10 @@ async fn init_db(env: &Env) -> bool {
             intro_9 TEXT, intro_10 TEXT,
             views_total INTEGER DEFAULT 0,
             watch_ms_total INTEGER DEFAULT 0,
-            -- Yosh chegarasi (0 — belgilanmagan). Admin har bir
-            -- qism uchun alohida yozadi.
+            -- ESKI ustun: yosh chegarasi endi QISMGA emas, butun
+            -- BO'LIMga yoziladi (`season_db.yosh`). Ustun eski
+            -- bazalarda qolgani uchun turibdi — hech qayerda
+            -- o'qilmaydi va yozilmaydi.
             yosh INTEGER DEFAULT 0,
             created_at INTEGER,
             PRIMARY KEY (anime_id, season_id, epizod_id)
@@ -3065,6 +3068,9 @@ async fn save_janrs(env: &Env, anime_id: i64, season_id: i64, janrs: &[String]) 
 
 /// Yosh chegarasini har qanday ko'rinishdan songa aylantiradi.
 ///
+/// TALAB (foydalanuvchi): "yosh chegarasi bitta BO'LIM uchun amal
+/// qiladi" — ya'ni u `season_db` ga yoziladi, qismlarga emas.
+///
 /// `18`, `"18"`, `"18+"`, `""` — hammasi to'g'ri o'qiladi. Mantiqsiz
 /// qiymat (manfiy yoki 21 dan katta) NOLGA tushadi, ya'ni
 /// kartochkada belgi umuman ko'rsatilmaydi.
@@ -3085,24 +3091,6 @@ fn yosh_of(v: &Value) -> i64 {
     if (1..=99).contains(&n) { n } else { 0 }
 }
 
-/// Bo'limning yosh chegarasini QISMLARDAGI eng kattasiga tenglaydi.
-///
-/// NEGA ENG KATTASI: kartochka BO'LIMni ko'rsatadi, chegara esa
-/// qismlarga yoziladi. Bo'limda bitta qism 18+ bo'lsa, butun
-/// bo'limni 18+ deb ko'rsatish kerak — aks holda kartochka
-/// haqiqatdan yengilroq ko'rinardi.
-async fn sync_season_yosh(env: &Env, anime_id: &str, season_id: &str) {
-    let _ = turso_exec(env,
-        "UPDATE season_db SET yosh=(
-            SELECT COALESCE(MAX(yosh),0) FROM epizod_db
-             WHERE anime_id=? AND season_id=?)
-          WHERE anime_id=? AND season_id=?",
-        vec![
-            TursoArg::text(anime_id), TursoArg::text(season_id),
-            TursoArg::text(anime_id), TursoArg::text(season_id),
-        ]).await;
-}
-
 /// `epizod_db` ga yoziladigan maydonlar.
 ///
 /// Tuple emas, STRUKTURA: ustunlar soni 20 dan oshdi (4 sifat x 2 +
@@ -3110,8 +3098,6 @@ async fn sync_season_yosh(env: &Env, anime_id: &str, season_id: &str) {
 struct EpizodFields {
     number: i64,
     name: String,
-    /// Yosh chegarasi (0 — belgilanmagan).
-    yosh: i64,
     /// `url_360p`, `size_360p`, `url_480p`, ... — jadvaldagi tartibda.
     media: [String; 8],
     /// `intro_1 ... intro_10` — admin yozgan MATN (`"5:14"`).
@@ -3137,9 +3123,6 @@ fn epizod_fields(b: &Value) -> EpizodFields {
     EpizodFields {
         number: b["epizod_number"].as_i64().unwrap_or(0),
         name: s("epizod_name"),
-        // Ilova son ham, matn ham ("18", "18+") yuborishi mumkin —
-        // ikkovi ham qabul qilinadi va faqat RAQAMI olinadi.
-        yosh: yosh_of(&b["yosh"]),
         media: [
             s("url_360p"), s("size_360p"),
             s("url_480p"), s("size_480p"),
@@ -5335,26 +5318,54 @@ async fn chat_read(
     // Shu sabab javobga o'z xabarlaringizdan O'QILGANLARINING
     // ro'yxati ham qo'shiladi. U atigi raqamlar ro'yxati, ya'ni
     // arzon.
+    // ── O'CHIRILGAN XABARLAR ──────────────────────────────
+    //
+    // TOPILGAN XATO (foydalanuvchi): "admin o'chirgan yozishmalar
+    // foydalanuvchi chatidan o'chib ketmayabdi".
+    //
+    // SABABI: `since` bilan faqat YANGI xabarlar qaytardi. Xabar
+    // o'chirilsa esa YANGI narsa paydo bo'lmaydi — ya'ni ilovaga
+    // hech qanday xabar bormasdi va o'chirilgan xabar ekranda ham,
+    // diskdagi nusxada ham qolib ketardi.
+    //
+    // YECHIM: javobga suhbatdagi BARCHA xabarlarning raqamlari
+    // (`all_ids`) qo'shiladi. Ilova shu ro'yxatda YO'Q xabarlarni
+    // o'zidan olib tashlaydi. Bu atigi raqamlar ro'yxati — xabar
+    // matni va fayllari qaytadan tashilmaydi.
+    //
+    // O'qilgan xabarlar ro'yxati (`seen_ids`) ham SHU BITTA
+    // so'rovdan chiqadi — ilgari alohida so'rov ketardi, endi
+    // bittasi ikkalasiga yetadi.
     let mine = if as_admin { 1 } else { 0 };
-    let seen_res = turso_exec(env,
-        "SELECT id FROM chat_messages
-          WHERE user_id=? AND from_admin=? AND seen=1
-          ORDER BY created_at DESC LIMIT ?",
-        vec![TursoArg::int(user), TursoArg::int(mine),
-             TursoArg::int(CHAT_LIMIT)]).await?;
-    let seen_ids: Vec<String> = seen_res["rows"]
-        .as_array()
-        .map(|rows| {
-            rows.iter()
-                .filter_map(|r| r.as_array())
-                .filter_map(|r| r.first())
-                .filter_map(|c| c["value"].as_str())
-                .map(|v| v.to_string())
-                .collect()
-        })
-        .unwrap_or_default();
+    let ids_res = turso_exec(env,
+        "SELECT id, from_admin, seen FROM chat_messages
+          WHERE user_id=? ORDER BY created_at DESC LIMIT ?",
+        vec![TursoArg::int(user), TursoArg::int(CHAT_LIMIT)]).await?;
+    let id_cols = ids_res["cols"].as_array().cloned().unwrap_or_default();
+    let id_rows = ids_res["rows"].as_array().cloned().unwrap_or_default();
+    let mut seen_ids: Vec<String> = Vec::new();
+    let mut all_ids: Vec<String> = Vec::new();
+    for r in &id_rows {
+        let o = row_to_obj(&id_cols, r.as_array().unwrap_or(&vec![]));
+        let id = o["id"].as_str().unwrap_or("").to_string();
+        if id.is_empty() {
+            continue;
+        }
+        if o["from_admin"].as_i64().unwrap_or(0) == mine
+            && o["seen"].as_i64().unwrap_or(0) == 1
+        {
+            seen_ids.push(id.clone());
+        }
+        all_ids.push(id);
+    }
 
-    ok_nostore(json!({"items": items, "since": since, "seen_ids": seen_ids}))
+    ok_nostore(json!({
+        "items": items,
+        "since": since,
+        "seen_ids": seen_ids,
+        "all_ids": all_ids,
+        "total": all_ids.len(),
+    }))
 }
 
 /// GET /api/chat — o'z yozishmasi (foydalanuvchi tomoni).
@@ -5617,14 +5628,28 @@ async fn chat_wait(req: &Request, env: &Env) -> Result<Response> {
     // soni. Ikkinchisi kerak, chunki suhbatdosh eski xabarni
     // o'qiganda yangi xabar paydo bo'lmaydi — faqat belgi
     // o'zgaradi (✓ -> ✓✓), va usiz ilova buni sezmasdi.
+    //
+    // UCHINCHI son: suhbatdagi xabarlar SONI. U o'chirish uchun
+    // kerak — admin xabarni o'chirsa eng oxirgi vaqt ORTMAYDI
+    // (aksincha kamayadi), shu sabab usiz ilova o'chirishni
+    // umuman sezmasdi va xabar ekranda qolib ketardi.
     let seen_before: i64 = q("seen").parse().unwrap_or(-1);
+    let count_before: i64 = q("count").parse().unwrap_or(-1);
+    let oldest_before: i64 = q("oldest").parse().unwrap_or(-1);
     let (sql, args): (&str, Vec<TursoArg>) = if watch_all {
-        ("SELECT COALESCE(MAX(last_at),0), 0 FROM chat_threads", vec![])
+        ("SELECT COALESCE(MAX(last_at),0), 0, COUNT(*), 0 FROM chat_threads", vec![])
     } else {
+        // Ilova ekranda eng ko'pi CHAT_LIMIT ta xabar saqlaydi, shu
+        // sabab bu yerda ham AYNAN o'sha oyna sanaladi. Aks holda
+        // uzun yozishmada sonlar hech qachon teng chiqmasdi va
+        // kutish so'rovi darhol qaytaverardi (bo'sh aylanish).
         ("SELECT COALESCE(MAX(created_at),0),
-                 COUNT(CASE WHEN seen=1 THEN 1 END)
-            FROM chat_messages WHERE user_id=?",
-         vec![TursoArg::int(target)])
+                 COUNT(CASE WHEN seen=1 THEN 1 END),
+                 COUNT(*),
+                 COALESCE(MIN(created_at),0)
+            FROM (SELECT created_at, seen FROM chat_messages
+                   WHERE user_id=? ORDER BY created_at DESC LIMIT ?)",
+         vec![TursoArg::int(target), TursoArg::int(CHAT_LIMIT)])
     };
 
     let cell = |res: &Value, i: usize| -> i64 {
@@ -5644,11 +5669,30 @@ async fn chat_wait(req: &Request, env: &Env) -> Result<Response> {
         let res = turso_exec(env, sql, args.clone()).await?;
         let last = cell(&res, 0);
         let seen = cell(&res, 1);
-        if last > since || (seen_before >= 0 && seen != seen_before) {
-            return ok_nostore(json!({"new": true, "last": last, "seen": seen}));
+        let count = cell(&res, 2);
+        let oldest = cell(&res, 3);
+        if last > since
+            || (seen_before >= 0 && seen != seen_before)
+            || (count_before >= 0 && count != count_before)
+            // Oynadagi ENG ESKI xabar vaqti. Uzun yozishmada
+            // o'rtadagi xabar o'chirilsa son o'zgarmaydi (o'rniga
+            // bittasi pastdan ko'tariladi) — lekin bu vaqt
+            // o'zgaradi.
+            || (oldest_before >= 0 && oldest != oldest_before)
+        {
+            return ok_nostore(json!({
+                "new": true, "last": last, "seen": seen,
+                "count": count, "oldest": oldest,
+            }));
         }
     }
-    ok_nostore(json!({"new": false, "last": since, "seen": seen_before.max(0)}))
+    ok_nostore(json!({
+        "new": false,
+        "last": since,
+        "seen": seen_before.max(0),
+        "count": count_before.max(0),
+        "oldest": oldest_before.max(0),
+    }))
 }
 
 /// GET /api/chat/threads — ADMIN uchun barcha suhbatlar.
@@ -5911,13 +5955,25 @@ async fn refresh_thread(env: &Env, user: i64) {
     } else {
         String::new()
     };
+    // O'QILMAGANLAR SONI ham qayta hisoblanadi.
+    //
+    // TOPILGAN XATO: o'qilmagan xabar o'chirilsa, profildagi
+    // NUQTA yonib turaverardi — hisoblagich eski qiymatda
+    // qolgani uchun. Endi u har safar haqiqiy xabarlarga qarab
+    // sanaladi, ya'ni o'chirilgan xabar hisobdan ham chiqadi.
     let _ = turso_exec(env,
-        "UPDATE chat_threads SET last_body=?, last_at=?, last_from_admin=?
+        "UPDATE chat_threads SET last_body=?, last_at=?, last_from_admin=?,
+                unread_user = (SELECT COUNT(*) FROM chat_messages
+                                WHERE user_id=? AND from_admin=1 AND seen=0),
+                unread_admin = (SELECT COUNT(*) FROM chat_messages
+                                 WHERE user_id=? AND from_admin=0 AND seen=0)
           WHERE user_id=?",
         vec![
             TursoArg::text(&label),
             TursoArg::int(r["created_at"].as_i64().unwrap_or(0)),
             TursoArg::int(r["from_admin"].as_i64().unwrap_or(0)),
+            TursoArg::int(user),
+            TursoArg::int(user),
             TursoArg::int(user),
         ]).await;
 }
@@ -7535,13 +7591,17 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
             let janri_text = janrs.join(", ");
 
             let res = turso_exec(&env,
-                "INSERT INTO season_db (anime_id,season_id,bolim_id,photo_url,nomi,studio,tarjimon,yili,janri,turi,holati,tavsif,created_at)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING *",
+                "INSERT INTO season_db (anime_id,season_id,bolim_id,photo_url,nomi,studio,tarjimon,yili,janri,turi,holati,tavsif,yosh,created_at)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING *",
                 vec![
                     TursoArg::int(anime_id), TursoArg::int(sid), TursoArg::int(bid),
                     TursoArg::text(&pu), TursoArg::text(&nomi), TursoArg::text(&studio),
                     TursoArg::text(&tarjimon), TursoArg::text(&yili), TursoArg::text(&janri_text),
                     TursoArg::text(&turi), TursoArg::text(&holati), TursoArg::text(&tavsif),
+                    // Yosh chegarasi BO'LIMning o'ziga yoziladi
+                    // (foydalanuvchi talabi: "yosh chegarasi bitta
+                    // bo'lim uchun amal qiladi").
+                    TursoArg::int(yosh_of(&b["yosh"])),
                     TursoArg::int(now_ms()),
                 ],
             ).await?;
@@ -7568,11 +7628,10 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
             ];
             for m in &ef.media { args.push(TursoArg::text(m)); }
             for v in &ef.intros { args.push(TursoArg::text(v)); }
-            args.push(TursoArg::int(ef.yosh));
             args.push(TursoArg::int(now_ms()));
             let res = turso_exec(&env,
-                "INSERT INTO epizod_db (anime_id,season_id,epizod_id,epizod_number,epizod_name,url_360p,size_360p,url_480p,size_480p,url_720p,size_720p,url_1080p,size_1080p,intro_1,intro_2,intro_3,intro_4,intro_5,intro_6,intro_7,intro_8,intro_9,intro_10,yosh,created_at)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING *",
+                "INSERT INTO epizod_db (anime_id,season_id,epizod_id,epizod_number,epizod_name,url_360p,size_360p,url_480p,size_480p,url_720p,size_720p,url_1080p,size_1080p,intro_1,intro_2,intro_3,intro_4,intro_5,intro_6,intro_7,intro_8,intro_9,intro_10,created_at)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING *",
                 args,
             ).await?;
             let cols = res["cols"].as_array().cloned().unwrap_or_default();
@@ -7587,8 +7646,6 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
                     TursoArg::text(&anime_id), TursoArg::text(&season_id),
                     TursoArg::text(&anime_id), TursoArg::text(&season_id),
                 ]).await;
-            // Kartochkadagi yosh belgisi — qismlardagi eng kattasi.
-            sync_season_yosh(&env, &anime_id, &season_id).await;
             created(resolve_fields(&origin, row_to_obj(&cols, rows[0].as_array().unwrap_or(&vec![])), EPIZOD_URL_KEYS))
         }
 
@@ -7642,20 +7699,18 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
                             ];
                             for m in &ef.media { args.push(TursoArg::text(m)); }
                             for v in &ef.intros { args.push(TursoArg::text(v)); }
-                            args.push(TursoArg::int(ef.yosh));
                             args.push(TursoArg::int(aid));
                             args.push(TursoArg::int(sid));
                             args.push(TursoArg::int(eid));
                             let res = turso_exec(&env,
                                 "UPDATE epizod_db SET epizod_number=?,epizod_name=?,url_360p=?,size_360p=?,url_480p=?,size_480p=?,url_720p=?,size_720p=?,url_1080p=?,size_1080p=?,
-                                        intro_1=?,intro_2=?,intro_3=?,intro_4=?,intro_5=?,intro_6=?,intro_7=?,intro_8=?,intro_9=?,intro_10=?,yosh=?
+                                        intro_1=?,intro_2=?,intro_3=?,intro_4=?,intro_5=?,intro_6=?,intro_7=?,intro_8=?,intro_9=?,intro_10=?
                                  WHERE anime_id=? AND season_id=? AND epizod_id=? RETURNING *",
                                 args,
                             ).await?;
                             let cols = res["cols"].as_array().cloned().unwrap_or_default();
                             let rows = res["rows"].as_array().cloned().unwrap_or_default();
                             if rows.is_empty() { return err500("Yangilashda xato"); }
-                            sync_season_yosh(&env, &aid.to_string(), &sid.to_string()).await;
                             return ok(resolve_fields(&origin, row_to_obj(&cols, rows[0].as_array().unwrap_or(&vec![])), EPIZOD_URL_KEYS));
                         }
 
@@ -7675,9 +7730,6 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
                                   WHERE anime_id=? AND season_id=?",
                                  vec![TursoArg::int(aid), TursoArg::int(sid), TursoArg::int(aid), TursoArg::int(sid)]),
                             ]).await;
-                            // Eng "og'ir" qism o'chirilgan bo'lishi
-                            // mumkin — belgi qayta hisoblanadi.
-                            sync_season_yosh(&env, &aid.to_string(), &sid.to_string()).await;
                             return ok(json!({"success": true}));
                         }
                     }
@@ -7733,13 +7785,14 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
                             let janri = janrs.join(", ");
                             save_janrs(&env, aid, sid, &janrs).await;
                             let res = turso_exec(&env,
-                                "UPDATE season_db SET bolim_id=?,photo_url=?,nomi=?,studio=?,tarjimon=?,yili=?,janri=?,turi=?,holati=?,tavsif=?
+                                "UPDATE season_db SET bolim_id=?,photo_url=?,nomi=?,studio=?,tarjimon=?,yili=?,janri=?,turi=?,holati=?,tavsif=?,yosh=?
                                  WHERE anime_id=? AND season_id=? RETURNING *",
                                 vec![
                                     TursoArg::int(bid), TursoArg::text(&pu), TursoArg::text(&nomi),
                                     TursoArg::text(&studio), TursoArg::text(&tarjimon), TursoArg::text(&yili),
                                     TursoArg::text(&janri), TursoArg::text(&turi), TursoArg::text(&holati),
-                                    TursoArg::text(&tavsif), TursoArg::int(aid), TursoArg::int(sid),
+                                    TursoArg::text(&tavsif), TursoArg::int(yosh_of(&b["yosh"])),
+                                    TursoArg::int(aid), TursoArg::int(sid),
                                 ],
                             ).await?;
                             let cols = res["cols"].as_array().cloned().unwrap_or_default();
