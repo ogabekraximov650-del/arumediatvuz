@@ -218,10 +218,26 @@ class AccountData {
     } catch (_) {}
 
     // 4) Posterlar keshi.
+    //
+    // Ikki joyga qaraladi: yangi papka qo'llab-quvvatlash
+    // papkasida (`image_cache.dart`), eski o'rnatishlarda esa
+    // vaqtinchalik papkada qolgan bo'lishi mumkin.
     onStep?.call('Rasmlar keshi', 0.85);
+    for (final root in [
+      await getApplicationSupportDirectory(),
+      await getTemporaryDirectory(),
+    ]) {
+      _wipeImageCache(root);
+    }
+
+    onStep?.call('Tayyor', 1.0);
+  }
+
+  /// Papkadagi posterlar keshini o'chiradi.
+  static void _wipeImageCache(Directory root) {
     try {
-      final tmp = await getTemporaryDirectory();
-      for (final e in tmp.listSync()) {
+      if (!root.existsSync()) return;
+      for (final e in root.listSync()) {
         final name = e.uri.pathSegments
             .lastWhere((s) => s.isNotEmpty, orElse: () => '');
         if (!name.startsWith('libCachedImageData') &&
@@ -239,8 +255,6 @@ class AccountData {
     } catch (e) {
       debugPrint('Rasm keshi tozalanmadi: $e');
     }
-
-    onStep?.call('Tayyor', 1.0);
   }
 
   /// Papkadagi fayllarni o'chiradi.

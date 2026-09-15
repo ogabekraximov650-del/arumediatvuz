@@ -165,11 +165,23 @@ class MyStats {
   final int watchMs;
   final int traffic;
 
+  /// TALAB (foydalanuvchi): "profil sahifasidagi statistikaga
+  /// sevimlilar, bo'limlar, baholagan (animelar) va kommentariya
+  /// statistikasini qo'sh".
+  final int seasons;
+  final int favorites;
+  final int rated;
+  final int comments;
+
   const MyStats({
     this.animes = 0,
     this.episodes = 0,
     this.watchMs = 0,
     this.traffic = 0,
+    this.seasons = 0,
+    this.favorites = 0,
+    this.rated = 0,
+    this.comments = 0,
   });
 
   factory MyStats.fromJson(Map<String, dynamic> j) {
@@ -179,6 +191,10 @@ class MyStats {
       episodes: v('episodes'),
       watchMs: v('watch_ms'),
       traffic: v('traffic'),
+      seasons: v('seasons'),
+      favorites: v('favorites'),
+      rated: v('rated'),
+      comments: v('comments'),
     );
   }
 
@@ -187,6 +203,10 @@ class MyStats {
         'episodes': episodes,
         'watch_ms': watchMs,
         'traffic': traffic,
+        'seasons': seasons,
+        'favorites': favorites,
+        'rated': rated,
+        'comments': comments,
       };
 }
 

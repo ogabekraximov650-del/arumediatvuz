@@ -17,6 +17,7 @@ import '../services/sync_queue.dart';
 import '../services/storage_janitor.dart';
 import '../services/storage_usage.dart';
 import '../services/traffic_service.dart';
+import '../services/user_stats.dart';
 import '../widgets/aru_logo.dart';
 import '../widgets/glass.dart';
 import 'billing_screen.dart';
@@ -27,6 +28,7 @@ import 'support_chat_screen.dart';
 import 'profile_edit_screen.dart';
 import 'sessions_screen.dart';
 import 'settings_screen.dart';
+import 'stat_detail_screen.dart';
 import 'telegram_login_screen.dart';
 
 /// PROFIL.
@@ -1043,7 +1045,11 @@ class _BillingButtonState extends State<_BillingButton> {
   }
 }
 
-/// Foydalanuvchining O'Z statistikasi — 2x2 katak.
+/// Foydalanuvchining O'Z statistikasi — ikkitadan kataklar.
+///
+/// Ochiladigan kataklar (Qismlar, Bo'limlar, Sevimlilar,
+/// Baholangan, Izohlar) bosilganda o'sha statistikaning to'liq
+/// ro'yxati chiqadi (`StatDetailScreen`).
 class _MyStatsGrid extends StatefulWidget {
   const _MyStatsGrid();
 
@@ -1079,52 +1085,87 @@ class _MyStatsGridState extends State<_MyStatsGrid> {
         MyStatsService.instance,
         TrafficService.instance,
         StorageUsageService.instance,
+        AuthService.instance,
       ]),
       builder: (context, _) {
         final s = MyStatsService.instance.stats;
         final storage = StorageUsageService.instance;
+        final me = AuthService.instance.user?.id ?? 0;
+
+        // ── QAYSI KATAK QAYERGA OLIB BORADI ─────────────────
+        //
+        // TALAB (foydalanuvchi): "qismlar, sevimlilar, bo'limlar,
+        // baholangan, kommentariya statistikalari ustiga bossa
+        // o'sha statistikaga tegishli oyna ochilishi kerak.
+        // Anime statistikasini hech kim ko'ra olmaydi".
+        //
+        // Ya'ni Anime va Tomosha vaqti — oddiy raqam, qolganlari
+        // ochiladi (`StatKind.openable`).
+        void open(StatKind kind) {
+          if (me <= 0 || !kind.openable) return;
+          Navigator.of(context).push(
+            MaterialPageRoute<void>(
+              builder: (_) => StatDetailScreen(
+                userId: me,
+                kind: kind,
+                isMe: true,
+              ),
+            ),
+          );
+        }
+
+        Widget box(StatKind kind, IconData icon, String value) => _StatBox(
+              icon: icon,
+              label: kind.label,
+              value: value,
+              onTap: kind.openable ? () => open(kind) : null,
+            );
+
+        // Ikkitadan qator qilib chiqaramiz — ekran kengligi
+        // qat'iy emas, kataklar teng bo'linadi.
+        Widget row(Widget a, Widget b) => Row(
+              children: [
+                Expanded(child: a),
+                const SizedBox(width: 12),
+                Expanded(child: b),
+              ],
+            );
+
         return Column(
           children: [
-            Row(
-              children: [
-                Expanded(
-                  child: _StatBox(
-                    icon: Icons.movie_filter_rounded,
-                    label: 'Anime',
-                    value: formatCount(s.animes),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: _StatBox(
-                    icon: Icons.play_circle_outline_rounded,
-                    label: 'Qism',
-                    value: formatCount(s.episodes),
-                  ),
-                ),
-              ],
+            row(
+              box(StatKind.anime, Icons.movie_filter_rounded,
+                  formatCount(s.animes)),
+              box(StatKind.episodes, Icons.play_circle_outline_rounded,
+                  formatCount(s.episodes)),
             ),
             const SizedBox(height: 12),
-            Row(
-              children: [
-                Expanded(
-                  child: _StatBox(
-                    icon: Icons.schedule_rounded,
-                    label: 'Tomosha vaqti',
-                    value: '${formatHours(s.watchMs)} soat',
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: _StatBox(
-                    icon: Icons.sd_storage_rounded,
-                    label: 'Xotira',
-                    value: storage.measured
-                        ? formatBytes(storage.usage.totalBytes)
-                        : '—',
-                  ),
-                ),
-              ],
+            row(
+              box(StatKind.seasons, Icons.grid_view_rounded,
+                  formatCount(s.seasons)),
+              box(StatKind.favorites, Icons.bookmark_rounded,
+                  formatCount(s.favorites)),
+            ),
+            const SizedBox(height: 12),
+            row(
+              box(StatKind.rated, Icons.star_rounded, formatCount(s.rated)),
+              box(StatKind.comments, Icons.mode_comment_rounded,
+                  formatCount(s.comments)),
+            ),
+            const SizedBox(height: 12),
+            row(
+              box(StatKind.watch, Icons.schedule_rounded,
+                  '${formatHours(s.watchMs)} soat'),
+              _StatBox(
+                icon: Icons.sd_storage_rounded,
+                // Xotira SERVERDA yo'q — u faqat shu telefonga
+                // tegishli, shu sabab `StatKind` ro'yxatida ham
+                // yo'q va hech qachon boshqalarga ko'rinmaydi.
+                label: 'Xotira',
+                value: storage.measured
+                    ? formatBytes(storage.usage.totalBytes)
+                    : '—',
+              ),
             ),
           ],
         );
@@ -1395,14 +1436,26 @@ class _StatBox extends StatelessWidget {
   final String label;
   final String value;
 
+  /// Bo'sh bo'lsa katak oddiy raqam bo'lib qoladi (Anime, Xotira,
+  /// Tomosha vaqti). Aks holda bosilganda o'sha statistikaning
+  /// oynasi ochiladi.
+  final VoidCallback? onTap;
+
   const _StatBox({
     required this.icon,
     required this.label,
     required this.value,
+    this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
+    final box = _box(context);
+    if (onTap == null) return box;
+    return GlassTappable(onTap: onTap!, child: box);
+  }
+
+  Widget _box(BuildContext context) {
     return Glass(
       borderRadius: 18,
       blur: 14,

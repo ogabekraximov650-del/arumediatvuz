@@ -23,14 +23,17 @@
 // qarang), ya'ni ilovani o'zgartirish bilan ularni ko'rib
 // bo'lmaydi.
 
-import 'package:cached_network_image/cached_network_image.dart';
-import 'package:flutter/material.dart';
-import '../services/image_cache.dart';
 import 'dart:convert';
 
+import 'package:cached_network_image/cached_network_image.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 
 import '../services/auth_service.dart';
+import '../services/image_cache.dart';
+import '../services/user_stats.dart';
+import 'stat_detail_screen.dart';
 import '../services/billing_service.dart' show formatSum;
 import '../services/disk_cache.dart';
 import '../services/format.dart';
@@ -145,117 +148,171 @@ class _PublicProfileScreenState extends State<PublicProfileScreen> {
     final name = '$first $last'.trim();
     final username = '${d['username'] ?? ''}'.trim();
     final photo = '${d['photo_url'] ?? ''}';
+    final premium = d['premium'] == true;
+    final shown = name.isEmpty
+        ? (username.isEmpty ? 'Foydalanuvchi ${widget.userId}' : '@$username')
+        : name;
+
+    // ── QAYSI KATAK KO'RINADI ─────────────────────────────────
+    //
+    // Egasi yashirgan statistika javobga UMUMAN qo'shilmaydi
+    // (`public_profile` izohiga qarang). Ya'ni "maydon bormi"
+    // degan savol — "ko'rinadimi" degan savolning O'ZI.
+    bool has(String key) => d[key] != null;
+    int n(String key) => ((d[key] as num?) ?? 0).toInt();
+
+    void open(StatKind kind) {
+      if (!kind.openable) return;
+      Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => StatDetailScreen(
+            userId: widget.userId,
+            kind: kind,
+            owner: shown,
+            isMe: AuthService.instance.user?.id == widget.userId,
+          ),
+        ),
+      );
+    }
+
+    // ── KO'RINADIGAN KATAKLAR ─────────────────────────────────
+    //
+    // TALAB (foydalanuvchi): "pastida yashirilmagan statistikalar
+    // ko'rinib tursin va boshqa foydalanuvchi ko'ringan
+    // statistikani bemalol account egasidek ochib ko'rishi mumkin
+    // bo'lsin — bu majburiy".
+    final tiles = <Widget>[
+      if (has('animes'))
+        _StatBox(
+            icon: Icons.movie_filter_rounded,
+            label: StatKind.anime.label,
+            value: formatCount(n('animes'))),
+      if (has('episodes'))
+        _StatBox(
+            icon: Icons.play_circle_outline_rounded,
+            label: StatKind.episodes.label,
+            value: formatCount(n('episodes')),
+            onTap: () => open(StatKind.episodes)),
+      if (has('seasons'))
+        _StatBox(
+            icon: Icons.grid_view_rounded,
+            label: StatKind.seasons.label,
+            value: formatCount(n('seasons')),
+            onTap: () => open(StatKind.seasons)),
+      if (has('favorites'))
+        _StatBox(
+            icon: Icons.bookmark_rounded,
+            label: StatKind.favorites.label,
+            value: formatCount(n('favorites')),
+            onTap: () => open(StatKind.favorites)),
+      if (has('rated'))
+        _StatBox(
+            icon: Icons.star_rounded,
+            label: StatKind.rated.label,
+            value: formatCount(n('rated')),
+            onTap: () => open(StatKind.rated)),
+      if (has('comments'))
+        _StatBox(
+            icon: Icons.mode_comment_rounded,
+            label: StatKind.comments.label,
+            value: formatCount(n('comments')),
+            onTap: () => open(StatKind.comments)),
+      if (has('watch_ms'))
+        _StatBox(
+            icon: Icons.schedule_rounded,
+            label: StatKind.watch.label,
+            value: '${formatHours(n('watch_ms'))} soat'),
+    ];
 
     return SingleChildScrollView(
       physics:
           const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics()),
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
       child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          // ── TEPA: RASM | ISM, USERNAME, ID ──────────────────
+          //
+          // TALAB (foydalanuvchi): "chap tarafda rasm, ustida
+          // obunasi bor bo'lsa premium belgisi; o'ng tarafda ism,
+          // username va nusxalasa bo'ladigan id raqam bo'lsin" —
+          // ya'ni AYNAN o'z profilidagi ko'rinish.
           Glass(
             borderRadius: 20,
             blur: 16,
-            padding: const EdgeInsets.all(20),
-            child: Column(
+            padding: const EdgeInsets.all(18),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
               children: [
-                _Avatar(url: photo, name: name.isEmpty ? username : name),
-                const SizedBox(height: 14),
-                Text(
-                  name.isEmpty
-                      ? (username.isEmpty
-                          ? 'Foydalanuvchi ${widget.userId}'
-                          : '@$username')
-                      : name,
-                  textAlign: TextAlign.center,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 20,
-                    fontWeight: FontWeight.w700,
-                  ),
+                Stack(
+                  clipBehavior: Clip.none,
+                  alignment: Alignment.topCenter,
+                  children: [
+                    _Avatar(url: photo, name: name.isEmpty ? username : name),
+                    if (premium)
+                      const Positioned(top: -8, child: _PremiumTag()),
+                  ],
                 ),
-                if (username.isNotEmpty && name.isNotEmpty) ...[
-                  const SizedBox(height: 4),
-                  Text('@$username',
-                      style: const TextStyle(
-                          color: Color(0xFF6BC7F0), fontSize: 15)),
-                ],
-                // ── ADMIN: ID VA BALANS SHU YERDA ─────────────
-                //
-                // TALAB (foydalanuvchi): "admin foydalanuvchi
-                // profiliga kirganda yuqori qism, ya'ni rasm,
-                // ism, username va balansi ko'rinib turishi
-                // kerak".
-                //
-                // Ilgari ikkovi ham pastdagi qo'shimcha kartada
-                // edi — admin ularni ko'rish uchun pastga surishi
-                // kerak bo'lardi. Endi ko'rinishi foydalanuvchi
-                // o'z profilidagidek: nom, username, keyin ID va
-                // balans.
-                if (d['admin_view'] == true) ...[
-                  const SizedBox(height: 12),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
                     children: [
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 12, vertical: 6),
-                        decoration: BoxDecoration(
-                          color: Colors.white.withValues(alpha: 0.07),
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(
-                              color: Colors.white.withValues(alpha: 0.12)),
+                      Text(
+                        shown,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 21,
+                          fontWeight: FontWeight.w800,
                         ),
-                        child: Text(
-                          'ID: ${widget.userId}',
+                      ),
+                      if (username.isNotEmpty && name.isNotEmpty) ...[
+                        const SizedBox(height: 3),
+                        Text('@$username',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                                color: Color(0xFF6BC7F0), fontSize: 15)),
+                      ],
+                      const SizedBox(height: 10),
+                      _IdPill(id: widget.userId),
+                      // Balans FAQAT adminga (`public_profile`
+                      // izohiga qarang) — oddiy odamning javobida
+                      // bu maydon umuman yo'q.
+                      if (d['admin_view'] == true) ...[
+                        const SizedBox(height: 8),
+                        Text(
+                          'Balans: '
+                          '${formatSum(((d['balance'] as num?) ?? 0).toInt())}',
                           style: TextStyle(
-                            color: Colors.white.withValues(alpha: 0.8),
-                            fontSize: 13.5,
+                            color: Colors.white.withValues(alpha: 0.75),
+                            fontSize: 14,
                             fontWeight: FontWeight.w600,
                           ),
                         ),
-                      ),
+                      ],
                     ],
                   ),
-                  const SizedBox(height: 8),
-                  Text(
-                    'Balans: ${formatSum(((d['balance'] as num?) ?? 0).toInt())}',
-                    style: TextStyle(
-                      color: Colors.white.withValues(alpha: 0.75),
-                      fontSize: 15,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ],
+                ),
               ],
             ),
           ),
-          const SizedBox(height: 12),
           const SizedBox(height: 14),
-          // ── STATISTIKA ODATDA YOPIQ ───────────────────────────
-          //
-          // TALAB (foydalanuvchi): "foydalanuvchi boshqa profilni
-          // ko'rishi mumkin bo'lsin, faqat to'liq emas — faqatgina
-          // profil surati, nomi va usernameni ko'rishga ruxsat
-          // berilsin. ID, balans va qolgan statistikalar
-          // ko'rinmasin".
-          //
-          // Ruxsat berilmagan bo'lsa server bu maydonlarni
-          // UMUMAN yubormaydi. Bu yerda esa sababi yozib
-          // qo'yiladi — aks holda ekran sababsiz bo'sh
-          // ko'rinardi.
-          if (d['stats_shared'] != true)
+
+          // ── STATISTIKA ──────────────────────────────────────
+          if (tiles.isEmpty)
             Glass(
               borderRadius: 18,
               blur: 14,
-              padding: const EdgeInsets.symmetric(
-                  horizontal: 18, vertical: 20),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 18, vertical: 20),
               child: Column(
                 children: [
                   Icon(Icons.lock_outline_rounded,
-                      size: 30,
-                      color: Colors.white.withValues(alpha: 0.3)),
+                      size: 30, color: Colors.white.withValues(alpha: 0.3)),
                   const SizedBox(height: 10),
                   Text(
                     'Bu foydalanuvchi statistikasini yashirgan',
@@ -270,72 +327,128 @@ class _PublicProfileScreenState extends State<PublicProfileScreen> {
               ),
             )
           else
-          Row(
-            children: [
-              Expanded(
-                child: _StatBox(
-                  icon: Icons.movie_filter_rounded,
-                  label: 'Anime',
-                  value: formatCount(
-                      ((d['animes'] as num?) ?? 0).toInt()),
-                ),
+            // Ikkitadan qator. Toq son bo'lsa oxirgisi yolg'iz
+            // qoladi va butun enni egallamaydi — shu sabab bo'sh
+            // joy qo'shiladi.
+            for (var i = 0; i < tiles.length; i += 2) ...[
+              Row(
+                children: [
+                  Expanded(child: tiles[i]),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: i + 1 < tiles.length
+                        ? tiles[i + 1]
+                        : const SizedBox.shrink(),
+                  ),
+                ],
               ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: _StatBox(
-                  icon: Icons.play_circle_outline_rounded,
-                  label: 'Qism',
-                  value: formatCount(
-                      ((d['episodes'] as num?) ?? 0).toInt()),
-                ),
-              ),
+              const SizedBox(height: 12),
             ],
-          ),
-          if (d['stats_shared'] == true) ...[
-            const SizedBox(height: 12),
-            _StatBox(
-              icon: Icons.access_time_rounded,
-              label: 'Tomosha vaqti',
-              value: formatHours(((d['watch_ms'] as num?) ?? 0).toInt()),
-            ),
-          ],
 
           // ── FAQAT ADMIN KO'RADI ─────────────────────────────
           //
-          // TALAB (foydalanuvchi): "chatdagi profil rasmi ustiga
-          // bosganda profil to'liq ko'rinsin".
-          //
           // Bu qism SERVER ruxsat bergandagina keladi: oddiy
-          // foydalanuvchining javobida bu maydonlar UMUMAN yo'q,
-          // ya'ni ilovani o'zgartirish bilan ham ularni ko'rib
-          // bo'lmaydi.
+          // foydalanuvchining javobida bu maydonlar UMUMAN yo'q.
           if (d['admin_view'] == true) ...[
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                Expanded(
-                  child: _StatBox(
-                    icon: Icons.favorite_rounded,
-                    label: 'Sevimlilar',
-                    value: formatCount(
-                        ((d['favorites'] as num?) ?? 0).toInt()),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: _StatBox(
-                    icon: Icons.download_rounded,
-                    label: 'Trafik',
-                    value:
-                        formatBytes(((d['traffic'] as num?) ?? 0).toInt()),
-                  ),
-                ),
-              ],
+            _StatBox(
+              icon: Icons.download_rounded,
+              label: 'Trafik',
+              value: formatBytes(((d['traffic'] as num?) ?? 0).toInt()),
             ),
             const SizedBox(height: 12),
             _AdminBox(data: d),
           ],
         ],
+      ),
+    );
+  }
+}
+
+/// Rasm ustidagi "PREMIUM" belgisi — obunasi faol bo'lsa.
+class _PremiumTag extends StatelessWidget {
+  const _PremiumTag();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(999),
+        gradient: const LinearGradient(
+          colors: [Color(0xFFFFC93C), Color(0xFFFF9A2E)],
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFFFFC93C).withValues(alpha: 0.35),
+            blurRadius: 12,
+          ),
+        ],
+      ),
+      child: const Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.workspace_premium_rounded, size: 12, color: Colors.black87),
+          SizedBox(width: 3),
+          Text(
+            'PREMIUM',
+            style: TextStyle(
+              color: Colors.black87,
+              fontSize: 9.5,
+              fontWeight: FontWeight.w900,
+              letterSpacing: 0.5,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Nusxalasa bo'ladigan ID raqam.
+///
+/// TALAB (foydalanuvchi): "o'ng tarafda ism, username va
+/// nusxalasa bo'ladigan id raqam bo'lsin".
+class _IdPill extends StatelessWidget {
+  final int id;
+  const _IdPill({required this.id});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: () {
+        Clipboard.setData(ClipboardData(text: '$id'));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            behavior: SnackBarBehavior.floating,
+            backgroundColor: AppColors.card,
+            content: const Text('ID nusxalandi',
+                style: TextStyle(color: Colors.white)),
+          ),
+        );
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.07),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              'ID: $id',
+              style: TextStyle(
+                color: Colors.white.withValues(alpha: 0.85),
+                fontSize: 13.5,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(width: 7),
+            Icon(Icons.copy_rounded,
+                size: 14, color: Colors.white.withValues(alpha: 0.5)),
+          ],
+        ),
       ),
     );
   }
@@ -470,14 +583,25 @@ class _StatBox extends StatelessWidget {
   final String label;
   final String value;
 
+  /// Bo'sh bo'lsa oddiy raqam (Anime, Tomosha vaqti, Trafik).
+  /// Aks holda bosilganda o'sha statistikaning oynasi ochiladi.
+  final VoidCallback? onTap;
+
   const _StatBox({
     required this.icon,
     required this.label,
     required this.value,
+    this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
+    final box = _box();
+    if (onTap == null) return box;
+    return GlassTappable(onTap: onTap!, child: box);
+  }
+
+  Widget _box() {
     return Glass(
       borderRadius: 16,
       blur: 14,

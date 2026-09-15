@@ -4,32 +4,35 @@
 //  TALAB
 // ═══════════════════════════════════════════════════════════════
 //
-// Foydalanuvchi: "foydalanuvchi boshqa profilni ko'rishi mumkin
-// bo'lsin, faqat to'liq emas — faqatgina profil surati, nomi va
-// usernameni ko'rishga ruxsat berilsin. ID, balans va qolgan
-// statistikalar ko'rinmasin. Bu narsalarni boshqalar ko'rishi
-// uchun foydalanuvchi sozlamalar panelidan ruxsat berib chiqishi
-// kerak".
+// Foydalanuvchi: "sozlamalardan avvalgi yashirish tugmasini olib
+// tashla va o'rniga HAR BITTA statistika uchun alohida yashirish
+// tugmalarini qo'yib chiq. Barcha accountda statistika OCHIQ
+// turadi va foydalanuvchi qo'lda statistikalarni sozlamalardan
+// yashirib chiqishi kerak va qaysi statistika yashirilgani bazada
+// ham saqlanishi kerak".
 //
-// ── NEGA ODATIY HOLAT "YOPIQ" ───────────────────────────────
+// ── ODATIY HOLAT ENDI "OCHIQ" ───────────────────────────────
 //
-// Maxfiylik "o'chirib qo'yiladigan" emas, "yoqiladigan" narsa
-// bo'lishi kerak. Yangi hisob ochilganda hech kim uning
-// statistikasini ko'rmaydi — odam o'zi xohlasa ochadi.
+// Ilgari bitta tugma bor edi va u odatda O'CHIQ turardi (hech
+// kim hech narsani ko'rmasdi). Endi teskari: yangi hisobda
+// hamma statistika ochiq, odam esa keraksizini bittalab
+// yashiradi. Yashirilganlar ro'yxati `users_db.hidden_stats` da.
 //
 // ── HAQIQIY TO'SIQ SERVERDA ─────────────────────────────────
 //
-// Bu yerdagi tugma shunchaki sozlamani yuboradi. Ruxsat
-// berilmagan bo'lsa statistika javobga UMUMAN qo'shilmaydi
-// (`public_profile` izohiga qarang), ya'ni ilovani o'zgartirish
-// bilan boshqaning ma'lumotini ko'rib bo'lmaydi.
+// Bu yerdagi tugmalar shunchaki sozlamani yuboradi. Yashirilgan
+// statistika javobga UMUMAN qo'shilmaydi va uning ro'yxati 403
+// bilan qaytadi (`public_profile` va `user_stats_list` izohlariga
+// qarang), ya'ni ilovani o'zgartirish bilan boshqaning
+// ma'lumotini ko'rib bo'lmaydi.
 //
 // BALANS ESA HECH QACHON KO'RINMAYDI: u faqat egasiga va
-// adminga. Sozlama uni ochmaydi.
+// adminga. Hech qanday sozlama uni ochmaydi.
 
 import 'package:flutter/material.dart';
 
 import '../services/auth_service.dart';
+import '../services/user_stats.dart';
 import '../theme/app_background.dart';
 import '../widgets/glass.dart';
 
@@ -40,8 +43,49 @@ class SettingsScreen extends StatefulWidget {
   State<SettingsScreen> createState() => _SettingsScreenState();
 }
 
+/// Sozlamalarda ko'rinadigan tugmalar — har bir statistika uchun
+/// bittadan, tushuntirishi bilan.
+const List<({StatKind kind, IconData icon, String hint})> _rows = [
+  (
+    kind: StatKind.anime,
+    icon: Icons.movie_filter_rounded,
+    hint: 'Nechta anime ko\'rganingiz'
+  ),
+  (
+    kind: StatKind.episodes,
+    icon: Icons.play_circle_outline_rounded,
+    hint: 'Nechta qism ko\'rganingiz va ularning ro\'yxati'
+  ),
+  (
+    kind: StatKind.seasons,
+    icon: Icons.grid_view_rounded,
+    hint: 'Ko\'rgan bo\'limlaringiz ro\'yxati'
+  ),
+  (
+    kind: StatKind.favorites,
+    icon: Icons.bookmark_rounded,
+    hint: 'Sevimlilarga saqlaganlaringiz'
+  ),
+  (
+    kind: StatKind.rated,
+    icon: Icons.star_rounded,
+    hint: 'Baho bergan bo\'limlaringiz va bergan bahoyingiz'
+  ),
+  (
+    kind: StatKind.comments,
+    icon: Icons.mode_comment_rounded,
+    hint: 'Yozgan izohlaringiz, javoblari va layklari'
+  ),
+  (
+    kind: StatKind.watch,
+    icon: Icons.schedule_rounded,
+    hint: 'Jami necha soat tomosha qilganingiz'
+  ),
+];
+
 class _SettingsScreenState extends State<SettingsScreen> {
-  bool _busy = false;
+  /// Hozir so'rov ketayotgan statistika (bo'sh — hech biri).
+  String _busy = '';
 
   void _say(String text) {
     if (!mounted) return;
@@ -54,19 +98,28 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  Future<void> _toggleStats(bool on) async {
-    if (_busy) return;
-    setState(() => _busy = true);
-    final err = await AuthService.instance.setShowStats(on);
+  /// `visible` — endi KO'RINSINMI. Ya'ni tugma yoqilgan holat
+  /// "ko'rinadi", o'chirilgani "yashirilgan".
+  Future<void> _toggle(StatKind kind, bool visible) async {
+    if (_busy.isNotEmpty) return;
+    final now = List<String>.from(
+        AuthService.instance.user?.hiddenStats ?? const <String>[]);
+    if (visible) {
+      now.remove(kind.key);
+    } else if (!now.contains(kind.key)) {
+      now.add(kind.key);
+    }
+    setState(() => _busy = kind.key);
+    final err = await AuthService.instance.setHiddenStats(now);
     if (!mounted) return;
-    setState(() => _busy = false);
+    setState(() => _busy = '');
     if (err != null) {
       _say(err);
       return;
     }
-    _say(on
-        ? 'Statistikangiz endi boshqalarga ko\'rinadi'
-        : 'Statistikangiz yashirildi');
+    _say(visible
+        ? '${kind.label} endi boshqalarga ko\'rinadi'
+        : '${kind.label} yashirildi');
   }
 
   @override
@@ -93,78 +146,43 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     parent: AlwaysScrollableScrollPhysics()),
                 children: [
                   _SectionLabel('MAXFIYLIK'),
-                  const SizedBox(height: 8),
-                  Glass(
-                    borderRadius: 20,
-                    blur: 16,
-                    padding: const EdgeInsets.fromLTRB(18, 14, 14, 14),
-                    child: Row(
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.all(8),
-                          decoration: BoxDecoration(
-                            color: Colors.white.withValues(alpha: 0.10),
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: const Icon(Icons.bar_chart_rounded,
-                              color: Colors.white, size: 20),
-                        ),
-                        const SizedBox(width: 14),
-                        const Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Text(
-                                'Statistikam ko\'rinsin',
-                                style: TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 15,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                              SizedBox(height: 3),
-                              Text(
-                                'ID raqam, nechta anime ko\'rganingiz va '
-                                'tomosha vaqtingiz',
-                                style: TextStyle(
-                                  color: Colors.white54,
-                                  fontSize: 12,
-                                  height: 1.35,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        if (_busy)
-                          const SizedBox(
-                            width: 22,
-                            height: 22,
-                            child: CircularProgressIndicator(
-                                strokeWidth: 2, color: Colors.white54),
-                          )
-                        else
-                          Switch(
-                            value: u?.showStats ?? false,
-                            activeThumbColor: Colors.white,
-                            activeTrackColor: AppColors.accent,
-                            onChanged: _toggleStats,
-                          ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  // Odam nima yopiq qolishini ham bilsin — aks
-                  // holda "tugmani yoqsam hammasi ko'rinadimi"
-                  // degan savol qoladi.
+                  const SizedBox(height: 6),
                   Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 4),
                     child: Text(
-                      'Profil rasmi, ismingiz va username har doim '
-                      'ko\'rinadi.\n'
-                      'Balansingiz esa HECH QACHON boshqalarga '
-                      'ko\'rinmaydi.',
+                      'Statistikangiz odatda OCHIQ turadi. Keraksizini '
+                      'shu yerdan yashirib qo\'ying — yashirilgani '
+                      'boshqalarga umuman ko\'rinmaydi.',
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.42),
+                        fontSize: 12,
+                        height: 1.5,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  for (final r in _rows) ...[
+                    _PrivacyRow(
+                      icon: r.icon,
+                      title: r.kind.label,
+                      hint: r.hint,
+                      // Tugma "ko'rinsinmi" degan savolga javob
+                      // beradi, shu sabab ro'yxatdagi holat
+                      // TESKARISIGA o'giriladi.
+                      value: !(u?.isHidden(r.kind.key) ?? false),
+                      busy: _busy == r.kind.key,
+                      onChanged: (on) => _toggle(r.kind, on),
+                    ),
+                    const SizedBox(height: 10),
+                  ],
+                  const SizedBox(height: 2),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 4),
+                    child: Text(
+                      'Profil rasmi, ismingiz, username va ID raqamingiz '
+                      'har doim ko\'rinadi.\n'
+                      'Balansingiz va sarflagan trafigingiz esa HECH '
+                      'QACHON boshqalarga ko\'rinmaydi.',
                       style: TextStyle(
                         color: Colors.white.withValues(alpha: 0.42),
                         fontSize: 12,
@@ -177,6 +195,87 @@ class _SettingsScreenState extends State<SettingsScreen> {
             },
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// Bitta statistika qatori: belgi, nom, tushuntirish va tugma.
+class _PrivacyRow extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String hint;
+  final bool value;
+  final bool busy;
+  final ValueChanged<bool> onChanged;
+
+  const _PrivacyRow({
+    required this.icon,
+    required this.title,
+    required this.hint,
+    required this.value,
+    required this.busy,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Glass(
+      borderRadius: 18,
+      blur: 16,
+      padding: const EdgeInsets.fromLTRB(16, 12, 10, 12),
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.10),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Icon(icon, color: Colors.white, size: 18),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 14.5,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  hint,
+                  style: const TextStyle(
+                    color: Colors.white54,
+                    fontSize: 11.5,
+                    height: 1.3,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 6),
+          if (busy)
+            const SizedBox(
+              width: 22,
+              height: 22,
+              child: CircularProgressIndicator(
+                  strokeWidth: 2, color: Colors.white54),
+            )
+          else
+            Switch(
+              value: value,
+              activeThumbColor: Colors.white,
+              activeTrackColor: AppColors.accent,
+              onChanged: onChanged,
+            ),
+        ],
       ),
     );
   }

@@ -29,6 +29,11 @@ dependencies:
   # O'z sozlamamizni berish uchun paket ochiq yoziladi
   # (`image_cache.dart`).
   flutter_cache_manager: ^3.3.1
+  # Posterlar keshining papkasini O'ZIMIZ tanlaymiz (vaqtinchalik
+  # emas, doimiy papka) — buning uchun `FileSystem` interfeysi
+  # kerak, u esa shu paketdan keladi.
+  file: ^7.0.0
+  path: ^1.9.0
   # Video yuklashda real-time progress uchun
   dio: ^5.4.0
   # ── VIDEO PLEYER ────────────────────────────────────────────

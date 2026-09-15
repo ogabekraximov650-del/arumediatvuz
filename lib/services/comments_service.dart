@@ -552,3 +552,47 @@ class CommentsController extends ChangeNotifier {
     return null;
   }
 }
+
+// ══════════════════════════════════════════════════════════════
+//  BITTA IZOHNING JAVOBLARI — XIZMATGA BOG'LANMASDAN
+// ══════════════════════════════════════════════════════════════
+//
+// TALAB (foydalanuvchi): izohlar statistikasida "javoblarni
+// statistika oynasining o'zida ochib ko'rish mumkin bo'lsin".
+//
+// NEGA `CommentsService` ISHLAMAYDI: u BITTA bo'limga bog'langan
+// (`animeId`/`seasonId` uning holati) va izohlar oynasi ochilganda
+// sozlanadi. Statistika oynasida esa har bir qator BOSHQA
+// bo'limning izohi — xizmatni ular uchun qayta-qayta sozlash
+// izohlar oynasini buzib qo'yardi.
+//
+// Shu sabab bu yerda holatsiz oddiy funksiya: so'radi, qaytardi.
+// `null` — kelmadi (internet yo'q yoki server javob bermadi).
+Future<List<Comment>?> fetchCommentReplies({
+  required int animeId,
+  required int seasonId,
+  required String parentId,
+}) async {
+  if (animeId <= 0 || parentId.isEmpty) return const [];
+  try {
+    final token = AuthService.instance.sessionToken;
+    final r = await http.get(
+      Uri.parse('$kApiBase/api/comments/$animeId/$seasonId/$parentId'),
+      headers: {
+        if (token != null) 'Authorization': 'Bearer $token',
+      },
+    ).timeout(const Duration(seconds: 20));
+    if (r.statusCode != 200) return null;
+    final j = jsonDecode(r.body) as Map<String, dynamic>;
+    // Javoblar eskisidan yangisiga — suhbat tartibida
+    // (`toggleReplies` bilan bir xil).
+    return ((j['items'] as List?) ?? const [])
+        .cast<Map<String, dynamic>>()
+        .map(Comment.fromJson)
+        .toList()
+        .reversed
+        .toList();
+  } catch (_) {
+    return null;
+  }
+}

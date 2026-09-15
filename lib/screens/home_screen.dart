@@ -365,7 +365,27 @@ void _askLoginDialog(BuildContext context) {
 class SeasonCard extends StatelessWidget {
   final Map<String, dynamic> season;
   final VoidCallback onTap;
-  const SeasonCard({super.key, required this.season, required this.onTap});
+
+  /// Rasm ustidagi belgilar (reyting, ko'rishlar, yosh) chizilsinmi.
+  ///
+  /// TALAB (foydalanuvchi): statistika oynalarida "karta ustida
+  /// hech narsa bo'lmasin" — u yerda kartochka faqat poster va
+  /// nomdan iborat bo'ladi.
+  final bool showBadges;
+
+  /// Rasmning o'ng yuqorisiga qo'yiladigan qo'shimcha belgi.
+  ///
+  /// "Baholangan" statistikasida foydalanuvchining O'Z bahosi shu
+  /// yerda ko'rinadi (foydalanuvchi talabi).
+  final Widget? corner;
+
+  const SeasonCard({
+    super.key,
+    required this.season,
+    required this.onTap,
+    this.showBadges = true,
+    this.corner,
+  });
 
   // ── KARTADAGI YOZUV ───────────────────────────────────────
   //
@@ -465,6 +485,9 @@ class SeasonCard extends StatelessWidget {
               //
               // Rasm ustida turadi, shu sabab har biri o'z quyuq
               // foniga ega — och kadrda ham o'qilsin.
+              if (corner != null)
+                Positioned(top: 8, right: 8, child: corner!),
+              if (showBadges)
               Positioned(
                 top: 8,
                 left: 8,

@@ -61,9 +61,17 @@ class AppUser {
   /// foydalanuvchi sozlamalar panelidan ruxsat berib chiqishi
   /// kerak".
   ///
-  /// Odatda `false` — maxfiylik "o'chiriladigan" emas,
-  /// "yoqiladigan" narsa.
-  final bool showStats;
+  /// ── ENDI TESKARI (foydalanuvchi talabi) ────────────────────
+  ///
+  /// "Barcha accountda statistika OCHIQ turadi va foydalanuvchi
+  /// qo'lda statistikalarni sozlamalardan yashirib chiqishi kerak
+  /// va qaysi statistika yashirilgani bazada ham saqlanishi
+  /// kerak."
+  ///
+  /// Shu sabab bitta "ko'rsatish" tugmasi o'rniga YASHIRILGANLAR
+  /// RO'YXATI: bo'sh ro'yxat — hammasi ochiq. Nomlar
+  /// `StatKind.key` bilan bir xil ("episodes", "comments" ...).
+  final List<String> hiddenStats;
 
   const AppUser({
     required this.id,
@@ -75,8 +83,11 @@ class AppUser {
     this.balance = 0,
     this.profileDone = true,
     this.isAdmin = false,
-    this.showStats = false,
+    this.hiddenStats = const [],
   });
+
+  /// Shu statistika yashirilganmi.
+  bool isHidden(String key) => hiddenStats.contains(key);
 
   String get fullName {
     final n = '$firstName $lastName'.trim();
@@ -107,8 +118,10 @@ class AppUser {
         profileDone: j['profile_done'] as bool? ?? true,
         // Maydon yo'q bo'lsa — admin EMAS (xavfsiz tomon).
         isAdmin: j['is_admin'] as bool? ?? false,
-        // Maydon yo'q bo'lsa — YOPIQ (xavfsiz tomon).
-        showStats: j['show_stats'] as bool? ?? false,
+        // Maydon yo'q bo'lsa — hech nima yashirilmagan (ochiq).
+        hiddenStats: ((j['hidden_stats'] as List?) ?? const [])
+            .map((e) => '$e')
+            .toList(),
       );
 
   Map<String, dynamic> toJson() => {
@@ -121,7 +134,7 @@ class AppUser {
         'balance': balance,
         'profile_done': profileDone,
         'is_admin': isAdmin,
-        'show_stats': showStats,
+        'hidden_stats': hiddenStats,
       };
 }
 
@@ -847,11 +860,15 @@ class AuthService extends ChangeNotifier {
 // Bu yerdagi kod shunchaki sozlamani yuboradi.
 
 extension AuthPrivacy on AuthService {
-  /// Statistikani boshqalarga ko'rsatish/yashirish.
+  /// Qaysi statistikalar yashirilishini saqlaydi.
+  ///
+  /// Ro'yxat TO'LIQ yuboriladi va eskisining o'rnini bosadi —
+  /// "qaysi biri o'zgardi" deb yuborish ikki qurilmada bir vaqtda
+  /// o'zgartirilganda chalkashardi.
   ///
   /// Xato bo'lsa matn qaytadi va ekrandagi tugma eski holatiga
   /// qaytariladi (chaqiruvchi shunga qarab ish tutadi).
-  Future<String?> setShowStats(bool on) async {
+  Future<String?> setHiddenStats(List<String> keys) async {
     final t = sessionToken;
     if (t == null) return 'Avval hisobingizga kiring';
     try {
@@ -862,7 +879,7 @@ extension AuthPrivacy on AuthService {
               'Authorization': 'Bearer $t',
               'Content-Type': 'application/json',
             },
-            body: jsonEncode({'show_stats': on}),
+            body: jsonEncode({'hidden_stats': keys}),
           )
           .timeout(const Duration(seconds: 20));
       if (r.statusCode != 200) {
@@ -870,7 +887,7 @@ extension AuthPrivacy on AuthService {
         return '${j['error'] ?? 'Saqlanmadi'}';
       }
       // Saqlangan nusxa ham yangilanadi — ilova qayta ochilganda
-      // tugma to'g'ri holatda turadi.
+      // tugmalar to'g'ri holatda turadi.
       await refresh();
       return null;
     } catch (_) {

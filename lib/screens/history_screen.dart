@@ -1746,13 +1746,29 @@ class AnimeRow extends StatelessWidget {
 
 class EpisodeRow extends StatelessWidget {
   final HistoryItem item;
-  const EpisodeRow({super.key, required this.item});
+
+  /// BOSHQA odamning ro'yxatimi.
+  ///
+  /// TALAB (foydalanuvchi): boshqa foydalanuvchining "Qismlar"
+  /// statistikasi ham aynan shu ko'rinishda ochiladi. Lekin u
+  /// yerda:
+  ///   * uzoq bosib O'CHIRIB bo'lmaydi — yozuv begona;
+  ///   * kadr (`_Frame`) yasalmaydi — kadrlar FAQAT shu telefonda
+  ///     ko'rilgan qismlar uchun bor, begona qism uchun esa ilova
+  ///     videoni yuklab kadr yasashga urinardi. Poster yetarli.
+  final bool readOnly;
+
+  const EpisodeRow({
+    super.key,
+    required this.item,
+    this.readOnly = false,
+  });
 
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
       onTap: () => _openEpisode(context, item),
-      onLongPress: () => _confirmRemove(context, item),
+      onLongPress: readOnly ? null : () => _confirmRemove(context, item),
       behavior: HitTestBehavior.opaque,
       child: ClipRRect(
         borderRadius: BorderRadius.circular(16),
@@ -1761,7 +1777,7 @@ class EpisodeRow extends StatelessWidget {
           child: Stack(
             fit: StackFit.expand,
             children: [
-              _Frame(item: item),
+              if (readOnly) _Poster(url: item.poster) else _Frame(item: item),
 
               // ── YOZUVLAR ────────────────────────────────────
               //
@@ -1932,8 +1948,16 @@ class _FrameState extends State<_Frame> {
     return _poster();
   }
 
-  Widget _poster() {
-    final url = widget.item.poster;
+  Widget _poster() => _Poster(url: widget.item.poster);
+}
+
+/// Bo'lim posteri — kadr yo'q bo'lgan (yoki kerak bo'lmagan) holat.
+class _Poster extends StatelessWidget {
+  final String url;
+  const _Poster({required this.url});
+
+  @override
+  Widget build(BuildContext context) {
     if (url.isEmpty) return Container(color: AppColors.cardAlt);
     return CachedNetworkImage(
       cacheManager: AppImageCache.manager,

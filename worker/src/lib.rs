@@ -495,6 +495,21 @@ async fn init_db(env: &Env) -> bool {
         "DELETE FROM reports_db WHERE kind='dm'",
         "ALTER TABLE comments_db DROP COLUMN gif_url",
         "ALTER TABLE users_db ADD COLUMN show_stats INTEGER DEFAULT 0",
+        // ── QAYSI STATISTIKA YASHIRILGAN ──────────────────────
+        //
+        // TALAB (foydalanuvchi): "sozlamalardan avvalgi yashirish
+        // tugmasini olib tashla va o'rniga HAR BITTA statistika
+        // uchun alohida yashirish tugmasi qo'yib chiq. Barcha
+        // hisobda statistika OCHIQ turadi va foydalanuvchi qo'lda
+        // yashirib chiqishi kerak; qaysi statistika yashirilgani
+        // bazada ham saqlanishi kerak".
+        //
+        // Bitta `INTEGER` bilan bo'lmaydi — endi bittasi emas,
+        // yettitasi bor. Alohida jadval ham ortiqcha: qiymat
+        // kichkina va har doim foydalanuvchi qatori bilan birga
+        // o'qiladi. Shu sabab ODDIY RO'YXAT: "episodes,comments".
+        // Bo'sh satr — hech nima yashirilmagan (odatiy holat).
+        "ALTER TABLE users_db ADD COLUMN hidden_stats TEXT DEFAULT ''",
         "ALTER TABLE users_db ADD COLUMN ban_until INTEGER DEFAULT 0",
         "ALTER TABLE users_db ADD COLUMN ban_reason TEXT DEFAULT ''",
         "ALTER TABLE users_db ADD COLUMN banned_at INTEGER DEFAULT 0",
@@ -3730,10 +3745,10 @@ fn user_public(origin: &str, u: &Value) -> Value {
         "profile_done": u["profile_done"].as_i64().unwrap_or(0) == 1,
         // ── MAXFIYLIK ────────────────────────────────────────
         //
-        // Statistikamni boshqalar ko'rsinmi. Odatda YO'Q —
-        // sozlamalardan yoqiladi (`public_profile` izohiga
-        // qarang).
-        "show_stats": u["show_stats"].as_i64().unwrap_or(0) == 1,
+        // Qaysi statistika YASHIRILGAN. Bo'sh ro'yxat — hammasi
+        // ochiq (odatiy holat, foydalanuvchi talabi). Sozlamalar
+        // oynasi shu ro'yxat bo'yicha tugmalarni chizadi.
+        "hidden_stats": hidden_stats_of(u),
         "created_at": u["created_at"].clone(),
         "last_login_at": u["last_login_at"].clone(),
     })
@@ -6830,57 +6845,72 @@ async fn admin_report_delete(req: &Request, env: &Env, id: &str) -> Result<Respo
 
 /// POST /api/me/privacy — maxfiylik sozlamalari.
 ///
-/// TALAB (foydalanuvchi): "bu narsalarni boshqalar ko'rishi uchun
-/// foydalanuvchi sozlamalar panelidan ruxsat berib chiqishi
-/// kerak".
+/// TALAB (foydalanuvchi): "sozlamalardan avvalgi yashirish
+/// tugmasini olib tashla va o'rniga har bitta statistika uchun
+/// alohida yashirish tugmalarini qo'yib chiq ... qaysi statistika
+/// yashirilgani bazada ham saqlanishi kerak".
 ///
-/// Tanasi: `{"show_stats": true|false}`.
+/// Tanasi: `{"hidden_stats": ["episodes", "comments"]}`.
+///
+/// Ro'yxat TO'LIQ keladi va eskisining O'RNINI BOSADI: "qaysi
+/// biri yoqildi/o'chirildi" deb yuborish ikki qurilmada bir vaqtda
+/// o'zgartirilganda chalkashardi.
 async fn me_privacy(mut req: Request, env: &Env) -> Result<Response> {
     let Some(u) = session_user(env, &bearer(&req)).await? else {
         return json_resp(&json!({"error": "unauthorized"}), 401);
     };
     let me = u["id"].as_i64().unwrap_or(0);
     let b: Value = req.json().await.unwrap_or(json!({}));
-    // Maydon kelmagan bo'lsa HECH NARSA o'zgartirilmaydi:
-    // yarim to'ldirilgan so'rov sozlamani nolga tushirib
-    // yubormasin.
-    let Some(on) = b["show_stats"].as_bool() else {
-        return json_resp(&json!({"error": "show_stats kelmadi"}), 400);
+    // Maydon kelmagan bo'lsa HECH NARSA o'zgartirilmaydi: yarim
+    // to'ldirilgan so'rov sozlamani nolga tushirib yubormasin.
+    let Some(list) = b["hidden_stats"].as_array() else {
+        return json_resp(&json!({"error": "hidden_stats kelmadi"}), 400);
     };
-    turso_exec(env, "UPDATE users_db SET show_stats=? WHERE id=?",
-        vec![TursoArg::int(if on { 1 } else { 0 }), TursoArg::int(me)]).await?;
-    ok_nostore(json!({"ok": true, "show_stats": on}))
+    // Faqat TANISH nomlar saqlanadi (`STAT_KEYS`) va har biri bir
+    // marta — aks holda ustunga cheksiz axlat yozish mumkin edi.
+    let mut keep: Vec<&str> = Vec::new();
+    for v in list {
+        if let Some(k) = v.as_str() {
+            if STAT_KEYS.contains(&k) && !keep.contains(&k) { keep.push(k); }
+        }
+    }
+    let value = keep.join(",");
+    turso_exec(env, "UPDATE users_db SET hidden_stats=? WHERE id=?",
+        vec![TursoArg::text(&value), TursoArg::int(me)]).await?;
+    ok_nostore(json!({"ok": true, "hidden_stats": keep}))
 }
 
 /// GET /api/user/:id — OMMAVIY profil.
 ///
-/// TALAB (foydalanuvchi): "izoh yozgan odamning profiliga bosib
-/// ko'rsa bo'ladigan qil — FAQAT ism, username, rasm va
-/// statistikasi".
+/// TALAB (foydalanuvchi): "biron bir foydalanuvchi boshqa
+/// foydalanuvchini profiliga kirganda: chap tarafda rasm, obunasi
+/// bor bo'lsa premium belgisi, o'ng tarafda ism, username va
+/// nusxalasa bo'ladigan ID raqam. Pastida yashirilmagan
+/// statistikalar ko'rinib tursin va boshqa foydalanuvchi ko'ringan
+/// statistikani bemalol account egasidek ochib ko'rishi mumkin
+/// bo'lsin — bu majburiy".
 ///
-/// Ya'ni bu yerda Telegram raqami, balans, obuna yoki boshqa
-/// shaxsiy narsa UMUMAN yuborilmaydi.
+/// Ya'ni endi statistika ODATDA OCHIQ. Egasi sozlamalardan qaysi
+/// birini yashirgan bo'lsa (`hidden_stats`), AYNAN o'sha javobga
+/// umuman qo'shilmaydi — ilovani o'zgartirish bilan ham ko'rib
+/// bo'lmaydi.
+///
+/// Telegram raqami, balans va obuna esa HECH QACHON yuborilmaydi
+/// (admin ko'rinishidan tashqari).
 async fn public_profile(
     req: &Request, env: &Env, origin: &str, id: i64,
 ) -> Result<Response> {
     // ── ADMIN KO'PROQ KO'RADI ─────────────────────────────────
     //
-    // TALAB (foydalanuvchi): "chatdagi profil rasmi ustiga
-    // bosganda profil TO'LIQ ko'rinsin, huddi foydalanuvchi
-    // o'zining profiliga kirganidek".
-    //
-    // Bu faqat ADMIN uchun va faqat qo'llab-quvvatlash ishi
-    // uchun kerak (kim yozayotganini, obunasi bor-yo'qligini
-    // bilish). Oddiy foydalanuvchi izohdan kirsa — avvalgidek
-    // faqat ism, username, rasm va statistika.
+    // Bu faqat qo'llab-quvvatlash ishi uchun (kim yozayotganini,
+    // obunasi bor-yo'qligini bilish).
     let viewer = session_user(env, &bearer(req)).await?;
     let as_admin = viewer.as_ref().map(is_admin).unwrap_or(false);
-    // Kim qarayotgani (0 — kirmagan odam).
     let me = viewer.as_ref().and_then(|v| v["id"].as_i64()).unwrap_or(0);
 
     let res = turso_exec(env,
         "SELECT id, username, first_name, last_name, avatar_file,
-                telegram_id, balance, traffic_bytes, show_stats,
+                telegram_id, balance, traffic_bytes, hidden_stats,
                 created_at, last_login_at
            FROM users_db WHERE id=?",
         vec![TursoArg::int(id)]).await?;
@@ -6894,67 +6924,55 @@ async fn public_profile(
         format!("{origin}/api/image/{avatar}")
     };
 
-    // Statistika — tomosha tarixidan (shaxsiy statistikadagi bilan
-    // bir xil hisob).
-    let st = turso_exec(env,
-        "SELECT COUNT(DISTINCT anime_id), COUNT(*), COALESCE(SUM(watched_ms),0)
-           FROM watch_history_db WHERE user_id=? AND deleted_at=0",
-        vec![TursoArg::int(id)]).await?;
-    let row = &st["rows"][0];
-    let cell = |i: usize| -> i64 {
-        row[i]["value"].as_str().and_then(|v| v.parse::<i64>().ok()).unwrap_or(0)
-    };
+    // Raqamlar — shaxsiy statistikadagi bilan BIR XIL hisob
+    // (`me_stats_route`), ya'ni odam o'z profilida ko'rgan son
+    // boshqalarda ham aynan shunday chiqadi.
+    let st = turso_many(env, &[
+        ("SELECT COUNT(DISTINCT anime_id) AS a, COUNT(*) AS e,
+                 COALESCE(SUM(watched_ms),0) AS w,
+                 COUNT(DISTINCT anime_id || '/' || season_id) AS s
+            FROM watch_history_db WHERE user_id=?", vec![TursoArg::int(id)]),
+        ("SELECT COUNT(*) FROM favorites_db WHERE user_id=?", vec![TursoArg::int(id)]),
+        ("SELECT COUNT(*) FROM ratings_db WHERE user_id=?", vec![TursoArg::int(id)]),
+        ("SELECT COUNT(*) FROM comments_db WHERE user_id=? AND deleted=0",
+         vec![TursoArg::int(id)]),
+    ]).await?;
+    let r = first_row(&st[0]).unwrap_or(json!({}));
 
-    // ── MAXFIYLIK: STATISTIKA ODATDA YOPIQ ───────────────────
-    //
-    // TALAB (foydalanuvchi): "foydalanuvchi boshqa profilni
-    // ko'rishi mumkin bo'lsin, faqat to'liq emas — faqatgina
-    // profil surati, nomi va usernameni ko'rishga ruxsat
-    // berilsin. ID, balans va qolgan statistikalar ko'rinmasin.
-    // Bu narsalarni boshqalar ko'rishi uchun foydalanuvchi
-    // sozlamalar panelidan ruxsat berib chiqishi kerak".
-    //
-    // Shu sabab statistika javobga FAQAT egasi ruxsat bergan
-    // bo'lsa qo'shiladi. Qo'shilmagan maydonni ilovani
-    // o'zgartirish bilan ham ko'rib bo'lmaydi — u javobda
-    // UMUMAN yo'q.
-    //
-    // Uch holatda ko'rinadi:
-    //   * egasi ruxsat bergan (`show_stats = 1`);
-    //   * odam O'Z profilini ochgan;
-    //   * admin ochgan (qo'llab-quvvatlash ishi uchun).
-    let shared = u["show_stats"].as_i64().unwrap_or(0) != 0;
-    let self_view = me == id;
-    let show_stats = shared || self_view || as_admin;
+    // Obuna — faqat "bormi yoki yo'q". Muddat sanasi boshqa
+    // odamga kerak emas.
+    let premium = sub_until(env, id).await > now_ms();
+
+    // Egasi va admin hammasini ko'radi.
+    let hidden = hidden_stats_of(&u);
+    let full = me == id || as_admin;
+    let visible = |key: &str| full || !hidden.iter().any(|h| h == key);
 
     let mut out = json!({
+        // ID endi HAR DOIM ko'rinadi: foydalanuvchi talabi
+        // ("nusxalasa bo'ladigan id raqam bo'lsin").
+        "id": id,
         "username": u["username"].as_str().unwrap_or(""),
         "first_name": u["first_name"].as_str().unwrap_or(""),
         "last_name": u["last_name"].as_str().unwrap_or(""),
         "photo_url": photo,
+        "premium": premium,
         "admin_view": as_admin,
-        // Ilova "statistika yashirilgan" deb yozib qo'yishi
-        // uchun — bo'sh ekran sababsiz qolmasin.
-        "stats_shared": show_stats,
+        // Ilova qaysi katakni umuman chizmasligini bilsin.
+        "hidden": hidden,
     });
-
-    if show_stats {
-        if let Some(m) = out.as_object_mut() {
-            // ID ham statistika bilan birga: u odamni ilovada
-            // izlash uchun ishlatiladi, ya'ni shaxsiy ma'lumot.
-            m.insert("id".into(), json!(id));
-            m.insert("animes".into(), json!(cell(0)));
-            m.insert("episodes".into(), json!(cell(1)));
-            m.insert("watch_ms".into(), json!(cell(2)));
-        }
+    if let Some(m) = out.as_object_mut() {
+        if visible("anime") { m.insert("animes".into(), json!(r["a"].as_i64().unwrap_or(0))); }
+        if visible("episodes") { m.insert("episodes".into(), json!(r["e"].as_i64().unwrap_or(0))); }
+        if visible("seasons") { m.insert("seasons".into(), json!(r["s"].as_i64().unwrap_or(0))); }
+        if visible("watch") { m.insert("watch_ms".into(), json!(r["w"].as_i64().unwrap_or(0))); }
+        if visible("favorites") { m.insert("favorites".into(), json!(scalar(&st[1]))); }
+        if visible("rated") { m.insert("rated".into(), json!(scalar(&st[2]))); }
+        if visible("comments") { m.insert("comments".into(), json!(scalar(&st[3]))); }
     }
 
     if as_admin {
         let until = sub_until(env, id).await;
-        let favs = turso_exec(env,
-            "SELECT COUNT(*) FROM favorites_db WHERE user_id=?",
-            vec![TursoArg::int(id)]).await
-            .map(|r| scalar(&r)).unwrap_or(0);
         if let Some(m) = out.as_object_mut() {
             m.insert("telegram_id".into(),
                 json!(u["telegram_id"].as_i64().unwrap_or(0)));
@@ -6967,12 +6985,164 @@ async fn public_profile(
             m.insert("last_login_at".into(),
                 json!(u["last_login_at"].as_i64().unwrap_or(0)));
             m.insert("subscription_until".into(), json!(until));
-            m.insert("favorites".into(), json!(favs));
         }
     }
     ok_nostore(out)
 }
 
+// ═══════════════════════════════════════════════════════════════
+//  STATISTIKA OYNALARI — RO'YXATNING O'ZI
+// ═══════════════════════════════════════════════════════════════
+//
+// TALAB (foydalanuvchi): "qismlar, sevimlilar, bo'limlar,
+// baholangan, kommentariya statistikalari ustiga bossa o'sha
+// statistikaga tegishli oyna ochilishi va barchasini ko'ra olishi
+// kerak ... boshqa foydalanuvchi ko'ringan statistikani bemalol
+// account egasidek ochib ko'rishi mumkin bo'lsin".
+//
+// Shu sabab BITTA yo'l hammasiga xizmat qiladi:
+//
+//   GET /api/user/:id/stats/:kind?page=0
+//
+// `kind`:
+//   episodes  — ko'rilgan HAR BIR qism (tomosha tarixidagidek,
+//               tarixdan tozalangani ham: u bazada `deleted_at`
+//               bilan turadi va foydalanuvchi talabiga ko'ra shu
+//               oynada KO'RINADI);
+//   seasons   — ko'rilgan bo'limlar (bosh sahifadagidek kartochka);
+//   favorites — sevimlilar;
+//   rated     — baholanganlar (kartochkada berilgan baho ham);
+//   comments  — yozilgan izohlar (bo'lim posteri bilan).
+//
+// Yashirilgan statistika 403 bilan qaytadi va ro'yxat javobga
+// UMUMAN qo'shilmaydi.
+
+/// Bitta sahifada nechta yozuv.
+const STATS_PAGE: i64 = 40;
+
+async fn user_stats_list(
+    req: &Request, env: &Env, origin: &str, id: i64, kind: &str,
+) -> Result<Response> {
+    let viewer = session_user(env, &bearer(req)).await?;
+    let as_admin = viewer.as_ref().map(is_admin).unwrap_or(false);
+    let me = viewer.as_ref().and_then(|v| v["id"].as_i64()).unwrap_or(0);
+
+    let res = turso_exec(env, "SELECT hidden_stats FROM users_db WHERE id=?",
+        vec![TursoArg::int(id)]).await?;
+    let Some(u) = first_row(&res) else {
+        return json_resp(&json!({"error": "Foydalanuvchi topilmadi"}), 404);
+    };
+    if me != id && !as_admin && hidden_stats_of(&u).iter().any(|h| h == kind) {
+        return json_resp(&json!({"error": "Bu statistika yashirilgan"}), 403);
+    }
+
+    let url = req.url()?;
+    let page: i64 = url.query_pairs()
+        .find(|(k, _)| k == "page")
+        .and_then(|(_, v)| v.parse().ok())
+        .unwrap_or(0)
+        .max(0);
+    let off = page * STATS_PAGE;
+
+    // Har bir ro'yxat ILOVAGA TAYYOR holda keladi: bo'lim qatori
+    // (poster, nom, yil) allaqachon ichida. Aks holda ilova har
+    // bir qator uchun alohida so'rov yuborardi.
+    let (sql, args, keys): (&str, Vec<TursoArg>, &[&str]) = match kind {
+        // Maydonlar `/api/history` BILAN BIR XIL: tomosha tarixi
+        // kartochkasi shu ro'yxatni ham hech o'zgarishsiz chiza
+        // oladi (foydalanuvchi talabi: "huddi tomosha tarixidagi
+        // bilan bir xil ko'rinishda").
+        //
+        // FARQ BITTA: `deleted_at = 0` sharti YO'Q — tarixdan
+        // tozalangan qismlar ham chiqadi (ular bazada shunchaki
+        // belgilangan, o'chirilmagan).
+        "episodes" => (
+            "SELECT h.anime_id, h.season_id, h.epizod_id,
+                    e.epizod_number AS epizod_number,
+                    h.video_url, h.last_quality,
+                    h.position_ms, h.duration_ms, h.watched_ms, h.view_count,
+                    h.updated_at, h.deleted_at,
+                    a.name AS anime_name, a.photo_url AS anime_photo,
+                    s.bolim_id AS bolim_id, s.nomi AS season_name,
+                    s.photo_url AS season_photo
+               FROM watch_history_db h
+               LEFT JOIN anime_db a ON a.id = h.anime_id
+               LEFT JOIN season_db s
+                      ON s.anime_id = h.anime_id AND s.season_id = h.season_id
+               LEFT JOIN epizod_db e
+                      ON e.anime_id = h.anime_id AND e.season_id = h.season_id
+                     AND e.epizod_id = h.epizod_id
+              WHERE h.user_id = ?
+              ORDER BY h.updated_at DESC
+              LIMIT ? OFFSET ?",
+            vec![TursoArg::int(id), TursoArg::int(STATS_PAGE), TursoArg::int(off)],
+            &["anime_photo", "season_photo", "video_url"],
+        ),
+        "seasons" => (
+            "SELECT s.*, MAX(h.updated_at) AS seen_at
+               FROM watch_history_db h
+               JOIN season_db s
+                 ON s.anime_id = h.anime_id AND s.season_id = h.season_id
+              WHERE h.user_id = ?
+              GROUP BY s.anime_id, s.season_id
+              ORDER BY seen_at DESC
+              LIMIT ? OFFSET ?",
+            vec![TursoArg::int(id), TursoArg::int(STATS_PAGE), TursoArg::int(off)],
+            SEASON_URL_KEYS,
+        ),
+        "favorites" => (
+            "SELECT s.*, f.created_at AS fav_at
+               FROM favorites_db f
+               JOIN season_db s
+                 ON s.anime_id = f.anime_id AND s.season_id = f.season_id
+              WHERE f.user_id = ?
+              ORDER BY f.created_at DESC
+              LIMIT ? OFFSET ?",
+            vec![TursoArg::int(id), TursoArg::int(STATS_PAGE), TursoArg::int(off)],
+            SEASON_URL_KEYS,
+        ),
+        "rated" => (
+            "SELECT s.*, r.stars AS my_stars, r.updated_at AS rated_at
+               FROM ratings_db r
+               JOIN season_db s
+                 ON s.anime_id = r.anime_id AND s.season_id = r.season_id
+              WHERE r.user_id = ?
+              ORDER BY r.updated_at DESC
+              LIMIT ? OFFSET ?",
+            vec![TursoArg::int(id), TursoArg::int(STATS_PAGE), TursoArg::int(off)],
+            SEASON_URL_KEYS,
+        ),
+        "comments" => (
+            "SELECT c.id, c.parent_id, c.anime_id, c.season_id, c.body,
+                    c.likes, c.reply_count, c.created_at, c.edited_at,
+                    s.nomi AS season_name, s.photo_url AS photo_url,
+                    a.name AS anime_name
+               FROM comments_db c
+               LEFT JOIN season_db s
+                      ON s.anime_id = c.anime_id AND s.season_id = c.season_id
+               LEFT JOIN anime_db a ON a.id = c.anime_id
+              WHERE c.user_id = ? AND c.deleted = 0
+              ORDER BY c.created_at DESC
+              LIMIT ? OFFSET ?",
+            vec![TursoArg::int(id), TursoArg::int(STATS_PAGE), TursoArg::int(off)],
+            &["photo_url"],
+        ),
+        _ => return json_resp(&json!({"error": "Noma'lum statistika"}), 400),
+    };
+
+    let res = turso_exec(env, sql, args).await?;
+    let cols = res["cols"].as_array().cloned().unwrap_or_default();
+    let rows = res["rows"].as_array().cloned().unwrap_or_default();
+    let items: Vec<Value> = rows.iter()
+        .map(|r| row_to_obj(&cols, r.as_array().unwrap_or(&vec![])))
+        .collect();
+    let n = items.len() as i64;
+    ok_nostore(json!({
+        "items": resolve_list(origin, items, keys),
+        "page": page,
+        "has_more": n >= STATS_PAGE,
+    }))
+}
 
 // ═══════════════════════════════════════════════════════════════
 //  FOYDALANUVCHILARNI BOSHQARISH (ADMIN)
@@ -7639,20 +7809,59 @@ async fn me_stats_route(req: Request, env: &Env) -> Result<Response> {
         return json_resp(&json!({"error": "unauthorized"}), 401);
     };
     let me = u["id"].as_i64().unwrap_or(0);
-    let res = turso_exec(env,
-        "SELECT COUNT(DISTINCT anime_id), COUNT(*), COALESCE(SUM(watched_ms),0)
-           FROM watch_history_db WHERE user_id=?",
-        vec![TursoArg::int(me)]).await?;
-    let row = &res["rows"][0];
-    let cell = |i: usize| -> i64 {
-        row[i]["value"].as_str().and_then(|v| v.parse::<i64>().ok()).unwrap_or(0)
-    };
+    let res = turso_many(env, &[
+        ("SELECT COUNT(DISTINCT anime_id) AS a, COUNT(*) AS e,
+                 COALESCE(SUM(watched_ms),0) AS w,
+                 COUNT(DISTINCT anime_id || '/' || season_id) AS s
+            FROM watch_history_db WHERE user_id=?",
+         vec![TursoArg::int(me)]),
+        ("SELECT COUNT(*) FROM favorites_db WHERE user_id=?",
+         vec![TursoArg::int(me)]),
+        ("SELECT COUNT(*) FROM ratings_db WHERE user_id=?",
+         vec![TursoArg::int(me)]),
+        ("SELECT COUNT(*) FROM comments_db WHERE user_id=? AND deleted=0",
+         vec![TursoArg::int(me)]),
+    ]).await?;
+    let r = first_row(&res[0]).unwrap_or(json!({}));
     ok_nostore(json!({
-        "animes": cell(0),
-        "episodes": cell(1),
-        "watch_ms": cell(2),
+        "animes": r["a"].as_i64().unwrap_or(0),
+        "episodes": r["e"].as_i64().unwrap_or(0),
+        "watch_ms": r["w"].as_i64().unwrap_or(0),
+        "seasons": r["s"].as_i64().unwrap_or(0),
+        "favorites": scalar(&res[1]),
+        "rated": scalar(&res[2]),
+        "comments": scalar(&res[3]),
         "traffic": u["traffic_bytes"].as_i64().unwrap_or(0),
     }))
+}
+
+// ══════════════════════════════════════════════════════════════
+//  QAYSI STATISTIKA YASHIRILGAN
+// ══════════════════════════════════════════════════════════════
+//
+// Ro'yxat `users_db.hidden_stats` da oddiy satr bo'lib yotadi:
+// "episodes,comments". Bo'sh satr — hammasi ochiq (odatiy holat,
+// foydalanuvchi talabi).
+//
+// `anime` ATAYLAB yo'q: "Anime statistikasini hech kim ko'ra
+// olmaydi" — unga alohida oyna yo'q, lekin RAQAMI profilda
+// ko'rinadi va uni ham yashirish mumkin.
+
+/// Ilova va server BITTA ro'yxatni biladi. Boshqa nom kelsa
+/// e'tiborsiz qoldiriladi — eski ilova yangi serverga kelib
+/// sozlamani buzib ketmasin.
+const STAT_KEYS: &[&str] = &[
+    "anime", "episodes", "seasons", "favorites", "rated", "comments", "watch",
+];
+
+/// Foydalanuvchi qatoridan yashirilganlar ro'yxati.
+fn hidden_stats_of(u: &Value) -> Vec<String> {
+    u["hidden_stats"].as_str().unwrap_or("")
+        .split(',')
+        .map(|v| v.trim())
+        .filter(|v| STAT_KEYS.contains(v))
+        .map(|v| v.to_string())
+        .collect()
 }
 
 /// GET /api/favorites — foydalanuvchining sevimli BO'LIMLARI.
@@ -8622,11 +8831,21 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
         }
     }
 
-    // ── OMMAVIY PROFIL ────────────────────────────────────────
+    // ── OMMAVIY PROFIL VA UNING STATISTIKA OYNALARI ───────────
     if method == Method::Get {
-        if let Some(idv) = path.strip_prefix("/api/user/") {
-            if let Ok(uid) = idv.parse::<i64>() {
-                return public_profile(&req, &env, &origin, uid).await;
+        if let Some(rest) = path.strip_prefix("/api/user/") {
+            let parts: Vec<&str> = rest.split('/').collect();
+            // /api/user/:id
+            if parts.len() == 1 {
+                if let Ok(uid) = parts[0].parse::<i64>() {
+                    return public_profile(&req, &env, &origin, uid).await;
+                }
+            }
+            // /api/user/:id/stats/:kind
+            if parts.len() == 3 && parts[1] == "stats" {
+                if let Ok(uid) = parts[0].parse::<i64>() {
+                    return user_stats_list(&req, &env, &origin, uid, parts[2]).await;
+                }
             }
         }
     }

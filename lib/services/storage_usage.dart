@@ -194,9 +194,17 @@ Map<String, int> _measure({
     _walk(Directory('$support/video_byte_cache'), (_, size) {
       add(_kVideo, size);
     });
-    // Qo'llab-quvvatlash papkasining qolgani (odatda bo'sh).
+    // Qo'llab-quvvatlash papkasining qolgani.
+    //
+    // Posterlar keshi ENDI SHU YERDA (`image_cache.dart`): u
+    // vaqtinchalik papkadan ko'chirildi, chunki tizim u yerdagi
+    // fayllarni o'zi o'chirib yuborardi.
     _walk(Directory(support), (path, size) {
       if (path.contains('/video_byte_cache/')) return;
+      if (path.contains('/aru_images/')) {
+        add(_kPoster, size);
+        return;
+      }
       add(_kOther, size);
     });
   }
