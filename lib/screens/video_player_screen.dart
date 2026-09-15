@@ -455,7 +455,32 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     );
   }();
 
-  Widget _buildCommentsTab() => CommentsTab(controller: _comments);
+  // ── IZOHLAR BUTUN EKRANGA ────────────────────────────────
+  //
+  // TALAB (foydalanuvchi): "foydalanuvchi izohlarni yuqoriga
+  // sursa, ya'ni pastdagi izohlarni o'qish uchun, izoh oynasi
+  // butun ekranga kattalashsin".
+  //
+  // Izohlarga pleyer ostidan atigi bir necha qator joy tegadi.
+  // Ro'yxat surilishi bilan tepadagi hamma narsa (sarlavha,
+  // video, tablar, qism o'tkazish) YIG'ILADI.
+  //
+  // MUHIM: yig'ilgan qism daraxtdan OLIB TASHLANMAYDI, balki
+  // bo'yi nolga tushiriladi (`AnimatedAlign(heightFactor: 0)` va
+  // `ClipRect`). Olib tashlansa pleyer qayta qurilib, ko'rilayotgan
+  // video to'xtab qolardi — ovozi ham uzilardi.
+  bool _commentsExpanded = false;
+
+  void _setCommentsExpanded(bool v) {
+    if (_commentsExpanded == v) return;
+    setState(() => _commentsExpanded = v);
+  }
+
+  Widget _buildCommentsTab() => CommentsTab(
+        controller: _comments,
+        expanded: _commentsExpanded,
+        onExpanded: _setCommentsExpanded,
+      );
 
   @override
   void dispose() {
@@ -2796,10 +2821,16 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
           return const _SubRequiredScreen();
         }
         return PopScope(
-          canPop: !_isFullscreen,
+          // Izohlar butun ekranni egallagan bo'lsa "orqaga"
+          // AVVAL uni yig'adi — ekrandan chiqib ketmaydi.
+          canPop: !_isFullscreen && !_commentsExpanded,
           onPopInvokedWithResult: (didPop, _) {
             if (didPop) return;
-            if (_isFullscreen) _toggleFullscreen();
+            if (_isFullscreen) {
+              _toggleFullscreen();
+            } else if (_commentsExpanded) {
+              _setCommentsExpanded(false);
+            }
           },
           child:
               _isFullscreen ? _buildFullscreenPlayer() : _buildNormalScreen(),
@@ -2827,6 +2858,24 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
         body: SafeArea(
           child: Column(
             children: [
+              // ── IZOHLAR OCHILGANDA TEPA QISM YIG'ILADI ───────
+              //
+              // Foydalanuvchi talabi: izohlarni yuqoriga surganda
+              // oyna butun ekranga kattalashsin.
+              //
+              // `heightFactor: 0` — bo'yi nolga tushadi, lekin
+              // tarkib daraxtda QOLADI. Shu sabab pleyer qayta
+              // qurilmaydi va ko'rilayotgan video to'xtamaydi
+              // (`_commentsExpanded` izohiga qarang).
+              ClipRect(
+                child: AnimatedAlign(
+                  duration: const Duration(milliseconds: 220),
+                  curve: Curves.easeOut,
+                  alignment: Alignment.topCenter,
+                  heightFactor: _commentsExpanded ? 0.0 : 1.0,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
                 child: Row(
@@ -2917,6 +2966,10 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
               // [<]  N-qism  [>] — tablarning TAGIDA, ro'yxat ustida.
               _buildEpisodeNav(),
               const SizedBox(height: 6),
+                    ],
+                  ),
+                ),
+              ),
               Expanded(
                 // ── OYNALAR QO'LDA SURILADI ──────────────────────
                 //
@@ -2968,6 +3021,11 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                     // telefondagi qotish aynan shundan edi).
                     allowImplicitScrolling: true,
                     onPageChanged: (i) {
+                      // Izohlardan chiqildi — tepa qism joyiga
+                      // qaytadi (aks holda tablar yig'ilgan
+                      // holicha qolib, boshqa oynaga o'tib
+                      // bo'lmasdi).
+                      if (i != 3) _setCommentsExpanded(false);
                       // Tugma bosilgan bo'lsa `_tabCtrl` allaqachon
                       // to'g'ri joyda — bu yerda tegilmaydi
                       // (`_goToTab` izohiga qarang).

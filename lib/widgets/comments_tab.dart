@@ -28,7 +28,34 @@ import 'glass.dart';
 
 class CommentsTab extends StatefulWidget {
   final CommentsController controller;
-  const CommentsTab({super.key, required this.controller});
+
+  /// ── BUTUN EKRANGA KATTALASHISH ───────────────────────────
+  ///
+  /// TALAB (foydalanuvchi): "foydalanuvchi izohlarni yuqoriga
+  /// sursa, ya'ni pastdagi izohlarni o'qish uchun, izoh oynasi
+  /// butun ekranga kattalashsin".
+  ///
+  /// Izohlar pleyer ekranining PASTKI qismida turadi — ya'ni
+  /// ro'yxatga atigi bir necha qator joy tegadi. Ro'yxat yuqoriga
+  /// surilishi bilan tepadagi hamma narsa (video, tablar, qism
+  /// o'tkazish) yig'iladi va izohlar butun ekranni egallaydi.
+  /// Ro'yxat eng tepasiga qaytsa — hammasi joyiga qaytadi.
+  ///
+  /// Qaror SHU YERDA emas, EKRANDA qabul qilinadi: yig'iladigan
+  /// qismlar o'sha yerda. Bu yerda faqat "surildi" deb xabar
+  /// beriladi.
+  final ValueChanged<bool>? onExpanded;
+
+  /// Hozir kattalashgan holatdami (tepadagi tugma shunga qarab
+  /// yig'ish yoki yoyish ko'rinishini oladi).
+  final bool expanded;
+
+  const CommentsTab({
+    super.key,
+    required this.controller,
+    this.onExpanded,
+    this.expanded = false,
+  });
 
   @override
   State<CommentsTab> createState() => _CommentsTabState();
@@ -43,6 +70,23 @@ class _CommentsTabState extends State<CommentsTab> {
   Comment? _replyTo;
   bool _sending = false;
 
+  /// Oyna oxirgi marta qachon yig'ilgan/yoyilgan.
+  ///
+  /// NEGA KERAK: kattalashganda ro'yxatga ko'proq joy tegadi va
+  /// qisqa ro'yxat umuman surilmaydigan bo'lib qolishi mumkin —
+  /// o'shanda surish holati nolga qaytadi va oyna darhol yana
+  /// yig'ilardi, barmoq ostida titrab. Shu sabab ikki o'zgarish
+  /// orasida qisqa oraliq bor (jonlanish muddatidan sal uzunroq).
+  DateTime _lastToggle = DateTime.fromMillisecondsSinceEpoch(0);
+
+  void _setExpanded(bool v) {
+    if (widget.expanded == v) return;
+    final now = DateTime.now();
+    if (now.difference(_lastToggle).inMilliseconds < 400) return;
+    _lastToggle = now;
+    widget.onExpanded?.call(v);
+  }
+
   @override
   void initState() {
     super.initState();
@@ -52,8 +96,22 @@ class _CommentsTabState extends State<CommentsTab> {
     // Pastga yetganda keyingi sahifa o'zi so'raladi.
     _scroll.addListener(() {
       if (!_scroll.hasClients) return;
-      final left = _scroll.position.maxScrollExtent - _scroll.position.pixels;
+      final pos = _scroll.position;
+      final left = pos.maxScrollExtent - pos.pixels;
       if (left < 400) widget.controller.loadMore();
+
+      // ── SURILDI -> KATTALASHDI ────────────────────────────
+      //
+      // Chegara ataylab kichik (24 nuqta): odam ro'yxatni endi
+      // surishi bilanoq joy ochilsin. Eng tepaga qaytganda esa
+      // hammasi joyiga tushadi. Ikki chegara BIR XIL emas —
+      // aks holda oyna chegaraning aynan ustida turib, ochilib
+      // yopilib titrardi.
+      if (pos.pixels > 24) {
+        _setExpanded(true);
+      } else if (pos.pixels <= 2) {
+        _setExpanded(false);
+      }
     });
   }
 
@@ -160,11 +218,65 @@ class _CommentsTabState extends State<CommentsTab> {
         final c = widget.controller;
         return Column(
           children: [
+            _sortBar(c),
             Expanded(child: _list(c)),
             _composer(),
           ],
         );
       },
+    );
+  }
+
+  // ── TEPADAGI TARTIB PANELI ───────────────────────────────
+  //
+  // TALAB (foydalanuvchi): "o'ng yuqori qismida yangilar,
+  // layklar, javoblar degan tugma bo'lsin. Yangini bossa barcha
+  // izohlar chiqadi va yangilari tepada turadi; layklarda
+  // layklar soni bo'yicha, javoblarda javob berishlar soni
+  // bo'yicha tepada turadi".
+  //
+  // Tartiblash SERVERDA bo'ladi (`comment_order` izohiga
+  // qarang): ro'yxat sahifalab keladi, shu sabab ilovada
+  // tartiblansa faqat YUKLANGAN sahifa tartiblanardi.
+  //
+  // Chapdagi tugma — oynani qo'lda yig'ish/yoyish. Izoh kam
+  // bo'lsa ro'yxat surilmaydi, ya'ni surish orqali
+  // kattalashtirib bo'lmasdi.
+  Widget _sortBar(CommentsController c) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 6, 12, 2),
+      child: Row(
+        children: [
+          GestureDetector(
+            onTap: () {
+              // Qo'lda bosilgan — kutish oralig'i qo'llanmaydi.
+              _lastToggle = DateTime.now();
+              widget.onExpanded?.call(!widget.expanded);
+            },
+            behavior: HitTestBehavior.opaque,
+            child: SizedBox(
+              width: 34,
+              height: 34,
+              child: Icon(
+                widget.expanded
+                    ? Icons.keyboard_arrow_down_rounded
+                    : Icons.keyboard_arrow_up_rounded,
+                size: 22,
+                color: Colors.white.withValues(alpha: 0.55),
+              ),
+            ),
+          ),
+          const Spacer(),
+          for (final s in CommentSort.values) ...[
+            if (s != CommentSort.values.first) const SizedBox(width: 6),
+            _SortChip(
+              label: s.label,
+              active: c.sort == s,
+              onTap: () => c.setSort(s),
+            ),
+          ],
+        ],
+      ),
     );
   }
 
@@ -611,13 +723,13 @@ class _CommentRow extends StatelessWidget {
                         if (err != null) onLikeError(err);
                       },
                     ),
-                    const SizedBox(width: 14),
+                    const SizedBox(width: 4),
                     _TextButton(
                       label: 'Javob berish',
                       onTap: () => onReply(c),
                     ),
                     if (mine) ...[
-                      const SizedBox(width: 14),
+                      const SizedBox(width: 4),
                       _TextButton(
                         label: 'O\'chirish',
                         color: Colors.red.shade300,
@@ -645,6 +757,61 @@ void _openProfile(BuildContext context, int userId) {
   );
 }
 
+/// Tartib tugmasi (Yangilar / Layklar / Javoblar).
+class _SortChip extends StatelessWidget {
+  final String label;
+  final bool active;
+  final VoidCallback onTap;
+
+  const _SortChip({
+    required this.label,
+    required this.active,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
+        decoration: BoxDecoration(
+          color: active
+              ? AppColors.accent
+              : Colors.white.withValues(alpha: 0.08),
+          borderRadius: BorderRadius.circular(11),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: active
+                ? Colors.white
+                : Colors.white.withValues(alpha: 0.6),
+            fontSize: 12,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// ── LAYK TUGMASI ────────────────────────────────────────────
+///
+/// TALAB (foydalanuvchi): "layk bosish tugmasini kattalashtir va
+/// tez ishlaydigan qil".
+///
+/// KATTALASHDI: ilgari ikonka 15 nuqta edi va bosish maydoni
+/// atigi 25 nuqta balandlikda — barmoq ko'pincha tegmay qolardi.
+/// Endi ikonka 20, bosish maydoni esa 40 nuqta (Android
+/// tavsiyasi) va bosilganda fon yonib turadi.
+///
+/// TEZLASHDI: bu yerda emas, `CommentsController.toggleLike` da
+/// — har bosish ekranda darhol ko'rinadi va so'rov ketayotganda
+/// bosilgan keyingi bosishlar ham yo'qolmaydi (o'sha yerdagi
+/// izohga qarang).
 class _LikeButton extends StatelessWidget {
   final Comment comment;
   final VoidCallback onTap;
@@ -653,33 +820,37 @@ class _LikeButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final on = comment.liked;
+    final color =
+        on ? AppColors.accent : Colors.white.withValues(alpha: 0.6);
     return GestureDetector(
       onTap: onTap,
       behavior: HitTestBehavior.opaque,
-      child: Padding(
-        // Bosish maydoni yozuvdan kengroq — barmoq tegmay qolmasin.
-        padding: const EdgeInsets.symmetric(vertical: 5, horizontal: 2),
+      child: Container(
+        constraints: const BoxConstraints(minHeight: 40, minWidth: 40),
+        alignment: Alignment.center,
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+        decoration: BoxDecoration(
+          color: on
+              ? AppColors.accent.withValues(alpha: 0.14)
+              : Colors.white.withValues(alpha: 0.06),
+          borderRadius: BorderRadius.circular(13),
+        ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
             Icon(
-              comment.liked
-                  ? Icons.thumb_up_rounded
-                  : Icons.thumb_up_outlined,
-              size: 15,
-              color: comment.liked
-                  ? AppColors.accent
-                  : Colors.white.withValues(alpha: 0.55),
+              on ? Icons.thumb_up_rounded : Icons.thumb_up_outlined,
+              size: 20,
+              color: color,
             ),
             if (comment.likes > 0) ...[
-              const SizedBox(width: 5),
+              const SizedBox(width: 6),
               Text(
                 '${comment.likes}',
                 style: TextStyle(
-                  color: comment.liked
-                      ? AppColors.accent
-                      : Colors.white.withValues(alpha: 0.55),
-                  fontSize: 12,
+                  color: color,
+                  fontSize: 13,
                   fontWeight: FontWeight.w700,
                 ),
               ),
@@ -703,13 +874,17 @@ class _TextButton extends StatelessWidget {
     return GestureDetector(
       onTap: onTap,
       behavior: HitTestBehavior.opaque,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 5, horizontal: 2),
+      // Bo'yi layk tugmasi bilan bir xil (40) — qator tekis
+      // ko'rinsin va barmoq bemalol tegsin.
+      child: Container(
+        constraints: const BoxConstraints(minHeight: 40),
+        alignment: Alignment.center,
+        padding: const EdgeInsets.symmetric(horizontal: 8),
         child: Text(
           label,
           style: TextStyle(
-            color: color ?? Colors.white.withValues(alpha: 0.55),
-            fontSize: 12,
+            color: color ?? Colors.white.withValues(alpha: 0.6),
+            fontSize: 12.5,
             fontWeight: FontWeight.w700,
           ),
         ),

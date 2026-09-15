@@ -4944,8 +4944,37 @@ const COMMENT_SELECT: &str =
         -- yozuvlar uchun: bir marta belgilangan-u o'chirilmagan
         -- qatorlar ham endi ko'rinmasin.
         AND c.deleted = 0
-      ORDER BY c.created_at DESC
-      LIMIT ? OFFSET ?";
+      ORDER BY ";
+
+/// ── TARTIB: YANGILAR / LAYKLAR / JAVOBLAR ────────────────────
+///
+/// TALAB (foydalanuvchi): "o'ng yuqori qismida yangilar, layklar,
+/// javoblar degan tugma bo'lsin — yangida barcha izohlar chiqadi
+/// va yangilari tepada turadi; layklarda layklar soni bo'yicha,
+/// javoblarda javob berishlar soni bo'yicha tepada turadi".
+///
+/// NEGA SERVERDA: ro'yxat sahifalab keladi (20 tadan). Tartib
+/// ilovada berilsa, faqat YUKLANGAN sahifa tartiblanardi — ya'ni
+/// eng ko'p layk olgan izoh uchinchi sahifada qolib ketishi
+/// mumkin edi. Serverda esa butun ro'yxatdan eng yuqorisi
+/// birinchi sahifaga tushadi.
+///
+/// Ikkinchi shart HAR DOIM `created_at DESC`: layki (yoki javobi)
+/// teng izohlar orasida yangisi tepada tursin va tartib
+/// sahifadan sahifaga o'zgarmasin.
+fn comment_order(sort: &str) -> &'static str {
+    match sort {
+        "layk" => "c.likes DESC, c.created_at DESC",
+        "javob" => "c.reply_count DESC, c.created_at DESC",
+        // "yangi" va noma'lum qiymat — odatiy tartib.
+        _ => "c.created_at DESC",
+    }
+}
+
+/// Bitta sahifa uchun to'liq so'rov (tartib qo'yilgan holda).
+fn comment_query(sort: &str) -> String {
+    format!("{COMMENT_SELECT}{} LIMIT ? OFFSET ?", comment_order(sort))
+}
 
 /// GET /api/comments/:anime/:season[/:parent]
 async fn comments_list(
@@ -4963,8 +4992,19 @@ async fn comments_list(
         .and_then(|(_, v)| v.parse().ok())
         .unwrap_or(0)
         .max(0);
+    // Tartib FAQAT bosh izohlarga tegishli. Javoblar suhbat
+    // tartibida qoladi — ular orasida "eng ko'p layk olgani
+    // tepada" degani suhbatni buzib yuborardi.
+    let sort = if parent.is_empty() {
+        url.query_pairs()
+            .find(|(k, _)| k == "sort")
+            .map(|(_, v)| v.to_string())
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
 
-    let res = turso_exec(env, COMMENT_SELECT, vec![
+    let res = turso_exec(env, &comment_query(&sort), vec![
         TursoArg::int(me), TursoArg::int(aid), TursoArg::int(sid),
         TursoArg::text(parent),
         TursoArg::int(COMMENT_PAGE), TursoArg::int(page * COMMENT_PAGE),

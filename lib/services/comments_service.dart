@@ -46,6 +46,23 @@ import 'package:http/http.dart' as http;
 import 'auth_service.dart';
 import 'disk_cache.dart';
 
+/// ── IZOHLAR TARTIBI ──────────────────────────────────────────
+///
+/// TALAB (foydalanuvchi): "o'ng yuqori qismida yangilar, layklar,
+/// javoblar degan tugma bo'lsin".
+///
+/// `code` — serverga yuboriladigan qiymat (`?sort=`), `label` —
+/// tugmadagi yozuv.
+enum CommentSort {
+  yangi('yangi', 'Yangilar'),
+  layk('layk', 'Layklar'),
+  javob('javob', 'Javoblar');
+
+  final String code;
+  final String label;
+  const CommentSort(this.code, this.label);
+}
+
 /// Bitta izoh (yoki javob).
 class Comment {
   final String id;
@@ -152,6 +169,27 @@ class CommentsController extends ChangeNotifier {
   String? _error;
   bool _loaded = false;
 
+  /// Hozirgi tartib. Oyna ochilganda har doim "Yangilar".
+  CommentSort _sort = CommentSort.yangi;
+  CommentSort get sort => _sort;
+
+  /// Tartibni almashtiradi va ro'yxatni QAYTADAN so'raydi.
+  ///
+  /// Ro'yxat darhol bo'shatiladi: eski tartibdagi izohlar yangi
+  /// tartib kelguncha ekranda turib qolsa, tugma bosilgani
+  /// bilinmasdi.
+  void setSort(CommentSort next) {
+    if (_sort == next) return;
+    _sort = next;
+    _items.clear();
+    _replies.clear();
+    _page = 0;
+    _hasMore = false;
+    _loaded = false;
+    notifyListeners();
+    load(force: true);
+  }
+
   bool get isLoading => _loading;
   bool get isLoadingMore => _loadingMore;
   bool get hasMore => _hasMore;
@@ -194,6 +232,8 @@ class CommentsController extends ChangeNotifier {
   /// ko'rinmaydi.
   void loadFromDisk() {
     if (_items.isNotEmpty) return;
+    // Diskda FAQAT odatiy tartib saqlanadi (`_saveDisk` izohi).
+    if (_sort != CommentSort.yangi) return;
     final rows = DiskCache.read(_diskKey);
     if (rows == null) return;
     _items
@@ -218,7 +258,11 @@ class CommentsController extends ChangeNotifier {
   ///
   /// Izoh o'chirilganda chaqiriladi: aks holda diskdagi eski
   /// nusxa o'chirilgan izohni qaytarib chiqarardi.
+  /// Diskda FAQAT odatiy ("Yangilar") tartib saqlanadi: oyna
+  /// har doim shu tartibda ochiladi, ya'ni boshqa tartiblarni
+  /// saqlash joy egallab, hech qachon ishlatilmasdi.
   void _saveDisk() {
+    if (_sort != CommentSort.yangi) return;
     DiskCache.write(_diskKey, _items.map((c) => c.toJson()).toList());
   }
 
@@ -230,7 +274,8 @@ class CommentsController extends ChangeNotifier {
     notifyListeners();
     try {
       final r = await http
-          .get(Uri.parse('$_base/$animeId/$seasonId?page=0'),
+          .get(Uri.parse(
+              '$_base/$animeId/$seasonId?page=0&sort=${_sort.code}'),
               headers: _headers())
           .timeout(const Duration(seconds: 20));
       if (r.statusCode == 200) {
@@ -246,7 +291,7 @@ class CommentsController extends ChangeNotifier {
         // Ochiq javoblar eskirdi — qayta ochilganda yangisi keladi.
         _replies.clear();
         // Keyingi ochilishda ekran darhol to'lsin.
-        DiskCache.write(_diskKey, rows);
+        if (_sort == CommentSort.yangi) DiskCache.write(_diskKey, rows);
       } else {
         _error = 'Izohlar yuklanmadi (${r.statusCode})';
       }
@@ -264,7 +309,8 @@ class CommentsController extends ChangeNotifier {
     final next = _page + 1;
     try {
       final r = await http
-          .get(Uri.parse('$_base/$animeId/$seasonId?page=$next'),
+          .get(Uri.parse(
+              '$_base/$animeId/$seasonId?page=$next&sort=${_sort.code}'),
               headers: _headers())
           .timeout(const Duration(seconds: 20));
       if (r.statusCode == 200) {
@@ -414,54 +460,82 @@ class CommentsController extends ChangeNotifier {
 
   /// Laykni yoqadi/o'chiradi.
   ///
-  /// Ekranda DARHOL o'zgaradi, so'rov fon'da ketadi. Server javobi
-  /// kelganda raqam AYNAN serverniki bilan almashtiriladi — ya'ni
-  /// ikkovi hech qachon farq qilib qolmaydi. So'rov yiqilsa eski
-  /// holat qaytariladi.
+  /// ── NEGA QAYTA YOZILDI ──────────────────────────────────
+  ///
+  /// TALAB (foydalanuvchi): "layk bosish tugmasini kattalashtir
+  /// va TEZ ishlaydigan qil".
+  ///
+  /// TOPILGAN XATO: tugma bosilganda so'rov tugagunicha KEYINGI
+  /// bosishlar butunlay e'tiborsiz qolardi (`_likeBusy` qaytarib
+  /// yuborardi). Sekin internetda bu bir necha soniya — odam
+  /// bosadi, hech narsa bo'lmaydi, yana bosadi. Tashqaridan bu
+  /// "tugma ishlamayapti" bo'lib ko'rinadi.
+  ///
+  /// ENDI: HAR BOSISH ekranda darhol ko'rinadi, so'rov ketayotgan
+  /// bo'lsa ham. So'rov tugagach server holati ekrandagi holat
+  /// bilan solishtiriladi va farq bo'lsa yana bitta so'rov
+  /// yuboriladi — ya'ni oxirida ikkovi albatta tenglashadi.
+  /// Tarmoqqa esa bosishlar soncha emas, kerakligicha so'rov
+  /// ketadi.
   Future<String?> toggleLike(String id) async {
-    if (_likeBusy.contains(id)) return null;
     final c = _find(id);
     if (c == null) return null;
     if (AuthService.instance.sessionToken == null) {
       return 'Layk bosish uchun hisobingizga kiring';
     }
 
-    _likeBusy.add(id);
-    final wasLiked = c.liked;
-    final wasLikes = c.likes;
-    // 1) Darhol ko'rsatamiz.
-    c.liked = !wasLiked;
-    c.likes = wasLiked ? (wasLikes - 1).clamp(0, 1 << 30) : wasLikes + 1;
+    // 1) Ekranda DARHOL — tarmoq umuman kutilmaydi.
+    c.liked = !c.liked;
+    c.likes = c.liked ? c.likes + 1 : (c.likes - 1).clamp(0, 1 << 30);
     notifyListeners();
 
+    // So'rov allaqachon ketyapti — quyidagi halqa yangi holatni
+    // o'zi yetkazadi, ikkinchi halqa kerak emas.
+    if (_likeBusy.contains(id)) return null;
+
+    // Xato bo'lsa SHU holatga qaytariladi: bu server bilgan
+    // oxirgi holat (bosishdan oldingisi).
+    final wasLiked = !c.liked;
+    final wasLikes = c.liked ? c.likes - 1 : c.likes + 1;
+
+    _likeBusy.add(id);
+    String? error;
     try {
-      final r = await http
-          .post(
-            Uri.parse('$_base/like'),
-            headers: _headers(json: true),
-            body: jsonEncode({'id': id}),
-          )
-          .timeout(const Duration(seconds: 20));
-      final j = jsonDecode(r.body) as Map<String, dynamic>;
-      if (r.statusCode != 200) {
-        c.liked = wasLiked;
-        c.likes = wasLikes;
-        notifyListeners();
-        return '${j['error'] ?? 'Layk yuborilmadi'}';
+      // Server ekrandagi holatga yetguncha. Chegara — cheksiz
+      // aylanishdan saqlaydi (server kutilmagan javob bersa).
+      for (var i = 0; i < 5; i++) {
+        final r = await http
+            .post(
+              Uri.parse('$_base/like'),
+              headers: _headers(json: true),
+              body: jsonEncode({'id': id}),
+            )
+            .timeout(const Duration(seconds: 20));
+        final j = jsonDecode(r.body) as Map<String, dynamic>;
+        if (r.statusCode != 200) {
+          error = '${j['error'] ?? 'Layk yuborilmadi'}';
+          break;
+        }
+        final liked = j['liked'] == true;
+        final likes = ((j['likes'] as num?) ?? c.likes).toInt();
+        // Foydalanuvchi so'rov ketayotganda YANA bosgan bo'lsa,
+        // `c.liked` allaqachon boshqa — yana bir marta yuboramiz.
+        if (liked == c.liked) {
+          c.likes = likes;
+          notifyListeners();
+          break;
+        }
       }
-      // 2) Serverning yakuniy so'zi.
-      c.liked = j['liked'] == true;
-      c.likes = ((j['likes'] as num?) ?? c.likes).toInt();
-      notifyListeners();
-      return null;
     } catch (_) {
+      error = 'Internet yo\'q';
+    }
+    if (error != null) {
       c.liked = wasLiked;
       c.likes = wasLikes;
       notifyListeners();
-      return 'Internet yo\'q';
-    } finally {
-      _likeBusy.remove(id);
     }
+    _likeBusy.remove(id);
+    return error;
   }
 
   /// Izohni ham bosh ro'yxatdan, ham javoblardan qidiradi.
