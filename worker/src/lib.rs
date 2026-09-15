@@ -477,6 +477,8 @@ async fn init_db(env: &Env) -> bool {
         // Odatiy qiymatni ataylab `0` qildik: maxfiylik
         // "o'chirib qo'yiladigan" emas, "yoqiladigan" narsa
         // bo'lishi kerak.
+        // Izohga biriktirilgan GIF manzili (bo'sh — GIF yo'q).
+        "ALTER TABLE comments_db ADD COLUMN gif_url TEXT DEFAULT ''",
         "ALTER TABLE users_db ADD COLUMN show_stats INTEGER DEFAULT 0",
         "ALTER TABLE users_db ADD COLUMN ban_until INTEGER DEFAULT 0",
         "ALTER TABLE users_db ADD COLUMN ban_reason TEXT DEFAULT ''",
@@ -5160,6 +5162,8 @@ fn comment_public(origin: &str, r: &Value) -> Value {
         "photo_url": photo,
         // O'chirilgan izohning matni UMUMAN yuborilmaydi.
         "body": if deleted { "" } else { r["body"].as_str().unwrap_or("") },
+        // O'chirilgan izohning GIF'i ham yuborilmaydi.
+        "gif_url": if deleted { "" } else { r["gif_url"].as_str().unwrap_or("") },
         "likes": r["likes"].as_i64().unwrap_or(0),
         "reply_count": r["reply_count"].as_i64().unwrap_or(0),
         "liked": r["liked"].as_i64().unwrap_or(0) != 0,
@@ -5176,6 +5180,7 @@ fn comment_public(origin: &str, r: &Value) -> Value {
 const COMMENT_SELECT: &str =
     "SELECT c.id, c.parent_id, c.user_id, c.body, c.likes,
             c.reply_count, c.deleted, c.created_at, c.edited_at,
+            c.gif_url,
             u.first_name AS first_name, u.username AS username,
             u.avatar_file AS avatar_file,
             (SELECT COUNT(*) FROM comment_likes l
@@ -5218,6 +5223,51 @@ fn comment_order(sort: &str) -> &'static str {
 /// Bitta sahifa uchun to'liq so'rov (tartib qo'yilgan holda).
 fn comment_query(sort: &str) -> String {
     format!("{COMMENT_SELECT}{} LIMIT ? OFFSET ?", comment_order(sort))
+}
+
+/// Izohga biriktirilgan GIF manzilini TEKSHIRADI.
+///
+/// TALAB (foydalanuvchi): "izohga GIF yuborish tizimini ulab ber"
+/// va uchala xizmatni sinab ko'rish uchun ulash.
+///
+/// ── NEGA OQ RO'YXAT (whitelist) ──────────────────────────────
+///
+/// Manzilni ILOVA yuboradi. O'zgartirilgan ilova bilan istalgan
+/// manzilni izohga qo'yib bo'lardi — jumladan nomaqbul rasmni.
+/// Ilovada esa yosh chegarasi bor va izohlarni bolalar ham
+/// o'qiydi.
+///
+/// Shu sabab faqat tanlangan uchta xizmatning manzili qabul
+/// qilinadi. Ro'yxat ATAYLAB qisqa: yangi xizmat qo'shilsa shu
+/// yerga bir qator yoziladi, ya'ni "kim ruxsat etilgan" degan
+/// savolga javob bitta joyda turadi.
+///
+/// Yaroqsiz manzil XATO EMAS — u shunchaki tashlab yuboriladi va
+/// izoh matni bilan yoziladi.
+fn clean_gif_url(raw: &str) -> String {
+    let u = raw.trim();
+    if u.is_empty() || u.len() > 500 {
+        return String::new();
+    }
+    // Faqat shu boshlanishlar. `https://` majburiy — `http://`
+    // yoki `//` bilan boshlanuvchi manzil o'tmaydi.
+    const ALLOWED: [&str; 3] = [
+        // nekos.best — GIF'lar to'g'ridan-to'g'ri API yo'lida.
+        "https://nekos.best/api/",
+        // otakugifs — gif va webp bitta CDN'da.
+        "https://cdn.otakugifs.xyz/",
+        // nekosapi — rasmlar CDN'da.
+        "https://cdn.nekosapi.com/",
+    ];
+    if !ALLOWED.iter().any(|p| u.starts_with(p)) {
+        return String::new();
+    }
+    // Manzil ichida bo'sh joy yoki qator uzilishi bo'lmasin —
+    // bunday belgilar faqat hiyla urinishida uchraydi.
+    if u.chars().any(|c| c.is_whitespace() || c == '"' || c == '\'') {
+        return String::new();
+    }
+    u.to_string()
 }
 
 /// GET /api/comments/:anime/:season[/:parent]
@@ -5282,7 +5332,26 @@ async fn comments_add(mut req: Request, env: &Env, origin: &str) -> Result<Respo
     let aid = b["anime_id"].as_i64().unwrap_or(0);
     let sid = b["season_id"].as_i64().unwrap_or(0);
     let body = b["body"].as_str().unwrap_or("").trim().to_string();
-    if body.is_empty() {
+
+    // ── GIF ──────────────────────────────────────────────────
+    //
+    // TALAB (foydalanuvchi): "izohga GIF yuborish tizimini ulab
+    // bera olasanmi, huddi Instagramdagidek".
+    //
+    // ── NEGA MANZIL TEKSHIRILADI ─────────────────────────────
+    //
+    // Manzilni ILOVA yuboradi, ya'ni unga ishonib bo'lmaydi.
+    // Tekshiruvsiz kimdir o'zgartirilgan ilova bilan ISTALGAN
+    // manzilni izohga qo'yishi mumkin edi — jumladan nomaqbul
+    // rasmni. Ilovada esa yosh chegarasi bor.
+    //
+    // Shu sabab faqat UCHTA tanlangan xizmatning manzili qabul
+    // qilinadi. Boshqa har qanday manzil — jim tashlab
+    // yuboriladi (xato emas: izoh matni bilan yoziladi).
+    let gif_url = clean_gif_url(b["gif_url"].as_str().unwrap_or(""));
+
+    // Matn ham, GIF ham bo'lmasa — yozadigan narsa yo'q.
+    if body.is_empty() && gif_url.is_empty() {
         return json_resp(&json!({"error": "Izoh bo'sh"}), 400);
     }
     // Uzunlik BELGI bo'yicha cheklanadi (bayt emas): o'zbekcha
@@ -5320,13 +5389,13 @@ async fn comments_add(mut req: Request, env: &Env, origin: &str) -> Result<Respo
     let now = now_ms();
     turso_exec(env,
         "INSERT INTO comments_db
-            (id,anime_id,season_id,user_id,parent_id,body,
+            (id,anime_id,season_id,user_id,parent_id,body,gif_url,
              likes,reply_count,deleted,created_at,edited_at)
-         VALUES (?,?,?,?,?,?,0,0,0,?,0)",
+         VALUES (?,?,?,?,?,?,?,0,0,0,?,0)",
         vec![
             TursoArg::text(&id), TursoArg::int(aid), TursoArg::int(sid),
             TursoArg::int(me), TursoArg::text(&parent), TursoArg::text(&body),
-            TursoArg::int(now),
+            TursoArg::text(&gif_url), TursoArg::int(now),
         ]).await?;
 
     // Javob bo'lsa — bosh izohning hisobi oshadi.

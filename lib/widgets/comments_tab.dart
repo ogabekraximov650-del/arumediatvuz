@@ -27,6 +27,7 @@ import '../services/auth_service.dart';
 import '../services/comments_service.dart';
 import '../services/reports_service.dart';
 import '../screens/public_profile_screen.dart';
+import 'gif_picker.dart';
 import 'glass.dart';
 
 class CommentsTab extends StatefulWidget {
@@ -72,6 +73,9 @@ class _CommentsTabState extends State<CommentsTab> {
   /// Hozir kimga javob yozilyapti (`null` — oddiy izoh).
   Comment? _replyTo;
   bool _sending = false;
+
+  /// GIF yuborilyaptimi (tugma aylanadi).
+  bool _sendingGif = false;
 
   /// Oyna oxirgi marta qachon yig'ilgan/yoyilgan.
   ///
@@ -172,6 +176,35 @@ class _CommentsTabState extends State<CommentsTab> {
         .add(text, parentId: _replyTo?.id ?? '');
     if (!mounted) return;
     setState(() => _sending = false);
+    if (err != null) {
+      _say(err);
+      return;
+    }
+    _input.clear();
+    setState(() => _replyTo = null);
+    _focus.unfocus();
+  }
+
+  /// GIF tanlash oynasini ochadi va tanlangani DARHOL yuboradi.
+  Future<void> _pickGif() async {
+    if (_sendingGif || _sending) return;
+    if (!AuthService.instance.isLoggedIn) {
+      _say('Izoh yozish uchun hisobingizga kiring');
+      return;
+    }
+    final url = await showGifPicker(context);
+    if (url == null || url.isEmpty || !mounted) return;
+
+    setState(() => _sendingGif = true);
+    final err = await widget.controller.add(
+      // Matn yozilgan bo'lsa u ham birga ketadi — odam yozgan
+      // narsasi yo'qolib qolmasin.
+      _input.text.trim(),
+      parentId: _replyTo?.id ?? '',
+      gifUrl: url,
+    );
+    if (!mounted) return;
+    setState(() => _sendingGif = false);
     if (err != null) {
       _say(err);
       return;
@@ -523,6 +556,19 @@ class _CommentsTabState extends State<CommentsTab> {
           Row(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
+              // ── GIF TUGMASI ──────────────────────────────────
+              //
+              // TALAB (foydalanuvchi): "izohga GIF yuborish
+              // tizimini ulab ber, huddi Instagramdagidek".
+              //
+              // Instagramdagidek: GIF tanlangan zahoti YUBORILADI,
+              // matn kutilmaydi. Javob yozilayotgan bo'lsa GIF ham
+              // javob bo'lib boradi.
+              _GifButton(
+                busy: _sendingGif,
+                onTap: _pickGif,
+              ),
+              const SizedBox(width: 8),
               Expanded(
                 child: Container(
                   decoration: BoxDecoration(
@@ -811,17 +857,61 @@ class _CommentRow extends StatelessWidget {
                 ],
               ),
               const SizedBox(height: 3),
-              Text(
-                c.deleted ? 'Izoh o\'chirilgan' : c.body,
-                style: TextStyle(
-                  color: c.deleted
-                      ? Colors.white.withValues(alpha: 0.35)
-                      : Colors.white.withValues(alpha: 0.86),
-                  fontSize: small ? 13 : 13.5,
-                  height: 1.38,
-                  fontStyle: c.deleted ? FontStyle.italic : null,
+              // Matn bo'sh bo'lishi mumkin — GIF o'zi yuborilgan
+              // bo'lsa bo'sh qator chiqmasin.
+              if (c.deleted || c.body.isNotEmpty)
+                Text(
+                  c.deleted ? 'Izoh o\'chirilgan' : c.body,
+                  style: TextStyle(
+                    color: c.deleted
+                        ? Colors.white.withValues(alpha: 0.35)
+                        : Colors.white.withValues(alpha: 0.86),
+                    fontSize: small ? 13 : 13.5,
+                    height: 1.38,
+                    fontStyle: c.deleted ? FontStyle.italic : null,
+                  ),
                 ),
-              ),
+              // ── BIRIKTIRILGAN GIF ──────────────────────────
+              //
+              // Eni cheklangan: GIF'lar turli o'lchamda keladi va
+              // cheklovsiz qo'yilsa bittasi butun ekranni
+              // egallab ketardi.
+              if (!c.deleted && c.gifUrl.isNotEmpty) ...[
+                const SizedBox(height: 6),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(12),
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(
+                      maxWidth: small ? 190 : 230,
+                      maxHeight: 210,
+                    ),
+                    child: CachedNetworkImage(
+                      imageUrl: c.gifUrl,
+                      fit: BoxFit.cover,
+                      placeholder: (_, __) => Container(
+                        width: small ? 190 : 230,
+                        height: 120,
+                        color: Colors.white.withValues(alpha: 0.05),
+                        child: const Center(
+                          child: SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                                strokeWidth: 2, color: Colors.white24),
+                          ),
+                        ),
+                      ),
+                      errorWidget: (_, __, ___) => Container(
+                        width: small ? 190 : 230,
+                        height: 90,
+                        color: Colors.white.withValues(alpha: 0.05),
+                        child: Icon(Icons.broken_image_outlined,
+                            color: Colors.white.withValues(alpha: 0.25)),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
               if (!c.deleted) ...[
                 const SizedBox(height: 4),
                 Row(
@@ -1070,7 +1160,13 @@ class _ReportSheetState extends State<_ReportSheet> {
                     ),
                     const SizedBox(height: 3),
                     Text(
-                      widget.comment.body,
+                      // GIF o'zi yuborilgan bo'lsa matn bo'sh —
+                      // shikoyat oynasida bo'sh joy qolmasin.
+                      widget.comment.body.isNotEmpty
+                          ? widget.comment.body
+                          : (widget.comment.gifUrl.isNotEmpty
+                              ? '(GIF)'
+                              : ''),
                       maxLines: 3,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
@@ -1178,6 +1274,45 @@ class _ReportSheetState extends State<_ReportSheet> {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// Yozish qatoridagi GIF tugmasi.
+///
+/// TALAB (foydalanuvchi): "izohga GIF yuborish tizimini ulab ber,
+/// huddi Instagramdagidek".
+class _GifButton extends StatelessWidget {
+  final bool busy;
+  final VoidCallback onTap;
+
+  const _GifButton({required this.busy, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: busy ? null : onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        width: 40,
+        height: 40,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.07),
+          shape: BoxShape.circle,
+          border:
+              Border.all(color: Colors.white.withValues(alpha: 0.12)),
+        ),
+        child: busy
+            ? const SizedBox(
+                width: 17,
+                height: 17,
+                child: CircularProgressIndicator(
+                    strokeWidth: 2, color: Colors.white54),
+              )
+            : Icon(Icons.gif_box_outlined,
+                size: 22, color: Colors.white.withValues(alpha: 0.65)),
       ),
     );
   }
