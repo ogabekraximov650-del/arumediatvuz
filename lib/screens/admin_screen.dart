@@ -3,6 +3,7 @@ import '../theme/app_background.dart';
 import '../widgets/glass.dart';
 import '../services/admin_badges.dart';
 import '../services/admin_users_service.dart';
+import 'admin_dm_screen.dart';
 import 'admin_reports_screen.dart';
 import 'admin_users_screen.dart';
 import 'anime_management_screen.dart';
@@ -161,6 +162,24 @@ class AdminScreen extends StatelessWidget {
                           },
                         );
                       },
+                    ),
+                    const SizedBox(height: 12),
+                    // ── SHAXSIY CHATLAR ───────────────────────
+                    //
+                    // TALAB (foydalanuvchi): "barcha shaxsiy
+                    // chatlar admin panelida ko'rinishi kerak ...
+                    // bu biroz noto'g'ri lekin xavfsizlik va
+                    // nomaqbul hatti-harakatlarni oldini olish
+                    // uchun zarur".
+                    _AdminButton(
+                      icon: Icons.forum_rounded,
+                      label: 'Shaxsiy chatlar',
+                      subtitle: 'Foydalanuvchilar o\'rtasidagi yozishmalar',
+                      onTap: () => Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) => const AdminDmScreen(),
+                        ),
+                      ),
                     ),
                     const SizedBox(height: 12),
                     // ── B2 TOZALASH ───────────────────────────

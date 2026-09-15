@@ -36,11 +36,22 @@
 //
 //   NEKOSAPI     GIF EMAS — bu rasm bazasi (webp, harakatsiz).
 //                Teglari reaksiya emas, tavsif: `catgirl`,
-//                `school_uniform`, `sword`... `rating=safe`
-//                majburiy qo'yiladi, chunki bazasida
-//                `suggestive` va `borderline` tarkib ham bor.
+//                `school_uniform`, `sword`...
 //                Ro'yxatdagi teglar sinab ko'rilgan — javob
 //                bermaganlari olib tashlangan.
+//
+//                REYTING TANLANADI (foydalanuvchi talabi:
+//                "GIF yuborishda yosh chegarasi bo'lmasin,
+//                barchasiga ruxsat ber — sinchiklab tekshirib
+//                ko'raman"). Odatiy qiymat baribir `safe`:
+//                oyna ochilganda eng toza tarkib chiqadi,
+//                qolganini sinovchi O'ZI tanlaydi.
+//
+//                ⚠️ Ilovada YOSH CHEGARASI bor. Sinov
+//                tugagach reytingni `safe` ga qaytarish yoki
+//                tanlash qatorini butunlay olib tashlash
+//                kerak — aks holda izohlarga nomaqbul rasm
+//                tushishi mumkin.
 //
 // ── XAVFSIZLIK SERVERDA ─────────────────────────────────────
 //
@@ -160,7 +171,22 @@ class GifService {
 
   // ── OLIB KELISH ────────────────────────────────────────────
 
+  /// nekosapi reytinglari.
+  ///
+  /// TALAB (foydalanuvchi): "GIF yuborishda yosh chegarasi
+  /// bo'lmasin, barchasiga ruxsat ber — sinchiklab tekshirib
+  /// ko'raman. Agar umuman to'g'ri kelmasa o'zimiz yasaymiz".
+  ///
+  /// Shu sabab filtr QOTIB QOLGAN emas, tanlanadi. Birinchisi
+  /// (`safe`) odatiy bo'lib qoladi: oyna ochilganda eng toza
+  /// tarkib chiqadi.
+  static const nekosApiRatings = <String>[
+    'safe', 'suggestive', 'borderline', 'explicit',
+  ];
+
   /// Tanlangan xizmatdan `count` ta GIF (yoki rasm) oladi.
+  ///
+  /// `rating` faqat nekosapi uchun ma'noli.
   ///
   /// Xato bo'lsa BO'SH ro'yxat qaytadi — oyna "topilmadi" deb
   /// yozadi va ilova yiqilmaydi.
@@ -168,12 +194,13 @@ class GifService {
     GifSource src,
     String category, {
     int count = 12,
+    String rating = 'safe',
   }) async {
     try {
       return switch (src) {
         GifSource.nekosBest => await _nekosBest(category, count),
         GifSource.otakuGifs => await _otakuGifs(category, count),
-        GifSource.nekosApi => await _nekosApi(category, count),
+        GifSource.nekosApi => await _nekosApi(category, count, rating),
       };
     } catch (_) {
       return const [];
@@ -239,10 +266,12 @@ class GifService {
 
   /// nekosapi — teg bo'yicha rasm (GIF emas).
   ///
-  /// `rating=safe` HAR DOIM qo'yiladi: bazasida `suggestive` va
-  /// `borderline` tarkib ham bor, ilovada esa yosh chegarasi bor.
-  static Future<List<GifItem>> _nekosApi(String tag, int count) async {
-    final q = StringBuffer('limit=$count&rating=safe');
+  /// Reyting TANLANADI (foydalanuvchi talabi — yuqoridagi
+  /// izohga qarang). Bo'sh berilsa server o'zi hal qiladi.
+  static Future<List<GifItem>> _nekosApi(
+      String tag, int count, String rating) async {
+    final q = StringBuffer('limit=$count');
+    if (rating.isNotEmpty) q.write('&rating=$rating');
     if (tag.isNotEmpty) q.write('&tags=$tag');
     final r = await http
         .get(

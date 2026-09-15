@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import '../services/admin_badges.dart';
 import '../services/auth_service.dart';
+import '../services/dm_service.dart';
 import '../services/support_service.dart';
 import '../services/season_info.dart';
 import '../services/ui_state.dart';
@@ -97,9 +98,13 @@ class _RootScreenState extends State<RootScreen>
       const Duration(seconds: 12),
       (_) {
         UnreadBadge.instance.refresh();
+        // Do'stlar bilan yozishmadagi o'qilmaganlar — AYRIM
+        // sanoq (`DmBadge` izohiga qarang).
+        DmBadge.instance.refresh();
         _refreshAdminBadges();
       },
     );
+    unawaited(DmBadge.instance.refresh());
     _refreshAdminBadges();
 
     // ── ADMIN PANELIGA QAYTISH ───────────────────────────────
@@ -143,6 +148,7 @@ class _RootScreenState extends State<RootScreen>
     AuthService.instance.refresh();
     // Fon'dan qaytdi — admin javob yozgan bo'lsa nuqta yonsin.
     unawaited(UnreadBadge.instance.refresh());
+    unawaited(DmBadge.instance.refresh());
     _refreshAdminBadges();
     // Telegramdan qaytdi. Foydalanuvchi u yerda START bosgan
     // bo'lsa, sessiya serverda allaqachon ochilgan — saqlangan

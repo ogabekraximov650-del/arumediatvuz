@@ -56,6 +56,17 @@ class _GifPickerState extends State<_GifPicker> {
   GifSource _src = GifSource.nekosBest;
   late String _cat = GifService.categoriesOf(_src).first;
 
+  /// nekosapi reytingi (faqat o'sha xizmat uchun).
+  ///
+  /// TALAB (foydalanuvchi): "GIF yuborishda yosh chegarasi
+  /// bo'lmasin, barchasiga ruxsat ber — sinchiklab tekshirib
+  /// ko'raman".
+  ///
+  /// Odatiy `safe`: oyna ochilganda eng toza tarkib chiqadi,
+  /// qolganini sinovchi O'ZI tanlaydi va nimani ko'rayotganini
+  /// bilib turadi.
+  String _rating = GifService.nekosApiRatings.first;
+
   List<GifItem> _items = const [];
   bool _loading = true;
 
@@ -72,7 +83,7 @@ class _GifPickerState extends State<_GifPicker> {
   Future<void> _load() async {
     final id = ++_reqId;
     setState(() => _loading = true);
-    final rows = await GifService.fetch(_src, _cat);
+    final rows = await GifService.fetch(_src, _cat, rating: _rating);
     if (!mounted || id != _reqId) return;
     setState(() {
       _items = rows;
@@ -143,6 +154,39 @@ class _GifPickerState extends State<_GifPicker> {
             ),
           ),
           const SizedBox(height: 10),
+
+          // ── REYTING (faqat nekosapi) ───────────────────────
+          //
+          // Boshqa ikki xizmatda reyting tushunchasi yo'q:
+          // nekos.best butunlay SFW, otakugifs esa reaksiya
+          // GIF'lari.
+          if (_src == GifSource.nekosApi) ...[
+            SizedBox(
+              height: 32,
+              child: ListView(
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.symmetric(horizontal: 14),
+                children: [
+                  for (final r in GifService.nekosApiRatings) ...[
+                    _CatChip(
+                      label: r,
+                      active: _rating == r,
+                      onTap: () {
+                        if (_rating == r) return;
+                        setState(() {
+                          _rating = r;
+                          _items = const [];
+                        });
+                        _load();
+                      },
+                    ),
+                    const SizedBox(width: 7),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(height: 8),
+          ],
 
           // ── KATEGORIYALAR ──────────────────────────────────
           SizedBox(
