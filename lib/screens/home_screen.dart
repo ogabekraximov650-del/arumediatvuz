@@ -5,6 +5,7 @@ import 'package:cached_network_image/cached_network_image.dart';
 import '../widgets/aru_logo.dart';
 import '../widgets/glass.dart';
 import '../widgets/stats_banner.dart';
+import '../services/app_build.dart';
 import '../services/auth_service.dart';
 import '../services/format.dart';
 import '../services/offline_library.dart';
@@ -193,12 +194,13 @@ class _HomeScreenState extends State<HomeScreen> {
           // Eng tepada: kunlik foydalanuvchilar va o'zi almashib
           // turadigan kunlik raqamlar. Ustiga bosilsa — to'liq
           // statistika sahifasi.
-          const SliverToBoxAdapter(
-            child: Padding(
-              padding: EdgeInsets.fromLTRB(16, 6, 16, 2),
-              child: StatsBanner(),
+          if (kHomeStats)
+            const SliverToBoxAdapter(
+              child: Padding(
+                padding: EdgeInsets.fromLTRB(16, 6, 16, 2),
+                child: StatsBanner(),
+              ),
             ),
-          ),
           if (_isOffline && _seasons.isNotEmpty)
             SliverToBoxAdapter(
               child: Padding(

@@ -84,3 +84,16 @@ class AppSignature {
     }
   }
 }
+
+/// ── BOSH SAHIFADAGI STATISTIKA KO'RINSINMI ──────────────────
+///
+/// Foydalanuvchi talabi: build qilinganda bosh sahifa tepasidagi
+/// statistika banneri KO'RINMASIN.
+///
+/// `const` bo'lgani MUHIM: `if (kHomeStats)` sharti build paytida
+/// hal qilinadi va `false` bo'lsa banner kodi APK ichiga
+/// umuman tushmaydi (tree-shaking).
+///
+/// Odatiy `false`. Kerak bo'lsa:
+///   flutter build apk --dart-define=HOME_STATS=true
+const bool kHomeStats = bool.fromEnvironment('HOME_STATS');
