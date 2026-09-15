@@ -25,6 +25,7 @@ import 'package:flutter/material.dart';
 
 import '../services/auth_service.dart';
 import '../services/comments_service.dart';
+import '../services/format.dart';
 import '../services/reports_service.dart';
 import '../screens/public_profile_screen.dart';
 import 'gif_picker.dart';

@@ -86,3 +86,45 @@ String formatCompact(num value) {
   if (n < 1000000) return '${cut(n / 1000)} ming';
   return '${cut(n / 1000000)} mln';
 }
+
+// ══════════════════════════════════════════════════════════════
+//  VAQT
+// ══════════════════════════════════════════════════════════════
+//
+// Bu ikkovi ilgari `comments_service.dart` da edi, lekin endi
+// izohlardan tashqari shaxsiy yozishmalar, admin shikoyatlari va
+// suhbatlar ro'yxati ham shu ko'rinishni ishlatadi. Ekranlar
+// vaqtni BIR XIL ko'rsatishi uchun ular shu yerga — umumiy joyga
+// ko'chirildi.
+
+/// Aniq vaqt: `14:32` (bugun) yoki `12.09.2026`.
+///
+/// TALAB (foydalanuvchi): "izoh yozganda vaqti ham ko'rsatilsin".
+/// "7 daqiqa oldin" ko'z uchun qulay, lekin aniq vaqtni bermaydi —
+/// shu sabab yonida shu ham turadi.
+String commentClock(int ms) {
+  if (ms <= 0) return '';
+  final d = DateTime.fromMillisecondsSinceEpoch(ms);
+  final now = DateTime.now();
+  String two(int n) => n.toString().padLeft(2, '0');
+  if (d.year == now.year && d.month == now.month && d.day == now.day) {
+    return '${two(d.hour)}:${two(d.minute)}';
+  }
+  return '${two(d.day)}.${two(d.month)}.${d.year} ${two(d.hour)}:${two(d.minute)}';
+}
+
+/// "3 daqiqa oldin" ko'rinishidagi vaqt.
+String commentAgo(int ms) {
+  if (ms <= 0) return '';
+  final d = DateTime.now().millisecondsSinceEpoch - ms;
+  if (d < 60000) return 'hozir';
+  final min = d ~/ 60000;
+  if (min < 60) return '$min daqiqa oldin';
+  final h = min ~/ 60;
+  if (h < 24) return '$h soat oldin';
+  final days = h ~/ 24;
+  if (days < 30) return '$days kun oldin';
+  final mo = days ~/ 30;
+  if (mo < 12) return '$mo oy oldin';
+  return '${days ~/ 365} yil oldin';
+}

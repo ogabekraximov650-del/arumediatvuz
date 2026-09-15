@@ -32,7 +32,7 @@
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 
-import '../services/comments_service.dart';
+import '../services/format.dart';
 import '../services/reports_service.dart';
 import '../theme/app_background.dart';
 import '../widgets/glass.dart';

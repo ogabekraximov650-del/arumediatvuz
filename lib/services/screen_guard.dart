@@ -32,6 +32,9 @@
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+// `State` va `StatefulWidget` uchun — aralashma (mixin) shularga
+// bog'lanadi.
+import 'package:flutter/widgets.dart';
 
 class ScreenGuard {
   const ScreenGuard._();
