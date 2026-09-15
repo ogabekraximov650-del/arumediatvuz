@@ -38,31 +38,51 @@ jobs:
   build-apk:
     runs-on: ubuntu-latest
 
-    # ── IKKITA APK (foydalanuvchi talabi) ─────────────────────
+    # ── TO'RTTA ALOHIDA APK (foydalanuvchi talabi) ────────────
     #
-    # TALAB: "ikkita build qil, bittasida admin paneliga tegishli
+    # TALAB 1: "ikkita build qil, bittasida admin paneliga tegishli
     # kodlar bo'lmasin, ikkinchisida esa men uchun admin paneli
     # bor ilova build qil".
+    # TALAB 2: "APK tayyorlanganda barchasi alohida tayyorlanishi
+    # kerak — admin uchun ikkita 32 va 64 bit alohida, user uchun
+    # ikkita 32 va 64 bit alohida; hozir ikkitasi bitta APK ichida
+    # va shu sababli hajmi katta bo'lib ketgan".
+    #
+    # Ya'ni har bir APK FAQAT BITTA arxitektura uchun quriladi:
+    # Rust yadrosi ham, Flutter kodi ham faqat o'shanisi. Shu
+    # sababli har bir fayl ~2 barobar kichik bo'ladi.
     #
     # `ADMIN_BUILD` `--dart-define` orqali beriladi va ilovada
     # `const bool` bo'lib tushadi. `false` bo'lsa Dart kompilyatori
     # admin ekranlariga boradigan yo'lni topmaydi va ularni
     # APK'dan butunlay chiqarib tashlaydi (`app_build.dart`).
     strategy:
-      # Bittasi yiqilsa ikkinchisi baribir qurilsin — admin
+      # Bittasi yiqilsa qolganlari baribir qurilsin — admin
       # buildidagi xato oddiy foydalanuvchilar APK'sini
       # to'xtatmasin.
       fail-fast: false
-      # KETMA-KET: ikkala job bir vaqtda bitta Release'ga yozsa
+      # KETMA-KET: joblar bir vaqtda bitta Release'ga yozsa
       # to'qnashadi va bittasi "tag allaqachon bor" xatosi bilan
       # yiqilardi.
       max-parallel: 1
       matrix:
         include:
-          - name: user
+          - name: user-32
             admin: 'false'
-          - name: admin
+            abi: armeabi-v7a
+            platform: android-arm
+          - name: user-64
+            admin: 'false'
+            abi: arm64-v8a
+            platform: android-arm64
+          - name: admin-32
             admin: 'true'
+            abi: armeabi-v7a
+            platform: android-arm
+          - name: admin-64
+            admin: 'true'
+            abi: arm64-v8a
+            platform: android-arm64
 
     steps:
       - name: Checkout code
@@ -82,18 +102,14 @@ jobs:
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
 
-      # IKKALA ARM ABI kompilyatsiya qilinadi (foydalanuvchi talabi:
-      # "Ham 32 ham 64 bit apk yasa"):
-      #   armeabi-v7a — 32-bitli telefonlar,
-      #   arm64-v8a   — 64-bitli telefonlar (zamonaviy qurilmalar).
-      # 64-bitli telefon o'zining ABI'sini tanlaydi va nativ tezlikda
-      # ishlaydi; 32-bitli eski telefonlar esa armeabi-v7a'ni oladi.
-      - name: Build rust_core for Android (32-bit + 64-bit)
+      # FAQAT SHU JOB'NING ABI'si quriladi — har APK bitta
+      # arxitektura uchun (foydalanuvchi talabi: "barchasi alohida
+      # tayyorlanishi kerak ... hajmi katta bo'lib ketgan").
+      - name: Build rust_core for Android (${{ matrix.abi }})
         working-directory: rust
         run: |
           cargo ndk \
-            -t armeabi-v7a \
-            -t arm64-v8a \
+            -t ${{ matrix.abi }} \
             -o ../jniLibs-out \
             build --release
 
@@ -115,11 +131,10 @@ jobs:
       - name: Copy librust_core.so into jniLibs
         run: |
           set -e
-          for abi in armeabi-v7a arm64-v8a; do
-            mkdir -p "android/app/src/main/jniLibs/$abi"
-            cp "jniLibs-out/$abi/librust_core.so" "android/app/src/main/jniLibs/$abi/"
-          done
-          echo "✅ Rust .so fayllar joylashtirildi:"
+          mkdir -p "android/app/src/main/jniLibs/${{ matrix.abi }}"
+          cp "jniLibs-out/${{ matrix.abi }}/librust_core.so" \
+             "android/app/src/main/jniLibs/${{ matrix.abi }}/"
+          echo "✅ Rust .so fayl joylashtirildi:"
           find android/app/src/main/jniLibs -name "*.so"
 
       - name: INTERNET ruxsatini qo'shish (agar yo'q bo'lsa)
@@ -341,12 +356,12 @@ jobs:
       - name: Get dependencies
         run: flutter pub get
 
-      # IKKI ABI BITTA APK ICHIDA (foydalanuvchi talabi:
-      # "Ham 32 ham 64 bit apk yasa").
-      # --split-per-abi ISHLATILMAYDI: bitta "universal" APK chiqadi,
-      # uni ham 32-, ham 64-bitli telefonlar o'rnata oladi va Android
-      # o'zi mos kutubxonani tanlaydi.
-      - name: Build APK (Release — 32-bit + 64-bit)
+      # HAR APK FAQAT BITTA ARXITEKTURA UCHUN (foydalanuvchi
+      # talabi). `--split-per-abi` ISHLATILMAYDI: u bir job ichida
+      # bir nechta APK chiqaradi va ularning nomini boshqarish
+      # qiyin; bu yerda ABI matritsadan keladi, ya'ni har job
+      # bitta toza APK beradi.
+      - name: Build APK (Release — ${{ matrix.abi }})
         run: |
           # ── NEGA `--build-number` (TUZATILGAN XATO) ──────────
           #
@@ -370,53 +385,53 @@ jobs:
           echo "versiya: $APP_VERSION  (admin: ${{ matrix.admin }})"
 
           flutter build apk --release \
-            --target-platform android-arm,android-arm64 \
+            --target-platform ${{ matrix.platform }} \
             --build-name "$BUILD_NAME" \
             --build-number "${{ github.run_number }}" \
             --dart-define=ADMIN_BUILD=${{ matrix.admin }} \
             --dart-define=APP_VERSION="$APP_VERSION"
 
-      # ── HAR BIR ABI TO'LIQ BO'LISHI SHART ─────────────────────
+      # ── APK'DA FAQAT SHU ABI QOLSIN ──────────────────────────
       #
       # TOPILGAN JIDDIY XATO (avvalgi versiyalarda bor edi):
-      # APK ichida `lib/arm64-v8a` papkasi bor edi, lekin Rust yadrosi
-      # (`librust_core.so`) faqat `armeabi-v7a` uchun qurilgandi.
-      # Android 64-bitli telefonda `arm64-v8a` papkasini TANLAYDI va
-      # faqat o'shandan kutubxona yuklaydi — `librust_core.so`
-      # TOPILMAY ilova ochilishida yiqilardi (kesh, qidiruv,
-      # shifrlash — hammasi shu kutubxonada).
+      # `--target-platform` berilganiga QARAMAY, tayyor APK ichida
+      # ortiqcha arxitektura papkalari qolardi (Flutter embedding
+      # AAR'idan). Rust yadrosi (`librust_core.so`) esa faqat
+      # bittasida bo'lardi — Android boshqa papkani tanlab,
+      # kutubxonani topa olmay ilova ochilishida yiqilardi.
       #
-      # ENDI ikkala ABI ham to'liq quriladi, shu sabab o'chirish
-      # SHART EMAS — faqat x86/x86_64 (emulyator arxitekturalari,
-      # telefonlarda kerak emas) olib tashlanadi va HAR IKKALA ARM
-      # papkasida uchchala .so borligi tekshiriladi.
-      - name: ABI tekshiruvi (armeabi-v7a + arm64-v8a to'liq bo'lsin)
+      # Shu sabab BEGONA papkalar o'chiriladi va shu ABI'da
+      # uchchala .so borligi tekshiriladi. Bu APK hajmini ham
+      # keskin kichraytiradi.
+      - name: ABI tozalash va tekshiruv (faqat ${{ matrix.abi }})
         run: |
           set -e
           APK="build/app/outputs/flutter-apk/app-release.apk"
+          KEEP="${{ matrix.abi }}"
 
           echo "── O'zgartirishdan OLDIN ──"
           unzip -l "$APK" | grep "lib/" || true
 
-          # Har ikkala ARM papkasida KERAKLI kutubxonalar borligini
-          # tekshiramiz. Bittasi yetishmasa — build ATAYLAB yiqiladi
-          # (jimgina buzuq APK chiqarishdan yaxshiroq).
-          for abi in armeabi-v7a arm64-v8a; do
-            for so in libapp.so libflutter.so librust_core.so; do
-              if ! unzip -l "$APK" | grep -q "lib/$abi/$so"; then
-                echo "❌ XATO: lib/$abi/$so topilmadi — APK to'liq emas"
-                exit 1
-              fi
-            done
+          # KERAKLI kutubxonalar shu ABI'da borligini tekshiramiz.
+          # Bo'lmasa — o'chirish ilovani buzardi, shu sabab build
+          # ATAYLAB yiqiladi (jimgina buzuq APK chiqarishdan
+          # yaxshiroq).
+          for so in libapp.so libflutter.so librust_core.so; do
+            if ! unzip -l "$APK" | grep -q "lib/$KEEP/$so"; then
+              echo "❌ XATO: lib/$KEEP/$so topilmadi — APK to'liq emas"
+              exit 1
+            fi
           done
 
-          # Telefonlarda kerak bo'lmagan emulyator arxitekturalari.
-          zip -q -d "$APK" "lib/x86_64/*" || true
-          zip -q -d "$APK" "lib/x86/*" || true
+          # Qolgan barcha arxitekturalar olib tashlanadi.
+          for abi in armeabi-v7a arm64-v8a x86 x86_64; do
+            [ "$abi" = "$KEEP" ] && continue
+            zip -q -d "$APK" "lib/$abi/*" || true
+          done
 
-          # `zip -d` fayllar joylashuvini buzadi — .so fayllar xotiraga
-          # to'g'ridan-to'g'ri joylashishi (memory-map) uchun APK
-          # qaytadan tekislanishi kerak.
+          # `zip -d` fayllar joylashuvini buzadi — .so fayllar
+          # xotiraga to'g'ridan-to'g'ri joylashishi (memory-map)
+          # uchun APK qaytadan tekislanishi kerak.
           ZIPALIGN=$(ls "$ANDROID_HOME"/build-tools/*/zipalign | sort -V | tail -1)
           "$ZIPALIGN" -f -p 4 "$APK" "$APK.aligned"
           mv "$APK.aligned" "$APK"
@@ -554,15 +569,14 @@ jobs:
           ABIS=$(unzip -l "$APK" | grep "lib/" | awk '{print $4}' | cut -d/ -f2 | sort -u)
           echo "$ABIS"
 
-          # QAT'IY TEKSHIRUV: APK ichida AYNAN ikkala ARM ABI
-          # bo'lishi SHART (x86 bo'lmasin, chunki telefonlarda
-          # kerak emas va u yerda Rust yadrosi yo'q).
-          EXPECT=$(printf 'arm64-v8a\narmeabi-v7a\n')
-          if [ "$ABIS" != "$EXPECT" ]; then
-            echo "❌ XATO: kutilgani armeabi-v7a + arm64-v8a edi, ichidagisi: $ABIS"
+          # QAT'IY TEKSHIRUV: APK ichida AYNAN BITTA ABI
+          # bo'lishi SHART. Boshqasi qolib ketsa, Android o'shani
+          # tanlab, Rust yadrosini topa olmasdi.
+          if [ "$ABIS" != "${{ matrix.abi }}" ]; then
+            echo "❌ XATO: faqat ${{ matrix.abi }} bo'lishi kerak edi, ichidagisi: $ABIS"
             exit 1
           fi
-          echo "✅ APK 32-bit + 64-bit (armeabi-v7a + arm64-v8a)"
+          echo "✅ APK faqat ${{ matrix.abi }}"
 
       # ── APK ICHIDA HAQIQATAN ARU BELGISI BORMI ────────────────
       #
@@ -791,8 +805,9 @@ jobs:
       # Shu sabab APK Release sifatida ham chiqariladi: u yerdan
       # telefonga TO'G'RIDAN-TO'G'RI .apk fayli yuklanadi va darhol
       # o'rnatiladi, hech narsani ochish shart emas.
-      # Ikkala APK bitta Release'ga tushadi, lekin NOMI boshqacha —
-      # aks holda ikkinchisi birinchisining ustiga yozilardi.
+      # To'rtala APK bitta Release'ga tushadi, lekin NOMI boshqacha
+      # (`aniraxuz-user-32.apk` kabi) — aks holda keyingisi
+      # oldingisining ustiga yozilardi.
       - name: APK nomini belgilash
         id: rename
         run: |
@@ -811,9 +826,14 @@ jobs:
             Telefonga to'g'ridan-to'g'ri o'rnatish uchun `.apk`
             faylini yuklab oling (ZIP emas).
 
-            * `aniraxuz-user.apk`  — oddiy foydalanuvchilar uchun
-              (admin paneli YO'Q)
-            * `aniraxuz-admin.apk` — admin paneli bilan
+            Har bir APK FAQAT bitta arxitektura uchun — shu sabab
+            hajmi kichik. Telefoningiz 64-bitli bo'lsa `-64`,
+            eskiroq bo'lsa `-32` ni oling.
+
+            * `aniraxuz-user-32.apk`  — foydalanuvchi, 32-bit (armeabi-v7a)
+            * `aniraxuz-user-64.apk`  — foydalanuvchi, 64-bit (arm64-v8a)
+            * `aniraxuz-admin-32.apk` — admin paneli bilan, 32-bit
+            * `aniraxuz-admin-64.apk` — admin paneli bilan, 64-bit
 
             Versiya: ${{ github.run_number }}
             Commit: ${{ github.sha }}
@@ -845,4 +865,4 @@ jobs:
       - name: Done
         run: |
           echo "✅ APK tayyor: aniraxuz-${{ matrix.name }}.apk"
-          echo "   32-bit + 64-bit (armeabi-v7a + arm64-v8a), imzolar: v1+v2+v3(+v4)."
+          echo "   Faqat ${{ matrix.abi }}, imzolar: v1+v2+v3(+v4)."
