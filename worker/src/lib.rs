@@ -1099,6 +1099,22 @@ async fn init_db(env: &Env) -> bool {
             (SELECT 1 FROM app_config WHERE cfg_key='wipe_stats_v5')", vec![]),
         ("INSERT OR IGNORE INTO app_config (cfg_key,cfg_value)
           VALUES ('wipe_stats_v5','1')", vec![]),
+
+        // ── ESKI FARQ BIR MARTA TO'G'RILANADI (v7) ────────────
+        //
+        // Yuqoridagi tozalashdan keyin ikkovi ham nolda bo'ladi,
+        // lekin tozalash allaqachon o'tib ketgan bazada eski farq
+        // qolishi mumkin. Shu sabab bo'lim soni bir marta
+        // qismlardan qayta yig'iladi (`sync_route` dagi bilan
+        // AYNAN bir xil buyruq).
+        ("UPDATE season_db SET views_total = (
+            SELECT COALESCE(SUM(e.views_total), 0) FROM epizod_db e
+             WHERE e.anime_id = season_db.anime_id
+               AND e.season_id = season_db.season_id)
+          WHERE NOT EXISTS
+            (SELECT 1 FROM app_config WHERE cfg_key='views_sync_v7')", vec![]),
+        ("INSERT OR IGNORE INTO app_config (cfg_key,cfg_value)
+          VALUES ('views_sync_v7','1')", vec![]),
     ]).await.is_ok();
     ok
 }
@@ -4613,25 +4629,11 @@ async fn sync_route(mut req: Request, env: &Env) -> Result<Response> {
 
     let mut old_hist: std::collections::HashMap<(i64, i64, i64), (i64, i64)> =
         std::collections::HashMap::new();
-    // ── SHU ODAM ALLAQACHON KO'RGAN BO'LIMLAR ─────────────────
-    //
-    // TOPILGAN XATO (foydalanuvchi: "ikkita hisob bor edi, lekin
-    // animedagi ko'rishlar soni yo'q joydan 3 ta bo'lib qoldi").
-    //
-    // Sabab: bo'limning `views_total` i HAR BIR QISM uchun alohida
-    // oshardi. Bitta odam 3 ta qismni ko'rsa — bo'limda "3 ta
-    // ko'rish" chiqardi, go'yo uch kishi ko'rgandek.
-    //
-    // To'g'ri qoida: BO'LIM darajasida bitta odam = BITTA ko'rish.
-    // Qism (`epizod_db`) darajasida esa ilgarigidek qoladi — u
-    // yerda "qaysi qism necha marta ko'rilgan" kerak.
-    let mut seen_seasons: std::collections::HashSet<(i64, i64)> =
-        std::collections::HashSet::new();
     for r in rows_of(&pre[1]) {
-        let (a, sn, e) = (num(&r, "anime_id"), num(&r, "season_id"), num(&r, "epizod_id"));
-        let views = num(&r, "view_count").max(0);
-        if views > 0 { seen_seasons.insert((a, sn)); }
-        old_hist.insert((a, sn, e), (num(&r, "watched_ms").max(0), views));
+        old_hist.insert(
+            (num(&r, "anime_id"), num(&r, "season_id"), num(&r, "epizod_id")),
+            (num(&r, "watched_ms").max(0), num(&r, "view_count").max(0)),
+        );
     }
     let mut old_rate: std::collections::HashMap<(i64, i64), i64> =
         std::collections::HashMap::new();
@@ -4708,10 +4710,6 @@ async fn sync_route(mut req: Request, env: &Env) -> Result<Response> {
             TursoArg::int(at),
         ]);
 
-        // Bo'lim hisobiga faqat shu odamning BIRINCHI ko'rishi
-        // qo'shiladi (yuqoridagi `seen_seasons` izohiga qarang).
-        let season_view_inc = if view_inc > 0 && seen_seasons.insert((aid, sid)) { 1 } else { 0 };
-
         if view_inc > 0 || delta > 0 {
             total_views += view_inc;
             total_watch += delta;
@@ -4719,7 +4717,7 @@ async fn sync_route(mut req: Request, env: &Env) -> Result<Response> {
             e.0 += view_inc;
             e.1 += delta;
             let s = seasons.entry((aid, sid)).or_default();
-            s.views += season_view_inc;
+            s.views += view_inc;
             s.watch += delta;
         }
     }
@@ -4841,6 +4839,42 @@ async fn sync_route(mut req: Request, env: &Env) -> Result<Response> {
                 TursoArg::int(d.fav), TursoArg::int(*aid), TursoArg::int(*sid),
             ],
         ));
+
+        // ── BO'LIM HISOBI QISMLARDAN QAYTA YIG'ILADI ──────────
+        //
+        // TOPILGAN XATO (foydalanuvchi: "bitta bo'lim va bitta
+        // qism bor edi, bitta qismni ikkita odam ko'rdi, yig'indi
+        // esa nimagadir 3 ta bo'lib qoldi").
+        //
+        // Qoida O'ZI to'g'ri edi va shunday qoladi:
+        //   * qism tagida — shu qismni nechta hisob ko'rgani;
+        //   * bo'lim (ma'lumotlar oynasi va kartochka) — o'sha
+        //     bo'limning HAMMA qismi bo'yicha shu sonlarning
+        //     YIG'INDISI.
+        //
+        // Xato esa hisoblashda emas, YIG'IB BORISHDA edi: ikkala
+        // son ham "ustiga qo'shib" boriladi va bir marta chetga
+        // chiqsa (eski tozalash faqat bo'limni nollagan, qismni
+        // nollamagan; yoki qator tozalanib, odam qismni qayta
+        // ko'rgan) farq MANGU qolib ketardi.
+        //
+        // Endi bo'lim soni qo'shib borilmaydi — har safar
+        // qismlardan QAYTA YIG'ILADI. Ya'ni u ta'rifi bo'yicha
+        // qismlar yig'indisiga TENG bo'ladi va hech qachon
+        // "yo'q joydan" o'sa olmaydi. Buyruq yuqoridagi
+        // `epizod_db` yangilanishidan KEYIN ketadi (quvurdagi
+        // tartib saqlanadi), shu sabab yangi son ham hisobga
+        // kiradi.
+        if d.views != 0 {
+            stmts.push((
+                "UPDATE season_db SET views_total = (
+                    SELECT COALESCE(SUM(e.views_total), 0) FROM epizod_db e
+                     WHERE e.anime_id = season_db.anime_id
+                       AND e.season_id = season_db.season_id)
+                  WHERE anime_id=? AND season_id=?",
+                vec![TursoArg::int(*aid), TursoArg::int(*sid)],
+            ));
+        }
     }
 
     // ── STATISTIKA CHELAKLARI — PAKETGA BIR MARTA ─────────────
