@@ -27,6 +27,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 
 import '../services/auth_service.dart';
+import '../services/screen_guard.dart';
 import '../services/storage_janitor.dart';
 import '../services/support_service.dart';
 import '../services/voice_player.dart';
@@ -56,7 +57,12 @@ class SupportChatScreen extends StatefulWidget {
   State<SupportChatScreen> createState() => _SupportChatScreenState();
 }
 
-class _SupportChatScreenState extends State<SupportChatScreen> {
+class _SupportChatScreenState extends State<SupportChatScreen>
+    // ── SKRINSHOT VA EKRAN YOZUVI TAQIQLANADI ────────────────
+    //
+    // TALAB (foydalanuvchi): yozishmada ham skrinshot olish va
+    // ekranni yozib olish taqiqlansin (`screen_guard.dart`).
+    with ScreenGuarded<SupportChatScreen> {
   late final ChatController _chat = ChatController(userId: widget.userId);
   final _input = TextEditingController();
   final _scroll = ScrollController();

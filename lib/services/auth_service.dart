@@ -52,6 +52,22 @@ class AppUser {
   /// unga qarab hech qanday oyna ochilmaydi.
   final bool profileDone;
 
+  /// ── MAXFIYLIK ──────────────────────────────────────────────
+  ///
+  /// Statistikamni (ID, nechta anime ko'rgani, tomosha vaqti)
+  /// boshqalar ko'rsinmi.
+  ///
+  /// TALAB (foydalanuvchi): "foydalanuvchi boshqa profilni
+  /// ko'rishi mumkin bo'lsin, faqat to'liq emas — faqatgina
+  /// profil surati, nomi va usernameni ko'rishga ruxsat
+  /// berilsin ... bu narsalarni boshqalar ko'rishi uchun
+  /// foydalanuvchi sozlamalar panelidan ruxsat berib chiqishi
+  /// kerak".
+  ///
+  /// Odatda `false` — maxfiylik "o'chiriladigan" emas,
+  /// "yoqiladigan" narsa.
+  final bool showStats;
+
   const AppUser({
     required this.id,
     required this.telegramId,
@@ -62,6 +78,7 @@ class AppUser {
     this.balance = 0,
     this.profileDone = true,
     this.isAdmin = false,
+    this.showStats = false,
   });
 
   String get fullName {
@@ -93,6 +110,8 @@ class AppUser {
         profileDone: j['profile_done'] as bool? ?? true,
         // Maydon yo'q bo'lsa — admin EMAS (xavfsiz tomon).
         isAdmin: j['is_admin'] as bool? ?? false,
+        // Maydon yo'q bo'lsa — YOPIQ (xavfsiz tomon).
+        showStats: j['show_stats'] as bool? ?? false,
       );
 
   Map<String, dynamic> toJson() => {
@@ -105,6 +124,7 @@ class AppUser {
         'balance': balance,
         'profile_done': profileDone,
         'is_admin': isAdmin,
+        'show_stats': showStats,
       };
 }
 
@@ -811,5 +831,53 @@ class AuthService extends ChangeNotifier {
       'platform': platform,
       'app_version': kAppVersion,
     };
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+//  MAXFIYLIK SOZLAMASI
+// ══════════════════════════════════════════════════════════════
+//
+// TALAB (foydalanuvchi): "foydalanuvchi boshqa profilni ko'rishi
+// mumkin bo'lsin, faqat to'liq emas — faqatgina profil surati,
+// nomi va usernameni ko'rishga ruxsat berilsin. ID, balans va
+// qolgan statistikalar ko'rinmasin. Bu narsalarni boshqalar
+// ko'rishi uchun foydalanuvchi sozlamalar panelidan ruxsat berib
+// chiqishi kerak".
+//
+// Haqiqiy to'siq SERVERDA: ruxsat berilmagan bo'lsa statistika
+// javobga UMUMAN qo'shilmaydi (`public_profile` izohiga qarang).
+// Bu yerdagi kod shunchaki sozlamani yuboradi.
+
+extension AuthPrivacy on AuthService {
+  /// Statistikani boshqalarga ko'rsatish/yashirish.
+  ///
+  /// Xato bo'lsa matn qaytadi va ekrandagi tugma eski holatiga
+  /// qaytariladi (chaqiruvchi shunga qarab ish tutadi).
+  Future<String?> setShowStats(bool on) async {
+    final t = sessionToken;
+    if (t == null) return 'Avval hisobingizga kiring';
+    try {
+      final r = await http
+          .post(
+            Uri.parse('$kApiBase/api/me/privacy'),
+            headers: {
+              'Authorization': 'Bearer $t',
+              'Content-Type': 'application/json',
+            },
+            body: jsonEncode({'show_stats': on}),
+          )
+          .timeout(const Duration(seconds: 20));
+      if (r.statusCode != 200) {
+        final j = jsonDecode(r.body) as Map<String, dynamic>;
+        return '${j['error'] ?? 'Saqlanmadi'}';
+      }
+      // Saqlangan nusxa ham yangilanadi — ilova qayta ochilganda
+      // tugma to'g'ri holatda turadi.
+      await refresh();
+      return null;
+    } catch (_) {
+      return 'Internet yo\'q';
+    }
   }
 }

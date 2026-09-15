@@ -462,6 +462,22 @@ async fn init_db(env: &Env) -> bool {
         //   * `ban_until` = 0  -> MUDDATSIZ;
         //   * `ban_until` > 0  -> o'sha vaqtgacha.
         // `ban_reason` bo'sh bo'lishi mumkin (sabab yozilmagan).
+        // ── PROFIL MAXFIYLIGI ────────────────────────────
+        //
+        // TALAB (foydalanuvchi): "foydalanuvchi boshqa profilni
+        // ko'rishi mumkin bo'lsin, faqat to'liq emas — faqatgina
+        // profil surati, nomi va usernameni ko'rishga ruxsat
+        // berilsin. ID, balans va qolgan statistikalar
+        // ko'rinmasin. Bu narsalarni boshqalar ko'rishi uchun
+        // foydalanuvchi sozlamalar panelidan ruxsat berib
+        // chiqishi kerak".
+        //
+        // Ya'ni ODATIY holat — YOPIQ. Ustun `0` bo'lsa statistika
+        // ko'rinmaydi; odam sozlamalardan yoqsa `1` bo'ladi.
+        // Odatiy qiymatni ataylab `0` qildik: maxfiylik
+        // "o'chirib qo'yiladigan" emas, "yoqiladigan" narsa
+        // bo'lishi kerak.
+        "ALTER TABLE users_db ADD COLUMN show_stats INTEGER DEFAULT 0",
         "ALTER TABLE users_db ADD COLUMN ban_until INTEGER DEFAULT 0",
         "ALTER TABLE users_db ADD COLUMN ban_reason TEXT DEFAULT ''",
         "ALTER TABLE users_db ADD COLUMN banned_at INTEGER DEFAULT 0",
@@ -3626,6 +3642,12 @@ fn user_public(origin: &str, u: &Value) -> Value {
         // AVTOMATIK berilgani uchun bu endi doim 1 — maydon
         // eski ilova versiyalari bilan moslik uchun qoldirilgan.
         "profile_done": u["profile_done"].as_i64().unwrap_or(0) == 1,
+        // ── MAXFIYLIK ────────────────────────────────────────
+        //
+        // Statistikamni boshqalar ko'rsinmi. Odatda YO'Q —
+        // sozlamalardan yoqiladi (`public_profile` izohiga
+        // qarang).
+        "show_stats": u["show_stats"].as_i64().unwrap_or(0) == 1,
         "created_at": u["created_at"].clone(),
         "last_login_at": u["last_login_at"].clone(),
     })
@@ -6520,6 +6542,64 @@ async fn admin_reports(req: &Request, env: &Env, origin: &str) -> Result<Respons
     }))
 }
 
+/// GET /api/admin/badges?since_reports=..&since_users=.. — YANGILIKLAR.
+///
+/// TALAB (foydalanuvchi): "admin paneliga yangilik kelsa, ya'ni
+/// shikoyat, support, yangi foydalanuvchi va boshqa narsalar
+/// kelganda admin paneli tugmasida qizil nuqta yonib tursin va
+/// o'sha yangi narsa ustida ham yonib tursin".
+///
+/// ── NEGA "SINCE" ILOVADAN KELADI ────────────────────────────
+///
+/// "Yangi" degani — ADMIN OXIRGI MARTA KO'RGANIDAN keyingisi.
+/// Bu vaqtni bazada saqlash mumkin edi, lekin u holda har
+/// bo'lim ochilganda yana bitta yozish so'rovi ketardi. Ilova
+/// esa uni o'zida (diskda) saqlaydi va so'rovga qo'shib
+/// yuboradi — bazaga hech narsa yozilmaydi.
+///
+/// Yozishmalar bundan farq qiladi: u yerda "o'qilmagan" tushunchasi
+/// allaqachon bazada bor (`chat_threads.unread_admin`), shu sabab
+/// vaqt kerak emas.
+async fn admin_badges(req: &Request, env: &Env) -> Result<Response> {
+    let Some(u) = session_user(env, &bearer(req)).await? else {
+        return json_resp(&json!({"error": "unauthorized"}), 401);
+    };
+    if !is_admin(&u) {
+        return json_resp(&json!({"error": "forbidden"}), 403);
+    }
+    let url = req.url()?;
+    let q = |k: &str| -> i64 {
+        url.query_pairs()
+            .find(|(n, _)| n == k)
+            .and_then(|(_, v)| v.parse::<i64>().ok())
+            .unwrap_or(0)
+            .max(0)
+    };
+    let since_reports = q("since_reports");
+    let since_users = q("since_users");
+
+    // Uchtasi BITTA paketda: uchta alohida so'rov chekkadan
+    // uch marta yo'l yurardi.
+    let res = turso_many(env, &[
+        ("SELECT COUNT(*) FROM reports_db WHERE created_at > ?",
+         vec![TursoArg::int(since_reports)]),
+        ("SELECT COALESCE(SUM(unread_admin),0) FROM chat_threads", vec![]),
+        ("SELECT COUNT(*) FROM users_db WHERE created_at > ?",
+         vec![TursoArg::int(since_users)]),
+    ]).await?;
+
+    let n = |i: usize| -> i64 { res.get(i).map(scalar).unwrap_or(0) };
+    ok_nostore(json!({
+        "reports": n(0),
+        "chat": n(1),
+        "users": n(2),
+        // Ilova shu vaqtni "ko'rildi" deb saqlaydi — o'z soatiga
+        // emas, SERVERNIKIGA qaraydi. Telefon soati noto'g'ri
+        // bo'lsa ham hisob buzilmaydi.
+        "now": now_ms(),
+    }))
+}
+
 /// DELETE /api/admin/report/:id — "Tozalash" tugmasi.
 ///
 /// Shikoyat bazadan BUTUNLAY o'chadi (foydalanuvchi talabi:
@@ -6534,6 +6614,30 @@ async fn admin_report_delete(req: &Request, env: &Env, id: &str) -> Result<Respo
     turso_exec(env, "DELETE FROM reports_db WHERE id=?",
         vec![TursoArg::text(id)]).await?;
     ok_nostore(json!({"ok": true}))
+}
+
+/// POST /api/me/privacy — maxfiylik sozlamalari.
+///
+/// TALAB (foydalanuvchi): "bu narsalarni boshqalar ko'rishi uchun
+/// foydalanuvchi sozlamalar panelidan ruxsat berib chiqishi
+/// kerak".
+///
+/// Tanasi: `{"show_stats": true|false}`.
+async fn me_privacy(mut req: Request, env: &Env) -> Result<Response> {
+    let Some(u) = session_user(env, &bearer(&req)).await? else {
+        return json_resp(&json!({"error": "unauthorized"}), 401);
+    };
+    let me = u["id"].as_i64().unwrap_or(0);
+    let b: Value = req.json().await.unwrap_or(json!({}));
+    // Maydon kelmagan bo'lsa HECH NARSA o'zgartirilmaydi:
+    // yarim to'ldirilgan so'rov sozlamani nolga tushirib
+    // yubormasin.
+    let Some(on) = b["show_stats"].as_bool() else {
+        return json_resp(&json!({"error": "show_stats kelmadi"}), 400);
+    };
+    turso_exec(env, "UPDATE users_db SET show_stats=? WHERE id=?",
+        vec![TursoArg::int(if on { 1 } else { 0 }), TursoArg::int(me)]).await?;
+    ok_nostore(json!({"ok": true, "show_stats": on}))
 }
 
 /// GET /api/user/:id — OMMAVIY profil.
@@ -6559,10 +6663,12 @@ async fn public_profile(
     // faqat ism, username, rasm va statistika.
     let viewer = session_user(env, &bearer(req)).await?;
     let as_admin = viewer.as_ref().map(is_admin).unwrap_or(false);
+    // Kim qarayotgani (0 — kirmagan odam).
+    let me = viewer.as_ref().and_then(|v| v["id"].as_i64()).unwrap_or(0);
 
     let res = turso_exec(env,
         "SELECT id, username, first_name, last_name, avatar_file,
-                telegram_id, balance, traffic_bytes,
+                telegram_id, balance, traffic_bytes, show_stats,
                 created_at, last_login_at
            FROM users_db WHERE id=?",
         vec![TursoArg::int(id)]).await?;
@@ -6587,17 +6693,49 @@ async fn public_profile(
         row[i]["value"].as_str().and_then(|v| v.parse::<i64>().ok()).unwrap_or(0)
     };
 
+    // ── MAXFIYLIK: STATISTIKA ODATDA YOPIQ ───────────────────
+    //
+    // TALAB (foydalanuvchi): "foydalanuvchi boshqa profilni
+    // ko'rishi mumkin bo'lsin, faqat to'liq emas — faqatgina
+    // profil surati, nomi va usernameni ko'rishga ruxsat
+    // berilsin. ID, balans va qolgan statistikalar ko'rinmasin.
+    // Bu narsalarni boshqalar ko'rishi uchun foydalanuvchi
+    // sozlamalar panelidan ruxsat berib chiqishi kerak".
+    //
+    // Shu sabab statistika javobga FAQAT egasi ruxsat bergan
+    // bo'lsa qo'shiladi. Qo'shilmagan maydonni ilovani
+    // o'zgartirish bilan ham ko'rib bo'lmaydi — u javobda
+    // UMUMAN yo'q.
+    //
+    // Uch holatda ko'rinadi:
+    //   * egasi ruxsat bergan (`show_stats = 1`);
+    //   * odam O'Z profilini ochgan;
+    //   * admin ochgan (qo'llab-quvvatlash ishi uchun).
+    let shared = u["show_stats"].as_i64().unwrap_or(0) != 0;
+    let self_view = me == id;
+    let show_stats = shared || self_view || as_admin;
+
     let mut out = json!({
-        "id": id,
         "username": u["username"].as_str().unwrap_or(""),
         "first_name": u["first_name"].as_str().unwrap_or(""),
         "last_name": u["last_name"].as_str().unwrap_or(""),
         "photo_url": photo,
-        "animes": cell(0),
-        "episodes": cell(1),
-        "watch_ms": cell(2),
         "admin_view": as_admin,
+        // Ilova "statistika yashirilgan" deb yozib qo'yishi
+        // uchun — bo'sh ekran sababsiz qolmasin.
+        "stats_shared": show_stats,
     });
+
+    if show_stats {
+        if let Some(m) = out.as_object_mut() {
+            // ID ham statistika bilan birga: u odamni ilovada
+            // izlash uchun ishlatiladi, ya'ni shaxsiy ma'lumot.
+            m.insert("id".into(), json!(id));
+            m.insert("animes".into(), json!(cell(0)));
+            m.insert("episodes".into(), json!(cell(1)));
+            m.insert("watch_ms".into(), json!(cell(2)));
+        }
+    }
 
     if as_admin {
         let until = sub_until(env, id).await;
@@ -7867,7 +8005,7 @@ async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
         || path.starts_with("/api/telegram/")
         || path.starts_with("/api/history")
         || path == "/api/favorites"
-        || path == "/api/me/stats"
+        || path.starts_with("/api/me/")
         || path == "/api/sync"
         || path.starts_with("/api/billing")
         // Izohlarda "men layk bosganmi" belgisi bor — ya'ni javob
@@ -8064,12 +8202,20 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
         }
     }
 
+    // ── MAXFIYLIK SOZLAMASI ───────────────────────────────────
+    if path == "/api/me/privacy" && method == Method::Post {
+        return me_privacy(req, &env).await;
+    }
+
     // ── SHIKOYATLAR ───────────────────────────────────────────
     if path == "/api/reports" && method == Method::Post {
         return report_add(req, &env).await;
     }
     if path == "/api/admin/reports" && method == Method::Get {
         return admin_reports(&req, &env, &origin).await;
+    }
+    if path == "/api/admin/badges" && method == Method::Get {
+        return admin_badges(&req, &env).await;
     }
     if method == Method::Delete {
         if let Some(rid) = path.strip_prefix("/api/admin/report/") {

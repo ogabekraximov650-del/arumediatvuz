@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 import '../theme/app_background.dart';
 import '../widgets/glass.dart';
+import '../services/admin_badges.dart';
 import '../services/admin_users_service.dart';
-import '../services/support_service.dart';
 import 'admin_reports_screen.dart';
 import 'admin_users_screen.dart';
 import 'anime_management_screen.dart';
@@ -102,21 +102,32 @@ class AdminScreen extends StatelessWidget {
                     // ko'rinadi — bo'limga kirmasdan turib
                     // bilinadi.
                     AnimatedBuilder(
-                      animation: UnreadBadge.instance,
+                      animation: AdminBadges.instance,
                       builder: (context, _) {
-                        final n = UnreadBadge.instance.count;
+                        final b = AdminBadges.instance;
+                        // Tugmadagi son — o'qilmagan xabarlar.
+                        // Yangi hisoblar esa izohda ko'rinadi:
+                        // ikkovini bitta raqamga qo'shib yuborish
+                        // "nechta xabar bor" degan savolga
+                        // noto'g'ri javob berardi.
+                        final n = b.chat;
                         return _AdminButton(
                           icon: Icons.people_alt_rounded,
                           label: 'Foydalanuvchilar',
-                          subtitle: n > 0
-                              ? '$n ta o\'qilmagan xabar'
-                              : 'Balans, obuna, bloklash, yozishma',
+                          subtitle: _usersSubtitle(b),
                           badge: n,
-                          onTap: () => Navigator.of(context).push(
-                            MaterialPageRoute<void>(
-                              builder: (_) => const AdminUsersScreen(),
-                            ),
-                          ),
+                          dot: b.users > 0,
+                          onTap: () {
+                            // Bo'lim ochildi — "yangi hisob"
+                            // nuqtasi so'nadi. Xabar nuqtasi esa
+                            // yozishma ochilgach o'zi so'nadi.
+                            b.markSeen('users');
+                            Navigator.of(context).push(
+                              MaterialPageRoute<void>(
+                                builder: (_) => const AdminUsersScreen(),
+                              ),
+                            );
+                          },
                         );
                       },
                     ),
@@ -129,15 +140,27 @@ class AdminScreen extends StatelessWidget {
                     // shikoyat qiluvchining xabari tursin; tagida
                     // Tekshirish, Xabar yuborish va Tozalash
                     // tugmalari bo'lsin".
-                    _AdminButton(
-                      icon: Icons.flag_rounded,
-                      label: 'Shikoyatlar',
-                      subtitle: 'Izohlarga kelgan shikoyatlar',
-                      onTap: () => Navigator.of(context).push(
-                        MaterialPageRoute<void>(
-                          builder: (_) => const AdminReportsScreen(),
-                        ),
-                      ),
+                    AnimatedBuilder(
+                      animation: AdminBadges.instance,
+                      builder: (context, _) {
+                        final n = AdminBadges.instance.reports;
+                        return _AdminButton(
+                          icon: Icons.flag_rounded,
+                          label: 'Shikoyatlar',
+                          subtitle: n > 0
+                              ? '$n ta yangi shikoyat'
+                              : 'Izohlarga kelgan shikoyatlar',
+                          badge: n,
+                          onTap: () {
+                            AdminBadges.instance.markSeen('reports');
+                            Navigator.of(context).push(
+                              MaterialPageRoute<void>(
+                                builder: (_) => const AdminReportsScreen(),
+                              ),
+                            );
+                          },
+                        );
+                      },
                     ),
                     const SizedBox(height: 12),
                     // ── B2 TOZALASH ───────────────────────────
@@ -157,6 +180,20 @@ class AdminScreen extends StatelessWidget {
   }
 }
 
+/// Foydalanuvchilar tugmasining izohi.
+///
+/// Ikki xil yangilik bo'lishi mumkin: o'qilmagan xabar va yangi
+/// ro'yxatdan o'tganlar. Ikkovi ham bo'lsa ikkovi ham yoziladi —
+/// admin qaysi biri uchun kirayotganini biladi.
+String _usersSubtitle(AdminBadges b) {
+  final parts = <String>[
+    if (b.chat > 0) '${b.chat} ta o\'qilmagan xabar',
+    if (b.users > 0) '${b.users} ta yangi hisob',
+  ];
+  if (parts.isEmpty) return 'Balans, obuna, bloklash, yozishma';
+  return parts.join(' · ');
+}
+
 class _AdminButton extends StatelessWidget {
   final IconData icon;
   final String label;
@@ -166,12 +203,19 @@ class _AdminButton extends StatelessWidget {
   /// O'qilmaganlar soni (0 — belgi ko'rsatilmaydi).
   final int badge;
 
+  /// Soni yo'q, lekin yangilik bor (masalan yangi hisob).
+  ///
+  /// `badge` bilan bir vaqtda kelsa — son ko'rsatiladi, chunki
+  /// son nuqtadan ko'proq narsa aytadi.
+  final bool dot;
+
   const _AdminButton({
     required this.icon,
     required this.label,
     required this.subtitle,
     required this.onTap,
     this.badge = 0,
+    this.dot = false,
   });
 
   @override
@@ -210,6 +254,24 @@ class _AdminButton extends StatelessWidget {
                 ],
               ),
             ),
+            // Soni yo'q yangilik — oddiy nuqta.
+            if (badge <= 0 && dot) ...[
+              Container(
+                width: 10,
+                height: 10,
+                decoration: BoxDecoration(
+                  color: AppColors.accent,
+                  shape: BoxShape.circle,
+                  boxShadow: [
+                    BoxShadow(
+                      color: AppColors.accent.withValues(alpha: 0.6),
+                      blurRadius: 7,
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+            ],
             if (badge > 0) ...[
               Container(
                 constraints: const BoxConstraints(minWidth: 22),

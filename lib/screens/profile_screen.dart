@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 
+import '../services/admin_badges.dart';
 import '../services/auth_service.dart';
 import '../services/billing_service.dart';
 import '../services/format.dart';
@@ -23,6 +24,7 @@ import 'admin_screen.dart';
 import 'support_chat_screen.dart';
 import 'profile_edit_screen.dart';
 import 'sessions_screen.dart';
+import 'settings_screen.dart';
 import 'telegram_login_screen.dart';
 
 /// PROFIL.
@@ -481,8 +483,19 @@ class _ProfileBody extends StatelessWidget {
                     icon: Icons.notifications_none_rounded,
                     label: 'Bildirishnoma'),
                 _divider(),
-                const _ProfileTile(
-                    icon: Icons.settings_rounded, label: 'Sozlamalar'),
+                // ── SOZLAMALAR ────────────────────────────────
+                //
+                // TALAB (foydalanuvchi): "bu narsalarni boshqalar
+                // ko'rishi uchun foydalanuvchi sozlamalar
+                // panelidan ruxsat berib chiqishi kerak".
+                //
+                // Ilgari bu tugma bosilmasdi — ochiladigan ekran
+                // yo'q edi.
+                _ProfileTile(
+                  icon: Icons.settings_rounded,
+                  label: 'Sozlamalar',
+                  onTap: () => _open(context, const SettingsScreen()),
+                ),
                 _divider(),
                 _ProfileTile(
                   icon: Icons.devices_rounded,
@@ -877,6 +890,19 @@ class _BillingButton extends StatefulWidget {
   State<_BillingButton> createState() => _BillingButtonState();
 }
 
+/// Obuna tugaydigan aniq sana: `21.09.2026 14:30`.
+///
+/// TALAB (foydalanuvchi): muddat "aniq qilib" yozilsin. Faqat
+/// "2 kun" deyish yetarli emas — odam qaysi kuni tugashini
+/// bilishi kerak.
+String _subUntilText(int ms) {
+  if (ms <= 0) return '—';
+  final d = DateTime.fromMillisecondsSinceEpoch(ms);
+  String two(int n) => n.toString().padLeft(2, '0');
+  return '${two(d.day)}.${two(d.month)}.${d.year} '
+      '${two(d.hour)}:${two(d.minute)}';
+}
+
 class _BillingButtonState extends State<_BillingButton> {
   @override
   void initState() {
@@ -929,43 +955,66 @@ class _BillingButtonState extends State<_BillingButton> {
                 ),
               ],
             ),
+            // ── OBUNA MUDDATI YOZUVNING TAGIDA ────────────
+            //
+            // TALAB (foydalanuvchi): "obuna tugash vaqti aniq
+            // qilib yozuv tagida bo'lishi kerak — hozirgisida
+            // qancha vaqt qolgani aniq yozilmagan va balans
+            // to'ldirish yozuvi ustida turibdi".
+            //
+            // Ilgari o'ng chetda tor belgi bor edi va u yozuvni
+            // qisqartirib qo'yardi ("Obuna olish va Balans
+            // to'l..."). Endi belgi olib tashlandi: yozuv to'liq
+            // sig'adi, muddat esa TAGIDA to'liq ko'rinishda —
+            // aniq sana va qancha qolgani.
             child: Row(
               children: [
                 const Icon(Icons.workspace_premium_rounded,
                     size: 20, color: Colors.white),
                 const SizedBox(width: 10),
-                const Expanded(
-                  child: Text(
-                    'Obuna olish va Balans to\'ldirish',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w700,
-                    ),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Text(
+                        'Obuna olish va Balans to\'ldirish',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        b.active
+                            ? 'Obuna ${_subUntilText(b.until)} gacha'
+                            : 'Obuna yo\'q',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: Colors.white.withValues(alpha: 0.85),
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      if (b.active) ...[
+                        const SizedBox(height: 1),
+                        // Har soniyada yangilanadi (`SubCountdown`):
+                        // kun qolgan bo'lsa "2 kun 05:12:33".
+                        const SubCountdown(
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
+                    ],
                   ),
                 ),
-                if (b.active)
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 8, vertical: 3),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.22),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    // Tugmada joy tor — qisqa ko'rinish: kun
-                    // qolgan bo'lsa "2 kun", oxirgi kunda esa
-                    // soat:daqiqa:sekund (`formatLeftShort`).
-                    child: const SubCountdown(
-                      short: true,
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 11.5,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ),
                 const SizedBox(width: 6),
                 const Icon(Icons.chevron_right_rounded,
                     size: 20, color: Colors.white70),
@@ -1718,15 +1767,25 @@ class _UnreadDotState extends State<_UnreadDot> {
 /// `_UnreadDot` dan farqi: bu FAQAT adminda yonadi, u esa faqat
 /// oddiy foydalanuvchida (`support_service.dart` -> `UnreadBadge`
 /// izohiga qarang). Ikkovi hech qachon bir vaqtda ko'rinmaydi.
+///
+/// ── FAQAT XABAR EMAS ───────────────────────────────────────
+///
+/// TALAB (foydalanuvchi): "admin paneliga yangilik kelsa, ya'ni
+/// shikoyat, support, yangi foydalanuvchi va boshqa narsalar
+/// kelganda admin paneli tugmasida qizil nuqta yonib tursin".
+///
+/// Shu sabab nuqta `AdminBadges` ga qaraydi — u uchala manbani
+/// (shikoyat, yozishma, yangi hisob) bitta so'rovda oladi.
 class _AdminUnreadDot extends StatelessWidget {
   const _AdminUnreadDot();
 
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: UnreadBadge.instance,
+      animation: Listenable.merge(
+          [UnreadBadge.instance, AdminBadges.instance]),
       builder: (context, _) {
-        if (!UnreadBadge.instance.hasForAdmin) {
+        if (!UnreadBadge.instance.isAdmin || !AdminBadges.instance.any) {
           return const SizedBox.shrink();
         }
         return Container(

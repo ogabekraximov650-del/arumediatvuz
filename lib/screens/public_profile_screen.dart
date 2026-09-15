@@ -180,11 +180,94 @@ class _PublicProfileScreenState extends State<PublicProfileScreen> {
                       style: const TextStyle(
                           color: Color(0xFF6BC7F0), fontSize: 15)),
                 ],
+                // ── ADMIN: ID VA BALANS SHU YERDA ─────────────
+                //
+                // TALAB (foydalanuvchi): "admin foydalanuvchi
+                // profiliga kirganda yuqori qism, ya'ni rasm,
+                // ism, username va balansi ko'rinib turishi
+                // kerak".
+                //
+                // Ilgari ikkovi ham pastdagi qo'shimcha kartada
+                // edi — admin ularni ko'rish uchun pastga surishi
+                // kerak bo'lardi. Endi ko'rinishi foydalanuvchi
+                // o'z profilidagidek: nom, username, keyin ID va
+                // balans.
+                if (d['admin_view'] == true) ...[
+                  const SizedBox(height: 12),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.07),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                              color: Colors.white.withValues(alpha: 0.12)),
+                        ),
+                        child: Text(
+                          'ID: ${widget.userId}',
+                          style: TextStyle(
+                            color: Colors.white.withValues(alpha: 0.8),
+                            fontSize: 13.5,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Balans: ${formatSum(((d['balance'] as num?) ?? 0).toInt())}',
+                    style: TextStyle(
+                      color: Colors.white.withValues(alpha: 0.75),
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
           const SizedBox(height: 14),
-          // ── STATISTIKA ────────────────────────────────────────
+          // ── STATISTIKA ODATDA YOPIQ ───────────────────────────
+          //
+          // TALAB (foydalanuvchi): "foydalanuvchi boshqa profilni
+          // ko'rishi mumkin bo'lsin, faqat to'liq emas — faqatgina
+          // profil surati, nomi va usernameni ko'rishga ruxsat
+          // berilsin. ID, balans va qolgan statistikalar
+          // ko'rinmasin".
+          //
+          // Ruxsat berilmagan bo'lsa server bu maydonlarni
+          // UMUMAN yubormaydi. Bu yerda esa sababi yozib
+          // qo'yiladi — aks holda ekran sababsiz bo'sh
+          // ko'rinardi.
+          if (d['stats_shared'] != true)
+            Glass(
+              borderRadius: 18,
+              blur: 14,
+              padding: const EdgeInsets.symmetric(
+                  horizontal: 18, vertical: 20),
+              child: Column(
+                children: [
+                  Icon(Icons.lock_outline_rounded,
+                      size: 30,
+                      color: Colors.white.withValues(alpha: 0.3)),
+                  const SizedBox(height: 10),
+                  Text(
+                    'Bu foydalanuvchi statistikasini yashirgan',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: Colors.white.withValues(alpha: 0.45),
+                      fontSize: 13,
+                      height: 1.4,
+                    ),
+                  ),
+                ],
+              ),
+            )
+          else
           Row(
             children: [
               Expanded(
@@ -206,12 +289,14 @@ class _PublicProfileScreenState extends State<PublicProfileScreen> {
               ),
             ],
           ),
-          const SizedBox(height: 12),
-          _StatBox(
-            icon: Icons.access_time_rounded,
-            label: 'Tomosha vaqti',
-            value: formatHours(((d['watch_ms'] as num?) ?? 0).toInt()),
-          ),
+          if (d['stats_shared'] == true) ...[
+            const SizedBox(height: 12),
+            _StatBox(
+              icon: Icons.access_time_rounded,
+              label: 'Tomosha vaqti',
+              value: formatHours(((d['watch_ms'] as num?) ?? 0).toInt()),
+            ),
+          ],
 
           // ── FAQAT ADMIN KO'RADI ─────────────────────────────
           //
@@ -246,7 +331,7 @@ class _PublicProfileScreenState extends State<PublicProfileScreen> {
               ],
             ),
             const SizedBox(height: 12),
-            _AdminBox(data: d, userId: widget.userId),
+            _AdminBox(data: d),
           ],
         ],
       ),
@@ -257,9 +342,7 @@ class _PublicProfileScreenState extends State<PublicProfileScreen> {
 /// Admin uchun qo'shimcha ma'lumot kartasi.
 class _AdminBox extends StatelessWidget {
   final Map<String, dynamic> data;
-  final int userId;
-
-  const _AdminBox({required this.data, required this.userId});
+  const _AdminBox({required this.data});
 
   @override
   Widget build(BuildContext context) {
@@ -291,11 +374,10 @@ class _AdminBox extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 10),
-          _row('ID', '$userId'),
+          // ID va Balans endi YUQORIDAGI kartada (foydalanuvchi
+          // talabi) — bu yerda takrorlanmaydi.
           _row('Telegram ID',
               '${((data['telegram_id'] as num?) ?? 0).toInt()}'),
-          _row('Balans',
-              formatSum(((data['balance'] as num?) ?? 0).toInt())),
           _row('Obuna', active ? 'Faol · yana $left kun' : 'Yo\'q'),
           _row('Ro\'yxatdan o\'tgan',
               formatMoment(((data['created_at'] as num?) ?? 0).toInt())),

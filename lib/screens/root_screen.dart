@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
+import '../services/admin_badges.dart';
 import '../services/auth_service.dart';
 import '../services/support_service.dart';
 import '../services/season_info.dart';
@@ -94,8 +95,12 @@ class _RootScreenState extends State<RootScreen>
     unawaited(UnreadBadge.instance.refresh());
     _unreadTimer = Timer.periodic(
       const Duration(seconds: 12),
-      (_) => UnreadBadge.instance.refresh(),
+      (_) {
+        UnreadBadge.instance.refresh();
+        _refreshAdminBadges();
+      },
     );
+    _refreshAdminBadges();
 
     // ── ADMIN PANELIGA QAYTISH ───────────────────────────────
     //
@@ -114,6 +119,22 @@ class _RootScreenState extends State<RootScreen>
     });
   }
 
+  /// ── ADMIN PANELIDAGI YANGILIKLAR ────────────────────────
+  ///
+  /// TALAB (foydalanuvchi): "admin paneliga yangilik kelsa
+  /// (shikoyat, support, yangi foydalanuvchi) admin paneli
+  /// tugmasida qizil nuqta yonib tursin".
+  ///
+  /// So'rov FAQAT adminga ketadi: oddiy foydalanuvchida server
+  /// baribir 403 qaytaradi va bekorga tarmoqqa chiqishning
+  /// ma'nosi yo'q. Adminlikni ilova o'zi taxmin qilmaydi —
+  /// `UnreadBadge` serverdan kelgan belgini eslab qoladi
+  /// (`support_service.dart` izohiga qarang).
+  void _refreshAdminBadges() {
+    if (!UnreadBadge.instance.isAdmin) return;
+    unawaited(AdminBadges.instance.refresh());
+  }
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state != AppLifecycleState.resumed) return;
@@ -122,6 +143,7 @@ class _RootScreenState extends State<RootScreen>
     AuthService.instance.refresh();
     // Fon'dan qaytdi — admin javob yozgan bo'lsa nuqta yonsin.
     unawaited(UnreadBadge.instance.refresh());
+    _refreshAdminBadges();
     // Telegramdan qaytdi. Foydalanuvchi u yerda START bosgan
     // bo'lsa, sessiya serverda allaqachon ochilgan — saqlangan
     // token bilan bir marta so'rasak, hisob o'zi ochiladi.

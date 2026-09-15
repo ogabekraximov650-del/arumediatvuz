@@ -42,6 +42,7 @@ import 'package:path_provider/path_provider.dart';
 
 import 'app_settings.dart';
 import 'billing_service.dart';
+import 'admin_badges.dart';
 import 'support_service.dart';
 import 'rust_bridge.dart';
 import 'season_info.dart';
@@ -95,6 +96,10 @@ class AccountData {
     // O'qilmagan xabarlar nuqtasi ham hisobga tegishli.
     try {
       UnreadBadge.instance.clear();
+    } catch (_) {}
+    // Admin panelidagi yangilik nuqtalari ham.
+    try {
+      AdminBadges.instance.clear();
     } catch (_) {}
     try {
       WatchProgress.instance.reload();

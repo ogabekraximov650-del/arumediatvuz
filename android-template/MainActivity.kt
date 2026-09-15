@@ -34,6 +34,7 @@ package __PKG__
 
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
+import android.view.WindowManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -57,6 +58,46 @@ class MainActivity : FlutterActivity() {
                         val bytes = grabFrame(url, maxWidth, quality)
                         runOnUiThread { result.success(bytes) }
                     }.start()
+                }
+            }
+
+        // ── SKRINSHOT VA EKRAN YOZIB OLISHNI TAQIQLASH ─────────
+        //
+        // TALAB (foydalanuvchi): "ilovada video pleyerda va shaxsiy
+        // chatda screenshot olish va ekranni yozib olish
+        // taqiqlansin".
+        //
+        // Android'da buning yagona ishonchli yo'li — oynaga
+        // `FLAG_SECURE` qo'yish. U bir vaqtning o'zida:
+        //   * skrinshotni bloklaydi (tizim "ruxsat yo'q" deydi);
+        //   * ekran yozuvida va ekranni uzatishda oynani QORA
+        //     qilib ko'rsatadi;
+        //   * oxirgi ilovalar ro'yxatida ham tarkibni yashiradi.
+        //
+        // Bayroq BUTUN oynaga tegishli, ya'ni u faqat kerakli
+        // ekran ochilganda yoqiladi va yopilganda o'chiriladi —
+        // aks holda butun ilovada skrinshot ishlamay qolardi.
+        //
+        // NEGA TASHQI PAKET EMAS: bu atigi ikki qator kod.
+        // `flutter_windowmanager` esa uzoq vaqtdan beri
+        // yangilanmagan va Gradle yangilanishlarida yiqiladi
+        // (yuqoridagi `video_thumbnail` bilan bir xil dard).
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "aru/secure")
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "on" -> {
+                        runOnUiThread {
+                            window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                        }
+                        result.success(true)
+                    }
+                    "off" -> {
+                        runOnUiThread {
+                            window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                        }
+                        result.success(true)
+                    }
+                    else -> result.notImplemented()
                 }
             }
 

@@ -121,6 +121,7 @@ import '../services/billing_service.dart';
 import '../services/comments_service.dart';
 import '../services/download_manager.dart';
 import '../services/rust_bridge.dart';
+import '../services/screen_guard.dart';
 import '../services/video_cache_server.dart';
 import '../services/format.dart';
 import '../services/intro_times.dart';
@@ -161,7 +162,17 @@ class VideoPlayerScreen extends StatefulWidget {
 }
 
 class _VideoPlayerScreenState extends State<VideoPlayerScreen>
-    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
+    with
+        SingleTickerProviderStateMixin,
+        WidgetsBindingObserver,
+        // ── SKRINSHOT VA EKRAN YOZUVI TAQIQLANADI ────────────
+        //
+        // TALAB (foydalanuvchi): "ilovada video pleyerda ...
+        // screenshot olish va ekranni yozib olish taqiqlansin".
+        //
+        // Aralashma ekran ochilganda himoyani yoqadi, yopilganda
+        // o'chiradi (`screen_guard.dart` izohiga qarang).
+        ScreenGuarded<VideoPlayerScreen> {
   late final TabController _tabCtrl;
 
   /// Oynalar QO'LDA suriladi (tarix oynalaridek). `TabBar` va bu
