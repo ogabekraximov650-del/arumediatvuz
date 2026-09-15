@@ -47,6 +47,16 @@ class AppSettings extends ChangeNotifier {
   /// sakratib yuborish kutilmagan bo'lardi).
   bool autoSkipIntro = false;
 
+  /// Qism tugaganda KEYINGISI o'zi ochilsinmi.
+  ///
+  /// TALAB (foydalanuvchi): "pleyerdagi 3ta nuqtaga `avto qism
+  /// o'tkazish` nomli tugma qo'sh — tugmani bosganda video
+  /// tugashi bilan avtomatik ravishda keyingi qismga o'tadi".
+  ///
+  /// `false` — boshlang'ich holat: so'ralmasdan keyingi qismni
+  /// ochib yuborish kutilmagan bo'lardi.
+  bool autoNextEpisode = false;
+
   bool _loaded = false;
 
   /// Diskdan o'qiydi. Bir necha marta chaqirilsa ham bir marta
@@ -72,11 +82,19 @@ class AppSettings extends ChangeNotifier {
     notifyListeners();
   }
 
+  void setAutoNextEpisode(bool on) {
+    if (autoNextEpisode == on) return;
+    autoNextEpisode = on;
+    _write();
+    notifyListeners();
+  }
+
   void _read() {
     try {
       final rows = RustCore.instance.getCachedList(_key);
       if (rows == null || rows.isEmpty) return;
       autoSkipIntro = rows.first['auto_skip_intro'] == true;
+      autoNextEpisode = rows.first['auto_next_episode'] == true;
     } catch (_) {
       // O'qib bo'lmadi — boshlang'ich qiymatlar qoladi.
     }
@@ -85,7 +103,10 @@ class AppSettings extends ChangeNotifier {
   void _write() {
     try {
       RustCore.instance.saveListCache(_key, [
-        {'auto_skip_intro': autoSkipIntro},
+        {
+          'auto_skip_intro': autoSkipIntro,
+          'auto_next_episode': autoNextEpisode,
+        },
       ]);
     } catch (_) {
       // Diskka yozib bo'lmadi — sozlama shu seansda baribir

@@ -9,7 +9,7 @@ import '../widgets/glass.dart';
 import 'add_anime_screen.dart';
 import 'season_management_screen.dart';
 
-const String API_BASE = 'https://aniraxuzapp.ogabekraximov650.workers.dev';
+const String API_BASE = 'https://arumediatv.ogabekraximov650.workers.dev';
 
 class AnimeManagementScreen extends StatefulWidget {
   const AnimeManagementScreen({super.key});

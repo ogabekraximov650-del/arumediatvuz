@@ -9,7 +9,7 @@
 // tekshiriladi.
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:fulutter/services/sync_queue.dart';
+import 'package:soft/services/sync_queue.dart';
 
 Map<String, dynamic> ep(int e, {int watched = 0, bool newView = false}) => {
       'anime_id': 1,

@@ -9,7 +9,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:fulutter/services/net_meter.dart';
+import 'package:soft/services/net_meter.dart';
 import 'package:http/http.dart' as http;
 
 /// Tarmoqqa umuman chiqmaydigan soxta klient.

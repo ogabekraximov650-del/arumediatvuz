@@ -394,7 +394,7 @@ class _ProfileBody extends StatelessWidget {
                             // qatorda turardi va o'ng tomonda
                             // tahrirlash tugmasi ham bor —
                             // natijada ismga atigi bir necha
-                            // harflik joy qolar, "AniRaxUz"
+                            // harflik joy qolar, "ARUmedia"
                             // "A..." bo'lib ko'rinardi.
                             //
                             // Endi ism butun qatorni oladi, belgi

@@ -5748,7 +5748,7 @@ mod tests {
     //   cargo test --lib haqiqiy_ -- --ignored --nocapture --test-threads=1
     fn real_base() -> String {
         std::env::var("REAL_BASE").unwrap_or_else(|_| {
-            "https://aniraxuzapp.ogabekraximov650.workers.dev/api/image".to_string()
+            "https://arumediatv.ogabekraximov650.workers.dev/api/image".to_string()
         })
     }
 

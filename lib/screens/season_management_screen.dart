@@ -9,7 +9,7 @@ import '../widgets/glass.dart';
 import 'add_season_screen.dart';
 import 'epizod_management_screen.dart';
 
-const String API_BASE = 'https://aniraxuzapp.ogabekraximov650.workers.dev';
+const String API_BASE = 'https://arumediatv.ogabekraximov650.workers.dev';
 
 /// Bitta anime'ga tegishli bo'limlarni (season_db) boshqarish sahifasi.
 /// Yuqorida doim anime rasmi va nomi ko'rinib turadi (sticky header).

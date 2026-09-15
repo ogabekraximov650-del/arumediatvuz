@@ -1246,11 +1246,27 @@ async fn b2_auth_fetch(env: &Env) -> Result<Value> {
     Ok(d)
 }
 
+/// ── B2 OMBORI (BUCKET) NOMI ───────────────────────────────────
+///
+/// DIQQAT: bu ilovaning nomi EMAS — Backblaze B2'dagi HAQIQIY
+/// ombor nomi. Ilova "ARUmedia" ga qayta nomlanganda ham u
+/// o'zgartirilmadi, chunki satrni almashtirish omborni
+/// qayta nomlamaydi: hamma video va rasm o'sha-o'sha joyda
+/// qoladi, worker esa uni topa olmay qolardi.
+///
+/// Omborni rostdan qayta nomlash tartibi:
+///   1. B2 panelida yangi ombor yaratib fayllar ko'chiriladi
+///      (B2 mavjud omborni qayta nomlashga ruxsat bermaydi);
+///   2. shu yerdagi qiymat almashtiriladi;
+///   3. worker qayta deploy qilinadi.
+const B2_BUCKET: &str = "aniraxuz";
+
 async fn b2_bucket_id(api_url: &str, auth_token: &str, account_id: &str) -> Result<String> {
     let mut h = Headers::new();
     h.set("Authorization", auth_token)?;
     let req = Request::new_with_init(
-        &format!("{api_url}/b2api/v3/b2_list_buckets?accountId={account_id}&bucketName=aniraxuz"),
+        &format!("{api_url}/b2api/v3/b2_list_buckets\
+             ?accountId={account_id}&bucketName={B2_BUCKET}"),
         RequestInit::new().with_method(Method::Get).with_headers(h),
     )?;
     let mut r = Fetch::Request(req).send().await?;
@@ -1260,7 +1276,9 @@ async fn b2_bucket_id(api_url: &str, auth_token: &str, account_id: &str) -> Resu
             d["message"].as_str().unwrap_or("unknown"))));
     }
     let bid = d["buckets"][0]["bucketId"].as_str().unwrap_or("").to_string();
-    if bid.is_empty() { return Err(Error::RustError("B2 bucket 'aniraxuz' topilmadi".into())); }
+    if bid.is_empty() {
+        return Err(Error::RustError(format!("B2 bucket '{B2_BUCKET}' topilmadi")));
+    }
     Ok(bid)
 }
 
@@ -1394,7 +1412,7 @@ fn b2_range_request(acc: &B2Access, file_name: &str, start: u64, end: u64) -> Re
     h.set("Authorization", &acc.token)?;
     h.set("Range", &format!("bytes={start}-{end}"))?;
     Request::new_with_init(
-        &format!("{}/file/aniraxuz/{file_name}", acc.dl_url),
+        &format!("{}/file/{B2_BUCKET}/{file_name}", acc.dl_url),
         RequestInit::new().with_method(Method::Get).with_headers(h),
     )
 }
@@ -3441,6 +3459,14 @@ async fn purge_list_cache(path: &str) {
 //     — Telegram'ning fayl manzilida bot tokeni bo'lgani uchun u
 //     manzil hech qachon ilovaga chiqarilmaydi.
 
+/// DIQQAT: bu ham ilovaning nomi EMAS — Telegram'dagi HAQIQIY
+/// bot manzili. Ilova "ARUmedia" ga qayta nomlanganda u
+/// o'zgartirilmadi: satrni almashtirish botni qayta nomlamaydi,
+/// aksincha kirish butunlay ishlamay qolardi.
+///
+/// Botni rostdan qayta nomlash tartibi: @BotFather -> /setusername,
+/// so'ng shu yerdagi qiymat almashtiriladi va worker qayta deploy
+/// qilinadi.
 const BOT_USERNAME: &str = "aniraxuzloginbot";
 
 /// Login tokeni necha millisekund yashaydi (5 daqiqa).
@@ -4197,7 +4223,7 @@ async fn tg_avatar(env: &Env, user_id: i64) -> Result<Response> {
 /// QILISH kerak. "Xatolik: Telegram xatosi (sendMessage)" kabi
 /// ichki matnlar hech qachon tashqariga chiqmaydi: ular
 /// foydalanuvchiga hech narsa tushuntirmaydi, faqat qo'rqitadi.
-const MSG_HELP: &str = "\u{1F44B} Salom! Men \u{2014} <b>AniRaxUz</b> ilovasining kirish yordamchisiman.\n\n\
+const MSG_HELP: &str = "\u{1F44B} Salom! Men \u{2014} <b>ARUmedia</b> ilovasining kirish yordamchisiman.\n\n\
      Kirish uchun: ilovani oching \u{2192} pastdagi <b>Profil</b> bo'limi \u{2192} \u{AB}Telegram orqali kirish\u{BB} tugmasi.\n\n\
      O'sha tugma meni o'zi ochadi \u{2014} bu yerda hech narsa yozishingiz shart emas.";
 

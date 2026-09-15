@@ -50,6 +50,13 @@ qaytadan o'rnatishga majbur bo'ladi.
 
     alias:    aniraxuz
     parol:    aniraxuz  (store va key uchun bir xil)
+
+    DIQQAT: bu nom ilovaning nomi EMAS — kalit faylining ichidagi
+    nom. Ilova ARUmedia ga qayta nomlanganda u tegilmadi: kalitni
+    almashtirish hamma foydalanuvchini ilovani o'chirib qaytadan
+    o'rnatishga majbur qilardi (Android yangi APK eskisi bilan
+    AYNAN bir xil kalit bilan imzolanishini talab qiladi). Bu nom
+    foydalanuvchiga hech qayerda ko'rinmaydi.
     muddati:  30 yil
     SHA-256:  8F:47:32:E1:B6:01:D6:34:2C:42:56:B3:F0:78:D7:62:
               A2:9C:59:D0:E2:59:5E:81:37:BB:59:EA:88:D4:F7:1E

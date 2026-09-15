@@ -134,7 +134,7 @@ import 'billing_screen.dart';
 import '../widgets/glass.dart';
 import '../widgets/comments_tab.dart';
 
-const String _apiBase = 'https://aniraxuzapp.ogabekraximov650.workers.dev';
+const String _apiBase = 'https://arumediatv.ogabekraximov650.workers.dev';
 
 class VideoPlayerScreen extends StatefulWidget {
   final Map<String, dynamic> season;
@@ -1751,6 +1751,28 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
         try {
           if (!mounted || _controller != c) return;
           await c.pause();
+          // ── AVTO QISM O'TKAZISH ──────────────────────────────
+          //
+          // TALAB (foydalanuvchi): "3ta nuqtaga `avto qism
+          // o'tkazish` nomli tugma qo'sh — tugmani bosganda video
+          // tugashi bilan avtomatik ravishda keyingi qismga
+          // o'tadi".
+          //
+          // Faqat HAQIQIY oxirda ishlaydi: erta uzilish yuqoridagi
+          // ikkinchi tarmoqqa tushadi va u yerda video o'sha
+          // nuqtadan qayta ochiladi, keyingi qismga o'tmaydi.
+          //
+          // `_intendedPlaying` ATAYLAB `true` qilinadi: odam
+          // videoni ko'rib tugatdi, ya'ni keyingisi ham ijro
+          // bo'lishi kerak. Yuqorida u `false` ga tushirilgan
+          // (pauza uchun), shu sabab shu yerda qaytariladi.
+          if (AppSettings.instance.autoNextEpisode && _hasNextEpisode) {
+            VideoCacheServer.log('Avto o\'tkazish: keyingi qism');
+            if (mounted) {
+              setState(() => _intendedPlaying = true);
+              _stepEpisode(1);
+            }
+          }
         } catch (_) {
         } finally {
           if (mounted) _handlingCompleted = false;
@@ -2632,6 +2654,16 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // Hozir intro oralig'ida turgan bo'lsa — darhol o'tkaziladi,
     // ya'ni tugma bosilishi bilan natija ko'rinadi.
     if (on && _introIndex >= 0) _skipIntro();
+  }
+
+  /// "Avto qism o'tkazish" tugmasi bosildi.
+  ///
+  /// Xuddi yuqoridagidek, MENYU YOPILMAYDI.
+  void _toggleAutoNextEpisode() {
+    AppSettings.instance
+        .setAutoNextEpisode(!AppSettings.instance.autoNextEpisode);
+    if (!mounted) return;
+    setState(() {});
   }
 
   /// Tugmani ko'rsatadi.
@@ -3538,9 +3570,27 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                   // bo'shliq: oyna aynan uning ostidan chiqadi.
                   top: (isFullscreen ? 6 : 2) + 40,
                 ),
-                child: _AutoSkipPanel(
-                  on: AppSettings.instance.autoSkipIntro,
-                  onToggle: _toggleAutoSkipIntro,
+                // ── MENYUDAGI TUGMALAR ──────────────────────
+                //
+                // Ikkovi ham bir xil ko'rinishda, ustma-ust.
+                // Ro'yxat qilib qo'yilgani ataylab: yangisi
+                // qo'shilsa shu yerga bitta qator qo'shiladi.
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _MenuToggle(
+                      label: 'Avto o\'tkazish',
+                      on: AppSettings.instance.autoSkipIntro,
+                      onToggle: _toggleAutoSkipIntro,
+                    ),
+                    const SizedBox(height: 6),
+                    _MenuToggle(
+                      label: 'Avto qism o\'tkazish',
+                      on: AppSettings.instance.autoNextEpisode,
+                      onToggle: _toggleAutoNextEpisode,
+                    ),
+                  ],
                 ),
               ),
             ),
@@ -4122,6 +4172,13 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     }
     return -1;
   }
+
+  /// Keyingi qism BORMI.
+  ///
+  /// Ro'yxat kamayish tartibida (3-qism, 2-qism, 1-qism...), ya'ni
+  /// keyingi qism indeksda YUQORIDA turadi — shu sabab shart
+  /// `> 0`. Joriy qism topilmasa (`-1`) o'tadigan joy ham yo'q.
+  bool get _hasNextEpisode => _currentEpIndex > 0;
 
   /// `delta`: +1 — KEYINGI qism (raqami kattaroq), -1 — oldingisi.
   ///
@@ -5795,6 +5852,11 @@ class _SkipIntroButton extends StatelessWidget {
 // kichraytir. Avto o'tkazishni bosganda oyna yopilib ketmasin,
 // faqat oyna tashqarisiga yoki 3ta nuqtaga bossa yo'qolsin."
 //
+// Keyinroq ikkinchi tugma qo'shildi: "avto qism o'tkazish" —
+// video tugashi bilan keyingi qismga o'zi o'tadi. Shu sabab
+// vidjet endi NOMNI ham parametr qilib oladi va menyuda
+// ikkitasi ustma-ust turadi.
+//
 // Shu sabab bu YUPQA vidjet: `PopupMenuButton` emas (u tanlangan
 // zahoti o'zini yopadi), oddiy `Container`. Ochish/yopish
 // pleyerning o'zida (`_menuOpen`), parda esa Stack'da.
@@ -5802,11 +5864,16 @@ class _SkipIntroButton extends StatelessWidget {
 // Ko'rinishi pastki paneldagi `HQ` tugmasidan olingan: fon oq
 // 15%, chekkasi `white30`, burchagi 7 — uchovi birga
 // o'zgartiriladi.
-class _AutoSkipPanel extends StatelessWidget {
+class _MenuToggle extends StatelessWidget {
+  final String label;
   final bool on;
   final VoidCallback onToggle;
 
-  const _AutoSkipPanel({required this.on, required this.onToggle});
+  const _MenuToggle({
+    required this.label,
+    required this.on,
+    required this.onToggle,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -5819,9 +5886,9 @@ class _AutoSkipPanel extends StatelessWidget {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text(
-              'Avto o\'tkazish',
-              style: TextStyle(
+            Text(
+              label,
+              style: const TextStyle(
                 color: Colors.white,
                 fontSize: 11.5,
                 fontWeight: FontWeight.w600,

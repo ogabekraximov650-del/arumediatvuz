@@ -6,7 +6,7 @@
 // tarmoq ham, ekran ham kerak emas, ya'ni test bir zumda ishlaydi.
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:fulutter/services/auth_service.dart';
+import 'package:soft/services/auth_service.dart';
 
 void main() {
   group('nameProblem', () {

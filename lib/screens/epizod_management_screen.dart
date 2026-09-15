@@ -8,7 +8,7 @@ import '../theme/app_background.dart';
 import '../widgets/glass.dart';
 import 'add_epizod_screen.dart';
 
-const String _apiBase = 'https://aniraxuzapp.ogabekraximov650.workers.dev';
+const String _apiBase = 'https://arumediatv.ogabekraximov650.workers.dev';
 
 /// Bitta bo'limga tegishli epizodlarni ADMIN boshqarish sahifasi.
 /// Faqat admin uchun: qo'shish / tahrirlash / o'chirish.

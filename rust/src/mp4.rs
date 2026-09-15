@@ -621,7 +621,7 @@ pub fn build_clip_mp4(
     hdlr.extend_from_slice(&0u32.to_be_bytes());
     hdlr.extend_from_slice(b"vide");
     hdlr.extend_from_slice(&[0u8; 12]);
-    hdlr.extend_from_slice(b"AniRaxUz\0");
+    hdlr.extend_from_slice(b"ARUmedia\0");
     push_box(&mut mdia, b"hdlr", &hdlr);
 
     let minf_offset_in_mdia = mdia.len() + 8;

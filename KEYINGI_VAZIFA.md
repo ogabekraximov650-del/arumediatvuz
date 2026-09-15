@@ -1237,9 +1237,9 @@ o'chirishda qismning HAMMA sifati o'chiriladi.
 **To'liq yuklanmagan qism** bosilganda ochilmaydi — avval
 "to'liq yuklab olinsinmi?" deb so'raladi (foydalanuvchi talabi).
 
-## BREND: ARU / AniRaxUz
+## BREND: ARU / ARUmedia
 
-Ilova nomi — **AniRaxUz**, logotipi — **ARU**. (`fulutter` faqat
+Ilova nomi — **ARUmedia**, logotipi — **ARU**. (`fulutter` faqat
 repo/papka nomi va Android paket nomi: `uz.fulutter.fulutter`.)
 
 | Qayerda | Nima |
@@ -1247,7 +1247,7 @@ repo/papka nomi va Android paket nomi: `uz.fulutter.fulutter`.)
 | Telefondagi belgi | `branding/android-res/mipmap-*/ic_launcher.png` |
 | Yumaloq belgi | `ic_launcher_round.png` — MIUI/One UI aynan shuni oladi |
 | Moslashuvchan belgi | `mipmap-anydpi-v26/ic_launcher.xml` (qora fon + oq harflar) |
-| Belgi ostidagi yozuv | CI manifestga `android:label="AniRaxUz"` yozadi |
+| Belgi ostidagi yozuv | CI manifestga `android:label="ARUmedia"` yozadi |
 | Ochilish ekrani | qora fon + ARU logotipi (`drawable*/launch_background.xml`) |
 | Ilova ichida | `lib/widgets/aru_logo.dart` -> `assets/aru-mark.png` |
 
@@ -2130,7 +2130,7 @@ Ilova                          Worker                      Telegram
   │ POST /api/auth/telegram/start
   ├────────────────────────────>│ 16 xonali token yaratadi
   │<─── token + deep_link ──────│ login_tokens (pending, 5 daq)
-  │ t.me/aniraxuzloginbot?start=<token>
+  │ t.me/aniraxuzloginbot   (bot manzili — o'zgarmadi)?start=<token>
   ├─────────────────────────────────────────────────────────>│
   │                             │<── POST /api/telegram/webhook
   │                             │  users_db: topadi yoki yaratadi
@@ -2229,7 +2229,7 @@ ketardi.
 Kirish ishlamay qolsa BIRINCHI shu manzil ochiladi:
 
 ```
-https://aniraxuzapp.ogabekraximov650.workers.dev/api/auth/telegram/health
+https://arumediatv.ogabekraximov650.workers.dev/api/auth/telegram/health
 ```
 
 `"ok": true` — hammasi joyida. `bot_token_configured: false` bo'lsa

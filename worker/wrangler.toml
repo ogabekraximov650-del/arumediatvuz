@@ -1,4 +1,4 @@
-name = "aniraxuzapp"
+name = "arumediatv"
 main = "build/worker/shim.mjs"
 compatibility_date = "2024-01-01"
 workers_dev = true
@@ -7,7 +7,7 @@ workers_dev = true
 command = "cargo install -q worker-build && worker-build --release"
 
 [env.production]
-name = "aniraxuzapp"
+name = "arumediatv"
 workers_dev = true
 
 # Secrets (GitHub Actions orqali o'rnatiladi):

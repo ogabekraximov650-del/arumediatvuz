@@ -8,7 +8,7 @@
 // oraliqni shunchaki "belgilanmagan" qiladi, ijroga tegmaydi.
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:fulutter/services/intro_times.dart';
+import 'package:soft/services/intro_times.dart';
 
 void main() {
   group('introMs', () {

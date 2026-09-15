@@ -14,7 +14,7 @@ import '../services/seasons_repo.dart';
 import '../services/watch_history.dart';
 import 'video_player_screen.dart';
 
-const String API_BASE = 'https://aniraxuzapp.ogabekraximov650.workers.dev';
+const String API_BASE = 'https://arumediatv.ogabekraximov650.workers.dev';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});

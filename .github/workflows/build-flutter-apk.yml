@@ -123,7 +123,7 @@ jobs:
       - name: Generate android folder (agar yo'q bo'lsa)
         run: |
           if [ ! -f "android/app/build.gradle" ]; then
-            flutter create --platforms=android --org uz.fulutter .
+            flutter create --platforms=android --org uz.arumediatv .
           fi
 
       # Kompilyatsiya qilingan .so fayllarni Android loyihasiga joylash —
@@ -287,9 +287,9 @@ jobs:
       # ── ILOVA NOMI VA YUMALOQ BELGI ───────────────────────────
       #
       # NOMI: `flutter create` nomni loyiha papkasidan oladi va
-      # manifestga `android:label="fulutter"` deb yozadi — telefonda
-      # belgi ostida aynan shu yozuv turadi. Ilovaning nomi esa
-      # AniRaxUz.
+      # manifestga `android:label="soft"` deb yozadi (loyiha nomi)
+      # — telefonda belgi ostida aynan shu yozuv turardi.
+      # Ilovaning nomi esa ARUmedia.
       #
       # YUMALOQ BELGI (`android:roundIcon`): Android 7.1 dan beri
       # qobiqlar (ayniqsa MIUI, Samsung One UI) belgini YUMALOQ
@@ -305,8 +305,8 @@ jobs:
           set -e
           MANIFEST="android/app/src/main/AndroidManifest.xml"
 
-          sed -i 's/android:label="[^"]*"/android:label="AniRaxUz"/' "$MANIFEST"
-          grep -q 'android:label="AniRaxUz"' "$MANIFEST" \
+          sed -i 's/android:label="[^"]*"/android:label="ARUmedia"/' "$MANIFEST"
+          grep -q 'android:label="ARUmedia"' "$MANIFEST" \
             || { echo "❌ Ilova nomi o'zgarmadi"; exit 1; }
 
           if ! grep -q 'android:roundIcon' "$MANIFEST"; then
@@ -315,7 +315,7 @@ jobs:
           grep -q 'android:roundIcon="@mipmap/ic_launcher_round"' "$MANIFEST" \
             || { echo "❌ roundIcon qo'shilmadi"; exit 1; }
 
-          echo "✅ Ilova nomi: AniRaxUz, yumaloq belgi ulandi"
+          echo "✅ Ilova nomi: ARUmedia, yumaloq belgi ulandi"
 
       # ── TOMOSHA TARIXI UCHUN KADR AJRATUVCHI ──────────────────
       #
@@ -495,6 +495,20 @@ jobs:
             STOREPASS="aniraxuz"
             echo "imzo kaliti: ci/release.keystore"
           fi
+          # DIQQAT: `aniraxuz` bu yerda ilovaning nomi EMAS —
+          # `ci/release.keystore` faylining ICHIDAGI kalit nomi va
+          # paroli. Ilova "ARUmedia" ga qayta nomlanganda ular
+          # ATAYLAB tegilmadi: kalit nomini o'zgartirish kalitning
+          # o'zini o'zgartirmaydi, faqat imzolash ishlamay qolardi.
+          #
+          # Kalitning o'zini almashtirib bo'lmaydi: Android yangi
+          # APK eskisi bilan AYNAN bir xil kalit bilan imzolangan
+          # bo'lishini talab qiladi. Boshqa kalit — hamma
+          # foydalanuvchi ilovani o'chirib, qaytadan o'rnatishi
+          # kerak degani. Ustiga worker ham imzo hash'ini
+          # tekshiradi (`AppSignature`).
+          #
+          # Bu nom foydalanuvchiga HECH QAYERDA ko'rinmaydi.
           ALIAS="aniraxuz"
 
           # Kalit HAQIQATAN o'sha ekanini yozib qo'yamiz — imzo
@@ -610,8 +624,8 @@ jobs:
           # 1) Ilova nomi
           LABEL=$("$AAPT" dump badging "$APK" | grep -m1 "^application-label:" || true)
           echo "$LABEL"
-          echo "$LABEL" | grep -q "'AniRaxUz'" \
-            || { echo "❌ XATO: ilova nomi AniRaxUz emas"; exit 1; }
+          echo "$LABEL" | grep -q "'ARUmedia'" \
+            || { echo "❌ XATO: ilova nomi ARUmedia emas"; exit 1; }
 
           # 2) Barcha PNG resurslar ochiladi
           TMP=$(mktemp -d)
@@ -806,13 +820,13 @@ jobs:
       # telefonga TO'G'RIDAN-TO'G'RI .apk fayli yuklanadi va darhol
       # o'rnatiladi, hech narsani ochish shart emas.
       # To'rtala APK bitta Release'ga tushadi, lekin NOMI boshqacha
-      # (`aniraxuz-user-32.apk` kabi) — aks holda keyingisi
+      # (`arumedia-user-32.apk` kabi) — aks holda keyingisi
       # oldingisining ustiga yozilardi.
       - name: APK nomini belgilash
         id: rename
         run: |
           SRC="build/app/outputs/flutter-apk/app-release.apk"
-          OUT="build/app/outputs/flutter-apk/aniraxuz-${{ matrix.name }}.apk"
+          OUT="build/app/outputs/flutter-apk/arumedia-${{ matrix.name }}.apk"
           cp "$SRC" "$OUT"
           echo "out=$OUT" >> "$GITHUB_OUTPUT"
           ls -lh "$OUT"
@@ -821,7 +835,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
-          name: AniRaxUz (build ${{ github.run_number }})
+          name: ARUmedia (build ${{ github.run_number }})
           body: |
             Telefonga to'g'ridan-to'g'ri o'rnatish uchun `.apk`
             faylini yuklab oling (ZIP emas).
@@ -830,10 +844,10 @@ jobs:
             hajmi kichik. Telefoningiz 64-bitli bo'lsa `-64`,
             eskiroq bo'lsa `-32` ni oling.
 
-            * `aniraxuz-user-32.apk`  — foydalanuvchi, 32-bit (armeabi-v7a)
-            * `aniraxuz-user-64.apk`  — foydalanuvchi, 64-bit (arm64-v8a)
-            * `aniraxuz-admin-32.apk` — admin paneli bilan, 32-bit
-            * `aniraxuz-admin-64.apk` — admin paneli bilan, 64-bit
+            * `arumedia-user-32.apk`  — foydalanuvchi, 32-bit (armeabi-v7a)
+            * `arumedia-user-64.apk`  — foydalanuvchi, 64-bit (arm64-v8a)
+            * `arumedia-admin-32.apk` — admin paneli bilan, 32-bit
+            * `arumedia-admin-64.apk` — admin paneli bilan, 64-bit
 
             Versiya: ${{ github.run_number }}
             Commit: ${{ github.sha }}
@@ -858,11 +872,11 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: aniraxuz-${{ matrix.name }}
+          name: arumedia-${{ matrix.name }}
           path: ${{ steps.rename.outputs.out }}
           retention-days: 30
 
       - name: Done
         run: |
-          echo "✅ APK tayyor: aniraxuz-${{ matrix.name }}.apk"
+          echo "✅ APK tayyor: arumedia-${{ matrix.name }}.apk"
           echo "   Faqat ${{ matrix.abi }}, imzolar: v1+v2+v3(+v4)."

@@ -12,8 +12,8 @@
 //     bir necha soniya narida bo'lardi.
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:fulutter/services/watch_history.dart';
-import 'package:fulutter/services/watch_progress.dart';
+import 'package:soft/services/watch_history.dart';
+import 'package:soft/services/watch_progress.dart';
 
 void main() {
   group('chegaralar qism uzunligiga bog\'liq', () {

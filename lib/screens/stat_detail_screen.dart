@@ -47,7 +47,7 @@ class StatDetailScreen extends StatefulWidget {
   final int userId;
   final StatKind kind;
 
-  /// Sarlavha ostidagi kichik yozuv ("AniRaxUz"). Bo'sh bo'lsa
+  /// Sarlavha ostidagi kichik yozuv ("ARUmedia"). Bo'sh bo'lsa
   /// chizilmaydi.
   final String owner;
 
