@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'screens/root_screen.dart';
+import 'services/app_build.dart';
 import 'services/app_http.dart';
 import 'services/app_keys.dart';
 import 'services/auth_service.dart';
@@ -50,6 +51,17 @@ Future<void> main() =>
 
 Future<void> _main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // ── ILOVANING IMZOSI ────────────────────────────────────────
+  //
+  // TALAB (foydalanuvchi): "worker ilovaning haqiqiyligini
+  // tekshirishi kerak".
+  //
+  // Tizimdan BIR MARTA o'qiladi va har so'rovga qo'shiladi
+  // (`app_build.dart` va `app_http.dart` izohlariga qarang).
+  // Birinchi so'rovdan OLDIN bo'lishi shart, shu sabab bu yerda
+  // kutiladi — u bir necha millisekund oladi.
+  await AppSignature.load();
 
   // Tizim navigatsiya panelini shaffof qilamiz — aks holda pleyer
   // fullscreen'dan qaytganda pastda vaqtincha qora to'rtburchak

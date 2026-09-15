@@ -72,7 +72,7 @@ jobs:
       - name: Setup Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: armv7-linux-androideabi
+          targets: armv7-linux-androideabi, aarch64-linux-android
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
@@ -82,17 +82,18 @@ jobs:
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
 
-      # FAQAT BITTA ABI kompilyatsiya qilinadi (foydalanuvchi talabi):
-      #   armeabi-v7a — 32-bitli telefonlar.
-      # arm64-v8a va x86_64 OLIB TASHLANDI. 32-bitli kutubxona
-      # 64-bitli telefonlarda ham ishlaydi (Android ularni qo'llab-
-      # quvvatlaydi), shu sabab bitta ABI barcha ARM qurilmalarni
-      # qoplaydi va APK hajmi ~2 barobar kichrayadi.
-      - name: Build rust_core for Android (faqat 32-bit / armeabi-v7a)
+      # IKKALA ARM ABI kompilyatsiya qilinadi (foydalanuvchi talabi:
+      # "Ham 32 ham 64 bit apk yasa"):
+      #   armeabi-v7a — 32-bitli telefonlar,
+      #   arm64-v8a   — 64-bitli telefonlar (zamonaviy qurilmalar).
+      # 64-bitli telefon o'zining ABI'sini tanlaydi va nativ tezlikda
+      # ishlaydi; 32-bitli eski telefonlar esa armeabi-v7a'ni oladi.
+      - name: Build rust_core for Android (32-bit + 64-bit)
         working-directory: rust
         run: |
           cargo ndk \
             -t armeabi-v7a \
+            -t arm64-v8a \
             -o ../jniLibs-out \
             build --release
 
@@ -113,9 +114,12 @@ jobs:
       # flutter APK build vaqtida ularni avtomatik jniLibs sifatida qo'shadi.
       - name: Copy librust_core.so into jniLibs
         run: |
-          mkdir -p android/app/src/main/jniLibs/armeabi-v7a
-          cp jniLibs-out/armeabi-v7a/librust_core.so android/app/src/main/jniLibs/armeabi-v7a/
-          echo "✅ Rust .so fayl joylashtirildi:"
+          set -e
+          for abi in armeabi-v7a arm64-v8a; do
+            mkdir -p "android/app/src/main/jniLibs/$abi"
+            cp "jniLibs-out/$abi/librust_core.so" "android/app/src/main/jniLibs/$abi/"
+          done
+          echo "✅ Rust .so fayllar joylashtirildi:"
           find android/app/src/main/jniLibs -name "*.so"
 
       - name: INTERNET ruxsatini qo'shish (agar yo'q bo'lsa)
@@ -337,16 +341,12 @@ jobs:
       - name: Get dependencies
         run: flutter pub get
 
-      # FAQAT 32-BIT (armeabi-v7a) — foydalanuvchi talabi.
-      # --split-per-abi ISHLATILMAYDI: bitta APK chiqadi va uni
-      # barcha ARM telefonlar (32- va 64-bitlilar) o'rnata oladi.
-      - name: Build APK (Release — faqat 32-bit / armeabi-v7a)
-        env:
-          # Ulanish kaliti GitHub Secrets'dan keladi. Qo'yilmagan
-          # bo'lsa bo'sh qoladi va server tekshiruvni o'chirib
-          # qo'yadi (`app_gate` izohiga qarang) — ya'ni ilova
-          # baribir ishlaydi.
-          APP_KEY: ${{ secrets.APP_KEY }}
+      # IKKI ABI BITTA APK ICHIDA (foydalanuvchi talabi:
+      # "Ham 32 ham 64 bit apk yasa").
+      # --split-per-abi ISHLATILMAYDI: bitta "universal" APK chiqadi,
+      # uni ham 32-, ham 64-bitli telefonlar o'rnata oladi va Android
+      # o'zi mos kutubxonani tanlaydi.
+      - name: Build APK (Release — 32-bit + 64-bit)
         run: |
           # ── NEGA `--build-number` (TUZATILGAN XATO) ──────────
           #
@@ -370,38 +370,27 @@ jobs:
           echo "versiya: $APP_VERSION  (admin: ${{ matrix.admin }})"
 
           flutter build apk --release \
-            --target-platform android-arm \
+            --target-platform android-arm,android-arm64 \
             --build-name "$BUILD_NAME" \
             --build-number "${{ github.run_number }}" \
             --dart-define=ADMIN_BUILD=${{ matrix.admin }} \
-            --dart-define=APP_VERSION="$APP_VERSION" \
-            --dart-define=APP_KEY="$APP_KEY"
+            --dart-define=APP_VERSION="$APP_VERSION"
 
-      # ── APK HAQIQATAN 32-BIT BO'LISHI SHART ───────────────────
+      # ── HAR BIR ABI TO'LIQ BO'LISHI SHART ─────────────────────
       #
-      # TOPILGAN JIDDIY XATO (0.0.1+1 versiyada ham bor edi):
+      # TOPILGAN JIDDIY XATO (avvalgi versiyalarda bor edi):
+      # APK ichida `lib/arm64-v8a` papkasi bor edi, lekin Rust yadrosi
+      # (`librust_core.so`) faqat `armeabi-v7a` uchun qurilgandi.
+      # Android 64-bitli telefonda `arm64-v8a` papkasini TANLAYDI va
+      # faqat o'shandan kutubxona yuklaydi — `librust_core.so`
+      # TOPILMAY ilova ochilishida yiqilardi (kesh, qidiruv,
+      # shifrlash — hammasi shu kutubxonada).
       #
-      # `--target-platform android-arm` berilganiga QARAMAY, tayyor
-      # APK ichida UCHTA arxitektura papkasi bor edi:
-      #   lib/armeabi-v7a, lib/arm64-v8a, lib/x86_64
-      # (aapt: `native-code: 'arm64-v8a' 'armeabi-v7a' 'x86_64'`).
-      # Bular Flutter embedding AAR'idan kelib qoladi.
-      #
-      # NEGA BU XAVFLI: Rust yadrosi (`librust_core.so`) FAQAT
-      # armeabi-v7a papkasida bor. Android esa 64-bitli telefonda
-      # `arm64-v8a` papkasini TANLAYDI va faqat o'shandan kutubxona
-      # yuklaydi — ya'ni `librust_core.so` TOPILMAYDI va ilova
-      # ochilishida yiqiladi (kesh, qidiruv, shifrlash — hammasi shu
-      # kutubxonada).
-      #
-      # YECHIM: ortiqcha arxitekturalar APK'dan olib tashlanadi.
-      # Shundan keyin Android 64-bitli telefonda ham 32-bitli
-      # kutubxonalarni ishlatadi (ARM64 qurilmalari 32-bit kodni
-      # qo'llab-quvvatlaydi) va librust_core.so har doim topiladi.
-      #
-      # Imzolash BUNDAN KEYIN bo'ladi — shu sabab o'zgartirilgan APK
-      # qaytadan, to'g'ri imzolanadi.
-      - name: Ortiqcha arxitekturalarni olib tashlash (faqat armeabi-v7a qolsin)
+      # ENDI ikkala ABI ham to'liq quriladi, shu sabab o'chirish
+      # SHART EMAS — faqat x86/x86_64 (emulyator arxitekturalari,
+      # telefonlarda kerak emas) olib tashlanadi va HAR IKKALA ARM
+      # papkasida uchchala .so borligi tekshiriladi.
+      - name: ABI tekshiruvi (armeabi-v7a + arm64-v8a to'liq bo'lsin)
         run: |
           set -e
           APK="build/app/outputs/flutter-apk/app-release.apk"
@@ -409,18 +398,19 @@ jobs:
           echo "── O'zgartirishdan OLDIN ──"
           unzip -l "$APK" | grep "lib/" || true
 
-          # 32-bitli papkada KERAKLI kutubxonalar borligini tekshiramiz.
-          # Bo'lmasa — o'chirish ilovani buzardi, shu sabab build
-          # ATAYLAB yiqiladi (jimgina buzuq APK chiqarishdan yaxshiroq).
-          for so in libapp.so libflutter.so librust_core.so; do
-            if ! unzip -l "$APK" | grep -q "lib/armeabi-v7a/$so"; then
-              echo "❌ XATO: lib/armeabi-v7a/$so topilmadi — APK 32-bit uchun to'liq emas"
-              exit 1
-            fi
+          # Har ikkala ARM papkasida KERAKLI kutubxonalar borligini
+          # tekshiramiz. Bittasi yetishmasa — build ATAYLAB yiqiladi
+          # (jimgina buzuq APK chiqarishdan yaxshiroq).
+          for abi in armeabi-v7a arm64-v8a; do
+            for so in libapp.so libflutter.so librust_core.so; do
+              if ! unzip -l "$APK" | grep -q "lib/$abi/$so"; then
+                echo "❌ XATO: lib/$abi/$so topilmadi — APK to'liq emas"
+                exit 1
+              fi
+            done
           done
 
-          # Qolgan barcha arxitekturalar olib tashlanadi.
-          zip -q -d "$APK" "lib/arm64-v8a/*" || true
+          # Telefonlarda kerak bo'lmagan emulyator arxitekturalari.
           zip -q -d "$APK" "lib/x86_64/*" || true
           zip -q -d "$APK" "lib/x86/*" || true
 
@@ -449,17 +439,54 @@ jobs:
       # v1 + v2 + v3 — ya'ni eski ham, yangi ham qurilmalar qabul
       # qiladi. Kalit — Gradle yaratgan standart debug kaliti.
       - name: APK'ni BARCHA imzo sxemalari bilan (v1..v4) qayta imzolash
+        env:
+          # Secrets qo'yilgan bo'lsa USTUN turadi (`ci/README.md`).
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASS }}
         run: |
           set -e
           APK="build/app/outputs/flutter-apk/app-release.apk"
-          KS="$HOME/.android/debug.keystore"
-          if [ ! -f "$KS" ]; then
-            mkdir -p "$HOME/.android"
-            keytool -genkeypair -v -keystore "$KS" -storepass android \
-              -keypass android -alias androiddebugkey \
-              -keyalg RSA -keysize 2048 -validity 10000 \
-              -dname "CN=Android Debug,O=Android,C=US"
+
+          # ── BARQAROR IMZO KALITI (TUZATILGAN JIDDIY XATO) ────
+          #
+          # TOPILGAN XATO (foydalanuvchi: "yangi versiyani
+          # o'rnatmoqchi bo'lganimda ilova yangilanmayapti ...
+          # versiya katta bo'lsa ham yangilanmasdi").
+          #
+          # Ilgari bu yerda shunday edi:
+          #     KS="$HOME/.android/debug.keystore"
+          #     if [ ! -f "$KS" ]; then keytool -genkeypair ...
+          #
+          # GitHub runner har build'da TOZA mashina — ya'ni bu
+          # fayl hech qachon topilmasdi va HAR APK BOSHQA KALIT
+          # bilan imzolanardi.
+          #
+          # Android qoidasi qat'iy: yangi APK eskisi bilan AYNAN
+          # BIR XIL kalit bilan imzolangan bo'lishi kerak. Aks
+          # holda tizim o'rnatishni rad etadi
+          # (INSTALL_FAILED_UPDATE_INCOMPATIBLE) — versiya raqami
+          # katta bo'lsa ham. Aynan shu sabab 8 dan 9 ga
+          # o'tganda ham yangilanmagan.
+          #
+          # Endi kalit repoda (`ci/release.keystore`) va u
+          # o'zgarmaydi. Secrets qo'yilgan bo'lsa undan olinadi.
+          KS="$RUNNER_TEMP/release.keystore"
+          if [ -n "$KS_B64" ]; then
+            echo "$KS_B64" | base64 -d > "$KS"
+            STOREPASS="${KS_PASS:-aniraxuz}"
+            echo "imzo kaliti: GitHub Secrets"
+          else
+            cp ci/release.keystore "$KS"
+            STOREPASS="aniraxuz"
+            echo "imzo kaliti: ci/release.keystore"
           fi
+          ALIAS="aniraxuz"
+
+          # Kalit HAQIQATAN o'sha ekanini yozib qo'yamiz — imzo
+          # almashib qolsa loglardan darhol ko'rinadi.
+          keytool -list -v -keystore "$KS" -storepass "$STOREPASS" \
+            -alias "$ALIAS" 2>/dev/null | grep "SHA256:" || true
+
           APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
           echo "apksigner: $APKSIGNER"
 
@@ -490,8 +517,9 @@ jobs:
           MIN_SDK=21
           sign_apk() {
             "$APKSIGNER" sign \
-              --ks "$KS" --ks-pass pass:android --key-pass pass:android \
-              --ks-key-alias androiddebugkey \
+              --ks "$KS" --ks-pass "pass:$STOREPASS" \
+              --key-pass "pass:$STOREPASS" \
+              --ks-key-alias "$ALIAS" \
               --min-sdk-version "$MIN_SDK" \
               --v1-signing-enabled true \
               --v2-signing-enabled true \
@@ -526,14 +554,15 @@ jobs:
           ABIS=$(unzip -l "$APK" | grep "lib/" | awk '{print $4}' | cut -d/ -f2 | sort -u)
           echo "$ABIS"
 
-          # QAT'IY TEKSHIRUV: APK faqat 32-bit bo'lishi SHART.
-          # Boshqa arxitektura qolib ketsa, 64-bitli telefonlar
-          # o'shani tanlab, Rust yadrosini topa olmasdi.
-          if [ "$ABIS" != "armeabi-v7a" ]; then
-            echo "❌ XATO: APK faqat armeabi-v7a bo'lishi kerak edi, ichidagisi: $ABIS"
+          # QAT'IY TEKSHIRUV: APK ichida AYNAN ikkala ARM ABI
+          # bo'lishi SHART (x86 bo'lmasin, chunki telefonlarda
+          # kerak emas va u yerda Rust yadrosi yo'q).
+          EXPECT=$(printf 'arm64-v8a\narmeabi-v7a\n')
+          if [ "$ABIS" != "$EXPECT" ]; then
+            echo "❌ XATO: kutilgani armeabi-v7a + arm64-v8a edi, ichidagisi: $ABIS"
             exit 1
           fi
-          echo "✅ APK faqat 32-bit (armeabi-v7a)"
+          echo "✅ APK 32-bit + 64-bit (armeabi-v7a + arm64-v8a)"
 
       # ── APK ICHIDA HAQIQATAN ARU BELGISI BORMI ────────────────
       #
@@ -816,4 +845,4 @@ jobs:
       - name: Done
         run: |
           echo "✅ APK tayyor: aniraxuz-${{ matrix.name }}.apk"
-          echo "   Faqat 32-bit (armeabi-v7a), imzolar: v1+v2+v3(+v4)."
+          echo "   32-bit + 64-bit (armeabi-v7a + arm64-v8a), imzolar: v1+v2+v3(+v4)."

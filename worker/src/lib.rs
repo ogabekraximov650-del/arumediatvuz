@@ -6564,24 +6564,23 @@ async fn admin_reports(req: &Request, env: &Env, origin: &str) -> Result<Respons
     }))
 }
 
-/// GET/POST /api/admin/app — ILOVA VERSIYASI VA ULANISH KALITI.
+/// GET/POST /api/admin/app — ILOVA VERSIYASI VA IMZOSI.
 ///
 /// TALAB (foydalanuvchi): "admin panelga versiya raqam yozadigan
 /// bo'lim qo'sh, ya'ni versiya raqamini yozaman 0.0.9+9 yoki
 /// 0.0.9 qilib yozaman. Worker esa shu va shundan katta
-/// versiyalarda ishlaydi, agar versiya past bo'lsa ishlamaydi".
+/// versiyalarda ishlaydi, agar versiya past bo'lsa ishlamaydi" va
+/// "worker ilovaning haqiqiyligini tekshirishi kerak".
 ///
 /// GET — hozirgi holat. POST — yangi qiymat.
 ///
-/// ── KALIT HAM SHU YERDAN ────────────────────────────────────
+/// ── IMZO ODDIY QO'YILADI ────────────────────────────────────
 ///
-/// Foydalanuvchi: "agar workerni tekshirmoqchi bo'lsang ulanish
-/// kaliti yasab bazaga qo'sh". Kalit `app_config` da turadi va
-/// uni FAQAT admin ko'ra oladi. Bo'sh bo'lsa — tekshiruv o'chiq.
-///
-/// ⚠️ Kalitni o'zgartirish ESKI ilovalarni darhol uzib qo'yadi:
-/// ularda eski kalit turadi. Shu sabab javobda ogohlantirish
-/// ham boradi va ilova uni ekranda ko'rsatadi.
+/// Admin panelni O'Z ilovasidan ochadi, ya'ni uning so'rovi
+/// AYNAN o'sha ilovaning imzosi bilan keladi. Shu sabab
+/// `{"trust_me": true}` yuborilsa — server so'rov sarlavhasidagi
+/// hash'ni kutilganlar ro'yxatiga qo'shadi. Hech narsa
+/// ko'chirib yozish shart emas.
 async fn admin_app_config(mut req: Request, env: &Env) -> Result<Response> {
     let Some(u) = session_user(env, &bearer(&req)).await? else {
         return json_resp(&json!({"error": "unauthorized"}), 401);
@@ -6589,6 +6588,10 @@ async fn admin_app_config(mut req: Request, env: &Env) -> Result<Response> {
     if !is_admin(&u) {
         return json_resp(&json!({"error": "forbidden"}), 403);
     }
+
+    // So'rov KIMDAN kelgani — POST'dan oldin o'qiladi
+    // (`req.json()` tanani yeb qo'yadi).
+    let my_sig = req.headers().get("X-App-Sig").ok().flatten().unwrap_or_default();
 
     if req.method() == Method::Post {
         let b: Value = req.json().await.unwrap_or(json!({}));
@@ -6604,46 +6607,62 @@ async fn admin_app_config(mut req: Request, env: &Env) -> Result<Response> {
             config_put(env, "app_min_version", v).await;
         }
 
-        // Eski kalitni butunlay o'chirish.
-        if b["drop_prev"].as_bool() == Some(true) {
-            config_put(env, "app_key_prev", "").await;
+        // ── SHU ILOVAGA ISHONISH ─────────────────────────────
+        //
+        // Admin o'z ilovasidan bosadi va uning imzosi
+        // ro'yxatga qo'shiladi. Eskilari JOYIDA QOLADI: aks
+        // holda yangi imzoli APK tarqatilguncha hamma uzilib
+        // qolardi.
+        if b["trust_me"].as_bool() == Some(true) {
+            if my_sig.is_empty() {
+                return json_resp(&json!({
+                    "error": "Ilova imzosi kelmadi. Eski APK bo'lishi mumkin."
+                }), 400);
+            }
+            let cur = config_get(env, "app_sig").await.unwrap_or_default();
+            let mut list: Vec<String> = cur
+                .split(',')
+                .map(|x| x.trim().to_string())
+                .filter(|x| !x.is_empty())
+                .collect();
+            if !list.iter().any(|x| x == &my_sig) {
+                list.push(my_sig.clone());
+            }
+            config_put(env, "app_sig", &list.join(",")).await;
         }
 
-        // Kalit. `"new"` — server o'zi yangisini yasaydi.
-        if let Some(k) = b["app_key"].as_str() {
-            let k = k.trim();
-            let value = if k == "new" {
-                random_hex(32)
-            } else {
-                k.to_string()
-            };
-            // Joriy kalit ESKI bo'lib qoladi, lekin hali ham
-            // qabul qilinadi (yuqoridagi izohga qarang).
-            let cur = config_get(env, "app_key").await.unwrap_or_default();
-            config_put(env, "app_key_prev", &cur).await;
-            config_put(env, "app_key", &value).await;
+        // Faqat SHU imzoni qoldirish (eskilarini bekor qilish).
+        if b["only_me"].as_bool() == Some(true) {
+            if my_sig.is_empty() {
+                return json_resp(&json!({
+                    "error": "Ilova imzosi kelmadi"
+                }), 400);
+            }
+            config_put(env, "app_sig", &my_sig).await;
+        }
+
+        // Tekshiruvni butunlay o'chirish.
+        if b["clear"].as_bool() == Some(true) {
+            config_put(env, "app_sig", "").await;
         }
     }
 
     let min = config_get(env, "app_min_version").await.unwrap_or_default();
-    let key = config_get(env, "app_key").await.unwrap_or_default();
-    let prev = config_get(env, "app_key_prev").await.unwrap_or_default();
-    // Wrangler siri qo'yilgan bo'lsa u USTUN turadi — admin buni
-    // bilib turishi kerak, aks holda bazadagi kalitni
-    // o'zgartirib, nega ishlamayotganini tushunmasdi.
-    let secret_set = env.secret("APP_KEY")
-        .map(|v| !v.to_string().is_empty())
-        .unwrap_or(false);
+    let sigs = config_get(env, "app_sig").await.unwrap_or_default();
+    let list: Vec<String> = sigs
+        .split(',')
+        .map(|x| x.trim().to_string())
+        .filter(|x| !x.is_empty())
+        .collect();
 
     ok_nostore(json!({
         "min_version": min,
-        "app_key": key,
-        // Eski kalit hali ham ishlayaptimi — admin buni ko'rib
-        // tursin va yangi APK tarqatib bo'lgach o'chirsin.
-        "has_prev_key": !prev.is_empty(),
-        "key_from_secret": secret_set,
-        // Tekshiruv umuman ishlayaptimi.
-        "gate_on": secret_set || !key.is_empty(),
+        // Nechta imzo qabul qilinadi.
+        "sig_count": list.len(),
+        // Shu so'rov yuborgan ilova ro'yxatdami.
+        "my_sig": my_sig,
+        "my_sig_trusted": !my_sig.is_empty() && list.iter().any(|x| x == &my_sig),
+        "gate_on": !list.is_empty(),
     }))
 }
 
@@ -8082,35 +8101,49 @@ async fn auth_route(req: Request, env: &Env, origin: &str, path: &str, method: M
 //   * "Workerni faqat ilovaga javob beradigan qil, tashqi
 //      so'rovlar rad etilsin va hujumlarga chidamli qil";
 //   * "admin panelga versiya raqam yozadigan bo'lim qo'sh ...
-//      Worker shu va shundan katta versiyalarda ishlaydi, agar
-//      versiya past bo'lsa ishlamaydi".
+//      Worker shu va shundan katta versiyalarda ishlaydi";
+//   * "APP_KEY nimaga kerak? ... busiz ishlaydigan qilish kerak,
+//      ya'ni worker ilovaning haqiqiyligini tekshirishi kerak".
+//
+// ── NEGA KALIT EMAS, IMZO ───────────────────────────────────
+//
+// Foydalanuvchi haq edi. APK'ga qo'yilgan sir — shunchaki APK
+// ichidagi matn: uni ochib o'qish mumkin va u hech narsani
+// ISBOTLAMAYDI.
+//
+// Imzo sertifikati esa boshqacha: uni ilova o'zi tanlamaydi,
+// TIZIM beradi. Kimdir ilovani o'zgartirib qayta yig'sa, uni
+// O'Z kaliti bilan imzolashga majbur — bizning kalitimiz unda
+// yo'q. Natijada hash boshqacha chiqadi va bu yerda rad
+// etiladi. Ustiga GitHub Secrets ham, APK'ni qayta yig'ish ham
+// kerak emas: hash admin panelidan bir bosishda qo'yiladi.
 //
 // ── IKKI SARLAVHA ───────────────────────────────────────────
 //
-//   `X-App-Key`     — ulanish kaliti. Ilovaga build paytida
-//                     qo'yiladi (`app_build.dart`).
+//   `X-App-Sig`     — APK imzosining SHA-256 hash'i (base64).
 //   `X-App-Version` — ilova versiyasi (`0.0.9+230`).
 //
 // ── ROSTINI AYTISH KERAK ────────────────────────────────────
 //
-// Kalit APK ICHIDA turadi va uni APK'ni ochib ko'ra oladigan
-// odam TOPISHI MUMKIN. Ya'ni bu to'siq:
-//   * brauzerdan, qidiruv botlaridan va oddiy skriptlardan
-//     kelgan so'rovlarni to'xtatadi — bular so'rovlarning
-//     aksariyati;
+// Hash'ning O'ZINI APK'dan o'qib, so'rovni qo'lda yasash
+// mumkin. Ya'ni bu:
+//   * O'ZGARTIRILGAN ILOVANI to'xtatadi — asosiy maqsad shu;
+//   * brauzer, qidiruv botlari va oddiy skriptlarni to'xtatadi
+//     (so'rovlarning aksariyati);
 //   * maqsadli hujumchini to'xtatmaydi.
-// Haqiqiy himoya baribir sessiya tekshiruvi va admin
-// huquqlarida, ular o'z joyida qoladi.
+// Mutlaq yechim (Play Integrity) Play Store'ni talab qiladi,
+// bu ilova esa APK bo'lib tarqatiladi. Haqiqiy himoya baribir
+// sessiya tekshiruvi, admin huquqlari va so'rov chegarasida.
 //
 // ── XAVFSIZ ODATIY HOLAT ────────────────────────────────────
 //
-// Kalit SOZLANMAGAN bo'lsa tekshiruv umuman ishlamaydi. Aks
-// holda kalitni qo'yishni unutish butun ilovani o'chirib
-// qo'yardi — bu tuzatib bo'lmaydigan holat, chunki eski
-// ilovalar ham kirолmay qolardi.
+// Kutilgan hash SOZLANMAGAN bo'lsa tekshiruv umuman ishlamaydi.
+// Aks holda uni qo'yishni unutish butun ilovani o'chirib
+// qo'yardi — tuzatib bo'lmaydigan holat, chunki eski ilovalar
+// ham kira olmay qolardi.
 
-/// Bu yo'lga kalit shartmi.
-fn needs_app_key(path: &str) -> bool {
+/// Bu yo'lga ilova tekshiruvi shartmi.
+fn needs_app_check(path: &str) -> bool {
     // Telegram webhook — Telegram serveridan keladi, unda bizning
     // kalitimiz yo'q. U o'z siri bilan himoyalangan.
     if path.starts_with("/api/telegram/") {
@@ -8172,37 +8205,25 @@ fn version_rank(v: &str) -> i64 {
 
 /// So'rovni o'tkazamizmi. `None` — o'tadi, `Some(resp)` — rad.
 async fn app_gate(req: &Request, env: &Env, path: &str) -> Option<Response> {
-    if !needs_app_key(path) {
+    if !needs_app_check(path) {
         return None;
     }
     let head = |k: &str| -> String {
         req.headers().get(k).ok().flatten().unwrap_or_default()
     };
 
-    // ── 1. KALIT ─────────────────────────────────────────────
+    // ── 1. ILOVA IMZOSI ──────────────────────────────────────
     //
-    // `APP_KEY` — wrangler siri yoki `app_config` dagi yozuv.
-    // Ikkovi ham yo'q bo'lsa tekshiruv o'chiq (yuqoridagi
-    // izohga qarang).
-    let want = match env.secret("APP_KEY").map(|v| v.to_string()) {
-        Ok(v) if !v.is_empty() => Some(v),
-        _ => config_get(env, "app_key").await,
-    };
-    if let Some(want) = want {
-        let got = head("X-App-Key");
-        // ── ESKI KALIT HAM BIR MUDDAT ISHLAYDI ───────────────
-        //
-        // Yangi kalit yasalgan zahoti hamma ilova uzilib
-        // qolardi — jumladan adminning O'ZINIKI, ya'ni u yangi
-        // APK yig'ib bo'lguncha panelga ham kira olmasdi.
-        //
-        // Shu sabab oldingi kalit `app_key_prev` da saqlanadi va
-        // u ham qabul qilinadi. Admin yangi APK tarqatib
-        // bo'lgach, panelda "eski kalitni o'chirish" tugmasini
-        // bosadi.
-        let ok = got == want
-            || (!got.is_empty()
-                && config_get(env, "app_key_prev").await.as_deref() == Some(got.as_str()));
+    // Kutilgan hash `app_config` da. Qo'yilmagan bo'lsa
+    // tekshiruv o'chiq (yuqoridagi izohga qarang).
+    //
+    // Bir nechta hash vergul bilan yozilishi mumkin: imzo
+    // almashtirilganda eski ilovalar ham bir muddat ishlab
+    // tursin.
+    if let Some(want) = config_get(env, "app_sig").await {
+        let got = head("X-App-Sig");
+        let ok = !got.is_empty()
+            && want.split(',').any(|w| w.trim() == got);
         if !ok {
             return Some(
                 json_resp(&json!({"error": "forbidden"}), 403)

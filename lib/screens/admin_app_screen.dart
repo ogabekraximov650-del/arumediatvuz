@@ -53,16 +53,17 @@ class _AdminAppScreenState extends State<AdminAppScreen> {
   String? _error;
 
   String _minVersion = '';
-  String _appKey = '';
-  bool _keyFromSecret = false;
-  bool _gateOn = false;
 
-  /// Eski kalit hali ham qabul qilinyaptimi.
-  ///
-  /// Yangi kalit yasalganda eskisi darhol o'chmaydi — aks holda
-  /// hamma ilova, jumladan adminning O'ZINIKI, yangi APK
-  /// tarqatilguncha uzilib qolardi.
-  bool _hasPrevKey = false;
+  /// Nechta imzo qabul qilinadi.
+  int _sigCount = 0;
+
+  /// SHU ilovaning imzosi (server so'rov sarlavhasidan oladi).
+  String _mySig = '';
+
+  /// SHU ilova ro'yxatdami.
+  bool _myTrusted = false;
+
+  bool _gateOn = false;
 
   Map<String, String> get _headers => {
         'Authorization': 'Bearer ${AuthService.instance.sessionToken}',
@@ -106,9 +107,9 @@ class _AdminAppScreenState extends State<AdminAppScreen> {
         final j = jsonDecode(r.body) as Map<String, dynamic>;
         setState(() {
           _minVersion = '${j['min_version'] ?? ''}';
-          _appKey = '${j['app_key'] ?? ''}';
-          _keyFromSecret = j['key_from_secret'] == true;
-          _hasPrevKey = j['has_prev_key'] == true;
+          _sigCount = ((j['sig_count'] as num?) ?? 0).toInt();
+          _mySig = '${j['my_sig'] ?? ''}';
+          _myTrusted = j['my_sig_trusted'] == true;
           _gateOn = j['gate_on'] == true;
           _version.text = _minVersion;
           _loading = false;
@@ -227,35 +228,39 @@ class _AdminAppScreenState extends State<AdminAppScreen> {
     await _post({'min_version': v}, v.isEmpty ? 'O\'chirildi' : 'Saqlandi');
   }
 
-  Future<void> _newKey() async {
+  /// Shu ilovaning imzosini ishonchlilar ro'yxatiga qo'shadi.
+  ///
+  /// Eskilari JOYIDA QOLADI: aks holda yangi APK tarqatilguncha
+  /// hamma uzilib qolardi.
+  Future<void> _trustMe() async {
     final ok = await _confirm(
-      'Yangi ulanish kaliti yasalsinmi?',
-      'Eski kalit VAQTINCHA ishlab turadi — ilovalar darhol '
-      'uzilmaydi. Yangi APK tarqatib bo\'lgach, eski kalitni '
-      'o\'chirasiz.',
+      'Shu ilovaga ishonilsinmi?',
+      'Bundan keyin server FAQAT shunday imzolangan ilovalarga '
+      'javob beradi. Ilgari qo\'shilgan imzolar ham ishlaydi.',
     );
     if (!ok) return;
-    await _post({'app_key': 'new'}, 'Yangi kalit yasaldi');
+    await _post({'trust_me': true}, 'Qo\'shildi');
   }
 
-  /// Eski kalitni butunlay bekor qiladi.
-  Future<void> _dropPrev() async {
+  /// Faqat shu imzoni qoldiradi.
+  Future<void> _onlyMe() async {
     final ok = await _confirm(
-      'Eski kalit bekor qilinsinmi?',
-      'Eski kalitli ilovalar SHU ZAHOTI ishlamay qoladi. Yangi '
+      'Faqat shu ilova qolsinmi?',
+      'Boshqa imzoli ilovalar SHU ZAHOTI ishlamay qoladi. Yangi '
       'APK hamma tarqatilganiga ishonch hosil qiling.',
     );
     if (!ok) return;
-    await _post({'drop_prev': true}, 'Eski kalit bekor qilindi');
+    await _post({'only_me': true}, 'Faqat shu ilova qoldi');
   }
 
-  Future<void> _clearKey() async {
+  /// Tekshiruvni butunlay o'chiradi.
+  Future<void> _clearSigs() async {
     final ok = await _confirm(
-      'Kalit tekshiruvi o\'chirilsinmi?',
+      'Imzo tekshiruvi o\'chirilsinmi?',
       'Serverga tashqaridan ham so\'rov yuborish mumkin bo\'ladi.',
     );
     if (!ok) return;
-    await _post({'app_key': ''}, 'Kalit o\'chirildi');
+    await _post({'clear': true}, 'O\'chirildi');
   }
 
   @override
@@ -378,8 +383,8 @@ class _AdminAppScreenState extends State<AdminAppScreen> {
                     ),
                     const SizedBox(height: 24),
 
-                    // ── ULANISH KALITI ────────────────────────
-                    _label('ULANISH KALITI'),
+                    // ── ILOVA IMZOSI ──────────────────────────
+                    _label('ILOVA HAQIQIYLIGI'),
                     const SizedBox(height: 8),
                     Glass(
                       borderRadius: 16,
@@ -388,92 +393,32 @@ class _AdminAppScreenState extends State<AdminAppScreen> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          if (_keyFromSecret) ...[
-                            Text(
-                              'Kalit Cloudflare sirida (APP_KEY) turibdi '
-                              'va u bazadagisidan USTUN. Bu yerdagi '
-                              'o\'zgarish ta\'sir qilmaydi.',
+                          _row(
+                            'Qabul qilinadigan imzolar',
+                            _sigCount == 0 ? 'yo\'q' : '$_sigCount ta',
+                          ),
+                          const SizedBox(height: 8),
+                          _row(
+                            'Shu ilova',
+                            _mySig.isEmpty
+                                ? 'imzo kelmadi'
+                                : (_myTrusted ? 'ISHONCHLI' : 'ro\'yxatda yo\'q'),
+                            color: _mySig.isEmpty
+                                ? Colors.orange.shade300
+                                : (_myTrusted
+                                    ? const Color(0xFF7BD88F)
+                                    : Colors.orange.shade300),
+                          ),
+                          if (_mySig.isNotEmpty) ...[
+                            const SizedBox(height: 10),
+                            SelectableText(
+                              _mySig,
                               style: TextStyle(
-                                color: Colors.orange.shade300,
-                                fontSize: 12.5,
+                                color: Colors.white.withValues(alpha: 0.7),
+                                fontSize: 11.5,
+                                fontFamily: 'monospace',
                                 height: 1.4,
                               ),
-                            ),
-                            const SizedBox(height: 10),
-                          ],
-                          SelectableText(
-                            _appKey.isEmpty ? '(kalit yo\'q)' : _appKey,
-                            style: TextStyle(
-                              color: Colors.white.withValues(alpha: 0.85),
-                              fontSize: 12.5,
-                              fontFamily: 'monospace',
-                              height: 1.4,
-                            ),
-                          ),
-                          if (_hasPrevKey) ...[
-                            const SizedBox(height: 10),
-                            Container(
-                              padding: const EdgeInsets.all(11),
-                              decoration: BoxDecoration(
-                                color: Colors.orange.shade300
-                                    .withValues(alpha: 0.12),
-                                borderRadius: BorderRadius.circular(11),
-                              ),
-                              child: Column(
-                                crossAxisAlignment:
-                                    CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    'Eski kalit hali ham ishlayapti',
-                                    style: TextStyle(
-                                      color: Colors.orange.shade300,
-                                      fontSize: 12.5,
-                                      fontWeight: FontWeight.w700,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 4),
-                                  Text(
-                                    'Yangi APK tarqatib bo\'lgach uni '
-                                    'bekor qiling.',
-                                    style: TextStyle(
-                                      color: Colors.white
-                                          .withValues(alpha: 0.6),
-                                      fontSize: 12,
-                                      height: 1.35,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 8),
-                                  OutlinedButton(
-                                    onPressed: _busy ? null : _dropPrev,
-                                    style: OutlinedButton.styleFrom(
-                                      foregroundColor:
-                                          Colors.orange.shade300,
-                                      side: BorderSide(
-                                          color: Colors.orange.shade300
-                                              .withValues(alpha: 0.4)),
-                                    ),
-                                    child: const Text('Eski kalitni bekor qilish'),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ],
-                          if (_appKey.isNotEmpty) ...[
-                            const SizedBox(height: 10),
-                            OutlinedButton.icon(
-                              onPressed: () {
-                                Clipboard.setData(
-                                    ClipboardData(text: _appKey));
-                                _say('Nusxa olindi');
-                              },
-                              style: OutlinedButton.styleFrom(
-                                foregroundColor: Colors.white70,
-                                side: BorderSide(
-                                    color: Colors.white
-                                        .withValues(alpha: 0.18)),
-                              ),
-                              icon: const Icon(Icons.copy_rounded, size: 17),
-                              label: const Text('Nusxa olish'),
                             ),
                           ],
                         ],
@@ -481,12 +426,13 @@ class _AdminAppScreenState extends State<AdminAppScreen> {
                     ),
                     const SizedBox(height: 8),
                     Text(
-                      'Kalitni APK yig\'ishda GitHub Secrets ichiga '
-                      '`APP_KEY` nomi bilan qo\'ying — CI uni ilovaga '
-                      'o\'zi joylaydi.\n\n'
-                      'Diqqat: kalit APK ichida turadi. U tasodifiy '
-                      'so\'rovlarni va botlarni to\'xtatadi, lekin '
-                      'APK\'ni ochib ko\'ra oladigan odamni emas.',
+                      'Imzo APK\'ni qanday kalit bilan imzolanganidan '
+                      'kelib chiqadi va uni ilova O\'ZI tanlay olmaydi — '
+                      'tizim beradi. Kimdir ilovani o\'zgartirib qayta '
+                      'yig\'sa, u boshqa kalit bilan imzolanadi va '
+                      'server uni rad etadi.\n\n'
+                      'Hech narsa ko\'chirib yozish shart emas: siz shu '
+                      'ilovadan turib "Shu ilovaga ishonish"ni bosasiz.',
                       style: TextStyle(
                         color: Colors.white.withValues(alpha: 0.42),
                         fontSize: 12,
@@ -494,37 +440,45 @@ class _AdminAppScreenState extends State<AdminAppScreen> {
                       ),
                     ),
                     const SizedBox(height: 12),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: FilledButton.icon(
-                            onPressed: _busy ? null : _newKey,
-                            style: FilledButton.styleFrom(
-                              minimumSize: const Size(0, 46),
-                              backgroundColor: AppColors.accent,
-                            ),
-                            icon: const Icon(Icons.vpn_key_rounded, size: 18),
-                            label: const Text('Yangi kalit'),
-                          ),
+                    if (!_myTrusted && _mySig.isNotEmpty)
+                      FilledButton.icon(
+                        onPressed: _busy ? null : _trustMe,
+                        style: FilledButton.styleFrom(
+                          minimumSize: const Size(double.infinity, 46),
+                          backgroundColor: AppColors.accent,
                         ),
-                        if (_appKey.isNotEmpty) ...[
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: OutlinedButton(
-                              onPressed: _busy ? null : _clearKey,
-                              style: OutlinedButton.styleFrom(
-                                minimumSize: const Size(0, 46),
-                                foregroundColor: Colors.red.shade300,
-                                side: BorderSide(
-                                    color: Colors.red.shade300
-                                        .withValues(alpha: 0.4)),
-                              ),
-                              child: const Text('O\'chirish'),
-                            ),
-                          ),
-                        ],
-                      ],
-                    ),
+                        icon: const Icon(Icons.verified_user_rounded, size: 19),
+                        label: const Text('Shu ilovaga ishonish',
+                            style: TextStyle(fontWeight: FontWeight.w700)),
+                      ),
+                    if (_sigCount > 1 && _myTrusted) ...[
+                      OutlinedButton(
+                        onPressed: _busy ? null : _onlyMe,
+                        style: OutlinedButton.styleFrom(
+                          minimumSize: const Size(double.infinity, 46),
+                          foregroundColor: Colors.orange.shade300,
+                          side: BorderSide(
+                              color: Colors.orange.shade300
+                                  .withValues(alpha: 0.4)),
+                        ),
+                        child: const Text('Faqat shu ilova qolsin'),
+                      ),
+                      const SizedBox(height: 8),
+                    ],
+                    if (_gateOn) ...[
+                      const SizedBox(height: 8),
+                      OutlinedButton(
+                        onPressed: _busy ? null : _clearSigs,
+                        style: OutlinedButton.styleFrom(
+                          minimumSize: const Size(double.infinity, 46),
+                          foregroundColor: Colors.red.shade300,
+                          side: BorderSide(
+                              color:
+                                  Colors.red.shade300.withValues(alpha: 0.4)),
+                        ),
+                        child: const Text('Tekshiruvni o\'chirish'),
+                      ),
+                    ],
                   ],
                 ),
         ),

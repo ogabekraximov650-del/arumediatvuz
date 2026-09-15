@@ -32,9 +32,13 @@
 
 package __PKG__
 
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
+import android.os.Build
+import android.util.Base64
 import android.view.WindowManager
+import java.security.MessageDigest
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -58,6 +62,42 @@ class MainActivity : FlutterActivity() {
                         val bytes = grabFrame(url, maxWidth, quality)
                         runOnUiThread { result.success(bytes) }
                     }.start()
+                }
+            }
+
+        // ── ILOVANING HAQIQIYLIGINI TASDIQLASH ────────────────
+        //
+        // TALAB (foydalanuvchi): "APP_KEY nimaga kerak? ... busiz
+        // ishlaydigan qilish kerak, ya'ni worker ilovaning
+        // haqiqiyligini tekshirishi kerak".
+        //
+        // ── NEGA IMZO ─────────────────────────────────────────
+        //
+        // APK'ga qo'yilgan sir (kalit) — shunchaki APK ichidagi
+        // matn: uni ochib o'qish mumkin va u hech narsani
+        // isbotlamaydi.
+        //
+        // Imzo sertifikati esa boshqacha: uni ILOVA O'ZI
+        // tanlamaydi, TIZIM beradi. Kimdir ilovani o'zgartirib
+        // qayta yig'sa, uni O'Z kaliti bilan imzolashga majbur —
+        // bizning kalitimiz unda yo'q. Natijada hash boshqacha
+        // chiqadi va server bunday ilovani rad etadi.
+        //
+        // ── ROSTINI AYTISH KERAK ──────────────────────────────
+        //
+        // Hash'ning O'ZINI APK'dan o'qib, so'rovni qo'lda yasash
+        // mumkin. Ya'ni bu:
+        //   * O'ZGARTIRILGAN ILOVANI to'xtatadi (asosiy maqsad);
+        //   * brauzer, bot va oddiy skriptlarni to'xtatadi;
+        //   * maqsadli hujumchini to'xtatmaydi.
+        // Mutlaq yechim (Play Integrity) Play Store'ni talab
+        // qiladi, bu ilova esa APK bo'lib tarqatiladi.
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "aru/signature")
+            .setMethodCallHandler { call, result ->
+                if (call.method != "sha256") {
+                    result.notImplemented()
+                } else {
+                    result.success(signatureSha256())
                 }
             }
 
@@ -119,6 +159,39 @@ class MainActivity : FlutterActivity() {
         // `aru/storage` kanali ham bor edi; profil sahifasidan
         // "telefon xotirasi N% band" qatori olib tashlangach
         // (foydalanuvchi talabi) u ham keraksiz bo'lib qoldi.
+    }
+
+    /// APK imzo sertifikatining SHA-256 hash'i (base64).
+    ///
+    /// Bir nechta imzo bo'lsa BIRINCHISI olinadi — Flutter
+    /// ilovalarida imzo doim bitta.
+    ///
+    /// Xato bo'lsa bo'sh satr: server bunday holatda so'rovni
+    /// rad etadi, lekin ilova yiqilmaydi.
+    private fun signatureSha256(): String {
+        return try {
+            val pm = packageManager
+            val sigs = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                @Suppress("DEPRECATION")
+                val info = pm.getPackageInfo(
+                    packageName, PackageManager.GET_SIGNING_CERTIFICATES
+                )
+                info.signingInfo?.apkContentsSigners
+            } else {
+                @Suppress("DEPRECATION")
+                val info = pm.getPackageInfo(
+                    packageName, PackageManager.GET_SIGNATURES
+                )
+                @Suppress("DEPRECATION")
+                info.signatures
+            }
+            val first = sigs?.firstOrNull() ?: return ""
+            val digest = MessageDigest.getInstance("SHA-256")
+                .digest(first.toByteArray())
+            Base64.encodeToString(digest, Base64.NO_WRAP)
+        } catch (e: Throwable) {
+            ""
+        }
     }
 
     /// Manzildagi videodan OXIRGI kadrni JPEG qilib qaytaradi.

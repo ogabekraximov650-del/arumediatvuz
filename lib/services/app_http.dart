@@ -22,7 +22,7 @@
 //
 // Rust yadrosi (video yuklash) bu yo'ldan O'TMAYDI — u o'z
 // so'rovlarini o'zi yuboradi. Shu sabab serverda video yo'llari
-// kalitdan ozod (`needs_app_key` izohiga qarang).
+// tekshiruvdan ozod (`needs_app_check` izohiga qarang).
 
 import 'package:http/http.dart' as http;
 
@@ -36,11 +36,12 @@ class AppHttpClient extends http.BaseClient {
 
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) {
-    // Kalit yoki versiya berilmagan bo'lsa (masalan ishlab
-    // chiqish paytida) sarlavha ham qo'shilmaydi — server esa
-    // bunday holatda tekshiruvni o'chirib qo'yadi.
-    if (kAppKey.isNotEmpty) {
-      request.headers['X-App-Key'] = kAppKey;
+    // Imzo yoki versiya berilmagan bo'lsa sarlavha ham
+    // qo'shilmaydi — server bunday holatda tekshiruvni o'chirib
+    // qo'ygan bo'lsa ilova baribir ishlaydi.
+    final sig = AppSignature.value;
+    if (sig.isNotEmpty) {
+      request.headers['X-App-Sig'] = sig;
     }
     if (kAppVersion.isNotEmpty) {
       request.headers['X-App-Version'] = kAppVersion;
