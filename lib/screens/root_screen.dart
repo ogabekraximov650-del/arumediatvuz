@@ -609,6 +609,22 @@ class _BottomNavState extends State<_BottomNav>
                                   // profil sahifasidagi nuqta bilan
                                   // bu nuqta hech qachon bir-biriga
                                   // zid bo'lib qolmaydi.
+                                  //
+                                  // ── ADMINDA CHIQMAYDI ──────────
+                                  //
+                                  // TALAB (foydalanuvchi): "adminga
+                                  // xabar kelganda support chat va
+                                  // profil tugmasida qizil nuqta
+                                  // chiqmasin, faqat admin paneli
+                                  // ustida chiqsin".
+                                  //
+                                  // Adminning sanog'i — BARCHA
+                                  // suhbatlardagi o'qilmaganlar
+                                  // yig'indisi, ya'ni uning O'Z
+                                  // yozishmasiga aloqasi yo'q.
+                                  // Shu sabab `hasForUser`
+                                  // (`support_service.dart` izohiga
+                                  // qarang).
                                   Transform.scale(
                                     scale: scale,
                                     child: _items[i].label == 'Profil'
@@ -618,7 +634,8 @@ class _BottomNavState extends State<_BottomNav>
                                                 _IconWithDot(
                                               icon: _items[i].icon,
                                               color: color,
-                                              dot: UnreadBadge.instance.has,
+                                              dot: UnreadBadge
+                                                  .instance.hasForUser,
                                             ),
                                           )
                                         : Icon(_items[i].icon,

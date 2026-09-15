@@ -4716,6 +4716,13 @@ async fn billing_create(mut req: Request, env: &Env) -> Result<Response> {
 
     let now = now_ms();
     let expires = now + PAY_LINK_TTL_MS;
+    // Eski, muddati o'tgan havolalar shu yerda ham tozalanadi:
+    // odam balans oynasini ochmasdan turib yangi havola
+    // yaratishi mumkin va o'sha holda tozalash hech qachon
+    // ishga tushmasdi.
+    let _ = turso_exec(env,
+        "DELETE FROM payments_db WHERE status='pending' AND expires_at < ?",
+        vec![TursoArg::int(now)]).await;
     turso_exec(env,
         "INSERT INTO payments_db
             (order_id,user_id,amount,status,pay_url,created_at,expires_at,paid_at)
@@ -6737,10 +6744,21 @@ async fn billing_state(req: Request, env: &Env) -> Result<Response> {
         ("SELECT kind,amount,days,note,created_at FROM billing_log
            WHERE user_id=? ORDER BY created_at DESC LIMIT 100",
          vec![TursoArg::int(me)]),
-        // Muddati o'tgan havolalar tozalanadi — jadval o'smasin.
+        // ── MUDDATI O'TGAN HAVOLA BAZADAN O'CHADI ────────
+        //
+        // TALAB (foydalanuvchi): "balans to'ldirish havolasi
+        // yaratilgach bir soatdan o'tgach bazadan o'chirib
+        // tashlanishi kerak".
+        //
+        // `expires_at` = yaratilgan vaqt + 1 soat, ya'ni shart
+        // AYNAN shuni bildiradi. Ilgari qator yana bir kun
+        // yotardi.
+        //
+        // To'langan qatorga TEGILMAYDI (`status='pending'`) —
+        // u pul yozuvi va tarixda turishi kerak.
         ("DELETE FROM payments_db
            WHERE status='pending' AND expires_at < ?",
-         vec![TursoArg::int(now - 86_400_000)]),
+         vec![TursoArg::int(now)]),
     ]).await?;
 
     let rows_of = |r: &Value| -> Vec<Value> {

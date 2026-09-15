@@ -183,12 +183,38 @@ class UnreadBadge extends ChangeNotifier {
 
   int _count = 0;
   bool _busy = false;
+  bool _admin = false;
 
   /// Nechta o'qilmagan xabar bor.
   int get count => _count;
 
   /// Nuqta yonsinmi.
   bool get has => _count > 0;
+
+  /// ── SANOQ KIMNIKI ───────────────────────────────────────
+  ///
+  /// Oddiy odam uchun bu — ADMIN unga yozgan o'qilmagan
+  /// xabarlar. Admin uchun esa — BARCHA suhbatlardagi
+  /// o'qilmaganlar yig'indisi, ya'ni butunlay boshqa narsa.
+  ///
+  /// TALAB (foydalanuvchi): "adminga xabar kelganda support chat
+  /// va profil tugmasida qizil nuqta chiqmasin, faqat admin
+  /// paneli ustida chiqsin".
+  ///
+  /// Ilgari ikkovi bir xil qaralardi va adminning profil
+  /// tugmasida ham, "Admin bilan bog'lanish" qatorida ham nuqta
+  /// yonardi — holbuki xabar u yerga emas, ADMIN PANELIGA
+  /// kelgan edi. Endi ekranlar shu belgiga qarab ajratadi.
+  bool get isAdmin => _admin;
+
+  /// Oddiy foydalanuvchining o'qilmagan xabari bormi.
+  ///
+  /// Profil tugmasi va "Admin bilan bog'lanish" qatori SHUNGA
+  /// qaraydi.
+  bool get hasForUser => _count > 0 && !_admin;
+
+  /// Admin panelidagi nuqta SHUNGA qaraydi.
+  bool get hasForAdmin => _count > 0 && _admin;
 
   /// Hisob almashganda.
   void clear() {
@@ -218,8 +244,12 @@ class UnreadBadge extends ChangeNotifier {
       if (r.statusCode == 200) {
         final j = jsonDecode(r.body) as Map<String, dynamic>;
         final n = ((j['unread'] as num?) ?? 0).toInt();
-        if (n != _count) {
+        // Server har javobda "bu admin sanog'imi" deb aytadi
+        // (`chat_unread`). Ilova buni O'ZI taxmin qilmaydi.
+        final adm = j['admin'] == true;
+        if (n != _count || adm != _admin) {
           _count = n;
+          _admin = adm;
           notifyListeners();
         }
       }

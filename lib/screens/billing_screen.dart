@@ -698,6 +698,65 @@ class _LinkTile extends StatefulWidget {
 class _LinkTileState extends State<_LinkTile> {
   bool _busy = false;
 
+  // ── MUDDAT TUGASHIDAN OLDIN BIR MARTA TEKSHIRAMIZ ────────
+  //
+  // Havola muddati tugagach qator BAZADAN o'chiriladi
+  // (foydalanuvchi talabi: "bir soatdan o'tgach bazadan
+  // o'chirib tashlanishi kerak").
+  //
+  // XAVF: odam oxirgi daqiqalarda to'lab, "Tekshirish" tugmasini
+  // bosishga ulgurmasa — qator o'chib ketadi va pul balansga
+  // tushmay qoladi. Shu sabab muddat tugashiga oz qolganda ilova
+  // O'ZI bir marta tekshiradi: to'lov bo'lgan bo'lsa qator
+  // o'chishidan OLDIN `paid` ga o'tadi va balans yangilanadi.
+  //
+  // Bir marta: takroriy so'rov hech narsani o'zgartirmaydi,
+  // faqat tarmoqqa yuk bo'lardi.
+  Timer? _autoCheck;
+  bool _autoChecked = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _armAutoCheck();
+  }
+
+  @override
+  void didUpdateWidget(_LinkTile old) {
+    super.didUpdateWidget(old);
+    if (old.link.orderId != widget.link.orderId) {
+      _autoChecked = false;
+      _armAutoCheck();
+    }
+  }
+
+  void _armAutoCheck() {
+    _autoCheck?.cancel();
+    if (_autoChecked) return;
+    // Muddat tugashiga 20 soniya qolganda.
+    final when = widget.link.left - const Duration(seconds: 20);
+    if (when <= Duration.zero) {
+      // Allaqachon oz qolgan (yoki o'tgan) — darhol.
+      _autoCheck = Timer(const Duration(milliseconds: 300), _runAutoCheck);
+      return;
+    }
+    _autoCheck = Timer(when, _runAutoCheck);
+  }
+
+  Future<void> _runAutoCheck() async {
+    if (_autoChecked || !mounted) return;
+    _autoChecked = true;
+    final r = await BillingService.instance.check(widget.link.orderId);
+    if (!mounted || !r.paid) return;
+    widget.onPaid();
+  }
+
+  @override
+  void dispose() {
+    _autoCheck?.cancel();
+    super.dispose();
+  }
+
   String get _left {
     final d = widget.link.left;
     final m = d.inMinutes;

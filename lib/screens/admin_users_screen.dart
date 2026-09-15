@@ -73,9 +73,42 @@ class _AdminUsersScreenState extends State<AdminUsersScreen> {
   final _ctrl = AdminUsersController();
   final _threads = ChatThreadsController();
   final _search = TextEditingController();
-  final _scroll = ScrollController();
+
+  // ── HAR VARAQQA O'Z SURISH NAZORATCHISI ─────────────────
+  //
+  // "Yangi" va "Onlayn" endi bir vaqtda daraxtda turadi
+  // (`PageView`), ya'ni BITTA nazoratchini ikkovi ham
+  // ishlatolmaydi — Flutter buni xato deb qaytaradi. Ustiga
+  // ikkovining surish joyi alohida bo'lgani to'g'ri ham:
+  // varaq almashganda ro'yxat boshiga sakramaydi.
+  final _scrollNew = ScrollController();
+  final _scrollOnline = ScrollController();
 
   _Tab _tab = _Tab.registered;
+
+  // ── VARAQLARNI QO'LDA SURIB O'TKAZISH ───────────────────
+  //
+  // TALAB (foydalanuvchi): "oynalarni qo'lda surib o'tkazsa
+  // bo'ladigan qil".
+  //
+  // Tugma bosilganda ham, surilganda ham bitta manba
+  // (`_tab`) o'zgaradi — ya'ni tugma bilan ko'rinayotgan
+  // oyna hech qachon bir-biriga zid bo'lib qolmaydi.
+  late final PageController _pages =
+      PageController(initialPage: _tab.index);
+
+  /// Admin varaqni O'ZI tanladimi.
+  ///
+  /// TALAB (foydalanuvchi): "foydalanuvchi bo'limidan support
+  /// chatga xabar kelganda xabar oynasi birinchi chiqishi
+  /// kerak".
+  ///
+  /// Yozishmalar ro'yxati tarmoqdan biroz keyin keladi, ya'ni
+  /// "o'qilmagan bormi" degan savolga javob ekran ochilgandan
+  /// SO'NG ma'lum bo'ladi. Shu sabab o'tish keyinroq ham
+  /// bo'lishi mumkin — lekin admin o'zi boshqa varaqqa
+  /// o'tgan bo'lsa, uni zo'rlab qaytarib olib kelmaydi.
+  bool _tabPicked = false;
 
   /// Izlash HAR HARFDA emas, yozish to'xtagach yuboriladi.
   Timer? _debounce;
@@ -90,31 +123,76 @@ class _AdminUsersScreenState extends State<AdminUsersScreen> {
     // yuklanadi, chunki ustidagi o'qilmaganlar soni darhol
     // kerak bo'ladi.
     _threads.loadFromDisk();
-    _threads.load();
+    // Diskdagi nusxada allaqachon o'qilmagan bo'lsa — darhol
+    // yozishmalar varag'ida ochiladi (tarmoq kutilmaydi).
+    _jumpToChatsIfUnread(initial: true);
+    unawaited(_threads.load().then((_) {
+      if (mounted) _jumpToChatsIfUnread();
+    }));
     // Yangi xabar DARHOL yuqorida paydo bo'lsin (uzoq kutish —
     // `ChatThreadsController._watchLoop` izohiga qarang).
     _threads.startWatching();
-    _scroll.addListener(() {
-      if (!_scroll.hasClients) return;
-      final left = _scroll.position.maxScrollExtent - _scroll.position.pixels;
-      if (left < 400) _ctrl.loadMore();
-    });
+    for (final c in [_scrollNew, _scrollOnline]) {
+      c.addListener(() {
+        if (!c.hasClients) return;
+        final left = c.position.maxScrollExtent - c.position.pixels;
+        if (left < 400) _ctrl.loadMore();
+      });
+    }
+  }
+
+  /// O'qilmagan xabar bo'lsa yozishmalar varag'ini ochadi.
+  ///
+  /// `initial` — `initState` dan chaqirilgan: ekran hali
+  /// qurilmagan, ya'ni `setState` ham, `PageController` ham
+  /// kerak emas (boshlang'ich varaq `_pages` yaratilganda
+  /// `_tab` dan olinadi).
+  void _jumpToChatsIfUnread({bool initial = false}) {
+    if (_tabPicked || _tab == _Tab.chats) return;
+    final unread = _threads.items.fold<int>(0, (n, t) => n + t.unread);
+    if (unread <= 0) return;
+    if (initial) {
+      _tab = _Tab.chats;
+      return;
+    }
+    _goToTab(_Tab.chats, fromSwipe: false);
   }
 
   @override
   void dispose() {
     _debounce?.cancel();
+    _pages.dispose();
     _ctrl.dispose();
     _threads.stopWatching();
     _threads.dispose();
     _search.dispose();
-    _scroll.dispose();
+    _scrollNew.dispose();
+    _scrollOnline.dispose();
     super.dispose();
   }
 
+  /// Tugma bosildi.
   void _setTab(_Tab t) {
+    _tabPicked = true;
+    _goToTab(t, fromSwipe: false);
+  }
+
+  /// Varaqni almashtiradi.
+  ///
+  /// `fromSwipe` — surish natijasida chaqirilgan bo'lsa
+  /// `PageController` allaqachon to'g'ri joyda, ya'ni unga
+  /// qayta tegilmaydi (aks holda surish o'rtasida sakrash
+  /// bo'lardi).
+  void _goToTab(_Tab t, {required bool fromSwipe}) {
     if (_tab == t) return;
     setState(() => _tab = t);
+    if (!fromSwipe && _pages.hasClients) {
+      _pages.animateToPage(
+        t.index,
+        duration: const Duration(milliseconds: 240),
+        curve: Curves.easeOutCubic,
+      );
+    }
     switch (t) {
       case _Tab.registered:
         _ctrl.setSort(UserSort.registered);
@@ -182,7 +260,28 @@ class _AdminUsersScreenState extends State<AdminUsersScreen> {
                 if (_tab != _Tab.chats) _searchBox(),
                 _sortTabs(),
                 Expanded(
-                  child: _tab == _Tab.chats ? _chatList() : _list(),
+                  // Varaqlar qo'lda suriladi (foydalanuvchi
+                  // talabi). Tartib `_Tab` dagidek:
+                  // Yangi | Onlayn | Suhbatlar.
+                  child: PageView(
+                    controller: _pages,
+                    // `Clamping` — chetda cho'zilishning ma'nosi
+                    // yo'q va har cho'zilish qo'shni varaqni
+                    // ham qaytadan chizardi.
+                    physics: const ClampingScrollPhysics(),
+                    onPageChanged: (i) {
+                      _tabPicked = true;
+                      _goToTab(_Tab.values[i], fromSwipe: true);
+                    },
+                    children: [
+                      // Birinchi ikkovi BITTA ro'yxat, faqat
+                      // tartibi boshqacha — `_ctrl.setSort`
+                      // varaq almashganda chaqiriladi.
+                      _list(_scrollNew),
+                      _list(_scrollOnline),
+                      _chatList(),
+                    ],
+                  ),
                 ),
               ],
             ),
@@ -462,7 +561,7 @@ class _AdminUsersScreenState extends State<AdminUsersScreen> {
     await UnreadBadge.instance.refresh();
   }
 
-  Widget _list() {
+  Widget _list(ScrollController scroll) {
     if (_ctrl.isLoading) {
       return Center(
         child: CircularProgressIndicator(
@@ -490,7 +589,7 @@ class _AdminUsersScreenState extends State<AdminUsersScreen> {
       color: AppColors.accent,
       backgroundColor: AppColors.card,
       child: ListView.builder(
-        controller: _scroll,
+        controller: scroll,
         physics: const BouncingScrollPhysics(
             parent: AlwaysScrollableScrollPhysics()),
         padding: const EdgeInsets.fromLTRB(12, 2, 12, 24),

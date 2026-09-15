@@ -546,6 +546,16 @@ class _ProfileBody extends StatelessWidget {
                             fontSize: 16,
                             fontWeight: FontWeight.w600)),
                   ),
+                  // ── O'QILMAGAN XABAR NUQTASI ──────────────
+                  //
+                  // TALAB (foydalanuvchi): "adminga xabar
+                  // kelganda ... faqat admin paneli ustida
+                  // chiqsin".
+                  //
+                  // Xabar aslida SHU YERGA keladi: adminning
+                  // sanog'i barcha foydalanuvchilar bilan
+                  // yozishmalardagi o'qilmaganlar yig'indisi.
+                  const _AdminUnreadDot(),
                   const Icon(Icons.chevron_right_rounded,
                       color: Colors.white38),
                 ],
@@ -1677,10 +1687,52 @@ class _UnreadDotState extends State<_UnreadDot> {
     return AnimatedBuilder(
       animation: UnreadBadge.instance,
       builder: (context, _) {
-        if (!UnreadBadge.instance.has) return const SizedBox.shrink();
+        // Adminda chiqmaydi: uning sanog'i BARCHA suhbatlarniki
+        // bo'lib, bu qatorga (o'z yozishmasiga) aloqasi yo'q.
+        // Foydalanuvchi talabi — nuqta faqat admin paneli
+        // tugmasida chiqsin.
+        if (!UnreadBadge.instance.hasForUser) {
+          return const SizedBox.shrink();
+        }
         return Container(
           width: 10,
           height: 10,
+          decoration: BoxDecoration(
+            color: AppColors.accent,
+            shape: BoxShape.circle,
+            boxShadow: [
+              BoxShadow(
+                color: AppColors.accent.withValues(alpha: 0.6),
+                blurRadius: 7,
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// Admin paneli tugmasidagi qizil nuqta.
+///
+/// `_UnreadDot` dan farqi: bu FAQAT adminda yonadi, u esa faqat
+/// oddiy foydalanuvchida (`support_service.dart` -> `UnreadBadge`
+/// izohiga qarang). Ikkovi hech qachon bir vaqtda ko'rinmaydi.
+class _AdminUnreadDot extends StatelessWidget {
+  const _AdminUnreadDot();
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: UnreadBadge.instance,
+      builder: (context, _) {
+        if (!UnreadBadge.instance.hasForAdmin) {
+          return const SizedBox.shrink();
+        }
+        return Container(
+          width: 10,
+          height: 10,
+          margin: const EdgeInsets.only(right: 8),
           decoration: BoxDecoration(
             color: AppColors.accent,
             shape: BoxShape.circle,
