@@ -6,8 +6,8 @@ import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../services/admin_badges.dart';
+import '../services/app_build.dart';
 import '../services/auth_service.dart';
-import '../services/dm_service.dart';
 import '../services/billing_service.dart';
 import '../services/format.dart';
 import '../services/net_meter.dart';
@@ -24,7 +24,6 @@ import '../services/support_service.dart';
 import 'admin_screen.dart';
 import 'support_chat_screen.dart';
 import 'profile_edit_screen.dart';
-import 'dm_threads_screen.dart';
 import 'sessions_screen.dart';
 import 'settings_screen.dart';
 import 'telegram_login_screen.dart';
@@ -461,21 +460,6 @@ class _ProfileBody extends StatelessWidget {
           // degan eniga cho'zilgan bitta uzun tugma qo'sh".
           const _BillingButton(),
           const SizedBox(height: 12),
-          // ── SUHBATLAR (foydalanuvchi talabi) ─────────────────
-          //
-          // TALAB: "balans to'ldirish tugmasi tagiga suhbatlar
-          // degan tugma qo'sh — tugmaga bosganda huddi admin
-          // panelidagidek support chat ochilsin, ya'ni bitta
-          // foydalanuvchi boshqa do'stlari bilan gaplasha olsin".
-          //
-          // Qizil nuqta — "suhbatlardan kimdir xabar yuborsa
-          // nuqta yonib tursin, huddi support chatdagidek".
-          // Sanoq AYRIM (`DmBadge`): admin bilan yozishmaniki
-          // bilan aralashsa, qaysi nuqta qaysi yozishmaniki
-          // ekani bilinmasdi.
-          const _DmButton(),
-          const SizedBox(height: 12),
-
           // ── SHAXSIY STATISTIKA (2x2) ─────────────────────────
           //
           // Rasm va balans TAGIDA: nechta anime ko'rgan (bo'lim
@@ -548,7 +532,22 @@ class _ProfileBody extends StatelessWidget {
           // (Telegram raqamiga qarab) — ya'ni ilovani
           // o'zgartirish bilan panelga kirib bo'lmaydi: har bir
           // admin so'rovi serverda ham tekshiriladi.
-          if (user.isAdmin)
+          // ── ADMIN PANELI: IKKI SHART ──────────────────────
+          //
+          // TALAB (foydalanuvchi): "ikkita build qil, bittasida
+          // admin paneliga tegishli kodlar bo'lmasin".
+          //
+          // `kAdminBuild` — `const`, ya'ni build paytida ma'lum.
+          // `false` bo'lsa Dart kompilyatori butun shu shoxni
+          // tashlab yuboradi va `AdminScreen` ga boradigan yo'l
+          // qolmaydi — u bilan birga admin ekranlari ham APK'dan
+          // chiqib ketadi.
+          //
+          // `user.isAdmin` esa SERVER bergan belgi: adminli
+          // build'ni boshqa odam o'rnatsa ham panel ko'rinmaydi.
+          // Haqiqiy to'siq baribir serverda — har admin so'rovi
+          // o'sha yerda qayta tekshiriladi.
+          if (kAdminBuild && user.isAdmin)
           GlassTappable(
             onTap: () => _open(context, AdminScreen()),
             child: Glass(
@@ -904,106 +903,6 @@ class _BillingButton extends StatefulWidget {
 
   @override
   State<_BillingButton> createState() => _BillingButtonState();
-}
-
-/// "Suhbatlar" tugmasi.
-class _DmButton extends StatefulWidget {
-  const _DmButton();
-
-  @override
-  State<_DmButton> createState() => _DmButtonState();
-}
-
-class _DmButtonState extends State<_DmButton> {
-  @override
-  void initState() {
-    super.initState();
-    // Sahifa ochilganda darhol bir marta. Doimiy yangilash
-    // `root_screen.dart` dagi umumiy taymerda.
-    unawaited(DmBadge.instance.refresh());
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: DmBadge.instance,
-      builder: (context, _) {
-        final n = DmBadge.instance.count;
-        return GlassTappable(
-          onTap: () => Navigator.of(context).push(
-            MaterialPageRoute<void>(builder: (_) => const DmThreadsScreen()),
-          ),
-          child: Glass(
-            borderRadius: 20,
-            blur: 16,
-            tint: 0.12,
-            padding:
-                const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-            child: Row(
-              children: [
-                Container(
-                  padding: const EdgeInsets.all(8),
-                  decoration: BoxDecoration(
-                    color: Colors.white.withValues(alpha: 0.12),
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: const Icon(Icons.forum_rounded,
-                      color: Colors.white, size: 22),
-                ),
-                const SizedBox(width: 14),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Text('Suhbatlar',
-                          style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 16,
-                              fontWeight: FontWeight.w600)),
-                      const SizedBox(height: 2),
-                      Text(
-                        n > 0
-                            ? '$n ta o\'qilmagan xabar'
-                            : 'Do\'stlaringiz bilan yozishing',
-                        style: TextStyle(
-                          color: Colors.white.withValues(alpha: 0.55),
-                          fontSize: 12,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                if (n > 0) ...[
-                  Container(
-                    constraints: const BoxConstraints(minWidth: 22),
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 7, vertical: 3),
-                    decoration: BoxDecoration(
-                      color: AppColors.accent,
-                      borderRadius: BorderRadius.circular(11),
-                    ),
-                    child: Text(
-                      '$n',
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 11.5,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 6),
-                ],
-                const Icon(Icons.chevron_right_rounded,
-                    color: Colors.white38),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
 }
 
 /// Obuna tugaydigan aniq sana: `21.09.2026 14:30`.

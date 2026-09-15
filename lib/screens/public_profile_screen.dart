@@ -33,10 +33,8 @@ import '../services/auth_service.dart';
 import '../services/billing_service.dart' show formatSum;
 import '../services/disk_cache.dart';
 import '../services/format.dart';
-import '../services/dm_service.dart';
 import '../theme/app_background.dart';
 import '../widgets/glass.dart';
-import 'dm_chat_screen.dart';
 
 class PublicProfileScreen extends StatefulWidget {
   final int userId;
@@ -233,39 +231,6 @@ class _PublicProfileScreenState extends State<PublicProfileScreen> {
             ),
           ),
           const SizedBox(height: 12),
-          // ── SUHBATLASHISH (foydalanuvchi talabi) ──────────────
-          //
-          // TALAB: "foydalanuvchi izoh orqali foydalanuvchi
-          // profiliga kirsa, suhbatlashish degan tugma bo'lsin".
-          //
-          // O'Z profilida ko'rinmaydi: o'zi bilan yozishishning
-          // ma'nosi yo'q (server ham rad etadi).
-          if (AuthService.instance.user?.id != widget.userId)
-            SizedBox(
-              width: double.infinity,
-              child: FilledButton.icon(
-                style: FilledButton.styleFrom(
-                  backgroundColor: AppColors.accent,
-                  minimumSize: const Size(0, 48),
-                ),
-                onPressed: () => Navigator.of(context).push(
-                  MaterialPageRoute<void>(
-                    builder: (_) => DmChatScreen(
-                      other: DmPerson(
-                        userId: widget.userId,
-                        firstName: first,
-                        username: username,
-                        photoUrl: photo,
-                      ),
-                    ),
-                  ),
-                ),
-                icon: const Icon(Icons.forum_rounded, size: 20),
-                label: const Text('Suhbatlashish',
-                    style: TextStyle(
-                        fontSize: 14.5, fontWeight: FontWeight.w700)),
-              ),
-            ),
           const SizedBox(height: 14),
           // ── STATISTIKA ODATDA YOPIQ ───────────────────────────
           //

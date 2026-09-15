@@ -43,7 +43,6 @@ import 'package:path_provider/path_provider.dart';
 import 'app_settings.dart';
 import 'billing_service.dart';
 import 'admin_badges.dart';
-import 'dm_service.dart';
 import 'support_service.dart';
 import 'rust_bridge.dart';
 import 'season_info.dart';
@@ -101,10 +100,6 @@ class AccountData {
     // Admin panelidagi yangilik nuqtalari ham.
     try {
       AdminBadges.instance.clear();
-    } catch (_) {}
-    // Do'stlar bilan yozishmadagi nuqta ham.
-    try {
-      DmBadge.instance.clear();
     } catch (_) {}
     try {
       WatchProgress.instance.reload();

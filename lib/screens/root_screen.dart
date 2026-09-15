@@ -4,8 +4,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import '../services/admin_badges.dart';
+import '../services/app_build.dart';
 import '../services/auth_service.dart';
-import '../services/dm_service.dart';
 import '../services/support_service.dart';
 import '../services/season_info.dart';
 import '../services/ui_state.dart';
@@ -98,13 +98,9 @@ class _RootScreenState extends State<RootScreen>
       const Duration(seconds: 12),
       (_) {
         UnreadBadge.instance.refresh();
-        // Do'stlar bilan yozishmadagi o'qilmaganlar — AYRIM
-        // sanoq (`DmBadge` izohiga qarang).
-        DmBadge.instance.refresh();
         _refreshAdminBadges();
       },
     );
-    unawaited(DmBadge.instance.refresh());
     _refreshAdminBadges();
 
     // ── ADMIN PANELIGA QAYTISH ───────────────────────────────
@@ -113,15 +109,20 @@ class _RootScreenState extends State<RootScreen>
     // bo'lsa, foydalanuvchi qaytganda O'SHA joyda turishi kerak
     // (foydalanuvchi talabi). Belgi diskda turadi —
     // `UiState` izohiga qarang.
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !UiState.takeAdminRestore()) return;
-      // Belgi diskda qolib ketgan bo'lsa ham panel faqat adminga
-      // ochiladi.
-      if (AuthService.instance.user?.isAdmin != true) return;
-      Navigator.of(context).push(
-        MaterialPageRoute<void>(builder: (_) => const AdminScreen()),
-      );
-    });
+    // `kAdminBuild` — `const`: admin paneli bo'lmagan build'da
+    // kompilyator butun shu shoxni tashlab yuboradi
+    // (`app_build.dart` izohiga qarang).
+    if (kAdminBuild) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !UiState.takeAdminRestore()) return;
+        // Belgi diskda qolib ketgan bo'lsa ham panel faqat
+        // adminga ochiladi.
+        if (AuthService.instance.user?.isAdmin != true) return;
+        Navigator.of(context).push(
+          MaterialPageRoute<void>(builder: (_) => const AdminScreen()),
+        );
+      });
+    }
   }
 
   /// ── ADMIN PANELIDAGI YANGILIKLAR ────────────────────────
@@ -136,7 +137,8 @@ class _RootScreenState extends State<RootScreen>
   /// `UnreadBadge` serverdan kelgan belgini eslab qoladi
   /// (`support_service.dart` izohiga qarang).
   void _refreshAdminBadges() {
-    if (!UnreadBadge.instance.isAdmin) return;
+    // Admin paneli yo'q build'da bu so'rov umuman kerak emas.
+    if (!kAdminBuild || !UnreadBadge.instance.isAdmin) return;
     unawaited(AdminBadges.instance.refresh());
   }
 
@@ -148,7 +150,6 @@ class _RootScreenState extends State<RootScreen>
     AuthService.instance.refresh();
     // Fon'dan qaytdi — admin javob yozgan bo'lsa nuqta yonsin.
     unawaited(UnreadBadge.instance.refresh());
-    unawaited(DmBadge.instance.refresh());
     _refreshAdminBadges();
     // Telegramdan qaytdi. Foydalanuvchi u yerda START bosgan
     // bo'lsa, sessiya serverda allaqachon ochilgan — saqlangan

@@ -38,6 +38,32 @@ jobs:
   build-apk:
     runs-on: ubuntu-latest
 
+    # ── IKKITA APK (foydalanuvchi talabi) ─────────────────────
+    #
+    # TALAB: "ikkita build qil, bittasida admin paneliga tegishli
+    # kodlar bo'lmasin, ikkinchisida esa men uchun admin paneli
+    # bor ilova build qil".
+    #
+    # `ADMIN_BUILD` `--dart-define` orqali beriladi va ilovada
+    # `const bool` bo'lib tushadi. `false` bo'lsa Dart kompilyatori
+    # admin ekranlariga boradigan yo'lni topmaydi va ularni
+    # APK'dan butunlay chiqarib tashlaydi (`app_build.dart`).
+    strategy:
+      # Bittasi yiqilsa ikkinchisi baribir qurilsin — admin
+      # buildidagi xato oddiy foydalanuvchilar APK'sini
+      # to'xtatmasin.
+      fail-fast: false
+      # KETMA-KET: ikkala job bir vaqtda bitta Release'ga yozsa
+      # to'qnashadi va bittasi "tag allaqachon bor" xatosi bilan
+      # yiqilardi.
+      max-parallel: 1
+      matrix:
+        include:
+          - name: user
+            admin: 'false'
+          - name: admin
+            admin: 'true'
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -315,9 +341,41 @@ jobs:
       # --split-per-abi ISHLATILMAYDI: bitta APK chiqadi va uni
       # barcha ARM telefonlar (32- va 64-bitlilar) o'rnata oladi.
       - name: Build APK (Release — faqat 32-bit / armeabi-v7a)
+        env:
+          # Ulanish kaliti GitHub Secrets'dan keladi. Qo'yilmagan
+          # bo'lsa bo'sh qoladi va server tekshiruvni o'chirib
+          # qo'yadi (`app_gate` izohiga qarang) — ya'ni ilova
+          # baribir ishlaydi.
+          APP_KEY: ${{ secrets.APP_KEY }}
         run: |
+          # ── NEGA `--build-number` (TUZATILGAN XATO) ──────────
+          #
+          # TOPILGAN XATO (foydalanuvchi: "yangi versiyani
+          # o'rnatmoqchi bo'lganimda ilova yangilanmayapti").
+          #
+          # `pubspec.yaml` da `version: 0.0.9+9` turardi va u
+          # HECH QACHON o'zgarmasdi. Android esa APK'ni
+          # `versionCode` bo'yicha taqqoslaydi: yangi APK'niki
+          # eskisidan KATTA bo'lmasa, o'rnatish "yangilanish"
+          # deb qabul qilinmaydi va tizim shunchaki rad etadi.
+          #
+          # Endi `versionCode` = build raqami. U har build'da
+          # o'sadi, ya'ni har yangi APK eskisining ustiga
+          # bemalol o'rnatiladi.
+          #
+          # Ko'rinadigan versiya (`0.0.9`) `pubspec.yaml` dan
+          # olinadi va o'zgarmaydi — uni faqat qo'lda oshirasiz.
+          BUILD_NAME=$(grep '^version:' pubspec.yaml | sed 's/version: *//' | cut -d+ -f1)
+          APP_VERSION="${BUILD_NAME}+${{ github.run_number }}"
+          echo "versiya: $APP_VERSION  (admin: ${{ matrix.admin }})"
+
           flutter build apk --release \
-            --target-platform android-arm
+            --target-platform android-arm \
+            --build-name "$BUILD_NAME" \
+            --build-number "${{ github.run_number }}" \
+            --dart-define=ADMIN_BUILD=${{ matrix.admin }} \
+            --dart-define=APP_VERSION="$APP_VERSION" \
+            --dart-define=APP_KEY="$APP_KEY"
 
       # ── APK HAQIQATAN 32-BIT BO'LISHI SHART ───────────────────
       #
@@ -704,18 +762,34 @@ jobs:
       # Shu sabab APK Release sifatida ham chiqariladi: u yerdan
       # telefonga TO'G'RIDAN-TO'G'RI .apk fayli yuklanadi va darhol
       # o'rnatiladi, hech narsani ochish shart emas.
+      # Ikkala APK bitta Release'ga tushadi, lekin NOMI boshqacha —
+      # aks holda ikkinchisi birinchisining ustiga yozilardi.
+      - name: APK nomini belgilash
+        id: rename
+        run: |
+          SRC="build/app/outputs/flutter-apk/app-release.apk"
+          OUT="build/app/outputs/flutter-apk/aniraxuz-${{ matrix.name }}.apk"
+          cp "$SRC" "$OUT"
+          echo "out=$OUT" >> "$GITHUB_OUTPUT"
+          ls -lh "$OUT"
+
       - name: APK'ni Release sifatida chiqarish
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
-          name: Fulutter APK (build ${{ github.run_number }})
+          name: AniRaxUz (build ${{ github.run_number }})
           body: |
-            Telefonga to'g'ridan-to'g'ri o'rnatish uchun quyidagi
-            `app-release.apk` faylini yuklab oling (ZIP emas).
+            Telefonga to'g'ridan-to'g'ri o'rnatish uchun `.apk`
+            faylini yuklab oling (ZIP emas).
 
+            * `aniraxuz-user.apk`  — oddiy foydalanuvchilar uchun
+              (admin paneli YO'Q)
+            * `aniraxuz-admin.apk` — admin paneli bilan
+
+            Versiya: ${{ github.run_number }}
             Commit: ${{ github.sha }}
           prerelease: true
-          files: build/app/outputs/flutter-apk/app-release.apk
+          files: ${{ steps.rename.outputs.out }}
 
       # ── ARTIFACT YUKLASH — MAJBURIY EMAS ──────────────────────
       #
@@ -735,11 +809,11 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: fulutter-app-release
-          path: build/app/outputs/flutter-apk/app-release.apk
+          name: aniraxuz-${{ matrix.name }}
+          path: ${{ steps.rename.outputs.out }}
           retention-days: 30
 
       - name: Done
         run: |
-          echo "✅ APK tayyor! Artifacts → fulutter-app-release"
+          echo "✅ APK tayyor: aniraxuz-${{ matrix.name }}.apk"
           echo "   Faqat 32-bit (armeabi-v7a), imzolar: v1+v2+v3(+v4)."

@@ -3,7 +3,7 @@ import '../theme/app_background.dart';
 import '../widgets/glass.dart';
 import '../services/admin_badges.dart';
 import '../services/admin_users_service.dart';
-import 'admin_dm_screen.dart';
+import 'admin_app_screen.dart';
 import 'admin_reports_screen.dart';
 import 'admin_users_screen.dart';
 import 'anime_management_screen.dart';
@@ -164,20 +164,20 @@ class AdminScreen extends StatelessWidget {
                       },
                     ),
                     const SizedBox(height: 12),
-                    // ── SHAXSIY CHATLAR ───────────────────────
+                    // ── ILOVA VA XAVFSIZLIK ───────────────────
                     //
-                    // TALAB (foydalanuvchi): "barcha shaxsiy
-                    // chatlar admin panelida ko'rinishi kerak ...
-                    // bu biroz noto'g'ri lekin xavfsizlik va
-                    // nomaqbul hatti-harakatlarni oldini olish
-                    // uchun zarur".
+                    // TALAB (foydalanuvchi): "admin panelga
+                    // versiya raqam yozadigan bo'lim qo'sh ...
+                    // Worker shu va shundan katta versiyalarda
+                    // ishlaydi" va "ulanish kaliti yasab bazaga
+                    // qo'sh".
                     _AdminButton(
-                      icon: Icons.forum_rounded,
-                      label: 'Shaxsiy chatlar',
-                      subtitle: 'Foydalanuvchilar o\'rtasidagi yozishmalar',
+                      icon: Icons.security_rounded,
+                      label: 'Ilova va xavfsizlik',
+                      subtitle: 'Eng past versiya, ulanish kaliti',
                       onTap: () => Navigator.of(context).push(
                         MaterialPageRoute<void>(
-                          builder: (_) => const AdminDmScreen(),
+                          builder: (_) => const AdminAppScreen(),
                         ),
                       ),
                     ),

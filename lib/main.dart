@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'screens/root_screen.dart';
+import 'services/app_http.dart';
 import 'services/app_keys.dart';
 import 'services/auth_service.dart';
 import 'services/billing_service.dart';
@@ -34,7 +35,18 @@ import 'services/watch_history.dart';
 //
 // Video bunga kirmaydi: uni Rust yadrosi oladi va o'z hisoblagichi
 // bor (`traffic_service.dart` ikkovini qo'shadi).
-Future<void> main() => http.runWithClient(_main, CountingClient.new);
+// ── ILOVA BELGISI HAM SHU YERDA QO'SHILADI ──────────────────
+//
+// TALAB (foydalanuvchi): "Workerni faqat ilovaga javob beradigan
+// qil, tashqi so'rovlar rad etilsin".
+//
+// `AppHttpClient` har so'rovga ulanish kaliti va ilova versiyasini
+// qo'yadi, keyin sanovchi klientga uzatadi. Ikkovi ham SHU BITTA
+// joyda o'raladi — ya'ni servislarga umuman tegilmaydi va yangi
+// so'rov qo'shilganda ham sarlavha o'z-o'zidan boradi
+// (`app_http.dart` izohiga qarang).
+Future<void> main() =>
+    http.runWithClient(_main, () => AppHttpClient(CountingClient()));
 
 Future<void> _main() async {
   WidgetsFlutterBinding.ensureInitialized();

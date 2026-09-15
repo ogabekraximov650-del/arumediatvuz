@@ -72,18 +72,6 @@ class Comment {
   final String username;
   final String photoUrl;
   final String body;
-
-  /// ── GIF ───────────────────────────────────────────────────
-  ///
-  /// TALAB (foydalanuvchi): "izohga GIF yuborish tizimini ulab
-  /// ber, huddi Instagramdagidek".
-  ///
-  /// Bo'sh — oddiy matnli izoh. Manzil SERVERDA tekshiriladi:
-  /// faqat tanlangan xizmatlarniki qabul qilinadi
-  /// (`clean_gif_url` izohiga qarang), ya'ni bu yerga begona
-  /// manzil tusha olmaydi.
-  final String gifUrl;
-
   final int createdAt;
   final bool deleted;
 
@@ -102,7 +90,6 @@ class Comment {
     required this.body,
     required this.createdAt,
     required this.deleted,
-    this.gifUrl = '',
     required this.likes,
     required this.replyCount,
     required this.liked,
@@ -126,7 +113,6 @@ class Comment {
         username: '${j['username'] ?? ''}',
         photoUrl: '${j['photo_url'] ?? ''}',
         body: '${j['body'] ?? ''}',
-        gifUrl: '${j['gif_url'] ?? ''}',
         createdAt: ((j['created_at'] as num?) ?? 0).toInt(),
         deleted: j['deleted'] == true,
         likes: ((j['likes'] as num?) ?? 0).toInt(),
@@ -143,7 +129,6 @@ class Comment {
         'username': username,
         'photo_url': photoUrl,
         'body': body,
-        'gif_url': gifUrl,
         'created_at': createdAt,
         'deleted': deleted,
         'likes': likes,
@@ -381,17 +366,9 @@ class CommentsController extends ChangeNotifier {
 
   /// Izoh yoki javob yozadi. Xato bo'lsa matn qaytadi.
   /// Izoh yozadi.
-  ///
-  /// `gifUrl` — biriktirilgan GIF (bo'sh bo'lsa oddiy matn).
-  /// GIF bo'lsa MATN SHART EMAS: Instagramda ham GIF o'zi
-  /// yuboriladi.
-  Future<String?> add(
-    String body, {
-    String parentId = '',
-    String gifUrl = '',
-  }) async {
+  Future<String?> add(String body, {String parentId = ''}) async {
     final text = body.trim();
-    if (text.isEmpty && gifUrl.isEmpty) return 'Izoh bo\'sh';
+    if (text.isEmpty) return 'Izoh bo\'sh';
     try {
       final r = await http
           .post(
@@ -402,7 +379,6 @@ class CommentsController extends ChangeNotifier {
               'season_id': seasonId,
               'parent_id': parentId,
               'body': text,
-              if (gifUrl.isNotEmpty) 'gif_url': gifUrl,
             }),
           )
           .timeout(const Duration(seconds: 20));
