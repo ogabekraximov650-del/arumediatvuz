@@ -747,6 +747,48 @@ async fn init_db(env: &Env) -> bool {
         )", vec![]),
 
         // ══════════════════════════════════════════════════════
+        //  SHIKOYATLAR
+        // ══════════════════════════════════════════════════════
+        //
+        // TALAB (foydalanuvchi): "izohning o'ng chetiga 3ta nuqta
+        // qo'y, bosganda shikoyat qilish chiqsin; admin panelida
+        // esa shikoyatlar bo'limida shikoyat qayerdan kelgani,
+        // shikoyat qilingan izoh va shikoyat qiluvchining xabari
+        // tursin".
+        //
+        // ── NEGA IZOH NUSXASI SAQLANADI ───────────────────────
+        //
+        // `target_body` va `target_user_id` — shikoyat kelgan
+        // PAYTDAGI holat. Izohni egasi o'chirib yuborsa ham admin
+        // nimadan shikoyat qilinganini ko'radi; aks holda ro'yxatda
+        // bo'sh qator turardi va shikoyatni hal qilib bo'lmasdi.
+        //
+        // `anime_id` / `season_id` — "Tekshirish" tugmasi uchun:
+        // izoh QAYSI bo'limda yozilgani.
+        ("CREATE TABLE IF NOT EXISTS reports_db (
+            id TEXT PRIMARY KEY,
+            -- Hozircha faqat 'comment'. Keyinchalik boshqa manba
+            -- (profil, yozishma) qo'shilsa shu ustun ajratadi.
+            kind TEXT DEFAULT 'comment',
+            target_id TEXT DEFAULT '',
+            target_body TEXT DEFAULT '',
+            target_user_id INTEGER DEFAULT 0,
+            anime_id INTEGER DEFAULT 0,
+            season_id INTEGER DEFAULT 0,
+            reporter_id INTEGER DEFAULT 0,
+            reason TEXT DEFAULT '',
+            created_at INTEGER
+        )", vec![]),
+        // Yangi shikoyat tepada.
+        ("CREATE INDEX IF NOT EXISTS idx_reports_new
+            ON reports_db(created_at DESC)", vec![]),
+        // BIR ODAM — BIR MARTA. Xuddi laykdagidek: takroriy
+        // shikoyat ro'yxatni bir xil qatorlar bilan to'ldirib,
+        // adminning ishini qiyinlashtirardi.
+        ("CREATE UNIQUE INDEX IF NOT EXISTS idx_reports_once
+            ON reports_db(kind, target_id, reporter_id)", vec![]),
+
+        // ══════════════════════════════════════════════════════
         //  ADMIN BILAN YOZISHMA
         // ══════════════════════════════════════════════════════
         //
@@ -5204,28 +5246,53 @@ async fn comments_delete(req: &Request, env: &Env, id: &str) -> Result<Response>
     // Layklar ham o'chiriladi — aks holda comment_likes jadvalida
     // hech qachon o'qilmaydigan qatorlar yig'ilib borardi.
     //
-    // Tartib MUHIM: avval EGALIK tekshiriladi (user_id=?), shu
-    // o'tgandan keyingina qolgani o'chiriladi.
-    let res = turso_exec(env,
-        "DELETE FROM comments_db
-          WHERE id=? AND user_id=?
-          RETURNING id, parent_id",
-        vec![TursoArg::text(id), TursoArg::int(me)]).await?;
+    // ── ADMIN HAM O'CHIRA OLADI ──────────────────────────────
+    //
+    // Shikoyat tizimi shusiz ishlamaydi: admin qoidabuzar izohni
+    // ko'radi-yu, unga hech narsa qila olmasdi. Boshqa hamma
+    // odam uchun shart o'zgarmaydi — faqat O'Z izohi.
+    //
+    // Tartib MUHIM: avval EGALIK (yoki adminlik) tekshiriladi,
+    // shu o'tgandan keyingina qolgani o'chiriladi.
+    let res = if is_admin(&u) {
+        turso_exec(env,
+            "DELETE FROM comments_db WHERE id=? RETURNING id, parent_id",
+            vec![TursoArg::text(id)]).await?
+    } else {
+        turso_exec(env,
+            "DELETE FROM comments_db
+              WHERE id=? AND user_id=?
+              RETURNING id, parent_id",
+            vec![TursoArg::text(id), TursoArg::int(me)]).await?
+    };
     let Some(row) = first_row(&res) else {
         return json_resp(&json!({"error": "Izoh topilmadi"}), 404);
     };
 
     let parent = row["parent_id"].as_str().unwrap_or("").to_string();
 
+    // TARTIB MUHIM: javoblarga tegishli qatorlar (layk, shikoyat)
+    // javoblarning O'ZIDAN oldin o'chiriladi — ular javoblarni
+    // `parent_id` bo'yicha qidiradi, javoblar ketgandan keyin esa
+    // topadigan narsasi qolmasdi.
     let mut cleanup: Vec<(&str, Vec<TursoArg>)> = vec![
-        // Javoblarning layklari — javoblarning O'ZIDAN oldin.
+        // Javoblarning layklari.
         ("DELETE FROM comment_likes
            WHERE comment_id IN (SELECT id FROM comments_db WHERE parent_id=?)",
+         vec![TursoArg::text(id)]),
+        // Javoblarga kelgan shikoyatlar.
+        ("DELETE FROM reports_db
+           WHERE kind='comment'
+             AND target_id IN (SELECT id FROM comments_db WHERE parent_id=?)",
          vec![TursoArg::text(id)]),
         // Javoblarning o'zi.
         ("DELETE FROM comments_db WHERE parent_id=?", vec![TursoArg::text(id)]),
         // O'chirilgan izohning layklari.
         ("DELETE FROM comment_likes WHERE comment_id=?", vec![TursoArg::text(id)]),
+        // Unga kelgan shikoyatlar ham ma'nosini yo'qotdi: izoh
+        // endi yo'q, adminning ko'radigan narsasi qolmadi.
+        ("DELETE FROM reports_db WHERE kind='comment' AND target_id=?",
+         vec![TursoArg::text(id)]),
     ];
     // ── JAVOB O'CHDI — BOSH IZOHNING HISOBI KAMAYADI ─────────
     if !parent.is_empty() {
@@ -6016,6 +6083,240 @@ async fn refresh_thread(env: &Env, user: i64) {
             TursoArg::int(user),
             TursoArg::int(user),
         ]).await;
+}
+
+// ══════════════════════════════════════════════════════════════
+//  SHIKOYATLAR
+// ══════════════════════════════════════════════════════════════
+//
+// TALAB (foydalanuvchi): "izohning o'ng chetiga 3ta nuqta qo'y,
+// bosganda shikoyat qilish chiqsin; pastdan shikoyat yozish
+// oynasi ochilsin. Admin panelida shikoyatlar bo'limida shikoyat
+// qayerdan kelgani, shikoyat qilingan izoh va shikoyat
+// qiluvchining xabari tursin; tagida Tekshirish, Xabar yuborish
+// va Tozalash tugmalari bo'lsin".
+//
+// ── QANDAY QURILGAN ─────────────────────────────────────────
+//
+// Shikoyat — O'ZGARMAS yozuv: kelgan paytdagi izoh matni va
+// muallifi bilan birga saqlanadi. Shu sabab izoh keyin
+// o'chirilsa ham admin nimadan shikoyat qilinganini ko'radi.
+//
+// Ikki qoida suiiste'molni to'xtatadi:
+//   * BIR ODAM — BIR MARTA (bazadagi birlamchi indeks);
+//   * soatiga eng ko'pi REPORT_HOURLY ta shikoyat.
+// Ikkovi ham SERVERDA: o'zgartirilgan ilova ham aylanib o'ta
+// olmaydi.
+
+/// Shikoyat matnining eng ko'p uzunligi (BELGI, bayt emas).
+const REPORT_MAX: usize = 2000;
+
+/// Eng kam uzunlik. Foydalanuvchidan "batafsil ma'lumot"
+/// so'ralyapti — bitta harf yoki nuqta shikoyatni tekshirishga
+/// yaramaydi.
+const REPORT_MIN: usize = 10;
+
+/// Bir odam bir soatda nechta shikoyat yubora oladi.
+const REPORT_HOURLY: i64 = 10;
+
+/// Bir sahifada nechta shikoyat (admin ro'yxati).
+const REPORT_PAGE: i64 = 30;
+
+/// POST /api/reports — shikoyat yuborish.
+///
+/// Tanasi: `{"kind":"comment","target_id":"c...","reason":"..."}`.
+async fn report_add(mut req: Request, env: &Env) -> Result<Response> {
+    let Some(u) = session_user(env, &bearer(&req)).await? else {
+        return json_resp(&json!({"error": "unauthorized"}), 401);
+    };
+    let me = u["id"].as_i64().unwrap_or(0);
+    if u["is_banned"].as_i64().unwrap_or(0) != 0 {
+        return json_resp(&json!({"error": "Sizga yozish taqiqlangan"}), 403);
+    }
+
+    let b: Value = req.json().await.unwrap_or(json!({}));
+    let target = b["target_id"].as_str().unwrap_or("").trim().to_string();
+    if target.is_empty() {
+        return json_resp(&json!({"error": "Nimaga shikoyat qilinayotgani noma'lum"}), 400);
+    }
+    let reason = b["reason"].as_str().unwrap_or("").trim().to_string();
+    if reason.chars().count() < REPORT_MIN {
+        return json_resp(&json!({
+            "error": "Iltimos, shikoyat sababini batafsilroq yozing"
+        }), 400);
+    }
+    // Uzunlik BELGI bo'yicha kesiladi (bayt emas): o'zbekcha
+    // harflar ikki bayt egallaydi va bayt bilan kesilsa yozuv
+    // o'rtasidan uzilib qolardi.
+    let reason: String = reason.chars().take(REPORT_MAX).collect();
+
+    // ── SOATLIK CHEGARA ──────────────────────────────────────
+    let hour_ago = now_ms() - 3_600_000;
+    let recent = turso_exec(env,
+        "SELECT COUNT(*) FROM reports_db WHERE reporter_id=? AND created_at>?",
+        vec![TursoArg::int(me), TursoArg::int(hour_ago)]).await?;
+    if scalar(&recent) >= REPORT_HOURLY {
+        return json_resp(&json!({
+            "error": "Juda ko'p shikoyat yubordingiz. Birozdan keyin urinib ko'ring"
+        }), 429);
+    }
+
+    // ── IZOHNI TOPAMIZ VA NUSXASINI OLAMIZ ───────────────────
+    let c = turso_exec(env,
+        "SELECT id, user_id, body, anime_id, season_id
+           FROM comments_db WHERE id=?",
+        vec![TursoArg::text(&target)]).await?;
+    let Some(row) = first_row(&c) else {
+        return json_resp(&json!({"error": "Izoh topilmadi"}), 404);
+    };
+    let author = row["user_id"].as_i64().unwrap_or(0);
+    if author == me {
+        return json_resp(&json!({
+            "error": "O'z izohingizga shikoyat qila olmaysiz"
+        }), 400);
+    }
+
+    // ── BIR ODAM — BIR MARTA ─────────────────────────────────
+    //
+    // Bazada birlamchi indeks ham bor, lekin bu yerdagi tekshiruv
+    // foydalanuvchiga TUSHUNARLI javob beradi (baza xatosi emas).
+    let dup = turso_exec(env,
+        "SELECT COUNT(*) FROM reports_db
+          WHERE kind='comment' AND target_id=? AND reporter_id=?",
+        vec![TursoArg::text(&target), TursoArg::int(me)]).await?;
+    if scalar(&dup) > 0 {
+        return json_resp(&json!({
+            "error": "Siz bu izohga allaqachon shikoyat qilgansiz"
+        }), 409);
+    }
+
+    turso_exec(env,
+        "INSERT INTO reports_db
+            (id,kind,target_id,target_body,target_user_id,
+             anime_id,season_id,reporter_id,reason,created_at)
+         VALUES (?,'comment',?,?,?,?,?,?,?,?)",
+        vec![
+            TursoArg::text(&format!("r{}", random_hex(12))),
+            TursoArg::text(&target),
+            TursoArg::text(row["body"].as_str().unwrap_or("")),
+            TursoArg::int(author),
+            TursoArg::int(row["anime_id"].as_i64().unwrap_or(0)),
+            TursoArg::int(row["season_id"].as_i64().unwrap_or(0)),
+            TursoArg::int(me),
+            TursoArg::text(&reason),
+            TursoArg::int(now_ms()),
+        ]).await?;
+
+    ok_nostore(json!({"ok": true}))
+}
+
+/// Shikoyat qatorini ilova kutgan ko'rinishga aylantiradi.
+fn report_public(origin: &str, r: &Value) -> Value {
+    let photo = |uid: i64, file: &str| -> String {
+        if file.is_empty() {
+            format!("{origin}/api/avatar/{uid}")
+        } else {
+            format!("{origin}/api/image/{file}")
+        }
+    };
+    let rep_id = r["reporter_id"].as_i64().unwrap_or(0);
+    let tgt_id = r["target_user_id"].as_i64().unwrap_or(0);
+    json!({
+        "id": r["id"].as_str().unwrap_or(""),
+        "kind": r["kind"].as_str().unwrap_or("comment"),
+        "target_id": r["target_id"].as_str().unwrap_or(""),
+        "target_body": r["target_body"].as_str().unwrap_or(""),
+        "anime_id": r["anime_id"].as_i64().unwrap_or(0),
+        "season_id": r["season_id"].as_i64().unwrap_or(0),
+        "reason": r["reason"].as_str().unwrap_or(""),
+        "created_at": r["created_at"].as_i64().unwrap_or(0),
+        // Shikoyat qilingan izohning muallifi.
+        "target_user": {
+            "id": tgt_id,
+            "first_name": r["t_first"].as_str().unwrap_or(""),
+            "username": r["t_username"].as_str().unwrap_or(""),
+            "photo_url": photo(tgt_id, r["t_avatar"].as_str().unwrap_or("")),
+        },
+        // Shikoyat qiluvchi — "Xabar yuborish" tugmasi shu odamga
+        // yozadi.
+        "reporter": {
+            "id": rep_id,
+            "first_name": r["r_first"].as_str().unwrap_or(""),
+            "username": r["r_username"].as_str().unwrap_or(""),
+            "photo_url": photo(rep_id, r["r_avatar"].as_str().unwrap_or("")),
+        },
+        // Izoh HALI HAM turibdimi. `false` bo'lsa admin ro'yxatda
+        // "izoh o'chirilgan" deb ko'radi va bekorga qidirmaydi.
+        "target_alive": r["alive"].as_i64().unwrap_or(0) != 0,
+    })
+}
+
+/// GET /api/admin/reports?page=N — ADMIN uchun ro'yxat.
+///
+/// Yangi shikoyat tepada. Bitta so'rovda hammasi keladi: shikoyat,
+/// shikoyat qiluvchi va izoh muallifi — ilgari bunday ekranlar har
+/// bir qator uchun alohida so'rov qilardi.
+async fn admin_reports(req: &Request, env: &Env, origin: &str) -> Result<Response> {
+    let Some(u) = session_user(env, &bearer(req)).await? else {
+        return json_resp(&json!({"error": "unauthorized"}), 401);
+    };
+    if !is_admin(&u) {
+        return json_resp(&json!({"error": "forbidden"}), 403);
+    }
+    let url = req.url()?;
+    let page: i64 = url.query_pairs()
+        .find(|(k, _)| k == "page")
+        .and_then(|(_, v)| v.parse().ok())
+        .unwrap_or(0)
+        .max(0);
+
+    let res = turso_exec(env,
+        "SELECT p.id, p.kind, p.target_id, p.target_body, p.target_user_id,
+                p.anime_id, p.season_id, p.reporter_id, p.reason, p.created_at,
+                t.first_name AS t_first, t.username AS t_username,
+                t.avatar_file AS t_avatar,
+                r.first_name AS r_first, r.username AS r_username,
+                r.avatar_file AS r_avatar,
+                (SELECT COUNT(*) FROM comments_db c WHERE c.id = p.target_id)
+                  AS alive
+           FROM reports_db p
+           LEFT JOIN users_db t ON t.id = p.target_user_id
+           LEFT JOIN users_db r ON r.id = p.reporter_id
+          ORDER BY p.created_at DESC
+          LIMIT ? OFFSET ?",
+        vec![TursoArg::int(REPORT_PAGE), TursoArg::int(page * REPORT_PAGE)]).await?;
+
+    let cols = res["cols"].as_array().cloned().unwrap_or_default();
+    let rows = res["rows"].as_array().cloned().unwrap_or_default();
+    let items: Vec<Value> = rows.iter()
+        .map(|r| report_public(origin, &row_to_obj(&cols, r.as_array().unwrap_or(&vec![]))))
+        .collect();
+
+    // Tugmadagi son uchun — umumiy hisob.
+    let total = turso_exec(env, "SELECT COUNT(*) FROM reports_db", vec![]).await?;
+
+    ok_nostore(json!({
+        "items": items,
+        "page": page,
+        "total": scalar(&total),
+        "has_more": items.len() as i64 >= REPORT_PAGE,
+    }))
+}
+
+/// DELETE /api/admin/report/:id — "Tozalash" tugmasi.
+///
+/// Shikoyat bazadan BUTUNLAY o'chadi (foydalanuvchi talabi:
+/// "tozalash orqali kelgan shikoyatni bazadan tozalaydi").
+async fn admin_report_delete(req: &Request, env: &Env, id: &str) -> Result<Response> {
+    let Some(u) = session_user(env, &bearer(req)).await? else {
+        return json_resp(&json!({"error": "unauthorized"}), 401);
+    };
+    if !is_admin(&u) {
+        return json_resp(&json!({"error": "forbidden"}), 403);
+    }
+    turso_exec(env, "DELETE FROM reports_db WHERE id=?",
+        vec![TursoArg::text(id)]).await?;
+    ok_nostore(json!({"ok": true}))
 }
 
 /// GET /api/user/:id — OMMAVIY profil.
@@ -7294,7 +7595,9 @@ async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
         || path.starts_with("/api/chat")
         // Admin amallari katalogga aloqasi yo'q — keshni
         // kuydirmaydi.
-        || path.starts_with("/api/admin/");
+        || path.starts_with("/api/admin/")
+        // Shikoyat yuborish ham katalogga tegmaydi.
+        || path.starts_with("/api/reports");
     let write = matches!(method, Method::Post | Method::Put | Method::Delete) && !auth_path;
     let mut resp = route(req, env, ctx).await?;
 
@@ -7474,6 +7777,19 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
             if let Ok(uid) = idv.parse::<i64>() {
                 return admin_user_action(req, &env, uid).await;
             }
+        }
+    }
+
+    // ── SHIKOYATLAR ───────────────────────────────────────────
+    if path == "/api/reports" && method == Method::Post {
+        return report_add(req, &env).await;
+    }
+    if path == "/api/admin/reports" && method == Method::Get {
+        return admin_reports(&req, &env, &origin).await;
+    }
+    if method == Method::Delete {
+        if let Some(rid) = path.strip_prefix("/api/admin/report/") {
+            return admin_report_delete(&req, &env, rid).await;
         }
     }
 

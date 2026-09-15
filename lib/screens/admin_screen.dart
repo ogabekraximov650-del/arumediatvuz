@@ -3,6 +3,7 @@ import '../theme/app_background.dart';
 import '../widgets/glass.dart';
 import '../services/admin_users_service.dart';
 import '../services/support_service.dart';
+import 'admin_reports_screen.dart';
 import 'admin_users_screen.dart';
 import 'anime_management_screen.dart';
 
@@ -118,6 +119,25 @@ class AdminScreen extends StatelessWidget {
                           ),
                         );
                       },
+                    ),
+                    const SizedBox(height: 12),
+                    // ── SHIKOYATLAR ───────────────────────────
+                    //
+                    // TALAB (foydalanuvchi): "admin panelida
+                    // shikoyatlar bo'limi bo'lsin: shikoyat
+                    // qayerdan kelgani, shikoyat qilingan izoh va
+                    // shikoyat qiluvchining xabari tursin; tagida
+                    // Tekshirish, Xabar yuborish va Tozalash
+                    // tugmalari bo'lsin".
+                    _AdminButton(
+                      icon: Icons.flag_rounded,
+                      label: 'Shikoyatlar',
+                      subtitle: 'Izohlarga kelgan shikoyatlar',
+                      onTap: () => Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) => const AdminReportsScreen(),
+                        ),
+                      ),
                     ),
                     const SizedBox(height: 12),
                     // ── B2 TOZALASH ───────────────────────────

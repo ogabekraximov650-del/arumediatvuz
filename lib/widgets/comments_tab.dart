@@ -18,11 +18,14 @@
 // o'zicha to'liq bir ekran: ro'yxat, javoblar, yozish qatori.
 // Uni o'sha faylga qo'shish qidirishni yanada qiyinlashtirardi.
 
+import 'dart:async';
+
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 
 import '../services/auth_service.dart';
 import '../services/comments_service.dart';
+import '../services/reports_service.dart';
 import '../screens/public_profile_screen.dart';
 import 'glass.dart';
 
@@ -79,6 +82,27 @@ class _CommentsTabState extends State<CommentsTab> {
   /// orasida qisqa oraliq bor (jonlanish muddatidan sal uzunroq).
   DateTime _lastToggle = DateTime.fromMillisecondsSinceEpoch(0);
 
+  /// ── SHIKOYAT YUBORILGANDAN KEYINGI XABAR ────────────────
+  ///
+  /// TALAB (foydalanuvchi): "shikoyatni yozib yuborgach ekranda
+  /// 10 soniya 'Shikoyatingiz qabul qilindi, tez orada
+  /// shikoyatingizni tekshirib chiqamiz' yozuvi chiqadi".
+  ///
+  /// NEGA SNACKBAR EMAS: standart xabar 4 soniyada yo'qoladi va
+  /// yozish qatorining ustini to'sadi. Bu esa ro'yxatning
+  /// TEPASIDA turadi, o'qishga xalaqit bermaydi va aynan 10
+  /// soniya ko'rinadi.
+  bool _reportDone = false;
+  Timer? _reportTimer;
+
+  void _showReportDone() {
+    _reportTimer?.cancel();
+    setState(() => _reportDone = true);
+    _reportTimer = Timer(const Duration(seconds: 10), () {
+      if (mounted) setState(() => _reportDone = false);
+    });
+  }
+
   void _setExpanded(bool v) {
     if (widget.expanded == v) return;
     final now = DateTime.now();
@@ -117,6 +141,7 @@ class _CommentsTabState extends State<CommentsTab> {
 
   @override
   void dispose() {
+    _reportTimer?.cancel();
     _input.dispose();
     _focus.dispose();
     _scroll.dispose();
@@ -210,6 +235,73 @@ class _CommentsTabState extends State<CommentsTab> {
     if (err != null) _say(err);
   }
 
+  // ── UCH NUQTA -> SHIKOYAT QILISH ─────────────────────────
+  //
+  // TALAB (foydalanuvchi): "izohning o'ng chetiga 3ta nuqta
+  // qo'y va nuqtani bosganda 'shikoyat qilish' degan yozuv
+  // bo'lsin; ustiga bosganda pastdan shikoyat yozish oynasi
+  // chiqsin".
+  //
+  // Ikki bosqich ataylab: uch nuqta darhol shikoyat oynasini
+  // ochsa, tasodifan tekkan barmoq odamni shikoyat yozayotgan
+  // holatga tashlab qo'yardi.
+  Future<void> _openMenu(Comment c) async {
+    final wantReport = await showModalBottomSheet<bool>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => SafeArea(
+        top: false,
+        child: Container(
+          margin: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: AppColors.card,
+            borderRadius: BorderRadius.circular(18),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(18)),
+                leading: Icon(Icons.flag_outlined,
+                    color: Colors.red.shade300, size: 22),
+                title: Text(
+                  'Shikoyat qilish',
+                  style: TextStyle(
+                    color: Colors.red.shade300,
+                    fontSize: 14.5,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                onTap: () => Navigator.of(ctx).pop(true),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (wantReport != true || !mounted) return;
+    await _openReport(c);
+  }
+
+  /// Shikoyat yozish oynasi.
+  Future<void> _openReport(Comment c) async {
+    if (!AuthService.instance.isLoggedIn) {
+      _say('Shikoyat yuborish uchun hisobingizga kiring');
+      return;
+    }
+    final sent = await showModalBottomSheet<bool>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      // Klaviatura ochilganda oyna uning ustida qolsin va
+      // tarkibi kesilmasin.
+      isScrollControlled: true,
+      constraints: const BoxConstraints(),
+      builder: (_) => _ReportSheet(comment: c),
+    );
+    if (sent == true && mounted) _showReportDone();
+  }
+
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
@@ -219,6 +311,15 @@ class _CommentsTabState extends State<CommentsTab> {
         return Column(
           children: [
             _sortBar(c),
+            // Shikoyat yuborilganini tasdiqlovchi xabar — 10
+            // soniya ko'rinadi (`_showReportDone` izohiga qarang).
+            AnimatedSize(
+              duration: const Duration(milliseconds: 200),
+              curve: Curves.easeOut,
+              child: _reportDone
+                  ? const _ReportAcceptedBanner()
+                  : const SizedBox(width: double.infinity),
+            ),
             Expanded(child: _list(c)),
             _composer(),
           ],
@@ -354,6 +455,7 @@ class _CommentsTabState extends State<CommentsTab> {
             controller: c,
             onReply: _startReply,
             onDelete: _confirmDelete,
+            onMenu: _openMenu,
             onLikeError: _say,
           );
         },
@@ -520,6 +622,9 @@ class _CommentBlock extends StatelessWidget {
   final CommentsController controller;
   final void Function(Comment) onReply;
   final Future<void> Function(Comment) onDelete;
+
+  /// O'ng chetdagi uch nuqta bosildi (shikoyat menyusi).
+  final Future<void> Function(Comment) onMenu;
   final void Function(String) onLikeError;
 
   const _CommentBlock({
@@ -527,6 +632,7 @@ class _CommentBlock extends StatelessWidget {
     required this.controller,
     required this.onReply,
     required this.onDelete,
+    required this.onMenu,
     required this.onLikeError,
   });
 
@@ -545,6 +651,7 @@ class _CommentBlock extends StatelessWidget {
             controller: controller,
             onReply: onReply,
             onDelete: onDelete,
+            onMenu: onMenu,
             onLikeError: onLikeError,
           ),
           // ── "N TA JAVOB" ────────────────────────────────────
@@ -605,6 +712,7 @@ class _CommentBlock extends StatelessWidget {
                         controller: controller,
                         onReply: onReply,
                         onDelete: onDelete,
+                        onMenu: onMenu,
                         onLikeError: onLikeError,
                         small: true,
                       ),
@@ -623,6 +731,7 @@ class _CommentRow extends StatelessWidget {
   final CommentsController controller;
   final void Function(Comment) onReply;
   final Future<void> Function(Comment) onDelete;
+  final Future<void> Function(Comment) onMenu;
   final void Function(String) onLikeError;
   final bool small;
 
@@ -631,6 +740,7 @@ class _CommentRow extends StatelessWidget {
     required this.controller,
     required this.onReply,
     required this.onDelete,
+    required this.onMenu,
     required this.onLikeError,
     this.small = false,
   });
@@ -742,6 +852,28 @@ class _CommentRow extends StatelessWidget {
             ],
           ),
         ),
+        // ── O'NG CHETDAGI UCH NUQTA ────────────────────────────
+        //
+        // TALAB (foydalanuvchi): "izohning to'g'risini o'ng
+        // chetiga 3ta nuqta qo'y".
+        //
+        // O'Z izohida ko'rinmaydi: u yerda "O'chirish" allaqachon
+        // bor va o'z izohiga shikoyat qilishning ma'nosi yo'q
+        // (server ham rad etadi).
+        if (!mine && !c.deleted)
+          GestureDetector(
+            onTap: () => onMenu(c),
+            behavior: HitTestBehavior.opaque,
+            child: SizedBox(
+              width: 34,
+              height: 34,
+              child: Icon(
+                Icons.more_vert_rounded,
+                size: 19,
+                color: Colors.white.withValues(alpha: 0.45),
+              ),
+            ),
+          ),
       ],
     );
   }
@@ -755,6 +887,300 @@ void _openProfile(BuildContext context, int userId) {
       builder: (_) => PublicProfileScreen(userId: userId),
     ),
   );
+}
+
+// ══════════════════════════════════════════════════════════════
+//  SHIKOYAT
+// ══════════════════════════════════════════════════════════════
+
+/// Shikoyat yuborilganini tasdiqlovchi xabar.
+///
+/// TALAB (foydalanuvchi): "shikoyatni yozib yuborgach ekranda 10
+/// soniya 'Shikoyatingiz qabul qilindi, tez orada shikoyatingizni
+/// tekshirib chiqamiz' yozuvi chiqadi".
+class _ReportAcceptedBanner extends StatelessWidget {
+  const _ReportAcceptedBanner();
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 2, 12, 6),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        decoration: BoxDecoration(
+          color: const Color(0xFF7BD88F).withValues(alpha: 0.13),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+              color: const Color(0xFF7BD88F).withValues(alpha: 0.35)),
+        ),
+        child: Row(
+          children: [
+            const Icon(Icons.check_circle_rounded,
+                size: 20, color: Color(0xFF7BD88F)),
+            const SizedBox(width: 10),
+            const Expanded(
+              child: Text(
+                'Shikoyatingiz qabul qilindi.\n'
+                'Tez orada shikoyatingizni tekshirib chiqamiz.',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 12.5,
+                  height: 1.35,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Pastdan chiqadigan shikoyat yozish oynasi.
+///
+/// TALAB (foydalanuvchi): "'Iltimos shikoyat sababi haqida
+/// batafsil ma'lumot bering, shikoyatni iloji boricha tezroq
+/// ko'rib chiqishga harakat qilamiz' degan yozuv va tagida
+/// kattaroq yozadigan oyna bo'lsin".
+///
+/// Yopilganda `true` qaytaradi — ya'ni shikoyat HAQIQATAN
+/// yuborilgan. Chaqiruvchi shunga qarab 10 soniyalik xabarni
+/// ko'rsatadi.
+class _ReportSheet extends StatefulWidget {
+  final Comment comment;
+  const _ReportSheet({required this.comment});
+
+  @override
+  State<_ReportSheet> createState() => _ReportSheetState();
+}
+
+class _ReportSheetState extends State<_ReportSheet> {
+  final _text = TextEditingController();
+  bool _sending = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _text.dispose();
+    super.dispose();
+  }
+
+  Future<void> _send() async {
+    if (_sending) return;
+    setState(() {
+      _sending = true;
+      _error = null;
+    });
+    final err = await sendCommentReport(
+      commentId: widget.comment.id,
+      reason: _text.text,
+    );
+    if (!mounted) return;
+    if (err != null) {
+      setState(() {
+        _sending = false;
+        _error = err;
+      });
+      return;
+    }
+    Navigator.of(context).pop(true);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final media = MediaQuery.of(context);
+    return Padding(
+      // Klaviatura ochilganda oyna uning USTIDA qoladi.
+      padding: EdgeInsets.only(bottom: media.viewInsets.bottom),
+      child: Container(
+        constraints: BoxConstraints(maxHeight: media.size.height * 0.88),
+        decoration: const BoxDecoration(
+          color: AppColors.card,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+        ),
+        padding: EdgeInsets.fromLTRB(
+            18, 10, 18, 16 + media.padding.bottom),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // Tortish belgisi — oyna pastdan chiqqani bilinsin.
+              Center(
+                child: Container(
+                  width: 38,
+                  height: 4,
+                  margin: const EdgeInsets.only(bottom: 14),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.18),
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              Row(
+                children: [
+                  Icon(Icons.flag_outlined,
+                      color: Colors.red.shade300, size: 20),
+                  const SizedBox(width: 8),
+                  const Text(
+                    'Shikoyat qilish',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Text(
+                'Iltimos, shikoyat sababi haqida batafsil ma\'lumot '
+                'bering. Shikoyatni iloji boricha tezroq ko\'rib '
+                'chiqishga harakat qilamiz.',
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.6),
+                  fontSize: 13,
+                  height: 1.4,
+                ),
+              ),
+              const SizedBox(height: 12),
+              // ── QAYSI IZOH ─────────────────────────────────
+              //
+              // Odam nimaga shikoyat qilayotganini ko'rib tursin:
+              // ro'yxat uzun bo'lsa xato izohga bosib qo'yish
+              // oson.
+              Container(
+                padding: const EdgeInsets.all(11),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.05),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      widget.comment.name,
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.75),
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      widget.comment.body,
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.6),
+                        fontSize: 12.5,
+                        height: 1.35,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 14),
+              // ── KATTAROQ YOZADIGAN OYNA (foydalanuvchi talabi) ──
+              Container(
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.06),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(
+                      color: Colors.white.withValues(alpha: 0.09)),
+                ),
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 14, vertical: 6),
+                child: TextField(
+                  controller: _text,
+                  autofocus: true,
+                  minLines: 6,
+                  maxLines: 10,
+                  maxLength: kReportMaxLength,
+                  textCapitalization: TextCapitalization.sentences,
+                  onChanged: (_) {
+                    // Tugmaning yonishi uchun.
+                    if (_error != null) {
+                      setState(() => _error = null);
+                    } else {
+                      setState(() {});
+                    }
+                  },
+                  style: const TextStyle(
+                      color: Colors.white, fontSize: 14, height: 1.4),
+                  decoration: InputDecoration(
+                    hintText: 'Shikoyat sababini yozing...',
+                    hintStyle: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.35),
+                        fontSize: 14),
+                    border: InputBorder.none,
+                    counterStyle: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.3),
+                        fontSize: 11),
+                  ),
+                ),
+              ),
+              if (_error != null) ...[
+                const SizedBox(height: 8),
+                Text(
+                  _error!,
+                  style: TextStyle(
+                      color: Colors.red.shade300, fontSize: 12.5),
+                ),
+              ],
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed:
+                          _sending ? null : () => Navigator.of(context).pop(),
+                      style: OutlinedButton.styleFrom(
+                        minimumSize: const Size(0, 46),
+                        foregroundColor: Colors.white70,
+                        side: BorderSide(
+                            color: Colors.white.withValues(alpha: 0.18)),
+                      ),
+                      child: const Text('Bekor qilish'),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: FilledButton(
+                      // Matn juda qisqa bo'lsa tugma o'chiq turadi
+                      // — server ham qabul qilmaydi, bekorga
+                      // so'rov yuborilmasin.
+                      onPressed: _sending ||
+                              _text.text.trim().length < kReportMinLength
+                          ? null
+                          : _send,
+                      style: FilledButton.styleFrom(
+                        minimumSize: const Size(0, 46),
+                        backgroundColor: Colors.red.shade600,
+                      ),
+                      child: _sending
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(
+                                  strokeWidth: 2, color: Colors.white),
+                            )
+                          : const Text(
+                              'Yuborish',
+                              style: TextStyle(fontWeight: FontWeight.w700),
+                            ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 /// Tartib tugmasi (Yangilar / Layklar / Javoblar).
