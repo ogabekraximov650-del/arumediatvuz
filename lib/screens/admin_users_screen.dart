@@ -858,8 +858,39 @@ class _AdminUsersScreenState extends State<AdminUsersScreen> {
   }
 
 
+  // ── BLOKLASH: MUDDATSIZ VA MUDDATLI ──────────────────────
+  //
+  // TALAB (foydalanuvchi): "foydalanuvchini bloklaganda muddatsiz
+  // va muddatli bloklash tizimini qo'sh va bloklanish sababini ham
+  // yozsa bo'ladigan qil".
+  //
+  // Ochish oddiy tasdiq, bloklash esa alohida oyna: tayyor
+  // muddatlar (1 kun, 3 kun, 7, 30, muddatsiz) va sabab yozadigan
+  // joy. Tayyor tugmalar — eng ko'p ishlatiladigan muddatlar har
+  // safar qo'lda yozilmasin uchun.
   Future<void> _confirmBan(AdminUser u) async {
-    final ban = !u.banned;
+    if (u.banned) {
+      await _confirmUnban(u);
+      return;
+    }
+    final res = await showModalBottomSheet<({int days, String reason})>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      constraints: const BoxConstraints(),
+      builder: (_) => _BanSheet(user: u),
+    );
+    if (res == null || !mounted) return;
+    final err = await _ctrl.act(u.id, 'ban',
+        days: res.days, reason: res.reason);
+    if (!mounted) return;
+    _say(err ??
+        (res.days > 0
+            ? 'Bloklandi — ${res.days} kun'
+            : 'Muddatsiz bloklandi'));
+  }
+
+  Future<void> _confirmUnban(AdminUser u) async {
     final ok = await showDialog<bool>(
       context: context,
       barrierColor: Colors.black54,
@@ -872,22 +903,19 @@ class _AdminUsersScreenState extends State<AdminUsersScreen> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(ban ? Icons.block_rounded : Icons.lock_open_rounded,
-                  size: 40,
-                  color: ban ? Colors.red.shade300 : Colors.green.shade300),
+              Icon(Icons.lock_open_rounded,
+                  size: 40, color: Colors.green.shade300),
               const SizedBox(height: 12),
               Text(
-                ban
-                    ? '${u.name} bloklansinmi?'
-                    : '${u.name} blokdan chiqarilsinmi?',
+                '${u.name} blokdan chiqarilsinmi?',
                 textAlign: TextAlign.center,
                 style: const TextStyle(
                     color: Colors.white, fontSize: 15, height: 1.4),
               ),
-              if (ban) ...[
+              if (u.banReason.trim().isNotEmpty) ...[
                 const SizedBox(height: 6),
                 Text(
-                  'Barcha qurilmalaridan darhol chiqariladi.',
+                  'Sabab: ${u.banReason}',
                   textAlign: TextAlign.center,
                   style: TextStyle(
                       color: Colors.white.withValues(alpha: 0.55),
@@ -907,11 +935,9 @@ class _AdminUsersScreenState extends State<AdminUsersScreen> {
                   Expanded(
                     child: FilledButton(
                       style: FilledButton.styleFrom(
-                        backgroundColor:
-                            ban ? Colors.red.shade600 : Colors.green.shade700,
-                      ),
+                          backgroundColor: Colors.green.shade700),
                       onPressed: () => Navigator.of(ctx).pop(true),
-                      child: Text(ban ? 'Bloklash' : 'Ochish'),
+                      child: const Text('Ochish'),
                     ),
                   ),
                 ],
@@ -922,8 +948,338 @@ class _AdminUsersScreenState extends State<AdminUsersScreen> {
       ),
     );
     if (ok != true || !mounted) return;
-    final err = await _ctrl.act(u.id, ban ? 'ban' : 'unban');
-    _say(err ?? (ban ? 'Bloklandi' : 'Blokdan chiqarildi'));
+    final err = await _ctrl.act(u.id, 'unban');
+    if (!mounted) return;
+    _say(err ?? 'Blokdan chiqarildi');
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+//  BLOKLASH OYNASI
+// ══════════════════════════════════════════════════════════════
+//
+// Muddat va sabab shu yerda tanlanadi. Natija:
+// `(days, reason)` — `days == 0` MUDDATSIZ degani.
+
+class _BanSheet extends StatefulWidget {
+  final AdminUser user;
+  const _BanSheet({required this.user});
+
+  @override
+  State<_BanSheet> createState() => _BanSheetState();
+}
+
+class _BanSheetState extends State<_BanSheet> {
+  /// Tayyor muddatlar. `0` — muddatsiz.
+  static const _presets = <({int days, String label})>[
+    (days: 1, label: '1 kun'),
+    (days: 3, label: '3 kun'),
+    (days: 7, label: '7 kun'),
+    (days: 30, label: '30 kun'),
+    (days: 0, label: 'Muddatsiz'),
+  ];
+
+  int _days = 7;
+  final _custom = TextEditingController();
+  final _reason = TextEditingController();
+
+  @override
+  void dispose() {
+    _custom.dispose();
+    _reason.dispose();
+    super.dispose();
+  }
+
+  /// Qo'lda yozilgan kun tayyor tugmadan USTUN turadi: admin
+  /// raqam yozgan bo'lsa, aynan shuni nazarda tutgan.
+  int get _effectiveDays {
+    final n = int.tryParse(_custom.text.trim());
+    if (n != null && n > 0) return n;
+    return _days;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final media = MediaQuery.of(context);
+    final days = _effectiveDays;
+    return Padding(
+      padding: EdgeInsets.only(bottom: media.viewInsets.bottom),
+      child: Container(
+        constraints: BoxConstraints(maxHeight: media.size.height * 0.88),
+        decoration: const BoxDecoration(
+          color: AppColors.card,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+        ),
+        padding: EdgeInsets.fromLTRB(18, 10, 18, 16 + media.padding.bottom),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Center(
+                child: Container(
+                  width: 38,
+                  height: 4,
+                  margin: const EdgeInsets.only(bottom: 14),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.18),
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              Row(
+                children: [
+                  Icon(Icons.block_rounded,
+                      color: Colors.red.shade300, size: 20),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      '${widget.user.name} bloklansinmi?',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 6),
+              Text(
+                'Barcha qurilmalaridan darhol chiqariladi. Hisobiga '
+                'kirmoqchi bo\'lganda bot muddat va sababni ko\'rsatadi.',
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.55),
+                  fontSize: 12.5,
+                  height: 1.4,
+                ),
+              ),
+              const SizedBox(height: 16),
+              Text(
+                'MUDDAT',
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.35),
+                  fontSize: 10.5,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.3,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (final p in _presets)
+                    _Chip(
+                      label: p.label,
+                      active: _custom.text.trim().isEmpty && _days == p.days,
+                      onTap: () => setState(() {
+                        _days = p.days;
+                        _custom.clear();
+                      }),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              _Field(
+                controller: _custom,
+                hint: 'Yoki kunni qo\'lda yozing',
+                icon: Icons.edit_calendar_outlined,
+                keyboardType: TextInputType.number,
+                formatters: [
+                  FilteringTextInputFormatter.digitsOnly,
+                  LengthLimitingTextInputFormatter(4),
+                ],
+                onChanged: (_) => setState(() {}),
+              ),
+              const SizedBox(height: 16),
+              Text(
+                'SABAB',
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.35),
+                  fontSize: 10.5,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.3,
+                ),
+              ),
+              const SizedBox(height: 8),
+              _Field(
+                controller: _reason,
+                hint: 'Nima uchun bloklanyapti?',
+                icon: Icons.notes_rounded,
+                minLines: 3,
+                maxLines: 5,
+                maxLength: 300,
+                onChanged: (_) => setState(() {}),
+              ),
+              const SizedBox(height: 14),
+              // Admin nimani tasdiqlayotganini bir qatorda ko'rsin.
+              Container(
+                padding: const EdgeInsets.all(11),
+                decoration: BoxDecoration(
+                  color: Colors.red.shade400.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Text(
+                  days > 0
+                      ? '$days kunga bloklanadi'
+                      : 'MUDDATSIZ bloklanadi',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: Colors.red.shade200,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 14),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: () => Navigator.of(context).pop(),
+                      style: OutlinedButton.styleFrom(
+                        minimumSize: const Size(0, 46),
+                        foregroundColor: Colors.white70,
+                        side: BorderSide(
+                            color: Colors.white.withValues(alpha: 0.18)),
+                      ),
+                      child: const Text('Bekor qilish'),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: FilledButton(
+                      style: FilledButton.styleFrom(
+                        minimumSize: const Size(0, 46),
+                        backgroundColor: Colors.red.shade600,
+                      ),
+                      onPressed: () => Navigator.of(context).pop(
+                        (days: days, reason: _reason.text.trim()),
+                      ),
+                      child: const Text('Bloklash',
+                          style: TextStyle(fontWeight: FontWeight.w700)),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Blok tugashiga qancha qolgani — "3 kun 4 soat" ko'rinishida.
+String _banLeftText(AdminUser u) {
+  final d = u.banLeft;
+  if (d == null || d == Duration.zero) return '0 daqiqa';
+  if (d.inDays > 0) {
+    final h = d.inHours % 24;
+    return h > 0 ? '${d.inDays} kun $h soat' : '${d.inDays} kun';
+  }
+  if (d.inHours > 0) {
+    final m = d.inMinutes % 60;
+    return m > 0 ? '${d.inHours} soat $m daqiqa' : '${d.inHours} soat';
+  }
+  return '${d.inMinutes.clamp(1, 59)} daqiqa';
+}
+
+/// Bloklash oynasidagi tayyor muddat tugmasi.
+class _Chip extends StatelessWidget {
+  final String label;
+  final bool active;
+  final VoidCallback onTap;
+
+  const _Chip({
+    required this.label,
+    required this.active,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+        decoration: BoxDecoration(
+          color: active
+              ? Colors.red.shade600
+              : Colors.white.withValues(alpha: 0.08),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: active ? Colors.white : Colors.white.withValues(alpha: 0.65),
+            fontSize: 12.5,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Bloklash oynasidagi yozuv maydoni.
+class _Field extends StatelessWidget {
+  final TextEditingController controller;
+  final String hint;
+  final IconData icon;
+  final TextInputType? keyboardType;
+  final List<TextInputFormatter>? formatters;
+  final int minLines;
+  final int maxLines;
+  final int? maxLength;
+  final ValueChanged<String>? onChanged;
+
+  const _Field({
+    required this.controller,
+    required this.hint,
+    required this.icon,
+    this.keyboardType,
+    this.formatters,
+    this.minLines = 1,
+    this.maxLines = 1,
+    this.maxLength,
+    this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.06),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.09)),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      child: TextField(
+        controller: controller,
+        keyboardType: keyboardType,
+        inputFormatters: formatters,
+        minLines: minLines,
+        maxLines: maxLines,
+        maxLength: maxLength,
+        onChanged: onChanged,
+        style: const TextStyle(color: Colors.white, fontSize: 14, height: 1.4),
+        decoration: InputDecoration(
+          hintText: hint,
+          hintStyle: TextStyle(
+              color: Colors.white.withValues(alpha: 0.35), fontSize: 14),
+          prefixIcon: Icon(icon, color: Colors.white38, size: 19),
+          border: InputBorder.none,
+          counterStyle: TextStyle(
+              color: Colors.white.withValues(alpha: 0.3), fontSize: 11),
+        ),
+      ),
+    );
   }
 }
 
@@ -1179,6 +1535,38 @@ class _ActionSheet extends StatelessWidget {
                             color: Colors.white.withValues(alpha: 0.55),
                             fontSize: 12.5),
                       ),
+                      // ── BLOK HOLATI ────────────────────────
+                      //
+                      // Admin bloklangan odamni ochishdan oldin
+                      // muddat va sababni ko'rib tursin — aks
+                      // holda "nega bloklangan edi" degan savolga
+                      // javob yo'q edi.
+                      if (user.banned) ...[
+                        const SizedBox(height: 6),
+                        Text(
+                          user.banForever
+                              ? 'Muddatsiz bloklangan'
+                              : 'Blok tugashiga ${_banLeftText(user)} qoldi',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: Colors.red.shade300,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        if (user.banReason.trim().isNotEmpty) ...[
+                          const SizedBox(height: 3),
+                          Text(
+                            'Sabab: ${user.banReason}',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              color: Colors.white.withValues(alpha: 0.5),
+                              fontSize: 12,
+                              height: 1.35,
+                            ),
+                          ),
+                        ],
+                      ],
                     ],
                   ),
                 ),

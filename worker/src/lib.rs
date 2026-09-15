@@ -451,6 +451,20 @@ async fn init_db(env: &Env) -> bool {
     // bajarilmasdi. `ok` ga ham qo'shilmaydi — bu xato emas,
     // kutilgan holat.
     for sql in [
+        // ── BLOKLASH: MUDDAT VA SABAB ────────────────────
+        //
+        // TALAB (foydalanuvchi): "foydalanuvchini bloklaganda
+        // muddatsiz va muddatli bloklash tizimini qo'sh va
+        // bloklanish sababini ham yozsa bo'ladigan qil".
+        //
+        // `is_banned` eski ustun, o'z joyida qoladi — "bloklanganmi"
+        // degan savolga javob beradi.
+        //   * `ban_until` = 0  -> MUDDATSIZ;
+        //   * `ban_until` > 0  -> o'sha vaqtgacha.
+        // `ban_reason` bo'sh bo'lishi mumkin (sabab yozilmagan).
+        "ALTER TABLE users_db ADD COLUMN ban_until INTEGER DEFAULT 0",
+        "ALTER TABLE users_db ADD COLUMN ban_reason TEXT DEFAULT ''",
+        "ALTER TABLE users_db ADD COLUMN banned_at INTEGER DEFAULT 0",
         "ALTER TABLE season_db ADD COLUMN yosh INTEGER DEFAULT 0",
         "ALTER TABLE epizod_db ADD COLUMN yosh INTEGER DEFAULT 0",
         "ALTER TABLE chat_messages ADD COLUMN media_file TEXT DEFAULT ''",
@@ -3828,8 +3842,141 @@ async fn session_user(env: &Env, token: &str) -> Result<Option<Value>> {
     ]).await?;
     let Some(first) = res.first() else { return Ok(None) };
     let Some(u) = first_row(first) else { return Ok(None) };
-    if u["is_banned"].as_i64().unwrap_or(0) == 1 { return Ok(None); }
+    // ── BLOK MUDDATI TUGAGAN BO'LSA O'TKAZAMIZ ────────────
+    //
+    // `ban_state` muddatli blokning muddati o'tgan bo'lsa
+    // "bloklanmagan" deydi, qator esa shu yerda tozalanadi —
+    // ya'ni alohida kuzatuvchi vazifa (cron) kerak emas.
+    if u["is_banned"].as_i64().unwrap_or(0) == 1 {
+        if ban_state(&u, now).is_some() {
+            return Ok(None);
+        }
+        clear_expired_ban(env, u["id"].as_i64().unwrap_or(0)).await;
+    }
     Ok(Some(u))
+}
+
+// ══════════════════════════════════════════════════════════════
+//  BLOKLASH: MUDDATSIZ VA MUDDATLI
+// ══════════════════════════════════════════════════════════════
+//
+// TALAB (foydalanuvchi): "foydalanuvchini bloklaganda muddatsiz va
+// muddatli bloklash tizimini qo'sh va bloklanish sababini ham yozsa
+// bo'ladigan qil. Foydalanuvchi accountiga kirmoqchi bo'lganda bot
+// account qancha muddatga bloklangani va nima sababdan bloklanganini
+// chiqaradi".
+//
+// ── UCH USTUN ───────────────────────────────────────────────
+//
+//   `is_banned`  — bloklanganmi (eski ustun, o'z joyida);
+//   `ban_until`  — 0 bo'lsa MUDDATSIZ, aks holda shu vaqtgacha;
+//   `ban_reason` — sabab (bo'sh bo'lishi mumkin).
+//
+// ── MUDDAT O'ZI TUGAYDI ─────────────────────────────────────
+//
+// Muddat tugaganini kuzatib turadigan alohida vazifa (cron) YO'Q:
+// u shunchaki kirishda tekshiriladi. Ya'ni muddat tugagan zahoti
+// odam kira oladi va uning qatori shu paytda tozalanadi. Bu usul
+// soat aniqligida ishlaydi va bazaga ortiqcha yuk bermaydi.
+
+/// Bloklangan holat: `(muddat, sabab)`.
+///
+/// `None` — bloklanmagan YOKI muddati tugagan.
+/// Muddat `0` — muddatsiz.
+fn ban_state(u: &Value, now: i64) -> Option<(i64, String)> {
+    if u["is_banned"].as_i64().unwrap_or(0) == 0 {
+        return None;
+    }
+    let until = u["ban_until"].as_i64().unwrap_or(0);
+    // Muddatli blok va muddati o'tgan — bloklangan hisoblanmaydi.
+    if until > 0 && until <= now {
+        return None;
+    }
+    Some((until, u["ban_reason"].as_str().unwrap_or("").to_string()))
+}
+
+/// Muddati tugagan blokni bazadan olib tashlaydi.
+///
+/// Javob KUTILMAYDI natijasi uchun emas: chaqiruvchi allaqachon
+/// "bloklanmagan" deb qaror qilgan, bu shunchaki qatorni tartibga
+/// soladi.
+async fn clear_expired_ban(env: &Env, id: i64) {
+    let _ = turso_exec(env,
+        "UPDATE users_db SET is_banned=0, ban_until=0, ban_reason=''
+          WHERE id=? AND is_banned=1 AND ban_until>0 AND ban_until<=?",
+        vec![TursoArg::int(id), TursoArg::int(now_ms())]).await;
+}
+
+/// Vaqtni `DD.MM.YYYY HH:MM` ko'rinishida yozadi (Toshkent, UTC+5).
+///
+/// NEGA QO'LDA: worker'da vaqt kutubxonasi yo'q va faqat shu
+/// bitta joy uchun butun kutubxona qo'shishning ma'nosi yo'q.
+/// Hisob — Howard Hinnant'ning `civil_from_days` algoritmi.
+fn fmt_time_uz(ms: i64) -> String {
+    // Toshkent yil bo'yi UTC+5 (yozgi vaqt yo'q).
+    let secs = ms / 1000 + 5 * 3600;
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (hh, mm) = (rem / 3600, (rem % 3600) / 60);
+
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+
+    format!("{d:02}.{m:02}.{y} {hh:02}:{mm:02}")
+}
+
+/// "3 kun 4 soat" ko'rinishidagi qolgan muddat.
+fn fmt_left_uz(ms: i64) -> String {
+    if ms <= 0 {
+        return "tugadi".to_string();
+    }
+    let mins = ms / 60_000;
+    let days = mins / 1440;
+    let hours = (mins % 1440) / 60;
+    let m = mins % 60;
+    if days > 0 {
+        return if hours > 0 {
+            format!("{days} kun {hours} soat")
+        } else {
+            format!("{days} kun")
+        };
+    }
+    if hours > 0 {
+        return if m > 0 {
+            format!("{hours} soat {m} daqiqa")
+        } else {
+            format!("{hours} soat")
+        };
+    }
+    format!("{} daqiqa", m.max(1))
+}
+
+/// Bloklangan odamga ko'rsatiladigan xabar (bot va ilova uchun
+/// bir xil matn — odam ikki joyda ikki xil gap eshitmasin).
+fn ban_message(until: i64, reason: &str, now: i64) -> String {
+    let muddat = if until <= 0 {
+        "Muddatsiz".to_string()
+    } else {
+        format!("{} gacha ({} qoldi)", fmt_time_uz(until), fmt_left_uz(until - now))
+    };
+    let sabab = if reason.trim().is_empty() {
+        "ko'rsatilmagan".to_string()
+    } else {
+        reason.trim().to_string()
+    };
+    format!(
+        "\u{1F6AB} Hisobingiz bloklangan.\n\n\
+         \u{23F3} Muddat: {muddat}\n\
+         \u{1F4DD} Sabab: {sabab}"
+    )
 }
 
 fn bearer(req: &Request) -> String {
@@ -3994,6 +4141,32 @@ async fn handle_tg_webhook(env: &Env, mut req: Request) -> Result<Response> {
         tg_send(env, chat_id, MSG_TRY_LATER).await;
         return ok(json!({"ok": true}));
     };
+
+    // ── BLOKLANGAN HISOB ──────────────────────────────────────
+    //
+    // TALAB (foydalanuvchi): "foydalanuvchi accountiga kirmoqchi
+    // bo'lganda bot account qancha muddatga bloklangani va nima
+    // sababdan bloklanganini chiqaradi".
+    //
+    // Tekshiruv AYNAN shu yerda: sessiya ochilishidan OLDIN.
+    // Ilgari bloklangan odam bemalol kirardi va faqat keyingi
+    // so'rovda "unauthorized" olardi — ya'ni ilova sababsiz
+    // "chiqib ketgandek" bo'lardi.
+    //
+    // Muddati tugagan blok bu yerda ham o'zi tozalanadi.
+    if user["is_banned"].as_i64().unwrap_or(0) == 1 {
+        let uid = user["id"].as_i64().unwrap_or(0);
+        if let Some((until, reason)) = ban_state(&user, now) {
+            tg_send(env, chat_id, &format!(
+                "{}
+
+Savollaringiz bo'lsa adminga yozing.",
+                html_escape(&ban_message(until, &reason, now)),
+            )).await;
+            return ok(json!({"ok": true}));
+        }
+        clear_expired_ban(env, uid).await;
+    }
 
     // Sessiya ochish VA kirish tokenini tasdiqlash bitta so'rovda
     // ketadi (`create_session` izohiga qarang) — ilova shu daqiqada
@@ -5528,6 +5701,43 @@ async fn chat_unread(req: &Request, env: &Env) -> Result<Response> {
     ok_nostore(json!({"unread": scalar(&res), "admin": false}))
 }
 
+/// TIZIM nomidan foydalanuvchining yozishmasiga xabar qo'yadi.
+///
+/// Bloklash sababi shu yo'l bilan yetkaziladi: botdagi xabar bir
+/// marta ko'rinib yo'qoladi, yozishmadagi yozuv esa QOLADI —
+/// odam blok tugagach (yoki admin ochgach) nima bo'lganini o'qiy
+/// oladi.
+///
+/// Xabar ADMINDAN kelgan deb belgilanadi va foydalanuvchining
+/// o'qilmaganlar sanog'ini oshiradi, ya'ni oddiy xabardan hech
+/// qanday farqi yo'q.
+async fn chat_admin_note(env: &Env, user_id: i64, body: &str) -> Result<()> {
+    let text: String = body.trim().chars().take(CHAT_MAX).collect();
+    if text.is_empty() || user_id <= 0 {
+        return Ok(());
+    }
+    let now = now_ms();
+    turso_batch(env, &[
+        ("INSERT INTO chat_messages
+            (id,user_id,from_admin,body,media_file,media_type,media_ms,created_at)
+          VALUES (?,?,1,?,'','',0,?)",
+         vec![
+            TursoArg::text(&format!("m{}", random_hex(12))),
+            TursoArg::int(user_id), TursoArg::text(&text), TursoArg::int(now),
+         ]),
+        ("INSERT INTO chat_threads
+            (user_id,last_body,last_at,last_from_admin,unread_user,unread_admin)
+          VALUES (?,?,?,1,1,0)
+          ON CONFLICT(user_id) DO UPDATE SET
+             last_body=excluded.last_body,
+             last_at=excluded.last_at,
+             last_from_admin=1,
+             unread_user=unread_user+1",
+         vec![TursoArg::int(user_id), TursoArg::text(&text), TursoArg::int(now)]),
+    ]).await?;
+    Ok(())
+}
+
 /// POST /api/chat — xabar yuborish.
 ///
 /// Foydalanuvchi yozsa — adminga; admin `user_id` bilan yozsa —
@@ -6489,7 +6699,9 @@ async fn admin_users(req: &Request, env: &Env, origin: &str) -> Result<Response>
                         u.first_name AS first_name, u.last_name AS last_name,
                         u.avatar_file AS avatar_file,
                         u.telegram_id AS telegram_id, u.balance AS balance,
-                        u.is_banned AS is_banned, u.created_at AS created_at,
+                        u.is_banned AS is_banned, u.ban_until AS ban_until,
+                        u.ban_reason AS ban_reason,
+                        u.created_at AS created_at,
                         u.last_login_at AS last_login_at,
                         COALESCE(s.expires_at,0) AS sub_until
                    FROM users_db u
@@ -6505,7 +6717,9 @@ async fn admin_users(req: &Request, env: &Env, origin: &str) -> Result<Response>
                         u.first_name AS first_name, u.last_name AS last_name,
                         u.avatar_file AS avatar_file,
                         u.telegram_id AS telegram_id, u.balance AS balance,
-                        u.is_banned AS is_banned, u.created_at AS created_at,
+                        u.is_banned AS is_banned, u.ban_until AS ban_until,
+                        u.ban_reason AS ban_reason,
+                        u.created_at AS created_at,
                         u.last_login_at AS last_login_at,
                         COALESCE(s.expires_at,0) AS sub_until
                    FROM users_db u
@@ -6542,6 +6756,9 @@ async fn admin_users(req: &Request, env: &Env, origin: &str) -> Result<Response>
             "telegram_id": o["telegram_id"].as_i64().unwrap_or(0),
             "balance": o["balance"].as_i64().unwrap_or(0),
             "banned": o["is_banned"].as_i64().unwrap_or(0) != 0,
+            // 0 — muddatsiz (yoki bloklanmagan).
+            "ban_until": o["ban_until"].as_i64().unwrap_or(0),
+            "ban_reason": o["ban_reason"].as_str().unwrap_or(""),
             "created_at": o["created_at"].as_i64().unwrap_or(0),
             "last_login_at": o["last_login_at"].as_i64().unwrap_or(0),
             // Obuna qachon tugaydi (0 — obuna yo'q). Admin
@@ -6631,21 +6848,70 @@ async fn admin_user_action(
             ok_nostore(json!({"ok": true, "balance": left}))
         }
 
+        // ── BLOKLASH: MUDDATSIZ VA MUDDATLI ──────────────────
+        //
+        // TALAB (foydalanuvchi): "foydalanuvchini bloklaganda
+        // muddatsiz va muddatli bloklash tizimini qo'sh va
+        // bloklanish sababini ham yozsa bo'ladigan qil".
+        //
+        // Tanadagi maydonlar:
+        //   `days`   — 0 yoki yo'q bo'lsa MUDDATSIZ, aks holda
+        //              shuncha kunga;
+        //   `reason` — sabab (ixtiyoriy, 300 belgigacha).
+        //
+        // Ochishda ikkovi ham tozalanadi: eski sabab qolib
+        // ketsa, keyingi blokda noto'g'ri matn chiqardi.
         "ban" | "unban" => {
-            let on = if action == "ban" { 1 } else { 0 };
+            if action == "unban" {
+                let row = turso_exec(env,
+                    "UPDATE users_db SET is_banned=0, ban_until=0, ban_reason='',
+                            banned_at=0
+                      WHERE id=? RETURNING is_banned",
+                    vec![TursoArg::int(id)]).await?;
+                if first_row(&row).is_none() {
+                    return json_resp(&json!({"error": "Foydalanuvchi topilmadi"}), 404);
+                }
+                return ok_nostore(json!({"ok": true, "banned": false}));
+            }
+
+            let days = b["days"].as_i64().unwrap_or(0).max(0);
+            // Uzunlik BELGI bo'yicha kesiladi (bayt emas):
+            // o'zbekcha harflar ikki bayt egallaydi.
+            let reason: String = b["reason"].as_str().unwrap_or("")
+                .trim().chars().take(300).collect();
+            let until = if days > 0 { now + days * 86_400_000 } else { 0 };
+
             let row = turso_exec(env,
-                "UPDATE users_db SET is_banned=? WHERE id=? RETURNING is_banned",
-                vec![TursoArg::int(on), TursoArg::int(id)]).await?;
+                "UPDATE users_db SET is_banned=1, ban_until=?, ban_reason=?,
+                        banned_at=?
+                  WHERE id=? RETURNING is_banned",
+                vec![
+                    TursoArg::int(until), TursoArg::text(&reason),
+                    TursoArg::int(now), TursoArg::int(id),
+                ]).await?;
             if first_row(&row).is_none() {
                 return json_resp(&json!({"error": "Foydalanuvchi topilmadi"}), 404);
             }
             // Bloklangan odamning sessiyalari DARHOL yopiladi —
             // aks holda u chiqmaguncha ilovadan foydalanaverardi.
-            if on == 1 {
-                let _ = turso_exec(env, "DELETE FROM sessions_db WHERE user_id=?",
-                    vec![TursoArg::int(id)]).await;
-            }
-            ok_nostore(json!({"ok": true, "banned": on == 1}))
+            let _ = turso_exec(env, "DELETE FROM sessions_db WHERE user_id=?",
+                vec![TursoArg::int(id)]).await;
+
+            // ── SABAB YOZISHMAGA HAM TUSHADI ─────────────────
+            //
+            // Odam ilovaga kira olmaydi, lekin blok tugagach
+            // (yoki admin ochgach) yozishmani ochib nima
+            // bo'lganini o'qiy oladi. Botdagi xabar bir marta
+            // ko'rinadi va yo'qoladi — bu esa QOLADI.
+            let text = ban_message(until, &reason, now);
+            let _ = chat_admin_note(env, id, &text).await;
+
+            ok_nostore(json!({
+                "ok": true,
+                "banned": true,
+                "ban_until": until,
+                "ban_reason": reason,
+            }))
         }
 
         // ── OBUNA: KUN QO'SHISH VA AYIRISH ───────────────────

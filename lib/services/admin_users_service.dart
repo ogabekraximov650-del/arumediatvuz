@@ -49,6 +49,17 @@ class AdminUser {
   final int telegramId;
   final int balance;
   final bool banned;
+
+  /// ── BLOK MUDDATI VA SABABI ──────────────────────────────
+  ///
+  /// TALAB (foydalanuvchi): "bloklaganda muddatsiz va muddatli
+  /// bloklash tizimini qo'sh va bloklanish sababini ham yozsa
+  /// bo'ladigan qil".
+  ///
+  /// `banUntil` = 0 va `banned` = true — MUDDATSIZ.
+  final int banUntil;
+  final String banReason;
+
   final int createdAt;
   final int lastLoginAt;
 
@@ -66,8 +77,21 @@ class AdminUser {
     required this.banned,
     required this.createdAt,
     required this.lastLoginAt,
+    this.banUntil = 0,
+    this.banReason = '',
     this.subUntil = 0,
   });
+
+  /// Blok muddatsizmi.
+  bool get banForever => banned && banUntil <= 0;
+
+  /// Blok muddati tugashiga qancha qolgan (`null` — muddatsiz
+  /// yoki bloklanmagan).
+  Duration? get banLeft {
+    if (!banned || banUntil <= 0) return null;
+    final ms = banUntil - DateTime.now().millisecondsSinceEpoch;
+    return ms <= 0 ? Duration.zero : Duration(milliseconds: ms);
+  }
 
   /// Obunadan necha kun qolgan (0 — obuna yo'q yoki tugagan).
   int get subDaysLeft {
@@ -96,6 +120,8 @@ class AdminUser {
         telegramId: ((j['telegram_id'] as num?) ?? 0).toInt(),
         balance: ((j['balance'] as num?) ?? 0).toInt(),
         banned: j['banned'] == true,
+        banUntil: ((j['ban_until'] as num?) ?? 0).toInt(),
+        banReason: '${j['ban_reason'] ?? ''}',
         createdAt: ((j['created_at'] as num?) ?? 0).toInt(),
         lastLoginAt: ((j['last_login_at'] as num?) ?? 0).toInt(),
         subUntil: ((j['sub_until'] as num?) ?? 0).toInt(),
@@ -241,6 +267,7 @@ class AdminUsersController extends ChangeNotifier {
     String action, {
     int amount = 0,
     int days = 0,
+    String reason = '',
   }) async {
     try {
       final r = await http
@@ -251,6 +278,8 @@ class AdminUsersController extends ChangeNotifier {
               'action': action,
               if (amount != 0) 'amount': amount,
               'days': days,
+              // Bloklash sababi (boshqa amallarda bo'sh).
+              if (reason.isNotEmpty) 'reason': reason,
             }),
           )
           .timeout(const Duration(seconds: 20));
@@ -272,6 +301,12 @@ class AdminUsersController extends ChangeNotifier {
           telegramId: old.telegramId,
           balance: ((j['balance'] as num?) ?? old.balance).toInt(),
           banned: j.containsKey('banned') ? j['banned'] == true : old.banned,
+          banUntil: j.containsKey('banned')
+              ? ((j['ban_until'] as num?) ?? 0).toInt()
+              : old.banUntil,
+          banReason: j.containsKey('banned')
+              ? '${j['ban_reason'] ?? ''}'
+              : old.banReason,
           createdAt: old.createdAt,
           lastLoginAt: old.lastLoginAt,
           subUntil: j.containsKey('subscription_until')
