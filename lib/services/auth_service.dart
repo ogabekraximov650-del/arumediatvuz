@@ -8,15 +8,12 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 
+import 'app_build.dart';
 import 'account_data.dart';
 import 'rust_bridge.dart';
 import 'sync_queue.dart';
 
 const String kApiBase = 'https://aniraxuzapp.ogabekraximov650.workers.dev';
-
-/// Sessiyalar jurnalida ko'rinadigan ilova versiyasi.
-/// `pubspec.yaml` dagi `version:` bilan bir xil turishi kerak.
-const String kAppVersion = '0.0.9';
 
 /// Ism eng ko'pi shuncha belgidan iborat bo'lishi mumkin.
 /// `TextField` ning `maxLength` i ham, tekshiruv ham shu qiymatga
