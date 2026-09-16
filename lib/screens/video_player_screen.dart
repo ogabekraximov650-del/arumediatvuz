@@ -537,6 +537,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _releaseDownloadUpdates();
     _epScrollCtrl.dispose();
     _epListCtrl?.dispose();
+    _thinBarTimer?.cancel();
     DownloadManager.instance.unwatch(this);
     _tabPages.dispose();
     _tabCtrl.dispose();
@@ -1046,6 +1047,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       _intendedPlaying = resumePlaying;
       _introVisible = false;
     });
+    _syncThinBar();
 
     // Sek navbatini tozalaymiz — eski epizodga tegishli so'rovlar
     // yangisiga tushib qolmasligi kerak.
@@ -2136,15 +2138,44 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     }
   }
 
+  /// Kontrollar yashiringanda pastda qoladigan INGICHKA chiziq
+  /// yoqilganmi.
+  ///
+  /// `!_showControls` dan farqi: bu bayroq kontrollar so'nish
+  /// animatsiyasini TUGATGANDAN keyin yoqiladi, ya'ni ikkita
+  /// chiziq hech qachon bir vaqtda ko'rinmaydi.
+  bool _thinBarOn = false;
+  Timer? _thinBarTimer;
+
+  /// `_showControls` o'zgargan HAR SAFAR chaqiriladi.
+  void _syncThinBar() {
+    _thinBarTimer?.cancel();
+    if (_showControls) {
+      // Kontrollar chiqdi — ingichka chiziq DARHOL o'chadi
+      // (asosiy progress chizig'i uning o'rnini oladi).
+      if (_thinBarOn && mounted) setState(() => _thinBarOn = false);
+      return;
+    }
+    // Kontrollar so'nishi uchun 200 ms kerak (`AnimatedOpacity`),
+    // ustiga kichik zaxira.
+    _thinBarTimer = Timer(const Duration(milliseconds: 240), () {
+      if (!mounted || _showControls) return;
+      setState(() => _thinBarOn = true);
+    });
+  }
+
   void _scheduleHide() {
     _hideTimer?.cancel();
     _hideTimer = Timer(const Duration(seconds: 3), () {
-      if (mounted) setState(() => _showControls = false);
+      if (!mounted) return;
+      setState(() => _showControls = false);
+      _syncThinBar();
     });
   }
 
   void _onTapVideo() {
     setState(() => _showControls = !_showControls);
+    _syncThinBar();
     if (_showControls) _scheduleHide();
   }
 
@@ -3714,6 +3745,46 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     );
   }
 
+  /// Boshqaruvni VIDEO KADRI ichida ushlab turadi.
+  ///
+  /// TALAB (foydalanuvchi): "tugmalar video kadrini chetida
+  /// o'tmasin — hozir video kadr chetidan chiqib turibdi".
+  ///
+  /// Sabab: telefon ekrani 20:9, video esa 16:9 — fullscreen'da
+  /// yon tomonlarda qora yo'laklar qoladi. Boshqaruv esa butun
+  /// EKRAN bo'ylab chizilardi, ya'ni tugmalar va progress chizig'i
+  /// videodan tashqariga, qora yo'lakka chiqib ketardi.
+  ///
+  /// Bu yerda o'sha yo'lak kengligi hisoblanadi va boshqaruvga
+  /// chetlama (padding) sifatida beriladi. Video nisbati ekranga
+  /// teng bo'lsa (yo'lak yo'q) hech narsa o'zgarmaydi.
+  Widget _inVideoFrame(Widget child) {
+    return LayoutBuilder(
+      builder: (context, c) {
+        final ctrl = _controller;
+        final ar = (ctrl != null &&
+                ctrl.value.isInitialized &&
+                ctrl.value.aspectRatio > 0)
+            ? ctrl.value.aspectRatio
+            : 16 / 9;
+        var vw = c.maxWidth;
+        var vh = c.maxHeight;
+        if (vw / vh > ar) {
+          vw = vh * ar;
+        } else {
+          vh = vw / ar;
+        }
+        final padX = ((c.maxWidth - vw) / 2).clamp(0.0, 1e6).toDouble();
+        final padY = ((c.maxHeight - vh) / 2).clamp(0.0, 1e6).toDouble();
+        if (padX < 1 && padY < 1) return child;
+        return Padding(
+          padding: EdgeInsets.symmetric(horizontal: padX, vertical: padY),
+          child: child,
+        );
+      },
+    );
+  }
+
   Widget _buildPlayerCore({required bool isFullscreen}) {
     final ctrl = _controller;
     return Container(
@@ -3816,8 +3887,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
               duration: const Duration(milliseconds: 200),
               child: IgnorePointer(
                 ignoring: !_showControls,
-                child: RepaintBoundary(
-                    child: _buildControls(isFullscreen: isFullscreen)),
+                child: _inVideoFrame(RepaintBoundary(
+                    child: _buildControls(isFullscreen: isFullscreen))),
               ),
             ),
 
@@ -4030,16 +4101,30 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
             ),
 
           // ── DOIM KO'RINADIGAN PROGRESS CHIZIQI (YouTube uslubi) ──
+          //
+          // TALAB (foydalanuvchi): "bittasi yo'qolmaguncha
+          // ikkinchisi progress chizig'i chiqmasin".
+          //
+          // Ilgari u `!_showControls` bo'yicha DARHOL chiqardi,
+          // kontrollar esa 200 ms so'nib borardi — natijada bir
+          // lahza EKRANDA IKKITA chiziq turardi. Endi u
+          // `_thinBarOn` ga qaraydi: bayroq kontrollar to'liq
+          // so'ngach yoqiladi (`_syncThinBar`).
+          //
+          // Chiziq ham video kadri ichida — qora yo'lakka
+          // cho'zilmaydi.
           if (_currentEp != null && _playerError == null)
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: 0,
+            Positioned.fill(
               child: IgnorePointer(
-                child: _AlwaysVisibleProgress(
-                  controller: _controller,
-                  currentUrl: _currentUrl,
-                  visible: !_showControls,
+                child: _inVideoFrame(
+                  Align(
+                    alignment: Alignment.bottomCenter,
+                    child: _AlwaysVisibleProgress(
+                      controller: _controller,
+                      currentUrl: _currentUrl,
+                      visible: _thinBarOn,
+                    ),
+                  ),
                 ),
               ),
             ),
@@ -4061,7 +4146,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
           // o'sha qatorning TAGIGA tushadi, aks holda ular
           // ustma-ust kelardi.
           if (_currentEp != null && _playerError == null && _introVisible && !_isLocked)
-            Align(
+            _inVideoFrame(Align(
               alignment: Alignment.topLeft,
               child: Padding(
                 padding: EdgeInsets.only(
@@ -4070,7 +4155,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                 ),
                 child: _SkipIntroButton(onTap: _skipIntro),
               ),
-            ),
+            )),
 
           // ── UCH NUQTA MENYUSI ─────────────────────────────────
           //
@@ -4111,7 +4196,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
           // ekranning 85% idan oshmaydi — sig'magani ichida
           // suriladi, ya'ni hech qachon qirqilmaydi.
           if (_speedPanelOpen && isFullscreen)
-            Align(
+            _inVideoFrame(Align(
               alignment: Alignment.centerRight,
               child: Padding(
                 padding: const EdgeInsets.only(right: 24),
@@ -4165,7 +4250,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                   ),
                 ),
               ),
-            ),
+            )),
 
           // ── SIFAT PANELI (faqat fullscreen) ──────────────────
           if (_qualityPanelOpen && isFullscreen)
@@ -4180,7 +4265,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
           // qoldirib, ekran bo'yi bo'ylab o'rtada. Ilgari u
           // `bottom: 90` edi va o'ng chekkaga yopishib turardi.
           if (_qualityPanelOpen && isFullscreen && _currentEp != null)
-            Align(
+            _inVideoFrame(Align(
               alignment: Alignment.centerRight,
               child: Padding(
                 padding: const EdgeInsets.only(right: 24),
@@ -4252,7 +4337,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                   ),
                 ),
               ),
-            ),
+            )),
 
           // ── QISMLAR RO'YXATI PANELI (faqat fullscreen) ─────────
           if (_episodeListOpen && isFullscreen)
@@ -4274,7 +4359,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
           // 12 dan). Qatorlar ham kattalashdi: barmoq bilan
           // bosish oson.
           if (_episodeListOpen && isFullscreen)
-            Align(
+            _inVideoFrame(Align(
               alignment: Alignment.centerRight,
               child: Container(
                 width: (MediaQuery.of(context).size.width * 0.5)
@@ -4410,7 +4495,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                   ),
                 ),
               ),
-            ),
+            )),
 
           if (_menuOpen)
             Positioned.fill(
@@ -4523,44 +4608,27 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
               ),
             ),
 
-          // ── FULLSCREEN: yuqori o'ng burchak tugmalari ───────────
-          // Qulflanganda faqat qulf tugmasi ko'rinadi.
+          // ── FULLSCREEN: YUQORI O'NG BURCHAK TUGMALARI ─────────
+          //
+          // TALAB (foydalanuvchi): "qulflash tugmasini bosganda
+          // tugmaning O'ZI qulf holatiga o'tsin, chap tarafdan
+          // boshqa qizil qulf chiqmasin".
+          //
+          // Ilgari qulflanganda bu qator butunlay yo'qolib, uning
+          // o'rniga CHAP yuqorida alohida qizil qulf tugmasi
+          // chiqardi — ya'ni tugma "sakrab" ketardi. Endi tugma
+          // joyida qoladi, faqat ko'rinishi o'zgaradi:
+          //
+          //   * ochiq  -> oq "lock_open" ikonkasi;
+          //   * qulf   -> qizil "lock" ikonkasi (fon bilan).
+          //
+          // Qulflanganda yonidagi sozlamalar va fullscreen
+          // tugmalari ko'rinmaydi — qulfning ma'nosi ham shu.
           if (_currentEp != null &&
               _playerError == null &&
               isFullscreen &&
-              _isLocked &&
-              _showControls)
-            Align(
-              alignment: Alignment.topLeft,
-              child: Padding(
-                padding: const EdgeInsets.only(left: 12, top: 8),
-                child: GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTap: _toggleLock,
-                  child: Container(
-                    width: 42,
-                    height: 42,
-                    alignment: Alignment.center,
-                    decoration: BoxDecoration(
-                      color: AppColors.accent.withValues(alpha: 0.25),
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(
-                          color: AppColors.accent.withValues(alpha: 0.4)),
-                    ),
-                    child: Icon(Icons.lock_rounded,
-                        color: AppColors.accent, size: 20),
-                  ),
-                ),
-              ),
-            ),
-
-          // Fullscreen da yuqori o'ng burchak: qulf + sozlamalar + fullscreen chiqish
-          if (_currentEp != null &&
-              _playerError == null &&
-              isFullscreen &&
-              !_isLocked &&
               (_showControls || _settingsPanelOpen))
-            Align(
+            _inVideoFrame(Align(
               alignment: Alignment.topRight,
               child: Padding(
                 padding: const EdgeInsets.only(right: 8, top: 6),
@@ -4570,37 +4638,57 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                     GestureDetector(
                       behavior: HitTestBehavior.opaque,
                       onTap: _toggleLock,
-                      child: Padding(
-                        padding: const EdgeInsets.all(9),
-                        child: Icon(Icons.lock_open_rounded,
-                            color: Colors.white, size: 22),
+                      child: Container(
+                        margin: const EdgeInsets.all(4),
+                        padding: const EdgeInsets.all(5),
+                        decoration: BoxDecoration(
+                          color: _isLocked
+                              ? AppColors.accent.withValues(alpha: 0.25)
+                              : Colors.transparent,
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(
+                            color: _isLocked
+                                ? AppColors.accent.withValues(alpha: 0.45)
+                                : Colors.transparent,
+                          ),
+                        ),
+                        child: Icon(
+                          _isLocked
+                              ? Icons.lock_rounded
+                              : Icons.lock_open_rounded,
+                          color:
+                              _isLocked ? AppColors.accent : Colors.white,
+                          size: 22,
+                        ),
                       ),
                     ),
-                    GestureDetector(
-                      behavior: HitTestBehavior.opaque,
-                      onTap: _showSettingsPanel,
-                      child: Padding(
-                        padding: const EdgeInsets.all(9),
-                        // SOZLAMALAR ikonkasi. Ilgari bu yerda
-                        // chaqmoq (`bolt`) turardi — u sozlamani
-                        // emas, "tez rejim"ni anglatadi.
-                        child: Icon(Icons.settings_rounded,
-                            color: Colors.white, size: 22),
+                    if (!_isLocked) ...[
+                      GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: _showSettingsPanel,
+                        child: Padding(
+                          padding: const EdgeInsets.all(9),
+                          // SOZLAMALAR ikonkasi. Ilgari bu yerda
+                          // chaqmoq (`bolt`) turardi — u sozlamani
+                          // emas, "tez rejim"ni anglatadi.
+                          child: Icon(Icons.settings_rounded,
+                              color: Colors.white, size: 22),
+                        ),
                       ),
-                    ),
-                    GestureDetector(
-                      behavior: HitTestBehavior.opaque,
-                      onTap: _toggleFullscreen,
-                      child: Padding(
-                        padding: const EdgeInsets.all(9),
-                        child: Icon(Icons.fullscreen_exit_rounded,
-                            color: Colors.white, size: 22),
+                      GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: _toggleFullscreen,
+                        child: Padding(
+                          padding: const EdgeInsets.all(9),
+                          child: Icon(Icons.fullscreen_exit_rounded,
+                              color: Colors.white, size: 22),
+                        ),
                       ),
-                    ),
+                    ],
                   ],
                 ),
               ),
-            ),
+            )),
 
           // Normal (fullscreen bo'lmagan) rejimda uch nuqta tugmasi
           if (_currentEp != null &&
@@ -4633,7 +4721,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
             ),
 
           if (_settingsPanelOpen && isFullscreen && !_isLocked)
-            Align(
+            _inVideoFrame(Align(
               alignment: Alignment.topRight,
               child: Padding(
                 padding: const EdgeInsets.only(right: 8, top: 50),
@@ -4723,7 +4811,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                     ),
                 ),
               ),
-            ),
+            )),
 
           // ── UXLASH VAQTI OYNASI BU YERDA EMAS ──────────────
           //
@@ -6740,29 +6828,28 @@ class _BottomBarState extends State<_BottomBar> {
     final hqFont = compact ? 10.5 : 10.0;
 
     if (!compact) {
-      // ── FULLSCREEN: progress va vaqt yuqorida, tugmalar pastda ──
+      // ── FULLSCREEN: tugmalar yuqorida, PROGRESS ENG PASTDA ──
+      //
+      // TALAB (foydalanuvchi): "progress chizig'ini pastga tushir"
+      // va "vaqtni tezlik tugmasining chap yoniga qo'y".
+      //
+      // Shu sabab ustun tartibi o'zgardi. Ilgari:
+      //   progress -> vaqt (chapda) + tezlik/HQ (o'ngda) -> tugmalar
+      // Endi:
+      //   vaqt + tezlik + HQ (hammasi o'ngda) -> tugmalar -> progress
+      //
+      // Ya'ni chiziq ekranning eng pastida, barmoq bilan surish
+      // uchun eng qulay joyda turadi.
       return Padding(
-        padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+        padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            _VideoProgressBar(
-              played: ratio,
-              buffered: widget.buffered,
-              trackHeight: 5.0,
-              thumbRadius: 8.0,
-              onDragStart: () {
-                setState(() => _dragValue = ratio);
-                widget.onScrubStart();
-              },
-              onDragUpdate: (v) => setState(() => _dragValue = v),
-              onDragEnd: _commit,
-              onTapSeek: _commit,
-            ),
-            const SizedBox(height: 2),
-            // ── VAQT (chap) + TEZLIK/SIFAT (o'ng) ──────────────
+            // ── VAQT + TEZLIK + SIFAT — hammasi O'NG chetda ────
             Row(
               children: [
+                const Spacer(),
+                // VAQT aynan tezlik tugmasining CHAP yonida.
                 Text(
                   '${widget.fmt(shownPosition)} / ${widget.fmt(widget.duration)}',
                   style: const TextStyle(
@@ -6770,7 +6857,7 @@ class _BottomBarState extends State<_BottomBar> {
                       fontSize: 12,
                       fontWeight: FontWeight.w600),
                 ),
-                const Spacer(),
+                const SizedBox(width: 10),
                 if (widget.onSpeedTap != null) ...[
                   // TEZLIK — IKONKA (yozuv emas, foydalanuvchi
                   // talabi). Yonidagi kichik raqam hozirgi tezlikni
@@ -6832,6 +6919,21 @@ class _BottomBarState extends State<_BottomBar> {
                   onTap: widget.hasNext ? widget.onNext : null,
                 ),
               ],
+            ),
+            const SizedBox(height: 10),
+            // ── PROGRESS CHIZIG'I — ENG PASTDA ────────────────
+            _VideoProgressBar(
+              played: ratio,
+              buffered: widget.buffered,
+              trackHeight: 5.0,
+              thumbRadius: 8.0,
+              onDragStart: () {
+                setState(() => _dragValue = ratio);
+                widget.onScrubStart();
+              },
+              onDragUpdate: (v) => setState(() => _dragValue = v),
+              onDragEnd: _commit,
+              onTapSeek: _commit,
             ),
           ],
         ),
