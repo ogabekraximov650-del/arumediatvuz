@@ -2694,8 +2694,27 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _showIntroButton();
   }
 
+  /// Uch nuqta tugmasining o'rnini o'lchash uchun kalit.
+  ///
+  /// Menyu endi PLEYER ICHIDA emas, BUTUN EKRAN ustidagi
+  /// qatlamda chiziladi (foydalanuvchi talabi: "pleyerdan
+  /// tashqariga bosganda ham oyna yashirinsin"). Shu sabab uning
+  /// joyi tugmaning HAQIQIY o'rnidan hisoblanadi.
+  final GlobalKey _menuBtnKey = GlobalKey();
+
+  /// Uch nuqta tugmasining ekrandagi to'rtburchagi (menyu shuning
+  /// ostidan chiqadi). Menyu ochilayotganda o'lchanadi.
+  Rect? _menuAnchor;
+
   /// Uch nuqtaga bosilganda menyu ochiladi yoki yopiladi.
   void _toggleMenu() {
+    if (!_menuOpen) {
+      final ctx = _menuBtnKey.currentContext;
+      final box = ctx?.findRenderObject() as RenderBox?;
+      if (box != null && box.hasSize) {
+        _menuAnchor = box.localToGlobal(Offset.zero) & box.size;
+      }
+    }
     setState(() => _menuOpen = !_menuOpen);
     // Menyu ochiq turganda kontrollar yashirinmasin: aks holda
     // uch nuqta daraxtdan olib tashlanib, oyna "muallaq" qolardi.
@@ -2863,6 +2882,126 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     final m = _sleepSecondsLeft ~/ 60;
     final s = _sleepSecondsLeft % 60;
     return '${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
+  }
+
+  /// Uch nuqta menyusi — BUTUN EKRAN ustidagi qatlam.
+  ///
+  /// Parda ekranning hammasini qoplaydi: pleyerdan tashqariga
+  /// (qismlar ro'yxati, tablar, bo'sh joy) bosilsa ham menyu
+  /// yopiladi. Menyuning O'ZI esa uch nuqta tugmasining aynan
+  /// ostida chiqadi — tugmaning o'rni `_menuAnchor` da.
+  Widget _buildMenuOverlay() {
+    final size = MediaQuery.of(context).size;
+    final a = _menuAnchor;
+    // Tayanch o'lchanmagan bo'lsa (kutilmagan holat) — o'ng
+    // yuqorida, taxminiy joyda.
+    final top = a == null ? 90.0 : a.bottom + 6;
+    final right = a == null ? 8.0 : (size.width - a.right).clamp(0.0, 1e6);
+
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: _closeMenu,
+          ),
+        ),
+        Positioned(
+          top: top,
+          right: right.toDouble(),
+          child: _PlayerPanel(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+            child: ConstrainedBox(
+              constraints: BoxConstraints(maxHeight: size.height * 0.6),
+              child: SizedBox(
+                width: 260,
+                child: SingleChildScrollView(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      _MenuToggleRow(
+                        icon: Icons.fast_forward_rounded,
+                        label: 'Avto intro o\'tkazish',
+                        on: AppSettings.instance.autoSkipIntro,
+                        onToggle: _toggleAutoSkipIntro,
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 4),
+                        child: Divider(
+                          height: 1,
+                          color: Colors.white.withValues(alpha: 0.12),
+                        ),
+                      ),
+                      _MenuToggleRow(
+                        icon: Icons.skip_next_rounded,
+                        label: 'Avto qism o\'tkazish',
+                        on: AppSettings.instance.autoNextEpisode,
+                        onToggle: _toggleAutoNextEpisode,
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 4),
+                        child: Divider(
+                          height: 1,
+                          color: Colors.white.withValues(alpha: 0.12),
+                        ),
+                      ),
+                      // ── UXLASH VAQTI ───────────────────────
+                      //
+                      // TALAB (foydalanuvchi): "uxlash vaqti
+                      // tugmasini bosish qiyin, juda kichik".
+                      //
+                      // Ilgari bu qator boshqalaridan past edi
+                      // (yozuvi 11.5, belgisi 16, balandligi esa
+                      // faqat yozuv bo'yicha) va bosish zonasi
+                      // ham shunga yarasha tor edi. Endi u
+                      // yuqoridagi qatorlar bilan BIR XIL: 46 px
+                      // balandlik, butun eni bo'ylab bosiladi.
+                      GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: () {
+                          _closeMenu();
+                          _showSleepPanel();
+                        },
+                        child: SizedBox(
+                          height: 46,
+                          child: Row(
+                            children: [
+                              Icon(Icons.schedule_rounded,
+                                  size: 20,
+                                  color: _sleepMinutes > 0
+                                      ? AppColors.accent
+                                      : Colors.white70),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text(
+                                  _sleepMinutes > 0
+                                      ? 'Uxlash: ${_sleepTimeLabel()}'
+                                      : 'Uxlash vaqti',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    color: _sleepMinutes > 0
+                                        ? AppColors.accent
+                                        : Colors.white,
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
   }
 
   /// Uxlash vaqti oynasi — butun ekran ustidagi qatlam.
@@ -3211,6 +3350,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   void _toggleFullscreen() {
     setState(() {
       _isFullscreen = !_isFullscreen;
+      // Uch nuqta menyusi faqat oddiy rejimda bor — fullscreen'ga
+      // o'tganda ochiq qolib ketmasin.
+      _menuOpen = false;
       if (!_isFullscreen) {
         _isLocked = false;
         _settingsPanelOpen = false;
@@ -3413,6 +3555,15 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
               _isFullscreen
                   ? _buildFullscreenPlayer()
                   : _buildNormalScreen(),
+              // Uch nuqta menyusi — butun ekran ustida, ya'ni
+              // pleyerdan tashqariga bosilsa ham yopiladi.
+              if (_menuOpen && _currentEp != null && _playerError == null)
+                Positioned.fill(
+                  child: Material(
+                    type: MaterialType.transparency,
+                    child: _buildMenuOverlay(),
+                  ),
+                ),
               if (_sleepPanelOpen)
                 Positioned.fill(
                   child: Material(
@@ -4543,116 +4694,18 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
               ),
             )),
 
-          if (_menuOpen)
-            Positioned.fill(
-              child: GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: _closeMenu,
-              ),
-            ),
-
-          if (_currentEp != null && _playerError == null && _menuOpen)
-            Align(
-              alignment: Alignment.topRight,
-              child: Padding(
-                padding: EdgeInsets.only(
-                  right: isFullscreen ? 10 : 6,
-                  // Uch nuqta tugmasining balandligi + kichik
-                  // bo'shliq: oyna aynan uning ostidan chiqadi.
-                  top: (isFullscreen ? 6 : 2) + 40,
-                ),
-                // ── MENYUDAGI TUGMALAR ──────────────────────
-                //
-                // Ikkovi ham bir xil ko'rinishda, ustma-ust.
-                // Ro'yxat qilib qo'yilgani ataylab: yangisi
-                // qo'shilsa shu yerga bitta qator qo'shiladi.
-                child: _PlayerPanel(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 14, vertical: 6),
-                  // Aniq kenglik: qatorlar bir xil uzunlikda
-                  // bo'ladi va oyna yozuv uzunligiga qarab
-                  // sakramaydi. Chapdan tekislangan — o'ngdan
-                  // tekislanganda ro'yxat tartibsiz ko'rinardi.
-                  //
-                  // BALANDLIK CHEKLANGAN va ichi SURILADI: menyu
-                  // pleyer maydonidan baland bo'lsa Stack uni
-                  // kesib tashlardi va pastki qatorlarga yetib
-                  // bo'lmasdi (uxlash oynasida aynan shu bo'lgan).
-                  child: ConstrainedBox(
-                    constraints: BoxConstraints(
-                      maxHeight: MediaQuery.of(context).size.height * 0.5,
-                    ),
-                    child: SizedBox(
-                      width: 230,
-                      child: SingleChildScrollView(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                      _MenuToggleRow(
-                        icon: Icons.fast_forward_rounded,
-                        label: 'Avto intro o\'tkazish',
-                        on: AppSettings.instance.autoSkipIntro,
-                        onToggle: _toggleAutoSkipIntro,
-                      ),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 6),
-                        child: Divider(
-                          height: 1,
-                          color: Colors.white.withValues(alpha: 0.12),
-                        ),
-                      ),
-                      _MenuToggleRow(
-                        icon: Icons.skip_next_rounded,
-                        label: 'Avto qism o\'tkazish',
-                        on: AppSettings.instance.autoNextEpisode,
-                        onToggle: _toggleAutoNextEpisode,
-                      ),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 6),
-                        child: Divider(
-                          height: 1,
-                          color: Colors.white.withValues(alpha: 0.12),
-                        ),
-                      ),
-                      GestureDetector(
-                        behavior: HitTestBehavior.opaque,
-                        onTap: () {
-                          _closeMenu();
-                          _showSleepPanel();
-                        },
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(Icons.schedule_rounded,
-                                size: 16,
-                                color: _sleepMinutes > 0
-                                    ? AppColors.accent
-                                    : Colors.white70),
-                            const SizedBox(width: 6),
-                            Text(
-                              _sleepMinutes > 0
-                                  ? 'Uxlash: ${_sleepTimeLabel()}'
-                                  : 'Uxlash vaqti',
-                              style: TextStyle(
-                                color: _sleepMinutes > 0
-                                    ? AppColors.accent
-                                    : Colors.white,
-                                fontSize: 11.5,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                  ),
-                    ),
-                    ),
-                ),
-              ),
-            ),
+          // ── UCH NUQTA MENYUSI BU YERDA EMAS ───────────────
+          //
+          // TALAB (foydalanuvchi): "pleyerdan tashqariga
+          // bosganda ham oyna yashirinsin".
+          //
+          // Ilgari menyu ham, uni yopadigan parda ham SHU
+          // Stack'da — ya'ni pleyer maydonida — turardi. Parda
+          // pleyerdan tashqarisini qoplamagani uchun, pastdagi
+          // qismlar ro'yxatiga bosilsa menyu ochiq qolaverardi.
+          //
+          // Endi u butun ekran ustidagi qatlamda — `build()` ga
+          // qarang (`_buildMenuOverlay`).
 
           // ── FULLSCREEN: YUQORI O'NG BURCHAK TUGMALARI ─────────
           //
@@ -4746,6 +4799,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
               child: Padding(
                 padding: const EdgeInsets.only(right: 4, top: 2),
                 child: GestureDetector(
+                  key: _menuBtnKey,
                   behavior: HitTestBehavior.opaque,
                   onTap: _toggleMenu,
                   child: const Padding(
@@ -6957,19 +7011,15 @@ class _BottomBarState extends State<_BottomBar> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // ── VAQT + TEZLIK + SIFAT — hammasi O'NG chetda ────
+            // ── TEZLIK + SIFAT — O'NG chetda ──────────────────
+            //
+            // VAQT bu qatorda EMAS (foydalanuvchi talabi): tezlik
+            // tugmasi yonida u ko'rinmay ketardi. Endi u
+            // tugmalardan KEYIN, progress chizig'ining ustida —
+            // pastga qarang.
             Row(
               children: [
                 const Spacer(),
-                // VAQT aynan tezlik tugmasining CHAP yonida.
-                Text(
-                  '${widget.fmt(shownPosition)} / ${widget.fmt(widget.duration)}',
-                  style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 12 * s,
-                      fontWeight: FontWeight.w600),
-                ),
-                SizedBox(width: 10 * s),
                 if (widget.onSpeedTap != null) ...[
                   // TEZLIK — IKONKA (yozuv emas, foydalanuvchi
                   // talabi). Yonidagi kichik raqam hozirgi tezlikni
@@ -7038,7 +7088,26 @@ class _BottomBarState extends State<_BottomBar> {
                 ),
               ],
             ),
-            SizedBox(height: 10 * s),
+            SizedBox(height: 8 * s),
+            // ── VAQT: TUGMALAR TAGIDA, CHIZIQ USTIDA, O'NGDA ──
+            //
+            // TALAB (foydalanuvchi): "vaqtni progress chizig'ining
+            // o'ng tarafi ustiga va next/prev/play-pause
+            // tugmalarining tagiga qo'y — tezlik tugmasi yonida
+            // ko'rinmayapti".
+            Align(
+              alignment: Alignment.centerRight,
+              child: Padding(
+                padding: EdgeInsets.only(right: 4 * s, bottom: 4 * s),
+                child: Text(
+                  '${widget.fmt(shownPosition)} / ${widget.fmt(widget.duration)}',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 13 * s,
+                      fontWeight: FontWeight.w700),
+                ),
+              ),
+            ),
             // ── PROGRESS CHIZIG'I — ENG PASTDA ────────────────
             _VideoProgressBar(
               played: ratio,
@@ -7544,10 +7613,12 @@ class _MenuToggleRow extends StatelessWidget {
       behavior: HitTestBehavior.opaque,
       onTap: onToggle,
       child: SizedBox(
-        height: 38,
+        // Barmoq bilan bosish qulay bo'lishi uchun 38 -> 46
+        // (foydalanuvchi: "bosish qiyin bo'lyapti").
+        height: 46,
         child: Row(
           children: [
-            Icon(icon, size: 18, color: Colors.white70),
+            Icon(icon, size: 20, color: Colors.white70),
             const SizedBox(width: 10),
             Expanded(
               child: Text(
@@ -7556,15 +7627,15 @@ class _MenuToggleRow extends StatelessWidget {
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(
                   color: Colors.white,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w500,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
                 ),
               ),
             ),
             const SizedBox(width: 8),
             Icon(
               on ? Icons.toggle_on_rounded : Icons.toggle_off_rounded,
-              size: 26,
+              size: 30,
               color: on ? AppColors.accent : Colors.white30,
             ),
           ],
