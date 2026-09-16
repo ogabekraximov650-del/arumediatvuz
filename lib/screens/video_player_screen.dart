@@ -330,6 +330,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   bool _isFullscreen = false;
   bool _showControls = true;
   Timer? _hideTimer;
+  double _playbackSpeed = 1.0;
+  bool _speedPanelOpen = false;
 
   DateTime _lastPlayPauseTap = DateTime.fromMillisecondsSinceEpoch(0);
 
@@ -2666,6 +2668,23 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     setState(() {});
   }
 
+  void _showSpeedPanel() {
+    setState(() => _speedPanelOpen = true);
+    _hideTimer?.cancel();
+  }
+
+  void _closeSpeedPanel() {
+    if (!_speedPanelOpen) return;
+    setState(() => _speedPanelOpen = false);
+    _scheduleHide();
+  }
+
+  void _setSpeed(double speed) {
+    _playbackSpeed = speed;
+    _controller?.setPlaybackSpeed(speed);
+    _closeSpeedPanel();
+  }
+
   /// Tugmani ko'rsatadi.
   ///
   /// TALAB (foydalanuvchi): "intro tugmasi intro TUGAMAGUNCHA
@@ -3510,6 +3529,21 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
               ),
             ),
 
+          // ── DOIM KO'RINADIGAN PROGRESS CHIZIQI (YouTube uslubi) ──
+          if (_currentEp != null && _playerError == null)
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: IgnorePointer(
+                child: _AlwaysVisibleProgress(
+                  controller: _controller,
+                  currentUrl: _currentUrl,
+                  visible: !_showControls,
+                ),
+              ),
+            ),
+
           // ── "O'TKAZIB YUBORISH" — ENG USTKI QATLAM ────────────
           //
           // Sek gesture qatlamidan KEYIN (ya'ni uning USTIDA)
@@ -3552,6 +3586,63 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
           //   2. OYNA  — uch nuqta ostida;
           //   3. UCH NUQTA — pardadan USTIDA, ya'ni unga bosilsa
           //      menyu yopiladi (parda tutib qolmaydi).
+          // ── TEZLIK PANELI (faqat fullscreen) ──────────────────
+          if (_speedPanelOpen && isFullscreen)
+            Positioned.fill(
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: _closeSpeedPanel,
+              ),
+            ),
+
+          if (_speedPanelOpen && isFullscreen)
+            Align(
+              alignment: Alignment.bottomLeft,
+              child: Padding(
+                padding: const EdgeInsets.only(left: 12, bottom: 90),
+                child: _PlayerPanel(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 6, vertical: 8),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      for (final s in const [
+                        0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0
+                      ])
+                        GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: () => _setSpeed(s),
+                          child: Container(
+                            width: 56,
+                            padding: const EdgeInsets.symmetric(
+                                vertical: 7),
+                            alignment: Alignment.center,
+                            decoration: BoxDecoration(
+                              color: _playbackSpeed == s
+                                  ? AppColors.accent.withValues(alpha: 0.2)
+                                  : Colors.transparent,
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                            child: Text(
+                              '${s == s.truncate() ? s.toStringAsFixed(0) : s.toString()}×',
+                              style: TextStyle(
+                                color: _playbackSpeed == s
+                                    ? AppColors.accent
+                                    : Colors.white,
+                                fontSize: 13,
+                                fontWeight: _playbackSpeed == s
+                                    ? FontWeight.w800
+                                    : FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+
           if (_menuOpen)
             Positioned.fill(
               child: GestureDetector(
@@ -3575,22 +3666,32 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                 // Ikkovi ham bir xil ko'rinishda, ustma-ust.
                 // Ro'yxat qilib qo'yilgani ataylab: yangisi
                 // qo'shilsa shu yerga bitta qator qo'shiladi.
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    _MenuToggle(
-                      label: 'Avto o\'tkazish',
-                      on: AppSettings.instance.autoSkipIntro,
-                      onToggle: _toggleAutoSkipIntro,
-                    ),
-                    const SizedBox(height: 6),
-                    _MenuToggle(
-                      label: 'Avto qism o\'tkazish',
-                      on: AppSettings.instance.autoNextEpisode,
-                      onToggle: _toggleAutoNextEpisode,
-                    ),
-                  ],
+                child: _PlayerPanel(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 12, vertical: 10),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      _MenuToggleRow(
+                        label: 'Avto intro o\'tkazish',
+                        on: AppSettings.instance.autoSkipIntro,
+                        onToggle: _toggleAutoSkipIntro,
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 6),
+                        child: Divider(
+                          height: 1,
+                          color: Colors.white.withValues(alpha: 0.12),
+                        ),
+                      ),
+                      _MenuToggleRow(
+                        label: 'Avto qism o\'tkazish',
+                        on: AppSettings.instance.autoNextEpisode,
+                        onToggle: _toggleAutoNextEpisode,
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -3856,27 +3957,36 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     );
   }
 
-  Widget _bottomBar(VideoPlayerValue? value, bool isFullscreen) => _BottomBar(
-          // Sek kutilayotgan bo'lsa — chiziq va vaqt O'SHA nuqtani
-          // ko'rsatadi (pleyer hali eski joyda muzlab turgan bo'lsa
-          // ham). Foydalanuvchi shu bilan qayerga borayotganini
-          // darhol ko'radi.
+  Widget _bottomBar(VideoPlayerValue? value, bool isFullscreen) {
+    double bufferedRatio = 0.0;
+    if (value != null &&
+        value.isInitialized &&
+        value.duration.inMilliseconds > 0) {
+      Duration ahead = Duration.zero;
+      for (final r in value.buffered) {
+        if (r.end > ahead) ahead = r.end;
+      }
+      final dlStat = DownloadManager.instance.statOf(_currentUrl);
+      if (dlStat.ratio > 0) {
+        bufferedRatio = dlStat.ratio;
+      } else {
+        bufferedRatio = (ahead.inMilliseconds / value.duration.inMilliseconds)
+            .clamp(0.0, 1.0);
+      }
+    }
+    return _BottomBar(
           position: _pendingTarget ?? value?.position ?? Duration.zero,
           duration: value?.duration ?? Duration.zero,
+          buffered: bufferedRatio,
           fmt: _fmt,
           onSeek: (d) {
-            // MUHIM: progress chizig'idan kelgan sek ham DEBOUNCE
-            // orqali o'tadi. Avval har bir surish/bosish darhol
-            // ctrl.seekTo() chaqirardi — tez-tez bosilganda o'nlab sek
-            // buyrug'i pleyerda navbatga to'planib, uni qotirib
-            // qo'yardi. Endi ikki marta bosib sek qilish bilan BITTA
-            // umumiy navbat ishlatiladi.
             _scheduleSeekTo(d);
             _scheduleHide();
           },
           onQualityTap: _showQualityDialog,
           onFullscreen: _toggleFullscreen,
           isFullscreen: isFullscreen,
+          onSpeedTap: isFullscreen ? _showSpeedPanel : null,
           onScrubStart: () {
             _hideTimer?.cancel();
             if (!_isScrubbing) setState(() => _isScrubbing = true);
@@ -3886,6 +3996,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
             _scheduleHide();
           },
         );
+  }
 
   // ── QISMLAR RO'YXATI ────────────────────────────────────────────
   //
@@ -4983,10 +5094,6 @@ class _QualityRow extends StatelessWidget {
         // foydalanuvchi "sekinlashdimi yoki yo'q"ni shu raqamdan
         // ko'radi (ilgari ekranda faqat foiz bor edi).
         final speed = st.downloading ? st.speedLabel : '';
-        final line =
-            '${info.label} / ${st.percent}% / ${_mb(st.downloaded)} / $totalLabel'
-            '${speed.isNotEmpty ? ' · $speed' : ''}'
-            '${st.retrying ? ' · qayta urinilmoqda' : ''}';
         return Padding(
           padding: const EdgeInsets.fromLTRB(12, 0, 8, 10),
           child: Row(
@@ -4995,16 +5102,68 @@ class _QualityRow extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(line,
-                        style: TextStyle(
-                            color: st.complete
-                                ? Colors.white
-                                : Colors.white.withValues(alpha: 0.72),
-                            fontSize: 12,
-                            fontWeight: FontWeight.w600)),
+                    Row(
+                      children: [
+                        Text(info.label,
+                            style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 13,
+                                fontWeight: FontWeight.w800)),
+                        const SizedBox(width: 8),
+                        Text('${st.percent}%',
+                            style: TextStyle(
+                                color: st.complete
+                                    ? AppColors.accent
+                                    : Colors.white,
+                                fontSize: 13,
+                                fontWeight: FontWeight.w800)),
+                        const SizedBox(width: 8),
+                        Text(
+                            '${_mb(st.downloaded)} / $totalLabel',
+                            style: TextStyle(
+                                color: Colors.white.withValues(alpha: 0.65),
+                                fontSize: 11.5,
+                                fontWeight: FontWeight.w600)),
+                      ],
+                    ),
+                    if (speed.isNotEmpty || st.retrying) ...[
+                      const SizedBox(height: 3),
+                      Row(
+                        children: [
+                          if (speed.isNotEmpty)
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: AppColors.accent.withValues(alpha: 0.18),
+                                borderRadius: BorderRadius.circular(5),
+                              ),
+                              child: Text(speed,
+                                  style: TextStyle(
+                                      color: AppColors.accent,
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w700)),
+                            ),
+                          if (st.retrying) ...[
+                            const SizedBox(width: 6),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: Colors.orange.withValues(alpha: 0.18),
+                                borderRadius: BorderRadius.circular(5),
+                              ),
+                              child: const Text('qayta urinilmoqda',
+                                  style: TextStyle(
+                                      color: Colors.orange,
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w700)),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ],
                     const SizedBox(height: 5),
-                    // Chiziq o'ng chetga YETMAYDI — o'ng tarafda
-                    // tugmalar turadi.
                     Padding(
                       padding: const EdgeInsets.only(right: 12),
                       child: ClipRRect(
@@ -5021,17 +5180,9 @@ class _QualityRow extends StatelessWidget {
                   ],
                 ),
               ),
-              // TO'LIQ yuklangan sifatda yuklab olish tugmasi
-              // KO'RSATILMAYDI — olinadigan narsa qolmagan.
               if (!st.complete)
-                _MiniIconButton(
-                  // Yuklanayotganda pleyerdagidek IKKI CHIZIQ (pauza)
-                  // ko'rinadi; yana bosilsa yuklash to'xtaydi va ikonka
-                  // avvalgi holatiga qaytadi.
-                  icon: st.downloading
-                      ? Icons.pause_rounded
-                      : Icons.download_rounded,
-                  highlighted: st.downloading,
+                GestureDetector(
+                  behavior: HitTestBehavior.opaque,
                   onTap: () {
                     if (st.downloading) {
                       DownloadManager.instance.pause(info.url);
@@ -5039,6 +5190,30 @@ class _QualityRow extends StatelessWidget {
                       DownloadManager.instance.download(info.url);
                     }
                   },
+                  child: Container(
+                    margin: const EdgeInsets.only(left: 5),
+                    width: 44,
+                    height: 44,
+                    decoration: BoxDecoration(
+                      color: st.downloading
+                          ? AppColors.accent.withValues(alpha: 0.22)
+                          : Colors.white.withValues(alpha: 0.08),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: st.downloading
+                            ? AppColors.accent.withValues(alpha: 0.4)
+                            : Colors.white.withValues(alpha: 0.15),
+                      ),
+                    ),
+                    child: Icon(
+                        st.downloading
+                            ? Icons.pause_rounded
+                            : Icons.download_rounded,
+                        size: 23,
+                        color: st.downloading
+                            ? AppColors.accent
+                            : Colors.white),
+                  ),
                 ),
               const SizedBox(width: 2),
               _MiniIconButton(
@@ -5333,25 +5508,27 @@ class _SeekBadgeState extends State<_SeekBadge>
 class _BottomBar extends StatefulWidget {
   final Duration position;
   final Duration duration;
+  final double buffered;
 
   final String Function(Duration) fmt;
   final ValueChanged<Duration> onSeek;
   final VoidCallback onQualityTap;
   final VoidCallback onFullscreen;
   final bool isFullscreen;
-  // Barmoq chiziqqa qo'yilganda/uzilganda xabar beradi — markaziy
-  // tugmaning halqasi shu paytda aylanadi.
+  final VoidCallback? onSpeedTap;
   final VoidCallback onScrubStart;
   final VoidCallback onScrubEnd;
 
   const _BottomBar({
     required this.position,
     required this.duration,
+    required this.buffered,
     required this.fmt,
     required this.onSeek,
     required this.onQualityTap,
     required this.onFullscreen,
     required this.isFullscreen,
+    this.onSpeedTap,
     required this.onScrubStart,
     required this.onScrubEnd,
   });
@@ -5410,18 +5587,96 @@ class _BottomBarState extends State<_BottomBar> {
     final iconSize = compact ? 22.0 : 20.0;
     final hqFont = compact ? 10.5 : 10.0;
 
+    if (!compact) {
+      // ── FULLSCREEN: progress va vaqt yuqorida, tugmalar pastda ──
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _VideoProgressBar(
+              played: ratio,
+              buffered: widget.buffered,
+              trackHeight: 5.0,
+              thumbRadius: 8.0,
+              onDragStart: () {
+                setState(() => _dragValue = ratio);
+                widget.onScrubStart();
+              },
+              onDragUpdate: (v) => setState(() => _dragValue = v),
+              onDragEnd: _commit,
+              onTapSeek: _commit,
+            ),
+            const SizedBox(height: 2),
+            Row(
+              children: [
+                Text(
+                  '${widget.fmt(shownPosition)} / ${widget.fmt(widget.duration)}',
+                  style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600),
+                ),
+                const Spacer(),
+                if (widget.onSpeedTap != null)
+                  GestureDetector(
+                    onTap: widget.onSpeedTap,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 4),
+                      decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(7),
+                          border: Border.all(color: Colors.white30)),
+                      child: const Text('Tezlik',
+                          style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700)),
+                    ),
+                  ),
+                const SizedBox(width: 6),
+                GestureDetector(
+                  onTap: widget.onQualityTap,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 8, vertical: 4),
+                    decoration: BoxDecoration(
+                        color: Colors.white.withValues(alpha: 0.15),
+                        borderRadius: BorderRadius.circular(7),
+                        border: Border.all(color: Colors.white30)),
+                    child: Text('HQ',
+                        style: TextStyle(
+                            color: Colors.white,
+                            fontSize: hqFont,
+                            fontWeight: FontWeight.w700)),
+                  ),
+                ),
+                const SizedBox(width: 6),
+                GestureDetector(
+                  onTap: widget.onFullscreen,
+                  child: Padding(
+                    padding: const EdgeInsets.all(2),
+                    child: Icon(Icons.fullscreen_exit_rounded,
+                        color: Colors.white, size: 24),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      );
+    }
+
+    // ── ODDIY (portrait) rejim ──
     return Padding(
-      // Panel IKKALA CHETGACHA to'ladi va biroz pastroqda turadi
-      // (foydalanuvchi talabi). Chap chetda progress chizig'i
-      // boshlanadi, o'ng chetda esa vaqt / HQ / fullscreen turadi.
-      // O'ng chetdagi bo'shliq ham qisqardi — chiziq o'ngga
-      // cho'ziladi.
-      padding: EdgeInsets.fromLTRB(0, 0, compact ? 4 : 3, compact ? 4 : 2),
+      padding: EdgeInsets.fromLTRB(0, 0, 4, 4),
       child: Row(
         children: [
           Expanded(
             child: _VideoProgressBar(
               played: ratio,
+              buffered: widget.buffered,
               trackHeight: trackHeight,
               thumbRadius: thumbRadius,
               onDragStart: () {
@@ -5433,8 +5688,7 @@ class _BottomBarState extends State<_BottomBar> {
               onTapSeek: _commit,
             ),
           ),
-          SizedBox(width: compact ? 6 : 5),
-          // Vaqt: joriy pozitsiya ham, UMUMIY davomiylik ham TO'LIQ OQ.
+          const SizedBox(width: 6),
           Text(
             '${widget.fmt(shownPosition)}/${widget.fmt(widget.duration)}',
             style: TextStyle(
@@ -5442,12 +5696,12 @@ class _BottomBarState extends State<_BottomBar> {
                 fontSize: timeFont,
                 fontWeight: FontWeight.w600),
           ),
-          SizedBox(width: compact ? 6 : 5),
+          const SizedBox(width: 6),
           GestureDetector(
             onTap: widget.onQualityTap,
             child: Container(
-              padding: EdgeInsets.symmetric(
-                  horizontal: compact ? 7 : 6, vertical: compact ? 4 : 3),
+              padding: const EdgeInsets.symmetric(
+                  horizontal: 7, vertical: 4),
               decoration: BoxDecoration(
                   color: Colors.white.withValues(alpha: 0.15),
                   borderRadius: BorderRadius.circular(7),
@@ -5459,18 +5713,14 @@ class _BottomBarState extends State<_BottomBar> {
                       fontWeight: FontWeight.w700)),
             ),
           ),
-          SizedBox(width: compact ? 3 : 3),
+          const SizedBox(width: 3),
           GestureDetector(
             onTap: widget.onFullscreen,
             child: Padding(
-              padding: EdgeInsets.symmetric(
-                  horizontal: compact ? 3 : 3, vertical: compact ? 4 : 2),
-              child: Icon(
-                  widget.isFullscreen
-                      ? Icons.fullscreen_exit_rounded
-                      : Icons.fullscreen_rounded,
-                  color: Colors.white,
-                  size: iconSize),
+              padding: const EdgeInsets.symmetric(
+                  horizontal: 3, vertical: 4),
+              child: Icon(Icons.fullscreen_rounded,
+                  color: Colors.white, size: iconSize),
             ),
           ),
         ],
@@ -5481,11 +5731,8 @@ class _BottomBarState extends State<_BottomBar> {
 
 /// Uch qatlamli progress chizig'i (shaffof / oq / accent) + tutqich.
 class _VideoProgressBar extends StatefulWidget {
-  /// Ijro etilgan ulush (0..1).
   final double played;
-
-  /// Chiziq qalinligi va tutqich radiusi — oddiy rejimda kattaroq,
-  /// fullscreen'da jamroq (chaqiruvchi hal qiladi).
+  final double buffered;
   final double trackHeight;
   final double thumbRadius;
 
@@ -5496,6 +5743,7 @@ class _VideoProgressBar extends StatefulWidget {
 
   const _VideoProgressBar({
     required this.played,
+    this.buffered = 0.0,
     required this.trackHeight,
     required this.thumbRadius,
     required this.onDragStart,
@@ -5547,19 +5795,34 @@ class _VideoProgressBarState extends State<_VideoProgressBar> {
             child: Stack(
               alignment: Alignment.centerLeft,
               children: [
-                // ── CHIZIQ MUTLAQO SHAFFOF ──────────────────────
-                //
-                // TALAB (foydalanuvchi): "progress chizig'ida faqat
-                // qizil nuqta qolsin — pastdagi videoni boshqa
-                // vaqtga o'tkazadigan, ya'ni qo'lda suriladigan
-                // progressni aytgandim".
-                //
-                // Shu sabab na orqa chiziq, na yuklab olingan oq
-                // qism, na o'tilgan qizil qism chizilmaydi. Bu
-                // shaffof yo'lak faqat KENGLIK beradi (Stack
-                // o'lchamini belgilaydi) va bosish zonasini ushlab
-                // turadi — ko'zga ko'rinmaydi.
-                SizedBox(width: w, height: track),
+                // Orqa chiziq (xira)
+                Container(
+                  width: w,
+                  height: track,
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.2),
+                    borderRadius: BorderRadius.circular(track / 2),
+                  ),
+                ),
+                // Buffer chiziqi (oq)
+                if (widget.buffered > 0)
+                  Container(
+                    width: w * widget.buffered.clamp(0.0, 1.0),
+                    height: track,
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.4),
+                      borderRadius: BorderRadius.circular(track / 2),
+                    ),
+                  ),
+                // O'tilgan qism (accent)
+                Container(
+                  width: w * played.clamp(0.0, 1.0),
+                  height: track,
+                  decoration: BoxDecoration(
+                    color: AppColors.accent,
+                    borderRadius: BorderRadius.circular(track / 2),
+                  ),
+                ),
                 Positioned(
                   left: (w * played.clamp(0.0, 1.0) - thumb / 2)
                       .clamp(0.0, w > thumb ? w - thumb : 0.0),
@@ -5864,12 +6127,12 @@ class _SkipIntroButton extends StatelessWidget {
 // Ko'rinishi pastki paneldagi `HQ` tugmasidan olingan: fon oq
 // 15%, chekkasi `white30`, burchagi 7 — uchovi birga
 // o'zgartiriladi.
-class _MenuToggle extends StatelessWidget {
+class _MenuToggleRow extends StatelessWidget {
   final String label;
   final bool on;
   final VoidCallback onToggle;
 
-  const _MenuToggle({
+  const _MenuToggleRow({
     required this.label,
     required this.on,
     required this.onToggle,
@@ -5878,33 +6141,98 @@ class _MenuToggle extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
-      // Oyna ICHIGA bosilgani pardaga o'tib ketmasin.
       behavior: HitTestBehavior.opaque,
       onTap: onToggle,
-      child: _PlayerPanel(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              label,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 11.5,
-                fontWeight: FontWeight.w600,
-              ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            label,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 11.5,
+              fontWeight: FontWeight.w600,
             ),
-            const SizedBox(width: 6),
-            // Yoqib-o'chiradigan tugma: bir marta bosilsa yonadi,
-            // yana bir marta bosilsa o'chadi.
-            Icon(
-              on ? Icons.toggle_on_rounded : Icons.toggle_off_rounded,
-              size: 22,
-              color: on ? AppColors.accent : Colors.white38,
-            ),
-          ],
-        ),
+          ),
+          const SizedBox(width: 6),
+          Icon(
+            on ? Icons.toggle_on_rounded : Icons.toggle_off_rounded,
+            size: 22,
+            color: on ? AppColors.accent : Colors.white38,
+          ),
+        ],
       ),
+    );
+  }
+}
+
+/// YouTube uslubidagi doim ko'rinadigan progress chiziqi.
+/// Kontrollar yashiringanda pastda ingichka, shaffof chiziq turadi.
+/// Kontrollar ochiq bo'lganda yashirinadi (asosiy progress bar ko'rinadi).
+class _AlwaysVisibleProgress extends StatelessWidget {
+  final VideoPlayerController? controller;
+  final String currentUrl;
+  final bool visible;
+
+  const _AlwaysVisibleProgress({
+    required this.controller,
+    required this.currentUrl,
+    required this.visible,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (!visible) return const SizedBox.shrink();
+    final ctrl = controller;
+    if (ctrl == null) return const SizedBox.shrink();
+    return ValueListenableBuilder<VideoPlayerValue>(
+      valueListenable: ctrl,
+      builder: (_, value, __) {
+        if (!value.isInitialized || value.duration.inMilliseconds <= 0) {
+          return const SizedBox.shrink();
+        }
+        final played = (value.position.inMilliseconds /
+                value.duration.inMilliseconds)
+            .clamp(0.0, 1.0);
+        Duration ahead = Duration.zero;
+        for (final r in value.buffered) {
+          if (r.end > ahead) ahead = r.end;
+        }
+        final dlStat = DownloadManager.instance.statOf(currentUrl);
+        final buffered = dlStat.ratio > 0
+            ? dlStat.ratio
+            : (ahead.inMilliseconds / value.duration.inMilliseconds)
+                .clamp(0.0, 1.0);
+
+        return SizedBox(
+          height: 3,
+          child: LayoutBuilder(
+            builder: (context, c) {
+              final w = c.maxWidth;
+              return Stack(
+                children: [
+                  Container(
+                    width: w,
+                    height: 3,
+                    color: Colors.white.withValues(alpha: 0.12),
+                  ),
+                  if (buffered > 0)
+                    Container(
+                      width: w * buffered,
+                      height: 3,
+                      color: Colors.white.withValues(alpha: 0.3),
+                    ),
+                  Container(
+                    width: w * played,
+                    height: 3,
+                    color: AppColors.accent.withValues(alpha: 0.85),
+                  ),
+                ],
+              );
+            },
+          ),
+        );
+      },
     );
   }
 }
