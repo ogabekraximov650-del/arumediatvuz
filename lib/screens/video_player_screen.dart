@@ -3758,6 +3758,45 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   /// Bu yerda o'sha yo'lak kengligi hisoblanadi va boshqaruvga
   /// chetlama (padding) sifatida beriladi. Video nisbati ekranga
   /// teng bo'lsa (yo'lak yo'q) hech narsa o'zgarmaydi.
+  /// Boshqaruv elementlari uchun O'LCHAM KOEFFITSIENTI.
+  ///
+  /// TALAB (foydalanuvchi): "iloji bo'lsa tugmalar joylashuvi
+  /// video o'lchamiga qarab o'zgarsin".
+  ///
+  /// Qiymat videoning EKRANDAGI haqiqiy kadridan olinadi (qora
+  /// yo'laklar hisobga olinmaydi). Etalon — odatiy telefonning
+  /// yon holatidagi 16:9 kadri (640x360 dp), ya'ni bunday
+  /// qurilmada koeffitsient 1.0 va hech nima o'zgarmaydi.
+  ///
+  ///   * planshet / katta ekran -> kadr kattaroq -> tugmalar ham
+  ///     kattaroq (1.6 gacha);
+  ///   * 4:3 yoki tik video     -> kadr TOR -> tugmalar kichrayadi
+  ///     (0.7 gacha), ya'ni ular kadrga bemalol sig'adi.
+  ///
+  /// Oddiy (portret) rejimda o'lcham o'zgarmaydi: u yerda
+  /// boshqaruv allaqachon ixcham.
+  double _ctrlScale(bool isFullscreen) {
+    if (!isFullscreen) return 1.0;
+    final m = MediaQuery.of(context).size;
+    final ctrl = _controller;
+    final ar = (ctrl != null &&
+            ctrl.value.isInitialized &&
+            ctrl.value.aspectRatio > 0)
+        ? ctrl.value.aspectRatio
+        : 16 / 9;
+    var vw = m.width;
+    var vh = m.height;
+    if (vw / vh > ar) {
+      vw = vh * ar;
+    } else {
+      vh = vw / ar;
+    }
+    final byWidth = vw / 640.0;
+    final byHeight = vh / 360.0;
+    final s = byWidth < byHeight ? byWidth : byHeight;
+    return s.clamp(0.7, 1.6).toDouble();
+  }
+
   Widget _inVideoFrame(Widget child) {
     return LayoutBuilder(
       builder: (context, c) {
@@ -3787,6 +3826,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
 
   Widget _buildPlayerCore({required bool isFullscreen}) {
     final ctrl = _controller;
+    // Yuqori burchakdagi tugmalar ham video kadriga moslashadi.
+    final btnS = _ctrlScale(isFullscreen);
     return Container(
       color: Colors.black,
       child: Stack(
@@ -4062,9 +4103,14 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                   // Pastki boshqaruv paneli oddiy rejimda kattaroq
                   // (tugmalar qulay bo'lishi uchun) — shu sabab uning
                   // ustidagi "sek qilinmaydigan" zona ham balandroq.
-                  final bottomGuard =
-                      _showControls ? (isFullscreen ? 78.0 : 86.0) : 0.0;
-                  final topGuard = (_showControls && isFullscreen) ? 60.0 : 0.0;
+                  // Tugmalar kadr o'lchamiga qarab kattalashadi —
+                  // ular ustidagi "sek qilinmaydigan" zona ham
+                  // xuddi shunday o'zgaradi.
+                  final bottomGuard = _showControls
+                      ? (isFullscreen ? 78.0 * btnS : 86.0)
+                      : 0.0;
+                  final topGuard =
+                      (_showControls && isFullscreen) ? 60.0 * btnS : 0.0;
                   return Listener(
                     behavior: HitTestBehavior.translucent,
                     onPointerDown: (e) {
@@ -4631,7 +4677,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
             _inVideoFrame(Align(
               alignment: Alignment.topRight,
               child: Padding(
-                padding: const EdgeInsets.only(right: 8, top: 6),
+                padding: EdgeInsets.only(right: 8 * btnS, top: 6 * btnS),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
@@ -4639,13 +4685,13 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                       behavior: HitTestBehavior.opaque,
                       onTap: _toggleLock,
                       child: Container(
-                        margin: const EdgeInsets.all(4),
-                        padding: const EdgeInsets.all(5),
+                        margin: EdgeInsets.all(4 * btnS),
+                        padding: EdgeInsets.all(5 * btnS),
                         decoration: BoxDecoration(
                           color: _isLocked
                               ? AppColors.accent.withValues(alpha: 0.25)
                               : Colors.transparent,
-                          borderRadius: BorderRadius.circular(10),
+                          borderRadius: BorderRadius.circular(10 * btnS),
                           border: Border.all(
                             color: _isLocked
                                 ? AppColors.accent.withValues(alpha: 0.45)
@@ -4658,7 +4704,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                               : Icons.lock_open_rounded,
                           color:
                               _isLocked ? AppColors.accent : Colors.white,
-                          size: 22,
+                          size: 22 * btnS,
                         ),
                       ),
                     ),
@@ -4667,21 +4713,21 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                         behavior: HitTestBehavior.opaque,
                         onTap: _showSettingsPanel,
                         child: Padding(
-                          padding: const EdgeInsets.all(9),
+                          padding: EdgeInsets.all(9 * btnS),
                           // SOZLAMALAR ikonkasi. Ilgari bu yerda
                           // chaqmoq (`bolt`) turardi — u sozlamani
                           // emas, "tez rejim"ni anglatadi.
                           child: Icon(Icons.settings_rounded,
-                              color: Colors.white, size: 22),
+                              color: Colors.white, size: 22 * btnS),
                         ),
                       ),
                       GestureDetector(
                         behavior: HitTestBehavior.opaque,
                         onTap: _toggleFullscreen,
                         child: Padding(
-                          padding: const EdgeInsets.all(9),
+                          padding: EdgeInsets.all(9 * btnS),
                           child: Icon(Icons.fullscreen_exit_rounded,
-                              color: Colors.white, size: 22),
+                              color: Colors.white, size: 22 * btnS),
                         ),
                       ),
                     ],
@@ -4828,6 +4874,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   }
 
   Widget _buildControls({required bool isFullscreen}) {
+    // Hamma o'lchamlar shu koeffitsientga ko'paytiriladi — ya'ni
+    // boshqaruv videoning ekrandagi kadriga MOSLASHADI.
+    final s = _ctrlScale(isFullscreen);
     return Container(
       decoration: BoxDecoration(
         gradient: LinearGradient(
@@ -4848,18 +4897,18 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
             // ── Yuqori qator: orqaga (faqat fullscreen) + sarlavha ──
             if (isFullscreen)
               Padding(
-                padding: const EdgeInsets.fromLTRB(12, 6, 12, 0),
+                padding: EdgeInsets.fromLTRB(12 * s, 6 * s, 12 * s, 0),
                 child: Row(
                   children: [
                     GestureDetector(
                       onTap: _toggleFullscreen,
-                      child: const Padding(
-                        padding: EdgeInsets.all(8),
+                      child: Padding(
+                        padding: EdgeInsets.all(8 * s),
                         child: Icon(Icons.arrow_back_rounded,
-                            color: Colors.white, size: 24),
+                            color: Colors.white, size: 24 * s),
                       ),
                     ),
-                    const SizedBox(width: 4),
+                    SizedBox(width: 4 * s),
                     Expanded(
                       child: Text(
                         (_currentEp?['epizod_name'] ??
@@ -4868,16 +4917,16 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                             .toString(),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
+                        style: TextStyle(
                             color: Colors.white,
                             fontWeight: FontWeight.w600,
-                            fontSize: 14),
+                            fontSize: 14 * s),
                       ),
                     ),
                     // O'ng yuqorida uch nuqta turadi (Stack'dagi
                     // alohida qatlamda) — sarlavha uning tagiga
                     // kirib ketmasligi uchun joy qoldiriladi.
-                    const SizedBox(width: 44),
+                    SizedBox(width: 44 * s),
                   ],
                 ),
               ),
@@ -4898,7 +4947,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
 
             const Spacer(),
 
-            _bottomBarReactive(isFullscreen: isFullscreen),
+            _bottomBarReactive(isFullscreen: isFullscreen, scale: s),
           ],
         ),
       ),
@@ -5024,8 +5073,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   // zona kengligi va sek ko'rsatkichining o'lchami shu qiymatga
   // asoslanadi.
   double _playPauseDiameter(bool isFullscreen) {
-    // Ikonka (40) + ichki padding (12×2) + halqa uchun joy (6×2).
-    return 40.0 + 12 * 2 + 6 * 2;
+    // Ikonka (40) + ichki padding (12×2) + halqa uchun joy (6×2),
+    // hammasi kadr o'lchamiga qarab (`_ctrlScale`).
+    return (40.0 + 12 * 2 + 6 * 2) * _ctrlScale(isFullscreen);
   }
 
   Widget _playPauseIcon({required bool playing, required double size}) {
@@ -5049,13 +5099,14 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   ///     hisobi bu yerda 0 bo'lardi va chiziq bo'sh ko'rinardi.
 
   // Faqat slayder/vaqtni eng tor ko'lamda yangilaydi.
-  Widget _bottomBarReactive({required bool isFullscreen}) {
+  Widget _bottomBarReactive(
+      {required bool isFullscreen, double scale = 1.0}) {
     final ctrl = _controller;
     // Progress chizig'idagi OQ (tayyor) qism uchun: mahalliy
     // ijroda DownloadManager hisobi kerak bo'ladi.
     Widget bar(VideoPlayerValue? value) => AnimatedBuilder(
           animation: DownloadManager.instance,
-          builder: (context, _) => _bottomBar(value, isFullscreen),
+          builder: (context, _) => _bottomBar(value, isFullscreen, scale),
         );
     if (ctrl == null) return bar(null);
     return ValueListenableBuilder<VideoPlayerValue>(
@@ -5064,7 +5115,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     );
   }
 
-  Widget _bottomBar(VideoPlayerValue? value, bool isFullscreen) {
+  Widget _bottomBar(VideoPlayerValue? value, bool isFullscreen,
+      [double scale = 1.0]) {
     double bufferedRatio = 0.0;
     if (value != null &&
         value.isInitialized &&
@@ -5086,6 +5138,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     final hasNext = i > 0;
     final hasPrev = i >= 0 && i < eps.length - 1;
     return _BottomBar(
+          scale: scale,
           position: _pendingTarget ?? value?.position ?? Duration.zero,
           duration: value?.duration ?? Duration.zero,
           buffered: bufferedRatio,
@@ -6642,16 +6695,20 @@ class _FsButton extends StatelessWidget {
   /// Asosiy tugma (play/pause) — kattaroq va urg'u rangida.
   final bool primary;
 
+  /// Video kadriga qarab o'lcham koeffitsienti.
+  final double scale;
+
   const _FsButton({
     required this.icon,
     required this.onTap,
     this.primary = false,
+    this.scale = 1.0,
   });
 
   @override
   Widget build(BuildContext context) {
     final on = onTap != null;
-    final size = primary ? 52.0 : 42.0;
+    final size = (primary ? 52.0 : 42.0) * scale;
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: onTap,
@@ -6671,7 +6728,7 @@ class _FsButton extends StatelessWidget {
         child: Icon(
           icon,
           color: Colors.white.withValues(alpha: on ? 1 : 0.3),
-          size: primary ? 30 : 24,
+          size: (primary ? 30 : 24) * scale,
         ),
       ),
     );
@@ -6687,7 +6744,14 @@ class _FsChip extends StatelessWidget {
   final IconData? icon;
   final VoidCallback onTap;
 
-  const _FsChip({required this.label, this.icon, required this.onTap});
+  /// Video kadriga qarab o'lcham koeffitsienti.
+  final double scale;
+
+  const _FsChip(
+      {required this.label,
+      this.icon,
+      required this.onTap,
+      this.scale = 1.0});
 
   @override
   Widget build(BuildContext context) {
@@ -6695,27 +6759,27 @@ class _FsChip extends StatelessWidget {
       behavior: HitTestBehavior.opaque,
       onTap: onTap,
       child: Container(
-        height: 30,
-        constraints: const BoxConstraints(minWidth: 44),
+        height: 30 * scale,
+        constraints: BoxConstraints(minWidth: 44 * scale),
         alignment: Alignment.center,
-        padding: const EdgeInsets.symmetric(horizontal: 10),
+        padding: EdgeInsets.symmetric(horizontal: 10 * scale),
         decoration: BoxDecoration(
           color: Colors.black.withValues(alpha: 0.45),
-          borderRadius: BorderRadius.circular(15),
+          borderRadius: BorderRadius.circular(15 * scale),
           border: Border.all(color: Colors.white.withValues(alpha: 0.18)),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
             if (icon != null) ...[
-              Icon(icon, color: Colors.white, size: 16),
-              const SizedBox(width: 4),
+              Icon(icon, color: Colors.white, size: 16 * scale),
+              SizedBox(width: 4 * scale),
             ],
             Text(
               label,
-              style: const TextStyle(
+              style: TextStyle(
                 color: Colors.white,
-                fontSize: 12,
+                fontSize: 12 * scale,
                 fontWeight: FontWeight.w700,
               ),
             ),
@@ -6727,6 +6791,8 @@ class _FsChip extends StatelessWidget {
 }
 
 class _BottomBar extends StatefulWidget {
+  /// Video kadriga qarab o'lcham koeffitsienti (`_ctrlScale`).
+  final double scale;
   final Duration position;
   final Duration duration;
   final double buffered;
@@ -6752,6 +6818,7 @@ class _BottomBar extends StatefulWidget {
   final VoidCallback onScrubEnd;
 
   const _BottomBar({
+    this.scale = 1.0,
     required this.position,
     required this.duration,
     required this.buffered,
@@ -6840,8 +6907,9 @@ class _BottomBarState extends State<_BottomBar> {
       //
       // Ya'ni chiziq ekranning eng pastida, barmoq bilan surish
       // uchun eng qulay joyda turadi.
+      final s = widget.scale;
       return Padding(
-        padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+        padding: EdgeInsets.fromLTRB(12 * s, 0, 12 * s, 6 * s),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -6852,12 +6920,12 @@ class _BottomBarState extends State<_BottomBar> {
                 // VAQT aynan tezlik tugmasining CHAP yonida.
                 Text(
                   '${widget.fmt(shownPosition)} / ${widget.fmt(widget.duration)}',
-                  style: const TextStyle(
+                  style: TextStyle(
                       color: Colors.white,
-                      fontSize: 12,
+                      fontSize: 12 * s,
                       fontWeight: FontWeight.w600),
                 ),
-                const SizedBox(width: 10),
+                SizedBox(width: 10 * s),
                 if (widget.onSpeedTap != null) ...[
                   // TEZLIK — IKONKA (yozuv emas, foydalanuvchi
                   // talabi). Yonidagi kichik raqam hozirgi tezlikni
@@ -6866,15 +6934,17 @@ class _BottomBarState extends State<_BottomBar> {
                     icon: Icons.speed_rounded,
                     label: widget.speedLabel,
                     onTap: widget.onSpeedTap!,
+                    scale: s,
                   ),
-                  const SizedBox(width: 8),
+                  SizedBox(width: 8 * s),
                 ],
                 // HQ — sifat tugmasi ataylab YOZUV bo'lib qoladi:
                 // foydalanuvchi uni aynan "HQ" deb so'ragan.
-                _FsChip(label: 'HQ', onTap: widget.onQualityTap),
+                _FsChip(
+                    label: 'HQ', onTap: widget.onQualityTap, scale: s),
               ],
             ),
-            const SizedBox(height: 8),
+            SizedBox(height: 8 * s),
             // ── QISM BOSHQARUVI — O'NG CHETDA ─────────────────
             //
             // TALAB (foydalanuvchi, aynan shu so'zlar bilan):
@@ -6896,14 +6966,16 @@ class _BottomBarState extends State<_BottomBar> {
                   _FsButton(
                     icon: Icons.playlist_play_rounded,
                     onTap: widget.onEpisodeList,
+                    scale: s,
                   ),
-                  const SizedBox(width: 10),
+                  SizedBox(width: 10 * s),
                 ],
                 _FsButton(
                   icon: Icons.skip_previous_rounded,
                   onTap: widget.hasPrev ? widget.onPrev : null,
+                  scale: s,
                 ),
-                const SizedBox(width: 10),
+                SizedBox(width: 10 * s),
                 if (widget.onPlayPause != null) ...[
                   _FsButton(
                     icon: widget.isPlaying
@@ -6911,22 +6983,24 @@ class _BottomBarState extends State<_BottomBar> {
                         : Icons.play_arrow_rounded,
                     onTap: widget.onPlayPause,
                     primary: true,
+                    scale: s,
                   ),
-                  const SizedBox(width: 10),
+                  SizedBox(width: 10 * s),
                 ],
                 _FsButton(
                   icon: Icons.skip_next_rounded,
                   onTap: widget.hasNext ? widget.onNext : null,
+                  scale: s,
                 ),
               ],
             ),
-            const SizedBox(height: 10),
+            SizedBox(height: 10 * s),
             // ── PROGRESS CHIZIG'I — ENG PASTDA ────────────────
             _VideoProgressBar(
               played: ratio,
               buffered: widget.buffered,
-              trackHeight: 5.0,
-              thumbRadius: 8.0,
+              trackHeight: 5.0 * s,
+              thumbRadius: 8.0 * s,
               onDragStart: () {
                 setState(() => _dragValue = ratio);
                 widget.onScrubStart();
