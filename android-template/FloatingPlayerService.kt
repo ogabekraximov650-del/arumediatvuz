@@ -186,7 +186,16 @@ class FloatingPlayerService : Service() {
             }
         }
 
-        val url = intent?.getStringExtra(EXTRA_URL).orEmpty()
+        // `intent` NULL bo'lishi mumkin (tizim service'ni qayta
+        // tiklaganda). Uni bir marta tekshirib, nol bo'lmagan
+        // mahalliy nusxa olinadi: `url.isEmpty()` tekshiruvi
+        // Kotlin'ga `intent` nol emasligini ISBOTLAMAYDI.
+        val req = intent ?: run {
+            stopEverything()
+            return START_NOT_STICKY
+        }
+
+        val url = req.getStringExtra(EXTRA_URL).orEmpty()
         if (url.isEmpty()) {
             stopEverything()
             return START_NOT_STICKY
@@ -200,14 +209,14 @@ class FloatingPlayerService : Service() {
             return START_NOT_STICKY
         }
 
-        startForegroundSafely(intent.getStringExtra(EXTRA_TITLE).orEmpty())
+        startForegroundSafely(req.getStringExtra(EXTRA_TITLE).orEmpty())
 
-        episodes = parsePlaylist(intent.getStringExtra(EXTRA_PLAYLIST).orEmpty())
-        epIndex = intent.getIntExtra(EXTRA_INDEX, 0)
+        episodes = parsePlaylist(req.getStringExtra(EXTRA_PLAYLIST).orEmpty())
+        epIndex = req.getIntExtra(EXTRA_INDEX, 0)
             .coerceIn(0, (episodes.size - 1).coerceAtLeast(0))
-        quality = intent.getStringExtra(EXTRA_QUALITY).orEmpty()
+        quality = req.getStringExtra(EXTRA_QUALITY).orEmpty()
 
-        val posMs = intent.getLongExtra(EXTRA_POSITION_MS, 0L)
+        val posMs = req.getLongExtra(EXTRA_POSITION_MS, 0L)
         if (rootView == null) buildOverlay()
         startPlayback(url, posMs)
         applyAdaptiveControls()
