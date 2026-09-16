@@ -1249,17 +1249,20 @@ async fn b2_auth_fetch(env: &Env) -> Result<Value> {
 /// ── B2 OMBORI (BUCKET) NOMI ───────────────────────────────────
 ///
 /// DIQQAT: bu ilovaning nomi EMAS — Backblaze B2'dagi HAQIQIY
-/// ombor nomi. Ilova "ARUmedia" ga qayta nomlanganda ham u
-/// o'zgartirilmadi, chunki satrni almashtirish omborni
-/// qayta nomlamaydi: hamma video va rasm o'sha-o'sha joyda
-/// qoladi, worker esa uni topa olmay qolardi.
+/// ombor nomi. Foydalanuvchi B2 panelida `arumedia` nomli yangi,
+/// BO'SH ombor yaratdi (2026-09-15) va shu yerga o'tildi.
 ///
-/// Omborni rostdan qayta nomlash tartibi:
+/// ⚠️ Eski `aniraxuz` omboridagi fayllar (agar bo'lsa) bu yangi
+/// omborda YO'Q. Baza ilgari tozalangani uchun bu muammo emas:
+/// yangi yuklangan har bir fayl to'g'ridan-to'g'ri shu omborga
+/// tushadi.
+///
+/// Omborni kelajakda yana almashtirish tartibi:
 ///   1. B2 panelida yangi ombor yaratib fayllar ko'chiriladi
 ///      (B2 mavjud omborni qayta nomlashga ruxsat bermaydi);
 ///   2. shu yerdagi qiymat almashtiriladi;
 ///   3. worker qayta deploy qilinadi.
-const B2_BUCKET: &str = "aniraxuz";
+const B2_BUCKET: &str = "arumedia";
 
 async fn b2_bucket_id(api_url: &str, auth_token: &str, account_id: &str) -> Result<String> {
     let mut h = Headers::new();
