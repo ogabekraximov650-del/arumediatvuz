@@ -3470,7 +3470,7 @@ async fn purge_list_cache(path: &str) {
 /// Botni rostdan qayta nomlash tartibi: @BotFather -> /setusername,
 /// so'ng shu yerdagi qiymat almashtiriladi va worker qayta deploy
 /// qilinadi.
-const BOT_USERNAME: &str = "aniraxuzloginbot";
+const BOT_USERNAME: &str = "arumedialoginbot";
 
 /// Login tokeni necha millisekund yashaydi (5 daqiqa).
 const LOGIN_TOKEN_TTL_MS: i64 = 5 * 60 * 1000;
