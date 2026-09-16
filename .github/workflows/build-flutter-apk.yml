@@ -412,8 +412,32 @@ jobs:
           p = 'android/app/src/main/AndroidManifest.xml'
           s = open(p, encoding='utf-8').read()
 
+          # ── SYSTEM_ALERT_WINDOW VAQTINCHA O'CHIRILDI ─────────
+          #
+          # TOPILGAN XATO: bu ruxsat qo'shilgandan keyin APK
+          # telefonga UMUMAN o'rnatilmay qoldi ("Ilova
+          # o'rnatilmadi"), ikkita boshqa-boshqa qurilmada ham.
+          #
+          # Tekshirilgani (ya'ni sabab BULAR EMAS):
+          #   * APK butun — hash release'dagi bilan bir xil,
+          #     ZIP toza, 92 fayl, imzolar (v1+v2/v3) joyida;
+          #   * tuzilishi ishlagan build bilan AYNAN bir xil —
+          #     .so fayllar siqilmagan va 16 KB'ga hizalangan;
+          #   * versionCode, minSdk (24), targetSdk (36) —
+          #     ishlagan build bilan bir xil;
+          #   * Play Protect va qurilma skaneri o'chirilgan.
+          #
+          # Ya'ni yagona farq — shu yerdagi ruxsatlar. Aybdorni
+          # ANIQLASH uchun bittasi olib tashlanmoqda, qolgani
+          # joyida: agar shu APK o'rnatilsa — sabab aynan
+          # SYSTEM_ALERT_WINDOW.
+          #
+          # ILOVA BUZILMAYDI: `FloatingPlayerService` va Dart
+          # tomoni joyida qoladi, `canDrawOverlays()` esa `false`
+          # qaytaradi va `_enterFloatingPlayer` o'zi tizim PiP'iga
+          # o'tadi (`video_player_screen.dart` izohiga qarang).
           perms = [
-              'android.permission.SYSTEM_ALERT_WINDOW',
+              # 'android.permission.SYSTEM_ALERT_WINDOW',
               'android.permission.FOREGROUND_SERVICE',
               'android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK',
               'android.permission.POST_NOTIFICATIONS',
@@ -450,7 +474,13 @@ jobs:
                  'service e\'lon qilinmadi'
           assert 'android:foregroundServiceType="mediaPlayback"' in chk, \
                  'foregroundServiceType yo\'q'
+          # Tajriba TOZA bo'lishi uchun: bu ruxsat manifestga
+          # boshqa yo'l bilan (plagin qo'shib) kirib qolmasin —
+          # aks holda natija hech narsani isbotlamasdi.
+          assert 'SYSTEM_ALERT_WINDOW' not in chk, \
+                 'SYSTEM_ALERT_WINDOW qayerdandir kirib qolgan'
           print('✅ Suzuvchi pleyer manifestga ulandi')
+          print('   DIQQAT: SYSTEM_ALERT_WINDOW ATAYLAB yo\'q (tajriba)')
           PYEOF
 
       # ── ExoPlayer (media3) SUZUVCHI PLEYER UCHUN ──────────────
