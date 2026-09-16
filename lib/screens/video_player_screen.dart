@@ -333,6 +333,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   double _playbackSpeed = 1.0;
   bool _speedPanelOpen = false;
   bool _qualityPanelOpen = false;
+  bool _episodeListOpen = false;
 
   DateTime _lastPlayPauseTap = DateTime.fromMillisecondsSinceEpoch(0);
 
@@ -2697,6 +2698,17 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _scheduleHide();
   }
 
+  void _showEpisodeListPanel() {
+    setState(() => _episodeListOpen = true);
+    _hideTimer?.cancel();
+  }
+
+  void _closeEpisodeListPanel() {
+    if (!_episodeListOpen) return;
+    setState(() => _episodeListOpen = false);
+    _scheduleHide();
+  }
+
   void _selectQualityFromPanel(String q) {
     final ep = _currentEp;
     if (ep == null) return;
@@ -3750,6 +3762,133 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
               ),
             ),
 
+          // ── QISMLAR RO'YXATI PANELI (faqat fullscreen) ─────────
+          if (_episodeListOpen && isFullscreen)
+            Positioned.fill(
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: _closeEpisodeListPanel,
+              ),
+            ),
+
+          if (_episodeListOpen && isFullscreen)
+            Align(
+              alignment: Alignment.centerRight,
+              child: Container(
+                width: 220,
+                margin: const EdgeInsets.symmetric(vertical: 20, horizontal: 8),
+                child: _PlayerPanel(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 10, vertical: 10),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 8, left: 4),
+                        child: Text(
+                          '${_seasonStr('nomi')} · '
+                          '${(_seasonNum('bolim_id') > 0 ? _seasonNum('bolim_id') : _seasonNum('season_id') > 0 ? _seasonNum('season_id') : 1)}-bo\'lim',
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                      Divider(
+                          height: 1,
+                          color: Colors.white.withValues(alpha: 0.12)),
+                      const SizedBox(height: 4),
+                      Flexible(
+                        child: ListView.builder(
+                          shrinkWrap: true,
+                          padding: EdgeInsets.zero,
+                          itemCount: _orderedEps.length,
+                          itemBuilder: (context, index) {
+                            final ep = _orderedEps[index];
+                            final num_ = _epNumOf(ep);
+                            final isCurrent = _currentEp != null &&
+                                _epKeyOf(ep) == _epKeyOf(_currentEp!);
+                            return GestureDetector(
+                              behavior: HitTestBehavior.opaque,
+                              onTap: () {
+                                _closeEpisodeListPanel();
+                                if (!isCurrent) {
+                                  _playEpisode(ep,
+                                      resumeAt: _savedPositionOf(ep),
+                                      resumePlaying: _intendedPlaying);
+                                }
+                              },
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 8, vertical: 9),
+                                margin:
+                                    const EdgeInsets.symmetric(vertical: 1),
+                                decoration: BoxDecoration(
+                                  color: isCurrent
+                                      ? AppColors.accent
+                                          .withValues(alpha: 0.2)
+                                      : Colors.transparent,
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: Row(
+                                  children: [
+                                    if (isCurrent)
+                                      Padding(
+                                        padding:
+                                            const EdgeInsets.only(right: 6),
+                                        child: Icon(
+                                            Icons.play_arrow_rounded,
+                                            size: 16,
+                                            color: AppColors.accent),
+                                      ),
+                                    Text(
+                                      '$num_-qism',
+                                      style: TextStyle(
+                                        color: isCurrent
+                                            ? AppColors.accent
+                                            : Colors.white,
+                                        fontSize: 13,
+                                        fontWeight: isCurrent
+                                            ? FontWeight.w800
+                                            : FontWeight.w600,
+                                      ),
+                                    ),
+                                    if ((ep['epizod_name'] ?? '')
+                                        .toString()
+                                        .isNotEmpty) ...[
+                                      const SizedBox(width: 6),
+                                      Expanded(
+                                        child: Text(
+                                          ep['epizod_name'].toString(),
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: TextStyle(
+                                            color: isCurrent
+                                                ? AppColors.accent
+                                                    .withValues(alpha: 0.7)
+                                                : Colors.white54,
+                                            fontSize: 11,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+
           if (_menuOpen)
             Positioned.fill(
               child: GestureDetector(
@@ -4081,6 +4220,11 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
             .clamp(0.0, 1.0);
       }
     }
+    final eps = _orderedEps;
+    final i = _currentEpIndex;
+    final hasNext = i > 0;
+    final hasPrev = i >= 0 && i < eps.length - 1;
+    final playing = value != null && value.isPlaying;
     return _BottomBar(
           position: _pendingTarget ?? value?.position ?? Duration.zero,
           duration: value?.duration ?? Duration.zero,
@@ -4094,6 +4238,13 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
           onFullscreen: _toggleFullscreen,
           isFullscreen: isFullscreen,
           onSpeedTap: isFullscreen ? _showSpeedPanel : null,
+          onPrev: isFullscreen && hasPrev ? () => _stepEpisode(-1) : null,
+          onNext: isFullscreen && hasNext ? () => _stepEpisode(1) : null,
+          onPlayPause: isFullscreen ? _togglePlayPause : null,
+          onEpisodeList: isFullscreen ? _showEpisodeListPanel : null,
+          isPlaying: _intendedPlaying,
+          hasPrev: hasPrev,
+          hasNext: hasNext,
           onScrubStart: () {
             _hideTimer?.cancel();
             if (!_isScrubbing) setState(() => _isScrubbing = true);
@@ -5623,6 +5774,13 @@ class _BottomBar extends StatefulWidget {
   final VoidCallback onFullscreen;
   final bool isFullscreen;
   final VoidCallback? onSpeedTap;
+  final VoidCallback? onPrev;
+  final VoidCallback? onNext;
+  final VoidCallback? onPlayPause;
+  final VoidCallback? onEpisodeList;
+  final bool isPlaying;
+  final bool hasPrev;
+  final bool hasNext;
   final VoidCallback onScrubStart;
   final VoidCallback onScrubEnd;
 
@@ -5636,6 +5794,13 @@ class _BottomBar extends StatefulWidget {
     required this.onFullscreen,
     required this.isFullscreen,
     this.onSpeedTap,
+    this.onPrev,
+    this.onNext,
+    this.onPlayPause,
+    this.onEpisodeList,
+    this.isPlaying = false,
+    this.hasPrev = false,
+    this.hasNext = false,
     required this.onScrubStart,
     required this.onScrubEnd,
   });
@@ -5715,6 +5880,7 @@ class _BottomBarState extends State<_BottomBar> {
               onTapSeek: _commit,
             ),
             const SizedBox(height: 2),
+            // Vaqt va tezlik/sifat/fullscreen tugmalari
             Row(
               children: [
                 Text(
@@ -5766,6 +5932,91 @@ class _BottomBarState extends State<_BottomBar> {
                     padding: const EdgeInsets.all(2),
                     child: Icon(Icons.fullscreen_exit_rounded,
                         color: Colors.white, size: 24),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            // Qism boshqaruv tugmalari:
+            // Chapdan o'ngga: Qismlar ro'yxati | Oldingi | Play/Pause | Keyingi
+            Row(
+              children: [
+                if (widget.onEpisodeList != null)
+                  GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: widget.onEpisodeList,
+                    child: Container(
+                      width: 40,
+                      height: 40,
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        color: Colors.white.withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: const Icon(Icons.list_rounded,
+                          color: Colors.white, size: 22),
+                    ),
+                  ),
+                const SizedBox(width: 10),
+                GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: widget.hasPrev ? widget.onPrev : null,
+                  child: Container(
+                    width: 40,
+                    height: 40,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(
+                          alpha: widget.hasPrev ? 0.12 : 0.04),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Icon(Icons.skip_previous_rounded,
+                        color: Colors.white.withValues(
+                            alpha: widget.hasPrev ? 0.9 : 0.25),
+                        size: 24),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                if (widget.onPlayPause != null)
+                  GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: widget.onPlayPause,
+                    child: Container(
+                      width: 48,
+                      height: 48,
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        color: AppColors.accent.withValues(alpha: 0.25),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(
+                          color: AppColors.accent.withValues(alpha: 0.4),
+                        ),
+                      ),
+                      child: Icon(
+                          widget.isPlaying
+                              ? Icons.pause_rounded
+                              : Icons.play_arrow_rounded,
+                          color: Colors.white,
+                          size: 28),
+                    ),
+                  ),
+                const SizedBox(width: 10),
+                GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: widget.hasNext ? widget.onNext : null,
+                  child: Container(
+                    width: 40,
+                    height: 40,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(
+                          alpha: widget.hasNext ? 0.12 : 0.04),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Icon(Icons.skip_next_rounded,
+                        color: Colors.white.withValues(
+                            alpha: widget.hasNext ? 0.9 : 0.25),
+                        size: 24),
                   ),
                 ),
               ],
