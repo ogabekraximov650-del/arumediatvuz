@@ -67,22 +67,13 @@ jobs:
       max-parallel: 1
       matrix:
         include:
-          - name: user-32
-            admin: 'false'
-            abi: armeabi-v7a
-            platform: android-arm
-          - name: user-64
-            admin: 'false'
-            abi: arm64-v8a
-            platform: android-arm64
+          # HOZIRCHA FAQAT ADMIN 32-BIT (foydalanuvchi talabi).
+          # Qolgan uchtasi (user-32, user-64, admin-64) vaqtincha
+          # o'chirildi — kerak bo'lganda shu ro'yxatga qaytariladi.
           - name: admin-32
             admin: 'true'
             abi: armeabi-v7a
             platform: android-arm
-          - name: admin-64
-            admin: 'true'
-            abi: arm64-v8a
-            platform: android-arm64
 
     steps:
       - name: Checkout code
@@ -380,14 +371,21 @@ jobs:
           #
           # Ko'rinadigan versiya (`0.0.9`) `pubspec.yaml` dan
           # olinadi va o'zgarmaydi — uni faqat qo'lda oshirasiz.
-          BUILD_NAME=$(grep '^version:' pubspec.yaml | sed 's/version: *//' | cut -d+ -f1)
-          APP_VERSION="${BUILD_NAME}+${{ github.run_number }}"
+          # Versiya TO'LIQ `pubspec.yaml` dan olinadi (foydalanuvchi
+          # talabi: aniq `0.0.1+1`). Ilgari build raqami sifatida
+          # `github.run_number` ishlatilardi; endi u ham pubspec'dan
+          # (`+` dan keyingi qism), ya'ni ko'rinadigan versiya ham,
+          # versionCode ham aynan pubspec aytganidek bo'ladi.
+          FULL=$(grep '^version:' pubspec.yaml | sed 's/version: *//')
+          BUILD_NAME=$(echo "$FULL" | cut -d+ -f1)
+          BUILD_NUMBER=$(echo "$FULL" | cut -d+ -f2)
+          APP_VERSION="${BUILD_NAME}+${BUILD_NUMBER}"
           echo "versiya: $APP_VERSION  (admin: ${{ matrix.admin }})"
 
           flutter build apk --release \
             --target-platform ${{ matrix.platform }} \
             --build-name "$BUILD_NAME" \
-            --build-number "${{ github.run_number }}" \
+            --build-number "$BUILD_NUMBER" \
             --dart-define=ADMIN_BUILD=${{ matrix.admin }} \
             --dart-define=APP_VERSION="$APP_VERSION"
 
