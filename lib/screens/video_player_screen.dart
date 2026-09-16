@@ -4909,18 +4909,62 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                       ),
                     ),
                     SizedBox(width: 4 * s),
+                    // ── SARLAVHA: ANIME NOMI + TAGIDA BO'LIM/QISM ──
+                    //
+                    // TALAB (foydalanuvchi): "orqaga qaytish
+                    // tugmasi yonida anime nomi va tagida
+                    // N-bo'lim va N-qismligi yozilgan bo'lsin".
+                    //
+                    // Ilgari bu yerda faqat bitta qator — qism
+                    // nomi (yoki anime nomi) turardi, ya'ni
+                    // fullscreen'da qaysi bo'lim va nechanchi
+                    // qism ko'rilayotgani bilinmasdi.
                     Expanded(
-                      child: Text(
-                        (_currentEp?['epizod_name'] ??
-                                widget.season['nomi'] ??
-                                '')
-                            .toString(),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.w600,
-                            fontSize: 14 * s),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            _seasonStr('nomi').isNotEmpty
+                                ? _seasonStr('nomi')
+                                : (_currentEp?['epizod_name'] ?? '')
+                                    .toString(),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w700,
+                                fontSize: 14 * s),
+                          ),
+                          if (_currentEp != null) ...[
+                            SizedBox(height: 2 * s),
+                            Text(
+                              () {
+                                final b = _seasonNum('bolim_id') > 0
+                                    ? _seasonNum('bolim_id')
+                                    : (_seasonNum('season_id') > 0
+                                        ? _seasonNum('season_id')
+                                        : 1);
+                                final q = _epNumOf(_currentEp!);
+                                final epName =
+                                    (_currentEp!['epizod_name'] ?? '')
+                                        .toString();
+                                final base = '$b-bo\'lim · $q-qism';
+                                // Qismning O'Z nomi bo'lsa u ham
+                                // shu qatorda ko'rinadi.
+                                return epName.isEmpty
+                                    ? base
+                                    : '$base · $epName';
+                              }(),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                  color: Colors.white70,
+                                  fontWeight: FontWeight.w500,
+                                  fontSize: 11.5 * s),
+                            ),
+                          ],
+                        ],
                       ),
                     ),
                     // O'ng yuqorida uch nuqta turadi (Stack'dagi
