@@ -280,7 +280,7 @@ jobs:
       # NOMI: `flutter create` nomni loyiha papkasidan oladi va
       # manifestga `android:label="soft"` deb yozadi (loyiha nomi)
       # — telefonda belgi ostida aynan shu yozuv turardi.
-      # Ilovaning nomi esa ARUmedia.
+      # Ilovaning nomi esa ARUmediaTv.
       #
       # YUMALOQ BELGI (`android:roundIcon`): Android 7.1 dan beri
       # qobiqlar (ayniqsa MIUI, Samsung One UI) belgini YUMALOQ
@@ -296,8 +296,8 @@ jobs:
           set -e
           MANIFEST="android/app/src/main/AndroidManifest.xml"
 
-          sed -i 's/android:label="[^"]*"/android:label="ARUmedia"/' "$MANIFEST"
-          grep -q 'android:label="ARUmedia"' "$MANIFEST" \
+          sed -i 's/android:label="[^"]*"/android:label="ARUmediaTv"/' "$MANIFEST"
+          grep -q 'android:label="ARUmediaTv"' "$MANIFEST" \
             || { echo "❌ Ilova nomi o'zgarmadi"; exit 1; }
 
           if ! grep -q 'android:roundIcon' "$MANIFEST"; then
@@ -306,7 +306,84 @@ jobs:
           grep -q 'android:roundIcon="@mipmap/ic_launcher_round"' "$MANIFEST" \
             || { echo "❌ roundIcon qo'shilmadi"; exit 1; }
 
-          echo "✅ Ilova nomi: ARUmedia, yumaloq belgi ulandi"
+          echo "✅ Ilova nomi: ARUmediaTv, yumaloq belgi ulandi"
+
+      # ── ILOVALAR USTIDA SUZUVCHI PLEYER (PiP) ─────────────────
+      #
+      # Tizim PiP'i Activity'dan IKKI narsani talab qiladi:
+      #
+      #   1. `android:supportsPictureInPicture="true"` — busiz
+      #      `enterPictureInPictureMode` istisno otadi.
+      #
+      #   2. `configChanges` ichida `screenLayout` va
+      #      `smallestScreenSize` — PiP oynaga o'tish konfiguratsiya
+      #      o'zgarishi hisoblanadi. Ular sanab o'tilmasa Android
+      #      Activity'ni QAYTA YARATADI: video uzilib, pleyer
+      #      boshidan ochilardi.
+      #
+      # `flutter create` shabloni `configChanges` ni allaqachon
+      # yozadi, lekin PiP uchun kerakli ikki qiymatsiz — shu sabab
+      # ular mavjud ro'yxatga QO'SHILADI (ustiga yozilmaydi: aks
+      # holda Flutter'ning o'z qiymatlari yo'qolib, ekran burilganda
+      # ilova qayta ishga tushardi).
+      - name: PiP (suzuvchi pleyer) uchun manifestni sozlash
+        run: |
+          set -e
+          python3 - <<'PYEOF'
+          import re, sys
+
+          p = 'android/app/src/main/AndroidManifest.xml'
+          s = open(p, encoding='utf-8').read()
+
+          # <activity ... > ochilish tegini topamiz (MainActivity).
+          m = re.search(r'<activity\b[^>]*android:name="\.MainActivity"[^>]*>', s)
+          if not m:
+              m = re.search(r'<activity\b[^>]*>', s)
+          if not m:
+              print('❌ <activity> topilmadi'); sys.exit(1)
+
+          tag = m.group(0)
+          orig = tag
+
+          # 1) supportsPictureInPicture
+          if 'supportsPictureInPicture' not in tag:
+              tag = tag.replace(
+                  '<activity',
+                  '<activity\n            android:supportsPictureInPicture="true"',
+                  1)
+
+          # 2) configChanges ga PiP qiymatlarini qo'shish
+          cm = re.search(r'android:configChanges="([^"]*)"', tag)
+          if cm:
+              vals = [v for v in cm.group(1).split('|') if v]
+              for need in ('screenLayout', 'smallestScreenSize'):
+                  if need not in vals:
+                      vals.append(need)
+              tag = tag[:cm.start()] + \
+                    'android:configChanges="%s"' % '|'.join(vals) + \
+                    tag[cm.end():]
+          else:
+              tag = tag.replace(
+                  '<activity',
+                  '<activity\n            android:configChanges='
+                  '"orientation|keyboardHidden|keyboard|screenSize|'
+                  'smallestScreenSize|locale|layoutDirection|fontScale|'
+                  'screenLayout|density|uiMode"',
+                  1)
+
+          s = s[:m.start()] + tag + s[m.end():]
+          open(p, 'w', encoding='utf-8').write(s)
+
+          # Tekshirish — jimgina o'tib ketmasin.
+          chk = open(p, encoding='utf-8').read()
+          assert 'android:supportsPictureInPicture="true"' in chk, 'supportsPictureInPicture qo\'shilmadi'
+          cm2 = re.search(r'android:configChanges="([^"]*)"', chk)
+          assert cm2 and 'screenLayout' in cm2.group(1) \
+                     and 'smallestScreenSize' in cm2.group(1), \
+                 'configChanges to\'liq emas'
+          print('✅ PiP manifestga ulandi')
+          print('   configChanges =', cm2.group(1))
+          PYEOF
 
       # ── TOMOSHA TARIXI UCHUN KADR AJRATUVCHI ──────────────────
       #

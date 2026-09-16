@@ -32,11 +32,14 @@
 
 package __PKG__
 
+import android.app.PictureInPictureParams
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
 import android.os.Build
 import android.util.Base64
+import android.util.Rational
 import android.view.WindowManager
 import java.security.MessageDigest
 import io.flutter.embedding.android.FlutterActivity
@@ -45,6 +48,11 @@ import io.flutter.plugin.common.MethodChannel
 import java.io.ByteArrayOutputStream
 
 class MainActivity : FlutterActivity() {
+    /// PiP holatini Flutter tomonga xabar qilish uchun saqlanadi.
+    /// `configureFlutterEngine` da to'ldiriladi, tizim PiP'ga
+    /// kirganda/chiqqanda ishlatiladi.
+    private var pipChannel: MethodChannel? = null
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "aru/thumb")
@@ -141,6 +149,66 @@ class MainActivity : FlutterActivity() {
                 }
             }
 
+        // ── ILOVALAR USTIDA SUZUVCHI PLEYER (PiP) ─────────────
+        //
+        // TALAB (foydalanuvchi): pleyer boshqa ilovalar ustida
+        // ham ko'rinib tursin.
+        //
+        // ── NEGA TIZIM PiP'i, OVERLAY EMAS ────────────────────
+        //
+        // Boshqa ilovalar ustiga chizishning ikki yo'li bor:
+        //
+        //   1. SYSTEM_ALERT_WINDOW — ilova o'z oynasini hamma
+        //      narsa ustiga chizadi. Tugmalar, o'lcham va surish
+        //      to'liq bizning ixtiyorimizda BO'LARDI, lekin:
+        //      foydalanuvchidan alohida ruxsat so'raladi
+        //      (Sozlamalar ichida qo'lda yoqiladi), doimiy
+        //      bildirishnoma bilan foreground service kerak,
+        //      va Play Store bunga shubha bilan qaraydi.
+        //
+        //   2. Tizim PiP'i — Android'ning O'ZI beradigan kichik
+        //      oyna. Hech qanday ruxsat so'ralmaydi, tizim o'zi
+        //      boshqaradi: foydalanuvchi uni surib qo'yadi,
+        //      ikki barobar bosib kattalashtiradi.
+        //
+        // Ikkinchisi tanlandi: ruxsatsiz ishlaydi va tizimning
+        // odatiy xulqiga mos. Evaziga oyna kichik va tugmalar
+        // cheklangan — bu PiP'ning tabiati, kamchilik emas.
+        //
+        // ── MANIFEST TALABI ───────────────────────────────────
+        //
+        // Activity'da `supportsPictureInPicture="true"` va
+        // `configChanges` da `screenLayout|smallestScreenSize`
+        // bo'lishi SHART, aks holda PiP'ga o'tganda Activity
+        // qayta yaratiladi va ijro uziladi. Buni CI qo'shadi
+        // (.github/workflows/build-flutter-apk.yml).
+        pipChannel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger, "aru/pip"
+        )
+        pipChannel?.setMethodCallHandler { call, result ->
+            when (call.method) {
+                // Qurilma PiP'ni umuman qo'llab-quvvatlaydimi.
+                // Arzon va Android 8 dan eski qurilmalarda yo'q —
+                // ilova tugmani o'shanda ko'rsatmasligi uchun.
+                "supported" -> result.success(isPipSupported())
+
+                "enter" -> {
+                    if (!isPipSupported()) {
+                        result.success(false)
+                    } else {
+                        // Video nisbati beriladi — aks holda oyna
+                        // kvadratga yaqin chiqib, rasm yon-tomondan
+                        // qirqiladi. Nisbat kelmasa 16:9.
+                        val w = call.argument<Int>("width") ?: 16
+                        val h = call.argument<Int>("height") ?: 9
+                        result.success(enterPip(w, h))
+                    }
+                }
+
+                else -> result.notImplemented()
+            }
+        }
+
         // ── TRAFIK KANALI OLIB TASHLANGAN ──────────────────────
         //
         // Bu yerda ilgari `TrafficStats.getUidRxBytes` bor edi.
@@ -159,6 +227,61 @@ class MainActivity : FlutterActivity() {
         // `aru/storage` kanali ham bor edi; profil sahifasidan
         // "telefon xotirasi N% band" qatori olib tashlangach
         // (foydalanuvchi talabi) u ham keraksiz bo'lib qoldi.
+    }
+
+    /// Qurilma PiP'ni qo'llab-quvvatlaydimi.
+    ///
+    /// Android 8.0 (API 26) dan past — umuman yo'q. Undan
+    /// yuqorida ham tizim xususiyati bo'lishi SHART emas:
+    /// ba'zi arzon va Go-nashr qurilmalarda u o'chirilgan.
+    private fun isPipSupported(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return false
+        return packageManager.hasSystemFeature(
+            PackageManager.FEATURE_PICTURE_IN_PICTURE
+        )
+    }
+
+    /// PiP rejimiga o'tadi. Muvaffaqiyatli bo'lsa `true`.
+    ///
+    /// Nisbat Android tomonidan CHEKLANGAN: taxminan 1:2.39 dan
+    /// 2.39:1 gacha. Chetdan chiqqan qiymat bilan tizim istisno
+    /// otadi — shu sabab qiymat shu oraliqqa siqiladi.
+    private fun enterPip(width: Int, height: Int): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return false
+        return try {
+            val w = if (width > 0) width else 16
+            val h = if (height > 0) height else 9
+
+            // Nisbatni ruxsat etilgan oraliqqa siqish. 100 ga
+            // ko'paytirib butun son bilan ishlanadi — Rational
+            // kasr qabul qilmaydi.
+            val ratio = w.toDouble() / h.toDouble()
+            val safe = ratio.coerceIn(0.42, 2.39)
+            val num = (safe * 1000).toInt()
+
+            val params = PictureInPictureParams.Builder()
+                .setAspectRatio(Rational(num, 1000))
+                .build()
+            enterPictureInPictureMode(params)
+        } catch (e: Throwable) {
+            false
+        }
+    }
+
+    /// Tizim PiP'ga kirganda/chiqqanda Flutter tomonga xabar.
+    ///
+    /// Ilova buni bilishi KERAK: PiP oynasida boshqaruv tugmalari
+    /// va sarlavha ortiqcha — ular kichik oynani to'ldirib
+    /// yuboradi. Flutter tomoni shu xabarni olib ularni yashiradi.
+    override fun onPictureInPictureModeChanged(
+        isInPictureInPictureMode: Boolean,
+        newConfig: Configuration
+    ) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        pipChannel?.invokeMethod(
+            "changed",
+            mapOf("inPip" to isInPictureInPictureMode)
+        )
     }
 
     /// APK imzo sertifikatining SHA-256 hash'i (base64).

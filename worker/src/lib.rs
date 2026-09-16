@@ -3462,15 +3462,16 @@ async fn purge_list_cache(path: &str) {
 //     — Telegram'ning fayl manzilida bot tokeni bo'lgani uchun u
 //     manzil hech qachon ilovaga chiqarilmaydi.
 
-/// DIQQAT: bu ham ilovaning nomi EMAS — Telegram'dagi HAQIQIY
-/// bot manzili. Ilova "ARUmedia" ga qayta nomlanganda u
-/// o'zgartirilmadi: satrni almashtirish botni qayta nomlamaydi,
-/// aksincha kirish butunlay ishlamay qolardi.
+/// DIQQAT: bu ilovaning nomi EMAS — Telegram'dagi HAQIQIY bot
+/// manzili. Uni o'zgartirish botni qayta nomlamaydi: avval
+/// @BotFather -> /setusername orqali bot rostdan qayta nomlanadi,
+/// SO'NG shu yerdagi qiymat almashtiriladi va worker qayta deploy
+/// qilinadi. Aks holda kirish butunlay ishlamay qoladi.
 ///
-/// Botni rostdan qayta nomlash tartibi: @BotFather -> /setusername,
-/// so'ng shu yerdagi qiymat almashtiriladi va worker qayta deploy
-/// qilinadi.
-const BOT_USERNAME: &str = "arumedialoginbot";
+/// DIQQAT: bot ALMASHGANI uchun `TELEGRAM_BOT_TOKEN` siri ham
+/// yangi botnikiga almashtirilishi SHART (wrangler secret put),
+/// aks holda webhook eski botda qolib ketadi.
+const BOT_USERNAME: &str = "arumediatvloginbot";
 
 /// Login tokeni necha millisekund yashaydi (5 daqiqa).
 const LOGIN_TOKEN_TTL_MS: i64 = 5 * 60 * 1000;

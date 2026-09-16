@@ -1,4 +1,8 @@
-import 'dart:async';
+// widgets/mini_player_widget.dart
+//
+// Ilova ichidagi suzuvchi kichik pleyer. Nima uchun kerakligi va
+// nega kontroller bu yerda yangidan ochilishi —
+// `services/mini_player_service.dart` boshidagi izohda.
 
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
@@ -6,6 +10,16 @@ import 'package:video_player/video_player.dart';
 import '../screens/video_player_screen.dart';
 import '../services/mini_player_service.dart';
 import 'glass.dart';
+
+/// Kichik oynaning o'lchami. Nisbat 16:9 ga yaqin.
+const double _kMiniW = 196;
+const double _kMiniH = 134;
+
+/// Ostidagi yozuv qatorining balandligi.
+const double _kLabelH = 24;
+
+/// Ekran chetidan qoldiriladigan eng kichik bo'shliq.
+const double _kEdge = 12;
 
 class MiniPlayerOverlay extends StatefulWidget {
   const MiniPlayerOverlay({super.key});
@@ -16,95 +30,110 @@ class MiniPlayerOverlay extends StatefulWidget {
 
 class _MiniPlayerOverlayState extends State<MiniPlayerOverlay> {
   VideoPlayerController? _controller;
-  bool _initializing = false;
-  Offset _position = const Offset(16, -1);
-  bool _needsInitialPosition = true;
+
+  /// Bir vaqtda ikkita kontroller ochilib qolmasligi uchun.
+  bool _opening = false;
+
+  /// Chap-yuqori burchagining o'rni. `null` — hali joylashtirilmagan
+  /// (birinchi chizishda pastki-chap burchakka qo'yiladi).
+  Offset? _pos;
+
+  /// `null` bo'lmasa — kontroller ochilmadi, xato yozuvi ko'rsatiladi.
+  String? _error;
 
   @override
   void initState() {
     super.initState();
-    MiniPlayerService.instance.addListener(_onServiceChange);
-    if (MiniPlayerService.instance.active) _initController();
+    _open();
   }
 
   @override
   void dispose() {
-    MiniPlayerService.instance.removeListener(_onServiceChange);
+    // Kontroller FAQAT shu yerda yopiladi: widget daraxtdan
+    // olib tashlanganda Flutter buni doim chaqiradi.
+    _controller?.removeListener(_onTick);
     _controller?.dispose();
     super.dispose();
   }
 
-  void _onServiceChange() {
-    if (!mounted) return;
-    if (MiniPlayerService.instance.active && _controller == null && !_initializing) {
-      _initController();
-    } else if (!MiniPlayerService.instance.active) {
-      _disposeController();
+  Future<void> _open() async {
+    if (_opening) return;
+    _opening = true;
+
+    final data = MiniPlayerService.instance.data;
+    final uri = data == null ? null : Uri.tryParse(data.url);
+    if (data == null || uri == null) {
+      _opening = false;
+      if (mounted) setState(() => _error = 'Video manzili noto\'g\'ri');
+      return;
+    }
+
+    final ctrl = VideoPlayerController.networkUrl(uri);
+    try {
+      await ctrl.initialize().timeout(const Duration(seconds: 20));
+
+      // Ochilguncha foydalanuvchi oynani yopgan bo'lishi mumkin —
+      // o'shanda kontroller ortda qolib ketmasin.
+      if (!mounted) {
+        await ctrl.dispose();
+        return;
+      }
+
+      await ctrl.seekTo(data.position);
+      await ctrl.play();
+      ctrl.addListener(_onTick);
+      setState(() {
+        _controller = ctrl;
+        _error = null;
+      });
+    } catch (e) {
+      try {
+        await ctrl.dispose();
+      } catch (_) {}
+      if (mounted) setState(() => _error = 'Video ochilmadi');
+    } finally {
+      _opening = false;
+    }
+  }
+
+  /// Soniyani servisga yozib boradi — oyna kattalashtirilganda
+  /// pleyer aynan shu joydan davom etadi.
+  ///
+  /// Bu yerda `setState` ATAYLAB chaqirilmaydi: tick sekundiga bir
+  /// necha marta keladi. Faqat ijro holati (play/pause) o'zgarganda
+  /// qayta chiziladi — tugma belgisi shunga bog'liq.
+  bool _lastPlaying = false;
+  void _onTick() {
+    final c = _controller;
+    if (c == null || !mounted) return;
+    MiniPlayerService.instance.updatePosition(c.value.position);
+    if (c.value.isPlaying != _lastPlaying) {
+      _lastPlaying = c.value.isPlaying;
       setState(() {});
     }
   }
 
-  Future<void> _initController() async {
-    _initializing = true;
-    final data = MiniPlayerService.instance.data;
-    if (data == null) {
-      _initializing = false;
-      return;
-    }
-    final uri = Uri.tryParse(data.url);
-    if (uri == null) {
-      _initializing = false;
-      return;
-    }
-    final ctrl = VideoPlayerController.networkUrl(uri);
-    try {
-      await ctrl.initialize();
-      if (!mounted || !MiniPlayerService.instance.active) {
-        ctrl.dispose();
-        _initializing = false;
-        return;
-      }
-      await ctrl.seekTo(data.position);
-      await ctrl.play();
-      setState(() {
-        _controller = ctrl;
-        _needsInitialPosition = true;
-      });
-      ctrl.addListener(_onVideoTick);
-    } catch (_) {
-      ctrl.dispose();
-    }
-    _initializing = false;
-  }
+  void _close() => MiniPlayerService.instance.deactivate();
 
-  void _onVideoTick() {
-    if (_controller == null) return;
-    MiniPlayerService.instance.updatePosition(_controller!.value.position);
-  }
-
-  void _disposeController() {
-    _controller?.removeListener(_onVideoTick);
-    _controller?.dispose();
-    _controller = null;
-  }
-
-  void _close() {
-    _disposeController();
-    MiniPlayerService.instance.deactivate();
-  }
-
+  /// Oynani yopib, to'liq pleyerni o'sha joydan ochadi.
   void _expand() {
     final data = MiniPlayerService.instance.data;
     if (data == null) return;
+
+    // Navigator'ni O'CHIRISHDAN OLDIN olamiz: `deactivate()` shu
+    // widget'ni daraxtdan olib tashlaydi va undan keyin
+    // `context` ishlatib bo'lmaydi.
+    final nav = Navigator.of(context);
     final pos = _controller?.value.position ?? data.position;
-    _disposeController();
+
     MiniPlayerService.instance.deactivate();
-    Navigator.of(context).push(
+
+    nav.push(
       PageRouteBuilder(
         transitionDuration: const Duration(milliseconds: 300),
-        pageBuilder: (_, anim, __) => VideoPlayerScreen(
+        pageBuilder: (_, __, ___) => VideoPlayerScreen(
           season: data.season,
-          startEpizodId: int.tryParse(data.episode['id']?.toString() ?? ''),
+          startEpizodId: data.epizodId == 0 ? null : data.epizodId,
           startAt: pos,
         ),
         transitionsBuilder: (_, anim, __, child) =>
@@ -114,60 +143,60 @@ class _MiniPlayerOverlayState extends State<MiniPlayerOverlay> {
   }
 
   void _togglePlay() {
-    if (_controller == null) return;
-    if (_controller!.value.isPlaying) {
-      _controller!.pause();
+    final c = _controller;
+    if (c == null) return;
+    if (c.value.isPlaying) {
+      c.pause();
     } else {
-      _controller!.play();
+      c.play();
     }
     setState(() {});
   }
 
   @override
   Widget build(BuildContext context) {
-    if (!MiniPlayerService.instance.active || _controller == null) {
-      return const SizedBox.shrink();
-    }
+    final media = MediaQuery.of(context);
+    final size = media.size;
+    final safe = media.padding;
 
-    final screenSize = MediaQuery.of(context).size;
-    const playerW = 200.0;
-    const playerH = 130.0;
+    // Oyna ekrandan tashqariga chiqmasin. Ekran burilganda ham
+    // shu yerda qayta siqiladi — shu sabab `_pos` xom holda
+    // saqlanadi, siqilgani esa har chizishda hisoblanadi.
+    final minX = _kEdge;
+    final maxX = (size.width - _kMiniW - _kEdge).clamp(minX, double.infinity);
+    final minY = safe.top + _kEdge;
+    final maxY = (size.height - _kMiniH - safe.bottom - _kEdge)
+        .clamp(minY, double.infinity);
 
-    if (_needsInitialPosition) {
-      _position = Offset(16, screenSize.height - playerH - 100);
-      _needsInitialPosition = false;
-    }
-
-    final clamped = Offset(
-      _position.dx.clamp(0, screenSize.width - playerW),
-      _position.dy.clamp(0, screenSize.height - playerH),
+    // Birinchi chizish: pastki-chap burchak (pastki menyu ustida).
+    final raw = _pos ?? Offset(minX, maxY);
+    final at = Offset(
+      raw.dx.clamp(minX, maxX),
+      raw.dy.clamp(minY, maxY),
     );
 
     return Positioned(
-      left: clamped.dx,
-      top: clamped.dy,
+      left: at.dx,
+      top: at.dy,
       child: GestureDetector(
-        onPanUpdate: (d) {
-          setState(() => _position = Offset(
-                _position.dx + d.delta.dx,
-                _position.dy + d.delta.dy,
-              ));
-        },
-        onTap: _expand,
+        // Surilganda xom qiymat yangilanadi; chegara yuqorida
+        // qo'llanadi, shu sabab barmoq chetga chiqsa ham oyna
+        // "yopishib" qolmaydi.
+        onPanUpdate: (d) => setState(() => _pos = at + d.delta),
         child: Material(
           color: Colors.transparent,
           child: Container(
-            width: playerW,
-            height: playerH,
+            width: _kMiniW,
+            height: _kMiniH,
             decoration: BoxDecoration(
               color: AppColors.bg,
               borderRadius: BorderRadius.circular(12),
               border: Border.all(color: AppColors.borderBright),
               boxShadow: [
                 BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.5),
-                  blurRadius: 16,
-                  offset: const Offset(0, 4),
+                  color: Colors.black.withValues(alpha: 0.55),
+                  blurRadius: 18,
+                  offset: const Offset(0, 6),
                 ),
               ],
             ),
@@ -175,71 +204,8 @@ class _MiniPlayerOverlayState extends State<MiniPlayerOverlay> {
               borderRadius: BorderRadius.circular(12),
               child: Column(
                 children: [
-                  Expanded(
-                    child: Stack(
-                      fit: StackFit.expand,
-                      children: [
-                        VideoPlayer(_controller!),
-                        Positioned(
-                          right: 4,
-                          top: 4,
-                          child: _miniBtn(
-                            Icons.close_rounded,
-                            _close,
-                          ),
-                        ),
-                        Positioned(
-                          left: 4,
-                          top: 4,
-                          child: _miniBtn(
-                            Icons.open_in_full_rounded,
-                            _expand,
-                          ),
-                        ),
-                        Center(
-                          child: GestureDetector(
-                            onTap: _togglePlay,
-                            child: Container(
-                              width: 36,
-                              height: 36,
-                              decoration: BoxDecoration(
-                                color: Colors.black.withValues(alpha: 0.5),
-                                shape: BoxShape.circle,
-                              ),
-                              child: Icon(
-                                _controller!.value.isPlaying
-                                    ? Icons.pause_rounded
-                                    : Icons.play_arrow_rounded,
-                                color: Colors.white,
-                                size: 22,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  Container(
-                    height: 24,
-                    padding: const EdgeInsets.symmetric(horizontal: 8),
-                    color: AppColors.surface,
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            MiniPlayerService.instance.data?.title ?? '',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              color: Colors.white70,
-                              fontSize: 10,
-                              fontWeight: FontWeight.w500,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
+                  Expanded(child: _videoArea()),
+                  _label(),
                 ],
               ),
             ),
@@ -249,17 +215,125 @@ class _MiniPlayerOverlayState extends State<MiniPlayerOverlay> {
     );
   }
 
-  Widget _miniBtn(IconData icon, VoidCallback onTap) {
+  Widget _videoArea() {
+    final c = _controller;
+
+    if (_error != null) {
+      return Container(
+        color: Colors.black,
+        alignment: Alignment.center,
+        child: Padding(
+          padding: const EdgeInsets.all(8),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.error_outline_rounded,
+                  color: Colors.white54, size: 20),
+              const SizedBox(height: 4),
+              Text(
+                _error!,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.white54, fontSize: 10),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    if (c == null || !c.value.isInitialized) {
+      return Container(
+        color: Colors.black,
+        alignment: Alignment.center,
+        child: const SizedBox(
+          width: 20,
+          height: 20,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+      );
+    }
+
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        FittedBox(
+          fit: BoxFit.cover,
+          clipBehavior: Clip.hardEdge,
+          child: SizedBox(
+            width: c.value.size.width,
+            height: c.value.size.height,
+            child: VideoPlayer(c),
+          ),
+        ),
+
+        // O'rtadagi play/pause. Rasm ustida turgani uchun ostiga
+        // to'q doira qo'yiladi — oq belgi oq kadrda yo'qolmasin.
+        Center(
+          child: GestureDetector(
+            onTap: _togglePlay,
+            child: Container(
+              width: 38,
+              height: 38,
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.45),
+                shape: BoxShape.circle,
+              ),
+              child: Icon(
+                c.value.isPlaying
+                    ? Icons.pause_rounded
+                    : Icons.play_arrow_rounded,
+                color: Colors.white,
+                size: 22,
+              ),
+            ),
+          ),
+        ),
+
+        Positioned(
+          left: 4,
+          top: 4,
+          child: _btn(Icons.open_in_full_rounded, _expand),
+        ),
+        Positioned(
+          right: 4,
+          top: 4,
+          child: _btn(Icons.close_rounded, _close),
+        ),
+      ],
+    );
+  }
+
+  Widget _label() {
+    return Container(
+      height: _kLabelH,
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      color: AppColors.surface,
+      alignment: Alignment.centerLeft,
+      child: Text(
+        MiniPlayerService.instance.data?.title ?? '',
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(
+          color: Colors.white70,
+          fontSize: 10,
+          fontWeight: FontWeight.w500,
+        ),
+      ),
+    );
+  }
+
+  Widget _btn(IconData icon, VoidCallback onTap) {
     return GestureDetector(
       onTap: onTap,
       child: Container(
-        width: 24,
-        height: 24,
+        width: 26,
+        height: 26,
         decoration: BoxDecoration(
-          color: Colors.black.withValues(alpha: 0.6),
-          borderRadius: BorderRadius.circular(6),
+          color: Colors.black.withValues(alpha: 0.55),
+          borderRadius: BorderRadius.circular(7),
         ),
-        child: Icon(icon, color: Colors.white, size: 14),
+        child: Icon(icon, color: Colors.white, size: 15),
       ),
     );
   }
