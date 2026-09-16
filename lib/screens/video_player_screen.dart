@@ -2825,16 +2825,56 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     return '${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
   }
 
+  /// Uxlash vaqti oynasi — butun ekran ustidagi qatlam.
+  ///
+  /// Parda (bosilsa yopadi) + o'rtadagi katta panel. Panelning
+  /// eni cheklangan (360) — keng ekranda cho'zilib ketmaydi,
+  /// bo'yi esa ekranga sig'masa ICHIDA suriladi.
+  Widget _buildSleepOverlay() {
+    return Stack(
+      children: [
+        // Parda: yozuvlar orqasidagi video xiralashadi va
+        // tashqariga bosilsa oyna yopiladi.
+        Positioned.fill(
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: _closeSleepPanel,
+            child: ColoredBox(
+              color: Colors.black.withValues(alpha: 0.55),
+            ),
+          ),
+        ),
+        Center(
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 360),
+              child: _PlayerPanel(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 20, vertical: 20),
+                child: SingleChildScrollView(
+                  child: _sleepCustomInput
+                      ? _buildSleepCustomInput()
+                      : _buildSleepOptions(),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _buildSleepOptions() {
     final options = [
-      // Yozuvlar ATAYLAB qisqa ("15 daqiqa" emas, "15 daq"):
-      // oyna pleyer maydoniga sig'ishi kerak, uzun yozuv esa uni
-      // keraksiz kengaytirardi.
+      // Oyna endi butun ekran o'rtasida (pleyer maydoni bilan
+      // cheklanmagan), shu sabab yozuvlar TO'LIQ yoziladi —
+      // ilgari joy tanqisligidan "15 daq" deb qisqartirilgandi.
       {'label': 'O\'chirish', 'minutes': 0},
-      {'label': '15 daq', 'minutes': 15},
-      {'label': '30 daq', 'minutes': 30},
-      {'label': '60 daq', 'minutes': 60},
-      {'label': '120 daq', 'minutes': 120},
+      {'label': '15 daqiqa', 'minutes': 15},
+      {'label': '30 daqiqa', 'minutes': 30},
+      {'label': '60 daqiqa', 'minutes': 60},
+      {'label': '120 daqiqa', 'minutes': 120},
     ];
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -2842,20 +2882,20 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
         const Text('Uxlash vaqti',
             style: TextStyle(
                 color: Colors.white,
-                fontSize: 14,
+                fontSize: 19,
                 fontWeight: FontWeight.w700)),
         if (_sleepMinutes > 0) ...[
-          const SizedBox(height: 4),
+          const SizedBox(height: 6),
           Text(_sleepTimeLabel(),
               style: TextStyle(
                   color: AppColors.accent,
-                  fontSize: 12,
+                  fontSize: 16,
                   fontWeight: FontWeight.w600)),
         ],
-        const SizedBox(height: 10),
+        const SizedBox(height: 18),
         Wrap(
-          spacing: 7,
-          runSpacing: 7,
+          spacing: 10,
+          runSpacing: 10,
           alignment: WrapAlignment.center,
           children: [
             for (final o in options)
@@ -2863,13 +2903,13 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                 onTap: () => _setSleepTimer(o['minutes'] as int),
                 child: Container(
                   padding:
-                      const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
+                      const EdgeInsets.symmetric(horizontal: 18, vertical: 13),
                   decoration: BoxDecoration(
                     color: _sleepMinutes == o['minutes'] as int &&
                             (o['minutes'] as int) > 0
                         ? AppColors.accent.withValues(alpha: 0.25)
                         : Colors.white.withValues(alpha: 0.08),
-                    borderRadius: BorderRadius.circular(8),
+                    borderRadius: BorderRadius.circular(12),
                     border: Border.all(
                       color: _sleepMinutes == o['minutes'] as int &&
                               (o['minutes'] as int) > 0
@@ -2884,7 +2924,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                               (o['minutes'] as int) > 0
                           ? AppColors.accent
                           : Colors.white,
-                      fontSize: 12,
+                      fontSize: 15,
                       fontWeight: FontWeight.w600,
                     ),
                   ),
@@ -2894,17 +2934,17 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
               onTap: () => setState(() => _sleepCustomInput = true),
               child: Container(
                 padding:
-                    const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
+                    const EdgeInsets.symmetric(horizontal: 18, vertical: 13),
                 decoration: BoxDecoration(
                   color: Colors.white.withValues(alpha: 0.08),
-                  borderRadius: BorderRadius.circular(8),
+                  borderRadius: BorderRadius.circular(12),
                   border: Border.all(
                       color: Colors.white.withValues(alpha: 0.15)),
                 ),
                 child: const Text('Qo\'lda kiritish',
                     style: TextStyle(
                         color: Colors.white,
-                        fontSize: 12,
+                        fontSize: 15,
                         fontWeight: FontWeight.w600)),
               ),
             ),
@@ -2924,24 +2964,24 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
             GestureDetector(
               onTap: () => setState(() => _sleepCustomInput = false),
               child: const Icon(Icons.arrow_back_rounded,
-                  color: Colors.white70, size: 18),
+                  color: Colors.white70, size: 24),
             ),
-            const SizedBox(width: 8),
+            const SizedBox(width: 10),
             const Text('Daqiqa kiriting',
                 style: TextStyle(
                     color: Colors.white,
-                    fontSize: 14,
+                    fontSize: 19,
                     fontWeight: FontWeight.w700)),
           ],
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: 18),
         Container(
-          width: 120,
-          height: 44,
+          width: 170,
+          height: 58,
           alignment: Alignment.center,
           decoration: BoxDecoration(
             color: Colors.white.withValues(alpha: 0.08),
-            borderRadius: BorderRadius.circular(10),
+            borderRadius: BorderRadius.circular(14),
             border:
                 Border.all(color: Colors.white.withValues(alpha: 0.2)),
           ),
@@ -2949,14 +2989,14 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
             _sleepCustomValue.isEmpty ? '0' : _sleepCustomValue,
             style: const TextStyle(
                 color: Colors.white,
-                fontSize: 22,
+                fontSize: 30,
                 fontWeight: FontWeight.w700,
                 letterSpacing: 2),
           ),
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: 18),
         SizedBox(
-          width: 200,
+          width: 280,
           child: Column(
             children: [
               for (final row in [
@@ -2992,14 +3032,14 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                           });
                         },
                         child: Container(
-                          height: 42,
-                          margin: const EdgeInsets.all(3),
+                          height: 58,
+                          margin: const EdgeInsets.all(4),
                           alignment: Alignment.center,
                           decoration: BoxDecoration(
                             color: key == '✓'
                                 ? AppColors.accent.withValues(alpha: 0.3)
                                 : Colors.white.withValues(alpha: 0.08),
-                            borderRadius: BorderRadius.circular(8),
+                            borderRadius: BorderRadius.circular(12),
                           ),
                           child: Text(
                             key,
@@ -3007,7 +3047,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                               color: key == '✓'
                                   ? AppColors.accent
                                   : Colors.white,
-                              fontSize: 18,
+                              fontSize: 24,
                               fontWeight: FontWeight.w600,
                             ),
                           ),
@@ -3270,18 +3310,51 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
         return PopScope(
           // Izohlar butun ekranni egallagan bo'lsa "orqaga"
           // AVVAL uni yig'adi — ekrandan chiqib ketmaydi.
-          canPop: !_isFullscreen && !_commentsExpanded,
+          //
+          // Uxlash oynasi ochiq bo'lsa "orqaga" AVVAL o'sha
+          // oynani yopadi — ekran yopilib ketmaydi.
+          canPop: !_isFullscreen && !_commentsExpanded && !_sleepPanelOpen,
           onPopInvokedWithResult: (didPop, _) {
             if (didPop) return;
-            if (_isFullscreen) {
+            if (_sleepPanelOpen) {
+              _closeSleepPanel();
+            } else if (_isFullscreen) {
               _toggleFullscreen();
             } else if (_commentsExpanded) {
               _setCommentsExpanded(false);
             }
           },
-          child: _isFullscreen
-              ? _buildFullscreenPlayer()
-              : _buildNormalScreen(),
+          // ── UXLASH OYNASI EKRAN O'RTASIDA ──────────────────
+          //
+          // TALAB (foydalanuvchi): "uxlash vaqti oynasi ekran
+          // o'rtasida chiqsin va kattaroq bo'lsin".
+          //
+          // Shu sabab u pleyer Stack'idan CHIQARILDI va eng
+          // tepaga — butun ekranni qoplaydigan qatlamga ko'chdi.
+          // Endi o'lchamini video maydoni cheklamaydi: oyna
+          // ekran o'rtasida, katta tugmalar bilan chiqadi va
+          // fullscreen'da ham xuddi shunday ishlaydi.
+          //
+          // `Material` kerak: bu qatlam `Scaffold` dan TASHQARIDA
+          // turadi, usiz matn uchun odatiy uslub topilmaydi.
+          child: Stack(
+            // `expand` SHART: usiz ekran (Scaffold) bo'sh
+            // cheklov oladi va o'z bo'yiga qarab siqilib
+            // qolishi mumkin.
+            fit: StackFit.expand,
+            children: [
+              _isFullscreen
+                  ? _buildFullscreenPlayer()
+                  : _buildNormalScreen(),
+              if (_sleepPanelOpen)
+                Positioned.fill(
+                  child: Material(
+                    type: MaterialType.transparency,
+                    child: _buildSleepOverlay(),
+                  ),
+                ),
+            ],
+          ),
         );
       },
     );
@@ -4555,44 +4628,15 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
               ),
             ),
 
-          // ── Sleep panel backdrop ───────────
-          if (_sleepPanelOpen)
-            Positioned.fill(
-              child: GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: _closeSleepPanel,
-              ),
-            ),
-
-          // ── Uxlash vaqti oynasi ───────────────────────────
+          // ── UXLASH VAQTI OYNASI BU YERDA EMAS ──────────────
           //
-          // TOPILGAN XATO: oyna pleyer maydonidan BALAND edi va
-          // pastki qismi qirqilib qolardi — 30/60/120 daqiqa va
-          // "Qo'lda kiritish" tugmalari umuman ko'rinmasdi.
-          // Sabab: balandlikka hech qanday cheklov qo'yilmagan,
-          // Stack esa ortiqcha qismini kesib tashlaydi.
+          // U ilgari shu Stack'da — ya'ni PLEYER MAYDONIDA —
+          // turardi. Maydon esa kichik (normal rejimda ekranning
+          // atigi uchdan biri), shu sabab oyna siqilib chiqardi
+          // va raqam tugmalari qirqilib qolardi.
           //
-          // Endi `Positioned.fill` + `Center`: oyna eng ko'pi bilan
-          // pleyer bo'yiga teng bo'ladi, sig'magani esa ICHIDA
-          // suriladi (`SingleChildScrollView`). Ya'ni kichik
-          // ekranda ham hamma tugmaga yetib boriladi.
-          if (_sleepPanelOpen)
-            Positioned.fill(
-              child: Center(
-                child: Padding(
-                  padding: const EdgeInsets.all(10),
-                  child: _PlayerPanel(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 14, vertical: 12),
-                    child: SingleChildScrollView(
-                      child: _sleepCustomInput
-                          ? _buildSleepCustomInput()
-                          : _buildSleepOptions(),
-                    ),
-                  ),
-                ),
-              ),
-            ),
+          // Endi u butun ekran ustida chiziladi — `build()` ga
+          // qarang.
         ],
       ),
     );
