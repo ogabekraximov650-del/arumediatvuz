@@ -203,7 +203,7 @@ class FulutterApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'ARUmediaTv',
+      title: 'ARUmediaTV',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,

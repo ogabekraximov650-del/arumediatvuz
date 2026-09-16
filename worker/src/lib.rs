@@ -4227,7 +4227,7 @@ async fn tg_avatar(env: &Env, user_id: i64) -> Result<Response> {
 /// QILISH kerak. "Xatolik: Telegram xatosi (sendMessage)" kabi
 /// ichki matnlar hech qachon tashqariga chiqmaydi: ular
 /// foydalanuvchiga hech narsa tushuntirmaydi, faqat qo'rqitadi.
-const MSG_HELP: &str = "\u{1F44B} Salom! Men \u{2014} <b>ARUmediaTv</b> ilovasining kirish yordamchisiman.\n\n\
+const MSG_HELP: &str = "\u{1F44B} Salom! Men \u{2014} <b>ARUmediaTV</b> ilovasining kirish yordamchisiman.\n\n\
      Kirish uchun: ilovani oching \u{2192} pastdagi <b>Profil</b> bo'limi \u{2192} \u{AB}Telegram orqali kirish\u{BB} tugmasi.\n\n\
      O'sha tugma meni o'zi ochadi \u{2014} bu yerda hech narsa yozishingiz shart emas.";
 

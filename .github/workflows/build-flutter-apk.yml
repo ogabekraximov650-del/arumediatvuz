@@ -280,7 +280,7 @@ jobs:
       # NOMI: `flutter create` nomni loyiha papkasidan oladi va
       # manifestga `android:label="soft"` deb yozadi (loyiha nomi)
       # — telefonda belgi ostida aynan shu yozuv turardi.
-      # Ilovaning nomi esa ARUmediaTv.
+      # Ilovaning nomi esa ARUmediaTV.
       #
       # YUMALOQ BELGI (`android:roundIcon`): Android 7.1 dan beri
       # qobiqlar (ayniqsa MIUI, Samsung One UI) belgini YUMALOQ
@@ -296,8 +296,8 @@ jobs:
           set -e
           MANIFEST="android/app/src/main/AndroidManifest.xml"
 
-          sed -i 's/android:label="[^"]*"/android:label="ARUmediaTv"/' "$MANIFEST"
-          grep -q 'android:label="ARUmediaTv"' "$MANIFEST" \
+          sed -i 's/android:label="[^"]*"/android:label="ARUmediaTV"/' "$MANIFEST"
+          grep -q 'android:label="ARUmediaTV"' "$MANIFEST" \
             || { echo "❌ Ilova nomi o'zgarmadi"; exit 1; }
 
           if ! grep -q 'android:roundIcon' "$MANIFEST"; then
@@ -306,7 +306,7 @@ jobs:
           grep -q 'android:roundIcon="@mipmap/ic_launcher_round"' "$MANIFEST" \
             || { echo "❌ roundIcon qo'shilmadi"; exit 1; }
 
-          echo "✅ Ilova nomi: ARUmediaTv, yumaloq belgi ulandi"
+          echo "✅ Ilova nomi: ARUmediaTV, yumaloq belgi ulandi"
 
       # ── ILOVALAR USTIDA SUZUVCHI PLEYER (PiP) ─────────────────
       #
@@ -804,8 +804,8 @@ jobs:
           # 1) Ilova nomi
           LABEL=$("$AAPT" dump badging "$APK" | grep -m1 "^application-label:" || true)
           echo "$LABEL"
-          echo "$LABEL" | grep -q "'ARUmediaTv'" \
-            || { echo "❌ XATO: ilova nomi ARUmediaTv emas"; exit 1; }
+          echo "$LABEL" | grep -q "'ARUmediaTV'" \
+            || { echo "❌ XATO: ilova nomi ARUmediaTV emas"; exit 1; }
 
           # 2) Barcha PNG resurslar ochiladi
           TMP=$(mktemp -d)
@@ -1015,7 +1015,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
-          name: ARUmediaTv (build ${{ github.run_number }})
+          name: ARUmediaTV (build ${{ github.run_number }})
           body: |
             Telefonga to'g'ridan-to'g'ri o'rnatish uchun `.apk`
             faylini yuklab oling (ZIP emas).
