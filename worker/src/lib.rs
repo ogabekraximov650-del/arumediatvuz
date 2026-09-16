@@ -3613,21 +3613,51 @@ async fn ensure_webhook(env: &Env, origin: &str) {
         }
     };
 
-    let want = format!("{origin}/api/telegram/webhook");
-    if config_get(env, "tg_webhook_url").await.as_deref() == Some(want.as_str()) {
+    let url = format!("{origin}/api/telegram/webhook");
+
+    // ── TOPILGAN XATO: BOT ALMASHSA WEBHOOK QO'YILMASDI ──────
+    //
+    // Ilgari bu yerda FAQAT manzil solishtirilardi. Bot
+    // almashtirilganda manzil esa O'ZGARMAYDI — eski bot
+    // allaqachon o'sha manzilga ro'yxatdan o'tgan bo'lardi.
+    // Natijada tekshiruv "hammasi joyida" deb o'tkazib yuborar,
+    // `setWebhook` YANGI botga hech qachon chaqirilmasdi.
+    //
+    // Oqibati: foydalanuvchi yangi botda START bosadi, Telegram
+    // esa u bot uchun webhook bilmaydi — worker hech narsa
+    // eshitmaydi va bot JIM qoladi. Aynan shu bo'ldi.
+    //
+    // Endi belgi ichiga BOTNING O'ZI ham kiradi. Bot tokeni
+    // "<bot_id>:<sir>" ko'rinishida; ':' gacha bo'lgan qism —
+    // botning IDsi va u sir EMAS (`getMe` ham shuni qaytaradi),
+    // shu sabab uni belgida saqlash xavfsiz. Bot almashsa ID
+    // o'zgaradi -> belgi mos kelmaydi -> webhook qayta qo'yiladi.
+    let bot_id = env
+        .secret("TELEGRAM_BOT_TOKEN")
+        .ok()
+        .map(|t| t.to_string())
+        .and_then(|t| t.split(':').next().map(|s| s.to_string()))
+        .unwrap_or_default();
+
+    // Kalit ATAYLAB yangi (`tg_webhook_for`): eskisida faqat
+    // manzil yotibdi va uni shu yerda qayta ishlatish eski
+    // xatoni tirilishtirib qo'yishi mumkin edi.
+    let want = format!("{bot_id}|{url}");
+    if config_get(env, "tg_webhook_for").await.as_deref() == Some(want.as_str()) {
         WEBHOOK_READY.store(true, Ordering::Relaxed);
         return;
     }
 
     let res = tg_api(env, "setWebhook", json!({
-        "url": want,
+        "url": url,
         "secret_token": secret,
         "allowed_updates": ["message"],
         "drop_pending_updates": true,
     })).await;
 
     if res.is_ok() {
-        config_put(env, "tg_webhook_url", &want).await;
+        config_put(env, "tg_webhook_for", &want).await;
+        config_put(env, "tg_webhook_url", &url).await;
         WEBHOOK_READY.store(true, Ordering::Relaxed);
     }
 }
@@ -8081,22 +8111,50 @@ async fn auth_route(req: Request, env: &Env, origin: &str, path: &str, method: M
                 Err(_) => (false, String::new()),
             };
 
-            let webhook_url = config_get(env, "tg_webhook_url").await.unwrap_or_default();
+            // ── WEBHOOK HOLATI TELEGRAMNING O'ZIDAN ──────────
+            //
+            // Ilgari bu yerda workerning O'Z yozuvi ko'rsatilardi
+            // ("men qachondir qo'ygandim"). Bot almashganda o'sha
+            // yozuv joyida turaverdi va tekshiruv
+            // `webhook_registered: true` deb YOLG'ON aytdi —
+            // holbuki yangi botda webhook umuman yo'q edi va bot
+            // jim turardi.
+            //
+            // Endi HAQIQIY manba so'raladi: `getWebhookInfo`
+            // Telegramning o'zida nima turganini aytadi.
+            let (hook_url, hook_err, hook_pending) =
+                match tg_api(env, "getWebhookInfo", json!({})).await {
+                    Ok(w) => (
+                        w["url"].as_str().unwrap_or("").to_string(),
+                        w["last_error_message"].as_str().unwrap_or("").to_string(),
+                        w["pending_update_count"].as_i64().unwrap_or(0),
+                    ),
+                    Err(_) => (String::new(), "getWebhookInfo xatosi".into(), 0),
+                };
+
+            let want_hook = format!("{origin}/api/telegram/webhook");
+            let hook_ok = hook_url == want_hook;
 
             ok_nostore(json!({
                 "bot_token_configured": token_ok,
                 "bot_reachable": bot_ok,
                 "bot_username": bot_username,
                 "expected_bot": BOT_USERNAME,
-                "webhook_registered": !webhook_url.is_empty(),
-                "webhook_url": webhook_url,
+                // Telegram AYTGAN manzil (workerning taxmini emas).
+                "webhook_registered": hook_ok,
+                "webhook_url": hook_url,
+                "webhook_expected": want_hook,
+                "webhook_last_error": hook_err,
+                "webhook_pending": hook_pending,
                 "max_devices": MAX_SESSIONS_PER_USER,
                 // Katta-kichik harf E'TIBORGA OLINMAYDI: Telegram
                 // username'ni shunday tushunadi, ya'ni yozuvdagi
                 // farq xato EMAS. Ilgari bu qat'iy `==` edi va
                 // sog'liq tekshiruvi bekordan-bekorga "ishlamayapti"
                 // deb turardi.
-                "ok": token_ok && bot_ok
+                // Webhook ham shartga KIRDI: usiz bot jim turadi,
+                // lekin tekshiruv "hammasi joyida" derdi.
+                "ok": token_ok && bot_ok && hook_ok
                     && bot_username.eq_ignore_ascii_case(BOT_USERNAME),
             }))
         }
