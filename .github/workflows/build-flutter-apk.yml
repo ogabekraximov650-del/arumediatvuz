@@ -385,6 +385,116 @@ jobs:
           print('   configChanges =', cm2.group(1))
           PYEOF
 
+      # ── SUZUVCHI PLEYER (ilovalar ustida) UCHUN MANIFEST ──────
+      #
+      # `FloatingPlayerService` uchta narsani talab qiladi:
+      #
+      #   1. SYSTEM_ALERT_WINDOW — boshqa ilovalar ustiga chizish.
+      #      Bu "xavfli" ruxsat: foydalanuvchi uni Sozlamalarda
+      #      QO'LDA yoqadi, dialog bilan so'rab bo'lmaydi.
+      #
+      #   2. FOREGROUND_SERVICE (+ ..._MEDIA_PLAYBACK Android 14
+      #      dan boshlab) — oddiy service'ni tizim fonda o'ldiradi,
+      #      video o'rtasida uzilib qolardi.
+      #
+      #   3. POST_NOTIFICATIONS (Android 13+) — foreground service
+      #      bildirishnomasi ko'rinishi uchun.
+      #
+      # `<service>` e'loni ham shu yerda qo'shiladi: `android/`
+      # papkasi har build'da qaytadan yaratilgani uchun uni
+      # qo'lda saqlab bo'lmaydi.
+      - name: Suzuvchi pleyer uchun manifestni sozlash
+        run: |
+          set -e
+          python3 - <<'PYEOF'
+          import re, sys
+
+          p = 'android/app/src/main/AndroidManifest.xml'
+          s = open(p, encoding='utf-8').read()
+
+          perms = [
+              'android.permission.SYSTEM_ALERT_WINDOW',
+              'android.permission.FOREGROUND_SERVICE',
+              'android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK',
+              'android.permission.POST_NOTIFICATIONS',
+          ]
+          add = ''
+          for perm in perms:
+              if perm not in s:
+                  add += '    <uses-permission android:name="%s" />\n' % perm
+          if add:
+              m = re.search(r'<manifest\b[^>]*>', s)
+              if not m:
+                  print('❌ <manifest> topilmadi'); sys.exit(1)
+              s = s[:m.end()] + '\n' + add + s[m.end():]
+
+          # `<service>` — `</application>` dan oldin.
+          if 'FloatingPlayerService' not in s:
+              svc = (
+                  '        <service\n'
+                  '            android:name=".FloatingPlayerService"\n'
+                  '            android:exported="false"\n'
+                  '            android:foregroundServiceType="mediaPlayback" />\n'
+              )
+              i = s.rfind('</application>')
+              if i < 0:
+                  print('❌ </application> topilmadi'); sys.exit(1)
+              s = s[:i] + svc + s[i:]
+
+          open(p, 'w', encoding='utf-8').write(s)
+
+          chk = open(p, encoding='utf-8').read()
+          for perm in perms:
+              assert perm in chk, 'ruxsat qo\'shilmadi: ' + perm
+          assert 'android:name=".FloatingPlayerService"' in chk, \
+                 'service e\'lon qilinmadi'
+          assert 'android:foregroundServiceType="mediaPlayback"' in chk, \
+                 'foregroundServiceType yo\'q'
+          print('✅ Suzuvchi pleyer manifestga ulandi')
+          PYEOF
+
+      # ── ExoPlayer (media3) SUZUVCHI PLEYER UCHUN ──────────────
+      #
+      # Overlay oynasida video Flutter bilan chizilmaydi (sabab —
+      # FloatingPlayerService.kt boshidagi izohda), shu sabab
+      # ExoPlayer TO'G'RIDAN-TO'G'RI chaqiriladi va bog'liqlik
+      # oshkora e'lon qilinishi kerak.
+      #
+      # `video_player` ham shu kutubxonani olib keladi. Versiyalar
+      # farq qilsa Gradle YUQORISINI tanlaydi — ya'ni bu yerdagi
+      # qiymat "eng kamida shu" degani, to'qnashuv chiqmaydi.
+      - name: media3 (ExoPlayer) bog'liqligini qo'shish
+        run: |
+          set -e
+          G="android/app/build.gradle"
+          [ -f "$G" ] || G="android/app/build.gradle.kts"
+          if [ ! -f "$G" ]; then
+            echo "❌ app build.gradle topilmadi"; exit 1
+          fi
+
+          if grep -q "media3-exoplayer" "$G"; then
+            echo "✅ media3 allaqachon bor"
+          else
+            python3 - "$G" <<'PYEOF'
+          import re, sys
+          p = sys.argv[1]
+          s = open(p, encoding='utf-8').read()
+          kts = p.endswith('.kts')
+          dep = ('    implementation("androidx.media3:media3-exoplayer:1.4.1")\n'
+                 if kts else
+                 "    implementation 'androidx.media3:media3-exoplayer:1.4.1'\n")
+
+          m = re.search(r'^dependencies\s*\{', s, re.M)
+          if m:
+              s = s[:m.end()] + '\n' + dep + s[m.end():]
+          else:
+              s = s.rstrip() + '\n\ndependencies {\n' + dep + '}\n'
+          open(p, 'w', encoding='utf-8').write(s)
+          assert 'media3-exoplayer' in open(p, encoding='utf-8').read()
+          print('✅ media3 qo\'shildi:', p)
+          PYEOF
+          fi
+
       # ── TOMOSHA TARIXI UCHUN KADR AJRATUVCHI ──────────────────
       #
       # `android/` papkasi `.gitignore` da va CI uni har safar
@@ -409,6 +519,15 @@ jobs:
           sed "s/__PKG__/$PKG/" android-template/MainActivity.kt > "$MA"
           echo "✅ Kadr ajratuvchi joylashtirildi (paket: $PKG)"
           grep -n "aru/thumb" "$MA"
+
+          # Suzuvchi pleyer xizmati MainActivity BILAN BIR
+          # papkaga qo'yiladi — bir paketda bo'lgani uchun
+          # `import` kerak emas.
+          SRC_DIR=$(dirname "$MA")
+          sed "s/__PKG__/$PKG/" android-template/FloatingPlayerService.kt \
+            > "$SRC_DIR/FloatingPlayerService.kt"
+          echo "✅ Suzuvchi pleyer xizmati joylashtirildi"
+          grep -n "class FloatingPlayerService" "$SRC_DIR/FloatingPlayerService.kt"
 
       - name: Kotlin va compileSdk versiyalarini eng yangisiga moslash
         run: |

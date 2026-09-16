@@ -33,11 +33,14 @@
 package __PKG__
 
 import android.app.PictureInPictureParams
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.net.Uri
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
 import android.os.Build
+import android.provider.Settings
 import android.util.Base64
 import android.util.Rational
 import android.view.WindowManager
@@ -209,6 +212,85 @@ class MainActivity : FlutterActivity() {
             }
         }
 
+        // ── ILOVALAR USTIDA SUZUVCHI PLEYER (to'liq oyna) ──────
+        //
+        // Yuqoridagi PiP — tizimning oynasi: tugmalarsiz va
+        // surib bo'lmaydigan. Bu esa BIZNING oynamiz:
+        // `FloatingPlayerService` uni `WindowManager` ga qo'yadi,
+        // ya'ni ilova ichidagi kichik pleyer kabi to'liq
+        // boshqariladi. Batafsil — o'sha fayl boshidagi izohda.
+        //
+        // Evaziga "ilovalar ustida ko'rsatish" ruxsati kerak. Uni
+        // oddiy dialog bilan so'rab bo'lmaydi — foydalanuvchi
+        // Sozlamalarda qo'lda yoqadi, shu sabab bu yerda o'sha
+        // sahifani ochadigan alohida metod bor.
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "aru/float")
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "canDraw" -> result.success(
+                        FloatingPlayerService.canDraw(this)
+                    )
+
+                    // Sozlamalardagi "Ilovalar ustida ko'rsatish"
+                    // sahifasini ochadi. Javob — sahifa ochildimi;
+                    // foydalanuvchi ruxsat berdimi degani EMAS, uni
+                    // qaytib kelgach `canDraw` bilan tekshiriladi.
+                    "requestPermission" -> result.success(openOverlaySettings())
+
+                    "start" -> {
+                        if (!FloatingPlayerService.canDraw(this)) {
+                            result.success(false)
+                        } else {
+                            val i = Intent(this, FloatingPlayerService::class.java)
+                                .setAction(FloatingPlayerService.ACTION_START)
+                                .putExtra(
+                                    FloatingPlayerService.EXTRA_URL,
+                                    call.argument<String>("url") ?: ""
+                                )
+                                .putExtra(
+                                    FloatingPlayerService.EXTRA_POSITION_MS,
+                                    (call.argument<Number>("positionMs")
+                                        ?: 0).toLong()
+                                )
+                                .putExtra(
+                                    FloatingPlayerService.EXTRA_TITLE,
+                                    call.argument<String>("title") ?: ""
+                                )
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                startForegroundService(i)
+                            } else {
+                                startService(i)
+                            }
+                            // Oyna ochilgach ilovani orqaga olamiz —
+                            // aks holda u o'z ustida turib qolardi.
+                            moveTaskToBack(true)
+                            result.success(true)
+                        }
+                    }
+
+                    "stop" -> {
+                        startService(
+                            Intent(this, FloatingPlayerService::class.java)
+                                .setAction(FloatingPlayerService.ACTION_STOP)
+                        )
+                        result.success(true)
+                    }
+
+                    "isRunning" -> result.success(FloatingPlayerService.running)
+
+                    // Oyna yopilgandagi ijro nuqtasi (ms). `-1` —
+                    // yo'q. O'qilgach tozalanadi: bir xil qiymat
+                    // ikkinchi marta ishlatilib qolmasin.
+                    "takeLastPosition" -> {
+                        val p = FloatingPlayerService.lastPositionMs
+                        FloatingPlayerService.lastPositionMs = -1L
+                        result.success(p)
+                    }
+
+                    else -> result.notImplemented()
+                }
+            }
+
         // ── TRAFIK KANALI OLIB TASHLANGAN ──────────────────────
         //
         // Bu yerda ilgari `TrafficStats.getUidRxBytes` bor edi.
@@ -227,6 +309,39 @@ class MainActivity : FlutterActivity() {
         // `aru/storage` kanali ham bor edi; profil sahifasidan
         // "telefon xotirasi N% band" qatori olib tashlangach
         // (foydalanuvchi talabi) u ham keraksiz bo'lib qoldi.
+    }
+
+    /// "Ilovalar ustida ko'rsatish" sozlamasini ochadi.
+    ///
+    /// Bu ruxsat ODDIY ruxsat emas: `requestPermissions` bilan
+    /// so'rab bo'lmaydi, foydalanuvchi uni Sozlamalarda qo'lda
+    /// yoqishi kerak. Shu sabab bu yerda faqat o'sha sahifa
+    /// ochiladi.
+    private fun openOverlaySettings(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return false
+        return try {
+            startActivity(
+                Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:$packageName")
+                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+            true
+        } catch (e: Throwable) {
+            // Ba'zi qobiqlarda bu sahifa yo'q — o'shanda ilovaning
+            // umumiy sozlamalari ochiladi.
+            try {
+                startActivity(
+                    Intent(
+                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.parse("package:$packageName")
+                    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+                true
+            } catch (e2: Throwable) {
+                false
+            }
+        }
     }
 
     /// Qurilma PiP'ni qo'llab-quvvatlaydimi.

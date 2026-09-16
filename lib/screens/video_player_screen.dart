@@ -133,6 +133,7 @@ import '../theme/app_background.dart';
 import 'billing_screen.dart';
 import '../widgets/glass.dart';
 import '../services/mini_player_service.dart';
+import '../services/floating_player_service.dart';
 import '../services/pip_service.dart';
 import '../widgets/comments_tab.dart';
 
@@ -602,6 +603,12 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       // yo'qolmasin.
       unawaited(WatchHistory.instance.flush());
     } else if (state == AppLifecycleState.resumed) {
+      // Suzuvchi oynada ko'rilgan bo'lsa — ijro AYNAN o'sha
+      // joydan davom etadi. Bu `_pausedByLifecycle` dan OLDIN
+      // tekshiriladi: oynaga o'tishda ijro qo'lda to'xtatilgan,
+      // ya'ni bayroq qo'yilmagan bo'ladi.
+      unawaited(_resumeFromFloating());
+
       if (!_pausedByLifecycle) return;
       _pausedByLifecycle = false;
       // Foydalanuvchi shu orada pauzani o'zi bosgan bo'lsa
@@ -609,6 +616,25 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       if (!_intendedPlaying) return;
       _controller?.play();
     }
+  }
+
+  /// Ilovalar ustidagi oyna yopilgan bo'lsa, o'sha nuqtadan
+  /// davom ettiradi.
+  ///
+  /// Nuqta native tomonda BIR MARTALIK saqlanadi: o'qilgach
+  /// tozalanadi, aks holda keyingi qaytishda pleyer eski joyga
+  /// sakrab ketardi.
+  Future<void> _resumeFromFloating() async {
+    final at = await FloatingPlayerService.instance.takeLastPosition();
+    if (at == null || !mounted) return;
+
+    final c = _controller;
+    if (c == null || !c.value.isInitialized) return;
+
+    await c.seekTo(at);
+    if (!mounted) return;
+    await c.play();
+    if (mounted) setState(() => _intendedPlaying = true);
   }
 
   // ── Ma'lumot yuklash ──────────────────────────────────────────
@@ -2830,6 +2856,103 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     });
   }
 
+  /// Ilovalar ustida suzuvchi oynani ochadi.
+  ///
+  /// ── IKKI YO'L, BIRI ZAXIRA ─────────────────────────────────
+  ///
+  /// Asosiysi — BIZNING oynamiz (`FloatingPlayerService`): unda
+  /// tugmalar bor, suriladi va o'lchami o'zgaradi, ya'ni ilova
+  /// ichidagi kichik pleyer kabi ishlaydi. Lekin u "ilovalar
+  /// ustida ko'rsatish" ruxsatini talab qiladi.
+  ///
+  /// Foydalanuvchi ruxsat bermasa — tizim PiP'iga tushamiz: u
+  /// ruxsatsiz ishlaydi, faqat oynasi tizimniki (tugmasiz,
+  /// surib bo'lmaydi). Ya'ni tugma HAR DOIM biror ish qiladi.
+  Future<void> _enterFloatingPlayer() async {
+    final ctrl = _controller;
+    if (ctrl == null || !ctrl.value.isInitialized) return;
+    if (_currentUrl.isEmpty) return;
+
+    final float = FloatingPlayerService.instance;
+
+    if (!await float.hasPermission()) {
+      if (!mounted) return;
+      final go = await _askOverlayPermission();
+      if (!mounted) return;
+      if (go == true) {
+        await float.openPermissionSettings();
+        // Foydalanuvchi Sozlamalarda bo'lgani uchun bu yerda
+        // kutib turmaymiz — qaytib kelib tugmani qayta bosadi.
+        return;
+      }
+      // Rad etdi — zaxira yo'l.
+      await _enterSystemPip();
+      return;
+    }
+
+    final ep = _currentEp;
+    final name = _seasonStr('nomi');
+    final epName = (ep?['epizod_name'] ?? '').toString();
+
+    // Ikkita pleyer bir vaqtda ovoz chiqarmasin: ilovaniki
+    // to'xtatiladi, ijroni endi native oyna davom ettiradi.
+    await ctrl.pause();
+    if (mounted) setState(() => _intendedPlaying = false);
+
+    final ok = await float.start(
+      url: _currentUrl,
+      position: ctrl.value.position,
+      title: epName.isEmpty ? name : '$name — $epName',
+    );
+
+    if (!ok && mounted) {
+      _showNotice('Suzuvchi oyna ochilmadi');
+    }
+  }
+
+  /// Ruxsat nima uchun kerakligini tushuntiradi.
+  ///
+  /// `true` — Sozlamalarni ochamiz, `false`/`null` — tizim
+  /// PiP'i bilan davom etamiz.
+  Future<bool?> _askOverlayPermission() {
+    return showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF15151F),
+        shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20)),
+        title: const Text(
+          'Ruxsat kerak',
+          style: TextStyle(
+              color: Colors.white,
+              fontSize: 17,
+              fontWeight: FontWeight.w700),
+        ),
+        content: const Text(
+          'Pleyer boshqa ilovalar ustida ko\'rinishi uchun '
+          '"Ilovalar ustida ko\'rsatish" ruxsati kerak.\n\n'
+          'Ruxsat bermasangiz ham suzuvchi oyna ishlaydi, lekin '
+          'uni surib bo\'lmaydi va tugmalari bo\'lmaydi.',
+          style: TextStyle(color: Colors.white70, fontSize: 14),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Ruxsatsiz davom etish',
+                style: TextStyle(color: Colors.white54)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: Text('Sozlamalarni ochish',
+                style: TextStyle(
+                    color: AppColors.accent,
+                    fontWeight: FontWeight.w700)),
+          ),
+        ],
+      ),
+    );
+  }
+
   /// Tizim PiP'iga (ilovalar ustida suzuvchi oyna) o'tadi.
   ///
   /// Bu yerda pleyer YOPILMAYDI: PiP'da ekranning O'ZI kichik
@@ -4467,7 +4590,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                         label: 'Ilovalar ustida suzuvchi pleyer',
                         onTap: () {
                           _closeMenu();
-                          _enterSystemPip();
+                          _enterFloatingPlayer();
                         },
                       ),
                     ],
@@ -4675,7 +4798,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                         label: 'Ilovalar ustida suzuvchi pleyer',
                         onTap: () {
                           _closeSettingsPanel();
-                          _enterSystemPip();
+                          _enterFloatingPlayer();
                         },
                       ),
                     ],
