@@ -337,6 +337,15 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   bool _isLocked = false;
   bool _settingsPanelOpen = false;
 
+  // ── UXLASH VAQTI (Sleep Timer) ──────────────────────────────
+  Timer? _sleepTimer;
+  int _sleepMinutes = 0;
+  int _sleepSecondsLeft = 0;
+  Timer? _sleepTickTimer;
+  bool _sleepPanelOpen = false;
+  bool _sleepCustomInput = false;
+  String _sleepCustomValue = '';
+
   DateTime _lastPlayPauseTap = DateTime.fromMillisecondsSinceEpoch(0);
 
   // ── Ikki marta bosib sek qilish (double-tap seek) ─────────────
@@ -519,6 +528,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _tabPages.dispose();
     _tabCtrl.dispose();
     _hideTimer?.cancel();
+    _sleepTimer?.cancel();
+    _sleepTickTimer?.cancel();
     _leftSeekHideTimer?.cancel();
     _rightSeekHideTimer?.cancel();
     _seekIdleTimer?.cancel();
@@ -2714,6 +2725,254 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     }
   }
 
+  void _showSleepPanel() {
+    setState(() {
+      _sleepPanelOpen = true;
+      _sleepCustomInput = false;
+      _sleepCustomValue = '';
+    });
+    _hideTimer?.cancel();
+  }
+
+  void _closeSleepPanel() {
+    if (!_sleepPanelOpen) return;
+    setState(() {
+      _sleepPanelOpen = false;
+      _sleepCustomInput = false;
+    });
+    _scheduleHide();
+  }
+
+  void _setSleepTimer(int minutes) {
+    _sleepTimer?.cancel();
+    _sleepTickTimer?.cancel();
+    if (minutes <= 0) {
+      setState(() {
+        _sleepMinutes = 0;
+        _sleepSecondsLeft = 0;
+      });
+      _closeSleepPanel();
+      return;
+    }
+    _sleepMinutes = minutes;
+    _sleepSecondsLeft = minutes * 60;
+    _sleepTickTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      setState(() => _sleepSecondsLeft--);
+      if (_sleepSecondsLeft <= 0) {
+        _sleepTickTimer?.cancel();
+        _controller?.pause();
+        setState(() {
+          _intendedPlaying = false;
+          _sleepMinutes = 0;
+        });
+      }
+    });
+    _closeSleepPanel();
+  }
+
+  String _sleepTimeLabel() {
+    if (_sleepSecondsLeft <= 0) return '';
+    final m = _sleepSecondsLeft ~/ 60;
+    final s = _sleepSecondsLeft % 60;
+    return '${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
+  }
+
+  Widget _buildSleepOptions() {
+    final options = [
+      {'label': 'O\'chirish', 'minutes': 0},
+      {'label': '15 daqiqa', 'minutes': 15},
+      {'label': '30 daqiqa', 'minutes': 30},
+      {'label': '60 daqiqa', 'minutes': 60},
+      {'label': '120 daqiqa', 'minutes': 120},
+    ];
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const Text('Uxlash vaqti',
+            style: TextStyle(
+                color: Colors.white,
+                fontSize: 14,
+                fontWeight: FontWeight.w700)),
+        if (_sleepMinutes > 0) ...[
+          const SizedBox(height: 4),
+          Text(_sleepTimeLabel(),
+              style: TextStyle(
+                  color: AppColors.accent,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600)),
+        ],
+        const SizedBox(height: 12),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          alignment: WrapAlignment.center,
+          children: [
+            for (final o in options)
+              GestureDetector(
+                onTap: () => _setSleepTimer(o['minutes'] as int),
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: _sleepMinutes == o['minutes'] as int &&
+                            (o['minutes'] as int) > 0
+                        ? AppColors.accent.withValues(alpha: 0.25)
+                        : Colors.white.withValues(alpha: 0.08),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                      color: _sleepMinutes == o['minutes'] as int &&
+                              (o['minutes'] as int) > 0
+                          ? AppColors.accent.withValues(alpha: 0.5)
+                          : Colors.white.withValues(alpha: 0.15),
+                    ),
+                  ),
+                  child: Text(
+                    o['label'] as String,
+                    style: TextStyle(
+                      color: _sleepMinutes == o['minutes'] as int &&
+                              (o['minutes'] as int) > 0
+                          ? AppColors.accent
+                          : Colors.white,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ),
+            GestureDetector(
+              onTap: () => setState(() => _sleepCustomInput = true),
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.08),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                      color: Colors.white.withValues(alpha: 0.15)),
+                ),
+                child: const Text('Qo\'lda kiritish',
+                    style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600)),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSleepCustomInput() {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            GestureDetector(
+              onTap: () => setState(() => _sleepCustomInput = false),
+              child: const Icon(Icons.arrow_back_rounded,
+                  color: Colors.white70, size: 18),
+            ),
+            const SizedBox(width: 8),
+            const Text('Daqiqa kiriting',
+                style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700)),
+          ],
+        ),
+        const SizedBox(height: 12),
+        Container(
+          width: 120,
+          height: 44,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.08),
+            borderRadius: BorderRadius.circular(10),
+            border:
+                Border.all(color: Colors.white.withValues(alpha: 0.2)),
+          ),
+          child: Text(
+            _sleepCustomValue.isEmpty ? '0' : _sleepCustomValue,
+            style: const TextStyle(
+                color: Colors.white,
+                fontSize: 22,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 2),
+          ),
+        ),
+        const SizedBox(height: 12),
+        SizedBox(
+          width: 200,
+          child: Column(
+            children: [
+              for (final row in [
+                ['1', '2', '3'],
+                ['4', '5', '6'],
+                ['7', '8', '9'],
+                ['⌫', '0', '✓'],
+              ])
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: row.map((key) {
+                    return Expanded(
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: () {
+                          setState(() {
+                            if (key == '⌫') {
+                              if (_sleepCustomValue.isNotEmpty) {
+                                _sleepCustomValue = _sleepCustomValue
+                                    .substring(
+                                        0,
+                                        _sleepCustomValue.length - 1);
+                              }
+                            } else if (key == '✓') {
+                              final val =
+                                  int.tryParse(_sleepCustomValue) ?? 0;
+                              if (val > 0) _setSleepTimer(val);
+                            } else {
+                              if (_sleepCustomValue.length < 4) {
+                                _sleepCustomValue += key;
+                              }
+                            }
+                          });
+                        },
+                        child: Container(
+                          height: 42,
+                          margin: const EdgeInsets.all(3),
+                          alignment: Alignment.center,
+                          decoration: BoxDecoration(
+                            color: key == '✓'
+                                ? AppColors.accent.withValues(alpha: 0.3)
+                                : Colors.white.withValues(alpha: 0.08),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Text(
+                            key,
+                            style: TextStyle(
+                              color: key == '✓'
+                                  ? AppColors.accent
+                                  : Colors.white,
+                              fontSize: 18,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      ),
+                    );
+                  }).toList(),
+                ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
   void _showSettingsPanel() {
     setState(() => _settingsPanelOpen = true);
     _hideTimer?.cancel();
@@ -3978,6 +4237,43 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                         on: AppSettings.instance.autoNextEpisode,
                         onToggle: _toggleAutoNextEpisode,
                       ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 6),
+                        child: Divider(
+                          height: 1,
+                          color: Colors.white.withValues(alpha: 0.12),
+                        ),
+                      ),
+                      GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: () {
+                          _closeMenu();
+                          _showSleepPanel();
+                        },
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.schedule_rounded,
+                                size: 16,
+                                color: _sleepMinutes > 0
+                                    ? AppColors.accent
+                                    : Colors.white70),
+                            const SizedBox(width: 6),
+                            Text(
+                              _sleepMinutes > 0
+                                  ? 'Uxlash: ${_sleepTimeLabel()}'
+                                  : 'Uxlash vaqti',
+                              style: TextStyle(
+                                color: _sleepMinutes > 0
+                                    ? AppColors.accent
+                                    : Colors.white,
+                                fontSize: 11.5,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
                     ],
                   ),
                 ),
@@ -4119,8 +4415,75 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                         on: AppSettings.instance.autoNextEpisode,
                         onToggle: _toggleAutoNextEpisode,
                       ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 6),
+                        child: Divider(
+                          height: 1,
+                          color: Colors.white.withValues(alpha: 0.12),
+                        ),
+                      ),
+                      GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: () {
+                          _closeSettingsPanel();
+                          _showSleepPanel();
+                        },
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.schedule_rounded,
+                                size: 16,
+                                color: _sleepMinutes > 0
+                                    ? AppColors.accent
+                                    : Colors.white70),
+                            const SizedBox(width: 6),
+                            Text(
+                              _sleepMinutes > 0
+                                  ? 'Uxlash: ${_sleepTimeLabel()}'
+                                  : 'Uxlash vaqti',
+                              style: TextStyle(
+                                color: _sleepMinutes > 0
+                                    ? AppColors.accent
+                                    : Colors.white,
+                                fontSize: 11.5,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
                     ],
                   ),
+                ),
+              ),
+            ),
+
+          // ── Sleep panel backdrop ───────────
+          if (_sleepPanelOpen)
+            Positioned.fill(
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: _closeSleepPanel,
+              ),
+            ),
+
+          // ── Sleep panel ───────────
+          if (_sleepPanelOpen)
+            Align(
+              alignment: isFullscreen
+                  ? Alignment.center
+                  : Alignment.bottomCenter,
+              child: Padding(
+                padding: EdgeInsets.only(
+                    bottom: isFullscreen ? 0 : 80,
+                    left: 16,
+                    right: 16),
+                child: _PlayerPanel(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                  child: _sleepCustomInput
+                      ? _buildSleepCustomInput()
+                      : _buildSleepOptions(),
                 ),
               ),
             ),
