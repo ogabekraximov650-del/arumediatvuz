@@ -3471,7 +3471,13 @@ async fn purge_list_cache(path: &str) {
 /// DIQQAT: bot ALMASHGANI uchun `TELEGRAM_BOT_TOKEN` siri ham
 /// yangi botnikiga almashtirilishi SHART (wrangler secret put),
 /// aks holda webhook eski botda qolib ketadi.
-const BOT_USERNAME: &str = "arumediatvloginbot";
+///
+/// Qiymat @BotFather'dagi AYNAN o'sha yozuvda (katta-kichik
+/// harfi bilan). Havolada bu muhim emas — Telegram username'ni
+/// katta-kichik harfga qaramay topadi — lekin sog'liq tekshiruvi
+/// `getMe` qaytargan nom bilan solishtiradi, shu sabab bu yerda
+/// ham haqiqiy yozuv turgani tushunarliroq.
+const BOT_USERNAME: &str = "ARUmediaTvloginbot";
 
 /// Login tokeni necha millisekund yashaydi (5 daqiqa).
 const LOGIN_TOKEN_TTL_MS: i64 = 5 * 60 * 1000;
@@ -8085,7 +8091,13 @@ async fn auth_route(req: Request, env: &Env, origin: &str, path: &str, method: M
                 "webhook_registered": !webhook_url.is_empty(),
                 "webhook_url": webhook_url,
                 "max_devices": MAX_SESSIONS_PER_USER,
-                "ok": token_ok && bot_ok && bot_username == BOT_USERNAME,
+                // Katta-kichik harf E'TIBORGA OLINMAYDI: Telegram
+                // username'ni shunday tushunadi, ya'ni yozuvdagi
+                // farq xato EMAS. Ilgari bu qat'iy `==` edi va
+                // sog'liq tekshiruvi bekordan-bekorga "ishlamayapti"
+                // deb turardi.
+                "ok": token_ok && bot_ok
+                    && bot_username.eq_ignore_ascii_case(BOT_USERNAME),
             }))
         }
 
