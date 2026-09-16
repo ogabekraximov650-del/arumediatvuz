@@ -2706,7 +2706,12 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   }
 
   void _showSpeedPanel() {
-    setState(() => _speedPanelOpen = true);
+    // Ikkalasi ham endi O'NG tomonda chiqadi — bir vaqtda
+    // ochilib ustma-ust tushmasligi uchun ikkinchisi yopiladi.
+    setState(() {
+      _qualityPanelOpen = false;
+      _speedPanelOpen = true;
+    });
     _hideTimer?.cancel();
   }
 
@@ -2723,7 +2728,10 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   }
 
   void _showQualityPanel() {
-    setState(() => _qualityPanelOpen = true);
+    setState(() {
+      _speedPanelOpen = false;
+      _qualityPanelOpen = true;
+    });
     _hideTimer?.cancel();
   }
 
@@ -4059,49 +4067,73 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
               ),
             ),
 
+          // ── PANEL O'NG TOMONDA ────────────────────────────
+          //
+          // TALAB (foydalanuvchi): panel o'ng tarafga o'tsin,
+          // lekin ekran chetiga YOPISHIB qolmasin, va eniga ham
+          // bo'yiga ham biroz kattalashsin.
+          //
+          // Ilgari u `bottomLeft` + `bottom: 90` edi: chap chekka
+          // va pastdan 90 — sakkizta qator bunga sig'masdi, ya'ni
+          // ro'yxatning tepasi va "2×" qirqilib qolardi (yon
+          // holatda ekran bo'yi kichik).
+          //
+          // Endi `centerRight`: panel o'ngda, chekkadan 24 joy
+          // qoldirib, ekran bo'yi bo'ylab O'RTADA turadi. Bo'yi
+          // ekranning 85% idan oshmaydi — sig'magani ichida
+          // suriladi, ya'ni hech qachon qirqilmaydi.
           if (_speedPanelOpen && isFullscreen)
             Align(
-              alignment: Alignment.bottomLeft,
+              alignment: Alignment.centerRight,
               child: Padding(
-                padding: const EdgeInsets.only(left: 12, bottom: 90),
+                padding: const EdgeInsets.only(right: 24),
                 child: _PlayerPanel(
                   padding: const EdgeInsets.symmetric(
-                      horizontal: 6, vertical: 8),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      for (final s in const [
-                        0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0
-                      ])
-                        GestureDetector(
-                          behavior: HitTestBehavior.opaque,
-                          onTap: () => _setSpeed(s),
-                          child: Container(
-                            width: 56,
-                            padding: const EdgeInsets.symmetric(
-                                vertical: 7),
-                            alignment: Alignment.center,
-                            decoration: BoxDecoration(
-                              color: _playbackSpeed == s
-                                  ? AppColors.accent.withValues(alpha: 0.2)
-                                  : Colors.transparent,
-                              borderRadius: BorderRadius.circular(6),
-                            ),
-                            child: Text(
-                              '${s == s.truncate() ? s.toStringAsFixed(0) : s.toString()}×',
-                              style: TextStyle(
-                                color: _playbackSpeed == s
-                                    ? AppColors.accent
-                                    : Colors.white,
-                                fontSize: 13,
-                                fontWeight: _playbackSpeed == s
-                                    ? FontWeight.w800
-                                    : FontWeight.w600,
+                      horizontal: 8, vertical: 8),
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(
+                      maxHeight:
+                          MediaQuery.of(context).size.height * 0.85,
+                    ),
+                    child: SingleChildScrollView(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          for (final s in const [
+                            0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0
+                          ])
+                            GestureDetector(
+                              behavior: HitTestBehavior.opaque,
+                              onTap: () => _setSpeed(s),
+                              child: Container(
+                                width: 72,
+                                padding: const EdgeInsets.symmetric(
+                                    vertical: 9),
+                                alignment: Alignment.center,
+                                decoration: BoxDecoration(
+                                  color: _playbackSpeed == s
+                                      ? AppColors.accent
+                                          .withValues(alpha: 0.2)
+                                      : Colors.transparent,
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: Text(
+                                  '${s == s.truncate() ? s.toStringAsFixed(0) : s.toString()}×',
+                                  style: TextStyle(
+                                    color: _playbackSpeed == s
+                                        ? AppColors.accent
+                                        : Colors.white,
+                                    fontSize: 15,
+                                    fontWeight: _playbackSpeed == s
+                                        ? FontWeight.w800
+                                        : FontWeight.w600,
+                                  ),
+                                ),
                               ),
                             ),
-                          ),
-                        ),
-                    ],
+                        ],
+                      ),
+                    ),
                   ),
                 ),
               ),
