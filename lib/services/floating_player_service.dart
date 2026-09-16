@@ -23,6 +23,8 @@
 // Android'dan boshqa platformada kanal javob bermaydi, shu sabab
 // har bir chaqiruv himoyalangan va xavfsiz qiymat qaytaradi.
 
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
@@ -66,10 +68,22 @@ class FloatingPlayerService {
   ///
   /// [positionMs] — video qaysi soniyadan davom etsin.
   /// `false` — ruxsat yo'q yoki tizim rad etdi.
+  /// [playlist] — oyna ichida qism o'tkazish va sifat tanlash
+  /// uchun. Har bir element:
+  /// `{id: int, title: String, qualities: [{label, url}, ...]}`.
+  ///
+  /// Ro'yxat oldindan to'liq beriladi: oyna ochilgach ilova fonga
+  /// ketadi va undan qo'shimcha ma'lumot so'rab bo'lmaydi.
+  ///
+  /// [index] — hozirgi qism ro'yxatning nechanchisi.
+  /// [quality] — hozirgi sifat yorlig'i ('720p' kabi).
   Future<bool> start({
     required String url,
     required Duration position,
     String title = '',
+    List<Map<String, dynamic>> playlist = const [],
+    int index = 0,
+    String quality = '',
   }) async {
     if (!_isAndroid || url.isEmpty) return false;
     try {
@@ -77,6 +91,9 @@ class FloatingPlayerService {
             'url': url,
             'positionMs': position.inMilliseconds,
             'title': title,
+            'playlist': jsonEncode(playlist),
+            'index': index,
+            'quality': quality,
           }) ??
           false;
     } catch (_) {

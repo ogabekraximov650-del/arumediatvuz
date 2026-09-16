@@ -256,6 +256,18 @@ class MainActivity : FlutterActivity() {
                                     FloatingPlayerService.EXTRA_TITLE,
                                     call.argument<String>("title") ?: ""
                                 )
+                                .putExtra(
+                                    FloatingPlayerService.EXTRA_PLAYLIST,
+                                    call.argument<String>("playlist") ?: ""
+                                )
+                                .putExtra(
+                                    FloatingPlayerService.EXTRA_INDEX,
+                                    call.argument<Int>("index") ?: 0
+                                )
+                                .putExtra(
+                                    FloatingPlayerService.EXTRA_QUALITY,
+                                    call.argument<String>("quality") ?: ""
+                                )
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                                 startForegroundService(i)
                             } else {

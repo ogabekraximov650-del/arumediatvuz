@@ -222,6 +222,16 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   // mumkin (mahalliy proksi yoki `/api/play/...`) — `_playEpisode`ga
   // qarang.
   String _currentUrl = '';
+
+  /// Pleyerga HAQIQATAN berilgan manzil: mahalliy proksi
+  /// (`127.0.0.1/v?u=...`) yoki worker oqimi (`/api/play/...`).
+  ///
+  /// Suzuvchi oynalar (ilova ichidagi ham, ilovalar ustidagi ham)
+  /// AYNAN shuni olishi kerak. `_currentUrl` xom manzil — u
+  /// `/api/image/` ga ishora qiladi va undan ijro etilsa
+  /// Cloudflare keshi chetlab o'tilib, har so'rov B2'ga tushardi
+  /// (pul). Batafsil — `_workerPlayUrl` izohi.
+  String _currentSource = '';
   // Ro'yxatda YOYILGAN (sifatlari ko'rsatilgan) qismlar kalitlari.
   final Set<String> _expandedEps = {};
 
@@ -1165,6 +1175,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       source = Uri.parse(_workerPlayUrl(url));
       _playViaLocal = false;
     }
+    _currentSource = source.toString();
     VideoCacheServer.log(_playViaLocal
         ? 'Manba: MAHALLIY server (fayl to\'liq yuklangan)'
         : 'Manba: WORKER (Cloudflare keshidan oqim)');
@@ -2818,7 +2829,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     final ep = _currentEp;
     final ctrl = _controller;
     if (ep == null || ctrl == null || !ctrl.value.isInitialized) return;
-    if (_currentUrl.isEmpty) return;
+    if (_currentSource.isEmpty) return;
 
     final name = _seasonStr('nomi');
     final epName = (ep['epizod_name'] ?? '').toString();
@@ -2829,7 +2840,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     MiniPlayerService.instance.activate(MiniPlayerData(
       season: widget.season,
       epizodId: _epIdOf(ep),
-      url: _currentUrl,
+      url: _currentSource,
       position: ctrl.value.position,
       title: title,
     ));
@@ -2871,7 +2882,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   Future<void> _enterFloatingPlayer() async {
     final ctrl = _controller;
     if (ctrl == null || !ctrl.value.isInitialized) return;
-    if (_currentUrl.isEmpty) return;
+    if (_currentSource.isEmpty) return;
 
     final float = FloatingPlayerService.instance;
 
@@ -2894,20 +2905,93 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     final name = _seasonStr('nomi');
     final epName = (ep?['epizod_name'] ?? '').toString();
 
+    // Qism o'tkazish va sifat tanlash oyna ICHIDA ishlashi uchun
+    // butun ro'yxat oldindan tayyorlanadi: oyna ochilgach ilova
+    // fonga ketadi va undan qo'shimcha ma'lumot so'rab bo'lmaydi.
+    final playlist = await _floatingPlaylist();
+    if (!mounted) return;
+
+    final epId = ep == null ? 0 : _epIdOf(ep);
+    var index = playlist.indexWhere((e) => e['id'] == epId);
+    if (index < 0) index = 0;
+
+    // Hozir qaysi sifat ijro etilyapti — oyna o'shandan boshlaydi.
+    final quality =
+        ep == null ? '' : _qualityOfUrl(ep, _currentUrl);
+
     // Ikkita pleyer bir vaqtda ovoz chiqarmasin: ilovaniki
     // to'xtatiladi, ijroni endi native oyna davom ettiradi.
     await ctrl.pause();
     if (mounted) setState(() => _intendedPlaying = false);
 
     final ok = await float.start(
-      url: _currentUrl,
+      url: _currentSource,
       position: ctrl.value.position,
       title: epName.isEmpty ? name : '$name — $epName',
+      playlist: playlist,
+      index: index,
+      quality: quality,
     );
 
     if (!ok && mounted) {
       _showNotice('Suzuvchi oyna ochilmadi');
     }
+  }
+
+  /// Xom manzilni IJRO ETSA BO'LADIGAN manzilga aylantiradi.
+  ///
+  /// Fayl to'liq yuklangan bo'lsa — mahalliy proksi (tarmoqqa
+  /// umuman chiqmaydi), aks holda worker oqimi. `_playEpisode`
+  /// dagi tanlov bilan bir xil; farqi shundaki, bu yerda BOSHQA
+  /// qismlar uchun ham hisoblanadi (suzuvchi oynadagi keyingi/
+  /// oldingi qism tugmalari uchun).
+  ///
+  /// Mahalliy server javob bermasa worker manzili qaytadi —
+  /// oyna baribir ishlaydi.
+  Future<String> _playableUrl(String rawUrl) async {
+    if (rawUrl.isEmpty) return '';
+    if (_isFullyDownloaded(rawUrl)) {
+      try {
+        final u = await VideoCacheServer.instance.proxyUri(rawUrl);
+        return u.toString();
+      } catch (_) {}
+    }
+    return _workerPlayUrl(rawUrl);
+  }
+
+  /// Suzuvchi oyna uchun qismlar ro'yxati.
+  ///
+  /// Har bir qism uchun MAVJUD sifatlar va ularning ijro
+  /// manzillari yig'iladi — oyna ichida sifat almashtirish va
+  /// qism o'tkazish uchun.
+  ///
+  /// Ro'yxat `_orderedEps` tartibida (yangisi yuqorida), shu
+  /// sabab oynadagi "keyingi qism" indeksni KAMAYTIRADI —
+  /// buni native tomon biladi.
+  Future<List<Map<String, dynamic>>> _floatingPlaylist() async {
+    final out = <Map<String, dynamic>>[];
+    for (final ep in _orderedEps) {
+      final quals = <Map<String, String>>[];
+      for (final q in ['1080p', '720p', '480p', '360p']) {
+        final raw = (ep['url_$q'] ?? '').toString();
+        if (raw.isEmpty) continue;
+        // Oflayn: faqat to'liq yuklangan sifatlar ishlaydi.
+        if (_offline && !_isComplete(raw)) continue;
+        final playable = await _playableUrl(raw);
+        if (playable.isEmpty) continue;
+        quals.add({'label': q, 'url': playable});
+      }
+      if (quals.isEmpty) continue;
+
+      final num = _epNumOf(ep);
+      final name = (ep['epizod_name'] ?? '').toString();
+      out.add({
+        'id': _epIdOf(ep),
+        'title': name.isEmpty ? '$num-qism' : name,
+        'qualities': quals,
+      });
+    }
+    return out;
   }
 
   /// Ruxsat nima uchun kerakligini tushuntiradi.

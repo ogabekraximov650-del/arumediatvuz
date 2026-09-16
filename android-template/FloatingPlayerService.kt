@@ -68,6 +68,10 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.TextView
+import org.json.JSONArray
+import org.json.JSONObject
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
@@ -84,6 +88,9 @@ class FloatingPlayerService : Service() {
         const val EXTRA_URL = "url"
         const val EXTRA_POSITION_MS = "positionMs"
         const val EXTRA_TITLE = "title"
+        const val EXTRA_PLAYLIST = "playlist"
+        const val EXTRA_INDEX = "index"
+        const val EXTRA_QUALITY = "quality"
 
         private const val CHANNEL_ID = "aru_floating_player"
         private const val NOTIF_ID = 4711
@@ -116,6 +123,34 @@ class FloatingPlayerService : Service() {
     private var surfaceView: SurfaceView? = null
     private var btnPlay: ImageView? = null
     private var controlsLayer: FrameLayout? = null
+
+    // ── QISMLAR RO'YXATI ────────────────────────────────────────
+    //
+    // Ro'yxat ilovadan TAYYOR holda keladi: oyna ochilgach ilova
+    // fonga ketadi va undan qo'shimcha so'rab bo'lmaydi.
+    //
+    // Tartib ilovadagi bilan bir xil — yangi qism YUQORIDA. Shu
+    // sabab "keyingi qism" indeksni KAMAYTIRADI.
+    private var episodes: List<Episode> = emptyList()
+    private var epIndex = 0
+    private var quality = ""
+
+    private var btnPrev: ImageView? = null
+    private var btnNext: ImageView? = null
+    private var btnQuality: ImageView? = null
+    private var btnOpen: ImageView? = null
+    private var btnClose: ImageView? = null
+    private var handleResize: ImageView? = null
+
+    /// Sifat tanlash ro'yxati ochiqmi (oyna ichidagi kichik menyu).
+    private var qualityMenu: LinearLayout? = null
+
+    data class Quality(val label: String, val url: String)
+    data class Episode(
+        val id: Int,
+        val title: String,
+        val qualities: List<Quality>
+    )
 
     private lateinit var params: WindowManager.LayoutParams
 
@@ -155,9 +190,15 @@ class FloatingPlayerService : Service() {
 
         startForegroundSafely(intent.getStringExtra(EXTRA_TITLE).orEmpty())
 
+        episodes = parsePlaylist(intent.getStringExtra(EXTRA_PLAYLIST).orEmpty())
+        epIndex = intent.getIntExtra(EXTRA_INDEX, 0)
+            .coerceIn(0, (episodes.size - 1).coerceAtLeast(0))
+        quality = intent.getStringExtra(EXTRA_QUALITY).orEmpty()
+
         val posMs = intent.getLongExtra(EXTRA_POSITION_MS, 0L)
         if (rootView == null) buildOverlay()
         startPlayback(url, posMs)
+        applyAdaptiveControls()
 
         running = true
         return START_NOT_STICKY
@@ -237,7 +278,11 @@ class FloatingPlayerService : Service() {
             WindowManager.LayoutParams.TYPE_PHONE
         }
 
-        val w = dp(220)
+        // Boshlang'ich kenglik ATAYLAB 260dp: `applyAdaptiveControls`
+        // dagi 240dp chegarasidan yuqori, ya'ni qism o'tkazish
+        // tugmalari DARHOL ko'rinadi. Foydalanuvchi hohlasa
+        // kichraytiradi — o'shanda ular o'zi yashirinadi.
+        val w = dp(260)
         params = WindowManager.LayoutParams(
             w,
             (w / videoRatio).roundToInt(),
@@ -294,7 +339,19 @@ class FloatingPlayerService : Service() {
             )
         )
 
-        // O'rtada — ijro/pauza.
+        // ── O'RTADAGI QATOR: oldingi / ijro / keyingi ─────────
+        //
+        // Uchovi bitta qatorda: oyna kichrayganda chetdagilari
+        // yashiriladi va o'rtadagi ijro tugmasi joyida qoladi
+        // (`applyAdaptiveControls`).
+        btnPrev = iconButton(android.R.drawable.ic_media_previous, dp(30)).also {
+            val lp = FrameLayout.LayoutParams(dp(30), dp(30))
+            lp.gravity = Gravity.CENTER
+            lp.rightMargin = dp(58)
+            layer.addView(it, lp)
+            it.setOnClickListener { _ -> stepEpisode(-1) }
+        }
+
         btnPlay = iconButton(android.R.drawable.ic_media_pause, dp(40)).also {
             val lp = FrameLayout.LayoutParams(dp(40), dp(40))
             lp.gravity = Gravity.CENTER
@@ -302,8 +359,18 @@ class FloatingPlayerService : Service() {
             it.setOnClickListener { _ -> togglePlay() }
         }
 
+        btnNext = iconButton(android.R.drawable.ic_media_next, dp(30)).also {
+            val lp = FrameLayout.LayoutParams(dp(30), dp(30))
+            lp.gravity = Gravity.CENTER
+            lp.leftMargin = dp(58)
+            layer.addView(it, lp)
+            it.setOnClickListener { _ -> stepEpisode(1) }
+        }
+
         // Yuqori o'ng — yopish.
-        iconButton(android.R.drawable.ic_menu_close_clear_cancel, dp(28)).also {
+        btnClose = iconButton(
+            android.R.drawable.ic_menu_close_clear_cancel, dp(28)
+        ).also {
             val lp = FrameLayout.LayoutParams(dp(28), dp(28))
             lp.gravity = Gravity.TOP or Gravity.END
             lp.topMargin = dp(4); lp.rightMargin = dp(4)
@@ -315,7 +382,7 @@ class FloatingPlayerService : Service() {
         }
 
         // Yuqori chap — ilovaga qaytish.
-        iconButton(android.R.drawable.ic_menu_view, dp(28)).also {
+        btnOpen = iconButton(android.R.drawable.ic_menu_view, dp(28)).also {
             val lp = FrameLayout.LayoutParams(dp(28), dp(28))
             lp.gravity = Gravity.TOP or Gravity.START
             lp.topMargin = dp(4); lp.leftMargin = dp(4)
@@ -323,8 +390,17 @@ class FloatingPlayerService : Service() {
             it.setOnClickListener { _ -> returnToApp() }
         }
 
+        // Pastki chap — sifat tanlash.
+        btnQuality = iconButton(android.R.drawable.ic_menu_manage, dp(26)).also {
+            val lp = FrameLayout.LayoutParams(dp(26), dp(26))
+            lp.gravity = Gravity.BOTTOM or Gravity.START
+            lp.bottomMargin = dp(4); lp.leftMargin = dp(4)
+            layer.addView(it, lp)
+            it.setOnClickListener { _ -> toggleQualityMenu() }
+        }
+
         // Pastki o'ng — o'lchamni o'zgartirish tutqichi.
-        iconButton(android.R.drawable.ic_menu_crop, dp(26)).also {
+        handleResize = iconButton(android.R.drawable.ic_menu_crop, dp(26)).also {
             val lp = FrameLayout.LayoutParams(dp(26), dp(26))
             lp.gravity = Gravity.BOTTOM or Gravity.END
             lp.bottomMargin = dp(4); lp.rightMargin = dp(4)
@@ -332,6 +408,45 @@ class FloatingPlayerService : Service() {
             attachResize(it)
         }
     }
+
+    // ── TUGMALAR OYNA O'LCHAMIGA QARAB ──────────────────────────
+    //
+    // Kichik oynada hamma tugma sig'maydi — ular bir-birining
+    // ustiga chiqib, rasmni butunlay to'sardi. Shu sabab oyna
+    // kengligiga qarab bosqichma-bosqich ko'payadi:
+    //
+    //   < 180dp  — faqat ijro/pauza va yopish (eng zarurlari);
+    //   < 240dp  — + ilovaga qaytish va o'lcham tutqichi;
+    //   < 300dp  — + oldingi/keyingi qism;
+    //   >= 300dp — + sifat tanlash (hammasi).
+    //
+    // Qism tugmalari ro'yxat bo'sh bo'lsa umuman chiqmaydi, sifat
+    // tugmasi esa tanlov bitta bo'lsa keraksiz.
+    private fun applyAdaptiveControls() {
+        val wDp = params.width / resources.displayMetrics.density
+
+        val showBasics = wDp >= 180f
+        val showEpisodes = wDp >= 240f && episodes.size > 1
+        val showQuality = wDp >= 300f && (currentEpisode()?.qualities?.size ?: 0) > 1
+
+        btnOpen?.visibility = vis(showBasics)
+        handleResize?.visibility = vis(showBasics)
+
+        // Ro'yxat chetida bo'lsa mos tugma o'chiriladi (ko'rinadi,
+        // lekin bosilmaydi) — birdan yo'qolib qolgani chalkash
+        // bo'lardi.
+        btnPrev?.visibility = vis(showEpisodes)
+        btnNext?.visibility = vis(showEpisodes)
+        btnPrev?.isEnabled = epIndex < episodes.size - 1
+        btnNext?.isEnabled = epIndex > 0
+        btnPrev?.alpha = if (btnPrev?.isEnabled == true) 1f else 0.35f
+        btnNext?.alpha = if (btnNext?.isEnabled == true) 1f else 0.35f
+
+        btnQuality?.visibility = vis(showQuality)
+        if (!showQuality) closeQualityMenu()
+    }
+
+    private fun vis(show: Boolean): Int = if (show) View.VISIBLE else View.GONE
 
     private fun iconButton(res: Int, size: Int): ImageView {
         return ImageView(this).apply {
@@ -408,6 +523,9 @@ class FloatingPlayerService : Service() {
                     params.height = (w / videoRatio).roundToInt()
                     clampToScreen()
                     safeUpdate()
+                    // Oyna kattalashdi/kichraydi — tugmalar soni
+                    // ham shunga qarab o'zgaradi.
+                    applyAdaptiveControls()
                     true
                 }
                 else -> false
@@ -438,13 +556,141 @@ class FloatingPlayerService : Service() {
     private fun setControlsVisible(v: Boolean) {
         controlsVisible = v
         controlsLayer?.visibility = if (v) View.VISIBLE else View.GONE
-        if (v) scheduleHideControls()
+        if (v) scheduleHideControls() else closeQualityMenu()
     }
 
     private fun scheduleHideControls() {
         val v = rootView ?: return
         v.removeCallbacks(hideRunnable)
         v.postDelayed(hideRunnable, 3000)
+    }
+
+    // ── QISMLAR VA SIFAT ────────────────────────────────────────
+
+    /// Ilovadan kelgan JSON ro'yxatni o'qiydi.
+    ///
+    /// Buzuq JSON kelsa BO'SH ro'yxat qaytadi — oyna baribir
+    /// ochiladi, shunchaki qism/sifat tugmalari bo'lmaydi.
+    private fun parsePlaylist(raw: String): List<Episode> {
+        if (raw.isEmpty()) return emptyList()
+        return try {
+            val arr = JSONArray(raw)
+            val out = ArrayList<Episode>(arr.length())
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val qs = o.optJSONArray("qualities") ?: JSONArray()
+                val quals = ArrayList<Quality>(qs.length())
+                for (j in 0 until qs.length()) {
+                    val q: JSONObject = qs.optJSONObject(j) ?: continue
+                    val label = q.optString("label")
+                    val url = q.optString("url")
+                    if (label.isNotEmpty() && url.isNotEmpty()) {
+                        quals.add(Quality(label, url))
+                    }
+                }
+                if (quals.isEmpty()) continue
+                out.add(
+                    Episode(
+                        id = o.optInt("id"),
+                        title = o.optString("title"),
+                        qualities = quals
+                    )
+                )
+            }
+            out
+        } catch (e: Throwable) {
+            emptyList()
+        }
+    }
+
+    private fun currentEpisode(): Episode? = episodes.getOrNull(epIndex)
+
+    /// Tanlangan sifatdagi manzil. O'sha sifat bu qismda bo'lmasa
+    /// — mavjud birinchisi (ro'yxat yuqoridan pastga saralangan,
+    /// ya'ni eng yaxshisi).
+    private fun urlFor(ep: Episode): String {
+        return ep.qualities.firstOrNull { it.label == quality }?.url
+            ?: ep.qualities.first().url
+    }
+
+    /// Qismni almashtiradi.
+    ///
+    /// `delta = +1` — KEYINGI qism. Ro'yxat yangi qism yuqorida
+    /// bo'lgani uchun bu indeksni KAMAYTIRADI (ilovadagi
+    /// `_stepEpisode` bilan bir xil mantiq).
+    private fun stepEpisode(delta: Int) {
+        if (episodes.isEmpty()) return
+        val target = epIndex - delta
+        if (target < 0 || target >= episodes.size) return
+
+        epIndex = target
+        val ep = episodes[target]
+        // Yangi qism BOSHIDAN boshlanadi.
+        startPlayback(urlFor(ep), 0L)
+        applyAdaptiveControls()
+        scheduleHideControls()
+    }
+
+    private fun toggleQualityMenu() {
+        if (qualityMenu != null) closeQualityMenu() else openQualityMenu()
+    }
+
+    private fun closeQualityMenu() {
+        val m = qualityMenu ?: return
+        (m.parent as? FrameLayout)?.removeView(m)
+        qualityMenu = null
+    }
+
+    private fun openQualityMenu() {
+        val layer = controlsLayer ?: return
+        val ep = currentEpisode() ?: return
+        closeQualityMenu()
+
+        val menu = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = GradientDrawable().apply {
+                setColor(Color.argb(230, 20, 20, 30))
+                cornerRadius = dp(8).toFloat()
+                setStroke(dp(1), Color.argb(60, 255, 255, 255))
+            }
+            setPadding(dp(4), dp(4), dp(4), dp(4))
+        }
+
+        for (q in ep.qualities) {
+            val row = TextView(this).apply {
+                text = q.label
+                setTextColor(
+                    if (q.label == quality) Color.rgb(255, 55, 95)
+                    else Color.WHITE
+                )
+                textSize = 12f
+                setPadding(dp(10), dp(6), dp(10), dp(6))
+                isClickable = true
+                setOnClickListener { _ -> selectQuality(q) }
+            }
+            menu.addView(row)
+        }
+
+        val lp = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT
+        )
+        lp.gravity = Gravity.BOTTOM or Gravity.START
+        lp.bottomMargin = dp(34); lp.leftMargin = dp(4)
+        layer.addView(menu, lp)
+        qualityMenu = menu
+
+        // Menyu ochiq turganda tugmalar o'z-o'zidan yashirinmasin.
+        rootView?.removeCallbacks(hideRunnable)
+    }
+
+    /// Sifatni almashtiradi va AYNAN o'sha soniyadan davom etadi.
+    private fun selectQuality(q: Quality) {
+        quality = q.label
+        val at = player?.currentPosition ?: 0L
+        startPlayback(q.url, at)
+        closeQualityMenu()
+        scheduleHideControls()
     }
 
     // ── IJRO ────────────────────────────────────────────────────
@@ -529,6 +775,13 @@ class FloatingPlayerService : Service() {
         surfaceView = null
         controlsLayer = null
         btnPlay = null
+        btnPrev = null
+        btnNext = null
+        btnQuality = null
+        btnOpen = null
+        btnClose = null
+        handleResize = null
+        qualityMenu = null
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(Service.STOP_FOREGROUND_REMOVE)
