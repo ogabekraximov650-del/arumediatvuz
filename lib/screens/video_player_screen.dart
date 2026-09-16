@@ -3119,11 +3119,14 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
 
   Widget _buildSleepOptions() {
     final options = [
+      // Yozuvlar ATAYLAB qisqa ("15 daqiqa" emas, "15 daq"):
+      // oyna pleyer maydoniga sig'ishi kerak, uzun yozuv esa uni
+      // keraksiz kengaytirardi.
       {'label': 'O\'chirish', 'minutes': 0},
-      {'label': '15 daqiqa', 'minutes': 15},
-      {'label': '30 daqiqa', 'minutes': 30},
-      {'label': '60 daqiqa', 'minutes': 60},
-      {'label': '120 daqiqa', 'minutes': 120},
+      {'label': '15 daq', 'minutes': 15},
+      {'label': '30 daq', 'minutes': 30},
+      {'label': '60 daq', 'minutes': 60},
+      {'label': '120 daq', 'minutes': 120},
     ];
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -3141,10 +3144,10 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                   fontSize: 12,
                   fontWeight: FontWeight.w600)),
         ],
-        const SizedBox(height: 12),
+        const SizedBox(height: 10),
         Wrap(
-          spacing: 8,
-          runSpacing: 8,
+          spacing: 7,
+          runSpacing: 7,
           alignment: WrapAlignment.center,
           children: [
             for (final o in options)
@@ -3152,7 +3155,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                 onTap: () => _setSleepTimer(o['minutes'] as int),
                 child: Container(
                   padding:
-                      const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                      const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
                   decoration: BoxDecoration(
                     color: _sleepMinutes == o['minutes'] as int &&
                             (o['minutes'] as int) > 0
@@ -3183,7 +3186,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
               onTap: () => setState(() => _sleepCustomInput = true),
               child: Container(
                 padding:
-                    const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
                 decoration: BoxDecoration(
                   color: Colors.white.withValues(alpha: 0.08),
                   borderRadius: BorderRadius.circular(8),
@@ -4593,12 +4596,22 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                   // bo'ladi va oyna yozuv uzunligiga qarab
                   // sakramaydi. Chapdan tekislangan — o'ngdan
                   // tekislanganda ro'yxat tartibsiz ko'rinardi.
-                  child: SizedBox(
-                    width: 230,
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
+                  //
+                  // BALANDLIK CHEKLANGAN va ichi SURILADI: menyu
+                  // pleyer maydonidan baland bo'lsa Stack uni
+                  // kesib tashlardi va pastki qatorlarga yetib
+                  // bo'lmasdi (uxlash oynasida aynan shu bo'lgan).
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(
+                      maxHeight: MediaQuery.of(context).size.height * 0.5,
+                    ),
+                    child: SizedBox(
+                      width: 230,
+                      child: SingleChildScrollView(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
                       _MenuToggleRow(
                         icon: Icons.fast_forward_rounded,
                         label: 'Avto intro o\'tkazish',
@@ -4688,6 +4701,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                     ],
                   ),
                   ),
+                    ),
+                    ),
                 ),
               ),
             ),
@@ -4813,12 +4828,22 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                   // bo'ladi va oyna yozuv uzunligiga qarab
                   // sakramaydi. Chapdan tekislangan — o'ngdan
                   // tekislanganda ro'yxat tartibsiz ko'rinardi.
-                  child: SizedBox(
-                    width: 230,
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
+                  //
+                  // BALANDLIK CHEKLANGAN va ichi SURILADI: menyu
+                  // pleyer maydonidan baland bo'lsa Stack uni
+                  // kesib tashlardi va pastki qatorlarga yetib
+                  // bo'lmasdi (uxlash oynasida aynan shu bo'lgan).
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(
+                      maxHeight: MediaQuery.of(context).size.height * 0.5,
+                    ),
+                    child: SizedBox(
+                      width: 230,
+                      child: SingleChildScrollView(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
                       _MenuToggleRow(
                         icon: Icons.fast_forward_rounded,
                         label: 'Avto intro o\'tkazish',
@@ -4908,6 +4933,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                     ],
                   ),
                   ),
+                    ),
+                    ),
                 ),
               ),
             ),
@@ -4921,23 +4948,32 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
               ),
             ),
 
-          // ── Sleep panel ───────────
+          // ── Uxlash vaqti oynasi ───────────────────────────
+          //
+          // TOPILGAN XATO: oyna pleyer maydonidan BALAND edi va
+          // pastki qismi qirqilib qolardi — 30/60/120 daqiqa va
+          // "Qo'lda kiritish" tugmalari umuman ko'rinmasdi.
+          // Sabab: balandlikka hech qanday cheklov qo'yilmagan,
+          // Stack esa ortiqcha qismini kesib tashlaydi.
+          //
+          // Endi `Positioned.fill` + `Center`: oyna eng ko'pi bilan
+          // pleyer bo'yiga teng bo'ladi, sig'magani esa ICHIDA
+          // suriladi (`SingleChildScrollView`). Ya'ni kichik
+          // ekranda ham hamma tugmaga yetib boriladi.
           if (_sleepPanelOpen)
-            Align(
-              alignment: isFullscreen
-                  ? Alignment.center
-                  : Alignment.bottomCenter,
-              child: Padding(
-                padding: EdgeInsets.only(
-                    bottom: isFullscreen ? 0 : 80,
-                    left: 16,
-                    right: 16),
-                child: _PlayerPanel(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-                  child: _sleepCustomInput
-                      ? _buildSleepCustomInput()
-                      : _buildSleepOptions(),
+            Positioned.fill(
+              child: Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(10),
+                  child: _PlayerPanel(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 12),
+                    child: SingleChildScrollView(
+                      child: _sleepCustomInput
+                          ? _buildSleepCustomInput()
+                          : _buildSleepOptions(),
+                    ),
+                  ),
                 ),
               ),
             ),
