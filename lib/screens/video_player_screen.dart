@@ -4588,12 +4588,19 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                 // qo'shilsa shu yerga bitta qator qo'shiladi.
                 child: _PlayerPanel(
                   padding: const EdgeInsets.symmetric(
-                      horizontal: 12, vertical: 10),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.end,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
+                      horizontal: 14, vertical: 6),
+                  // Aniq kenglik: qatorlar bir xil uzunlikda
+                  // bo'ladi va oyna yozuv uzunligiga qarab
+                  // sakramaydi. Chapdan tekislangan — o'ngdan
+                  // tekislanganda ro'yxat tartibsiz ko'rinardi.
+                  child: SizedBox(
+                    width: 230,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
                       _MenuToggleRow(
+                        icon: Icons.fast_forward_rounded,
                         label: 'Avto intro o\'tkazish',
                         on: AppSettings.instance.autoSkipIntro,
                         onToggle: _toggleAutoSkipIntro,
@@ -4606,6 +4613,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                         ),
                       ),
                       _MenuToggleRow(
+                        icon: Icons.skip_next_rounded,
                         label: 'Avto qism o\'tkazish',
                         on: AppSettings.instance.autoNextEpisode,
                         onToggle: _toggleAutoNextEpisode,
@@ -4678,6 +4686,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                         },
                       ),
                     ],
+                  ),
                   ),
                 ),
               ),
@@ -4741,7 +4750,10 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                       onTap: _showSettingsPanel,
                       child: Padding(
                         padding: const EdgeInsets.all(9),
-                        child: Icon(Icons.bolt_rounded,
+                        // SOZLAMALAR ikonkasi. Ilgari bu yerda
+                        // chaqmoq (`bolt`) turardi — u sozlamani
+                        // emas, "tez rejim"ni anglatadi.
+                        child: Icon(Icons.settings_rounded,
                             color: Colors.white, size: 22),
                       ),
                     ),
@@ -4796,12 +4808,19 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                 padding: const EdgeInsets.only(right: 8, top: 50),
                 child: _PlayerPanel(
                   padding: const EdgeInsets.symmetric(
-                      horizontal: 12, vertical: 10),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.end,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
+                      horizontal: 14, vertical: 6),
+                  // Aniq kenglik: qatorlar bir xil uzunlikda
+                  // bo'ladi va oyna yozuv uzunligiga qarab
+                  // sakramaydi. Chapdan tekislangan — o'ngdan
+                  // tekislanganda ro'yxat tartibsiz ko'rinardi.
+                  child: SizedBox(
+                    width: 230,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
                       _MenuToggleRow(
+                        icon: Icons.fast_forward_rounded,
                         label: 'Avto intro o\'tkazish',
                         on: AppSettings.instance.autoSkipIntro,
                         onToggle: _toggleAutoSkipIntro,
@@ -4814,6 +4833,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                         ),
                       ),
                       _MenuToggleRow(
+                        icon: Icons.skip_next_rounded,
                         label: 'Avto qism o\'tkazish',
                         on: AppSettings.instance.autoNextEpisode,
                         onToggle: _toggleAutoNextEpisode,
@@ -4886,6 +4906,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                         },
                       ),
                     ],
+                  ),
                   ),
                 ),
               ),
@@ -5031,7 +5052,12 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   Widget _playPauseReactive() {
     // Yuklanish/tayyorlanish paytida kontrollar majburiy ochiladi,
     // shu sabab ikonka ham o'shanda ko'rinadi.
-    final showIcon = _showControls || _playerLoading;
+    //
+    // FULLSCREEN'DA YO'Q: u yerda play/pause pastki qatorda turadi
+    // va ikkitasi bir vaqtda ko'rinib, ekranda ikki xil play
+    // tugmasi paydo bo'lardi. Aylanma halqa (kutish belgisi) esa
+    // baribir chiziladi — u `busy` ga bog'liq, `showIcon` ga emas.
+    final showIcon = (_showControls || _playerLoading) && !_isFullscreen;
 
     final ctrl = _controller;
     if (ctrl == null) {
@@ -5198,6 +5224,10 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
           isPlaying: _intendedPlaying,
           hasPrev: hasPrev,
           hasNext: hasNext,
+          // "1x" / "1.5x" — tugmada aynan shu yoziladi.
+          speedLabel: _playbackSpeed == _playbackSpeed.roundToDouble()
+              ? '${_playbackSpeed.toInt()}x'
+              : '${_playbackSpeed}x',
           onScrubStart: () {
             _hideTimer?.cancel();
             if (!_isScrubbing) setState(() => _isScrubbing = true);
@@ -6716,6 +6746,105 @@ class _SeekBadgeState extends State<_SeekBadge>
 // Barmoq bilan surish mantig'i o'zgarmadi: surish davomida pleyerga
 // UMUMAN tegilmaydi (faqat chiziqning ko'rinishi yangilanadi), sek
 // esa barmoq uzilganda BITTA marta yuboriladi.
+/// Fullscreen boshqaruvidagi YUMALOQ TUGMA.
+///
+/// Hamma tugma bitta shakl va o'lchamda bo'lishi uchun alohida
+/// ajratilgan — ilgari har biri joyida qo'lda yozilardi va
+/// o'lchamlari bir-biriga mos kelmasdi.
+///
+/// `onTap` `null` bo'lsa tugma o'chgan holatda ko'rinadi (yo'qolib
+/// qolmaydi): ro'yxat chetida ekanini ko'rsatadi.
+class _FsButton extends StatelessWidget {
+  final IconData icon;
+  final VoidCallback? onTap;
+
+  /// Asosiy tugma (play/pause) — kattaroq va urg'u rangida.
+  final bool primary;
+
+  const _FsButton({
+    required this.icon,
+    required this.onTap,
+    this.primary = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final on = onTap != null;
+    final size = primary ? 52.0 : 42.0;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: Container(
+        width: size,
+        height: size,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: primary
+              ? AppColors.accent.withValues(alpha: on ? 0.9 : 0.3)
+              : Colors.black.withValues(alpha: on ? 0.45 : 0.25),
+          shape: BoxShape.circle,
+          border: Border.all(
+            color: Colors.white.withValues(alpha: on ? 0.18 : 0.06),
+          ),
+        ),
+        child: Icon(
+          icon,
+          color: Colors.white.withValues(alpha: on ? 1 : 0.3),
+          size: primary ? 30 : 24,
+        ),
+      ),
+    );
+  }
+}
+
+/// Fullscreen boshqaruvidagi YOZUVLI tugma (tezlik, sifat).
+///
+/// Yumaloq tugmalar bilan bir xil fon va chekkada — ikkovi birga
+/// bitta to'plamdek ko'rinadi.
+class _FsChip extends StatelessWidget {
+  final String label;
+  final IconData? icon;
+  final VoidCallback onTap;
+
+  const _FsChip({required this.label, this.icon, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: Container(
+        height: 30,
+        constraints: const BoxConstraints(minWidth: 44),
+        alignment: Alignment.center,
+        padding: const EdgeInsets.symmetric(horizontal: 10),
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: 0.45),
+          borderRadius: BorderRadius.circular(15),
+          border: Border.all(color: Colors.white.withValues(alpha: 0.18)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (icon != null) ...[
+              Icon(icon, color: Colors.white, size: 16),
+              const SizedBox(width: 4),
+            ],
+            Text(
+              label,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _BottomBar extends StatefulWidget {
   final Duration position;
   final Duration duration;
@@ -6734,6 +6863,10 @@ class _BottomBar extends StatefulWidget {
   final bool isPlaying;
   final bool hasPrev;
   final bool hasNext;
+  /// Hozirgi tezlik ("1x", "1.5x"). Tugmada AYNAN shu ko'rinadi —
+  /// "Tezlik" so'zidan ko'ra foydaliroq: qaysi tezlik yoqilganini
+  /// oynani ochmasdan bilish mumkin (yirik pleyerlar shunday qiladi).
+  final String speedLabel;
   final VoidCallback onScrubStart;
   final VoidCallback onScrubEnd;
 
@@ -6754,6 +6887,7 @@ class _BottomBar extends StatefulWidget {
     this.isPlaying = false,
     this.hasPrev = false,
     this.hasNext = false,
+    this.speedLabel = '1x',
     required this.onScrubStart,
     required this.onScrubEnd,
   });
@@ -6833,7 +6967,7 @@ class _BottomBarState extends State<_BottomBar> {
               onTapSeek: _commit,
             ),
             const SizedBox(height: 2),
-            // Vaqt va tezlik/sifat/fullscreen tugmalari
+            // ── VAQT (chap) + TEZLIK/SIFAT (o'ng) ──────────────
             Row(
               children: [
                 Text(
@@ -6844,133 +6978,65 @@ class _BottomBarState extends State<_BottomBar> {
                       fontWeight: FontWeight.w600),
                 ),
                 const Spacer(),
-                if (widget.onSpeedTap != null)
-                  GestureDetector(
-                    onTap: widget.onSpeedTap,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 8, vertical: 4),
-                      decoration: BoxDecoration(
-                          color: Colors.white.withValues(alpha: 0.15),
-                          borderRadius: BorderRadius.circular(7),
-                          border: Border.all(color: Colors.white30)),
-                      child: const Text('Tezlik',
-                          style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 11,
-                              fontWeight: FontWeight.w700)),
-                    ),
+                if (widget.onSpeedTap != null) ...[
+                  // TEZLIK — IKONKA (yozuv emas, foydalanuvchi
+                  // talabi). Yonidagi kichik raqam hozirgi tezlikni
+                  // aytadi, shu sabab oynani ochmasdan ko'rinadi.
+                  _FsChip(
+                    icon: Icons.speed_rounded,
+                    label: widget.speedLabel,
+                    onTap: widget.onSpeedTap!,
                   ),
-                const SizedBox(width: 6),
-                GestureDetector(
-                  onTap: widget.onQualityTap,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 8, vertical: 4),
-                    decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.15),
-                        borderRadius: BorderRadius.circular(7),
-                        border: Border.all(color: Colors.white30)),
-                    child: Text('HQ',
-                        style: TextStyle(
-                            color: Colors.white,
-                            fontSize: hqFont,
-                            fontWeight: FontWeight.w700)),
-                  ),
-                ),
-                const SizedBox(width: 6),
-                GestureDetector(
-                  onTap: widget.onFullscreen,
-                  child: Padding(
-                    padding: const EdgeInsets.all(2),
-                    child: Icon(Icons.fullscreen_exit_rounded,
-                        color: Colors.white, size: 24),
-                  ),
-                ),
+                  const SizedBox(width: 8),
+                ],
+                // HQ — sifat tugmasi ataylab YOZUV bo'lib qoladi:
+                // foydalanuvchi uni aynan "HQ" deb so'ragan.
+                _FsChip(label: 'HQ', onTap: widget.onQualityTap),
               ],
             ),
-            const SizedBox(height: 6),
-            // Qism boshqaruv tugmalari:
-            // Chapdan o'ngga: Qismlar ro'yxati | Oldingi | Play/Pause | Keyingi
+            const SizedBox(height: 8),
+            // ── QISM BOSHQARUVI — O'NG CHETDA ─────────────────
+            //
+            // TALAB (foydalanuvchi, aynan shu so'zlar bilan):
+            // "vaqt tagiga yani O'NG CHETGA keyingi qismga
+            // o'tkazadigan tugma va chap tarafida play pause
+            // tugmasi va chap tarafida oldingi qismga o'tkazadigan
+            // tugma va chap tarafida qismlar ro'yxati".
+            //
+            // Ya'ni o'ngdan chapga: keyingi | play | oldingi |
+            // ro'yxat. Chapdan o'ngga yozilganda tartib teskari
+            // bo'ladi va qator O'NGGA yopishtiriladi.
+            //
+            // TOPILGAN XATO: qatorda hizalash umuman yo'q edi, shu
+            // sabab tugmalar CHAPDA turardi.
             Row(
+              mainAxisAlignment: MainAxisAlignment.end,
               children: [
-                if (widget.onEpisodeList != null)
-                  GestureDetector(
-                    behavior: HitTestBehavior.opaque,
+                if (widget.onEpisodeList != null) ...[
+                  _FsButton(
+                    icon: Icons.playlist_play_rounded,
                     onTap: widget.onEpisodeList,
-                    child: Container(
-                      width: 40,
-                      height: 40,
-                      alignment: Alignment.center,
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.12),
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      child: const Icon(Icons.list_rounded,
-                          color: Colors.white, size: 22),
-                    ),
                   ),
-                const SizedBox(width: 10),
-                GestureDetector(
-                  behavior: HitTestBehavior.opaque,
+                  const SizedBox(width: 10),
+                ],
+                _FsButton(
+                  icon: Icons.skip_previous_rounded,
                   onTap: widget.hasPrev ? widget.onPrev : null,
-                  child: Container(
-                    width: 40,
-                    height: 40,
-                    alignment: Alignment.center,
-                    decoration: BoxDecoration(
-                      color: Colors.white.withValues(
-                          alpha: widget.hasPrev ? 0.12 : 0.04),
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: Icon(Icons.skip_previous_rounded,
-                        color: Colors.white.withValues(
-                            alpha: widget.hasPrev ? 0.9 : 0.25),
-                        size: 24),
-                  ),
                 ),
                 const SizedBox(width: 10),
-                if (widget.onPlayPause != null)
-                  GestureDetector(
-                    behavior: HitTestBehavior.opaque,
+                if (widget.onPlayPause != null) ...[
+                  _FsButton(
+                    icon: widget.isPlaying
+                        ? Icons.pause_rounded
+                        : Icons.play_arrow_rounded,
                     onTap: widget.onPlayPause,
-                    child: Container(
-                      width: 48,
-                      height: 48,
-                      alignment: Alignment.center,
-                      decoration: BoxDecoration(
-                        color: AppColors.accent.withValues(alpha: 0.25),
-                        borderRadius: BorderRadius.circular(14),
-                        border: Border.all(
-                          color: AppColors.accent.withValues(alpha: 0.4),
-                        ),
-                      ),
-                      child: Icon(
-                          widget.isPlaying
-                              ? Icons.pause_rounded
-                              : Icons.play_arrow_rounded,
-                          color: Colors.white,
-                          size: 28),
-                    ),
+                    primary: true,
                   ),
-                const SizedBox(width: 10),
-                GestureDetector(
-                  behavior: HitTestBehavior.opaque,
+                  const SizedBox(width: 10),
+                ],
+                _FsButton(
+                  icon: Icons.skip_next_rounded,
                   onTap: widget.hasNext ? widget.onNext : null,
-                  child: Container(
-                    width: 40,
-                    height: 40,
-                    alignment: Alignment.center,
-                    decoration: BoxDecoration(
-                      color: Colors.white.withValues(
-                          alpha: widget.hasNext ? 0.12 : 0.04),
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: Icon(Icons.skip_next_rounded,
-                        color: Colors.white.withValues(
-                            alpha: widget.hasNext ? 0.9 : 0.25),
-                        size: 24),
-                  ),
                 ),
               ],
             ),
@@ -7354,24 +7420,32 @@ class _PlayerPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // ── KO'RINISH (foydalanuvchi talabi bilan qayta sozlangan) ──
+    //
+    // Ilgari panel yarim shaffof (0.52) va oq chekkasi kuchli
+    // (0.28) edi: orqadagi video ichidan ko'rinib turib, yozuvni
+    // o'qish qiyinlashardi va oyna "iflos" ko'rinardi.
+    //
+    // Endi fon deyarli to'q, chekka esa zo'rg'a sezilarli — oyna
+    // videodan aniq ajralib turadi va yozuv tiniq o'qiladi.
     return ClipRRect(
-      borderRadius: BorderRadius.circular(9),
+      borderRadius: BorderRadius.circular(12),
       child: BackdropFilter(
-        filter: ui.ImageFilter.blur(sigmaX: 14, sigmaY: 14),
+        filter: ui.ImageFilter.blur(sigmaX: 18, sigmaY: 18),
         child: Container(
           padding: padding,
           decoration: BoxDecoration(
-            color: Colors.black.withValues(alpha: 0.52),
-            borderRadius: BorderRadius.circular(9),
+            color: const Color(0xFF15151F).withValues(alpha: 0.92),
+            borderRadius: BorderRadius.circular(12),
             border: Border.all(
-              color: Colors.white.withValues(alpha: 0.28),
+              color: Colors.white.withValues(alpha: 0.10),
               width: 1,
             ),
             boxShadow: [
               BoxShadow(
-                color: Colors.black.withValues(alpha: 0.45),
-                blurRadius: 12,
-                offset: const Offset(0, 3),
+                color: Colors.black.withValues(alpha: 0.55),
+                blurRadius: 20,
+                offset: const Offset(0, 6),
               ),
             ],
           ),
@@ -7460,20 +7534,26 @@ class _MenuActionRow extends StatelessWidget {
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: onTap,
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 16, color: Colors.white70),
-          const SizedBox(width: 6),
-          Text(
-            label,
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 11.5,
-              fontWeight: FontWeight.w600,
+      child: SizedBox(
+        height: 38,
+        child: Row(
+          children: [
+            Icon(icon, size: 18, color: Colors.white70),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -7481,11 +7561,13 @@ class _MenuActionRow extends StatelessWidget {
 
 class _MenuToggleRow extends StatelessWidget {
   final String label;
+  final IconData icon;
   final bool on;
   final VoidCallback onToggle;
 
   const _MenuToggleRow({
     required this.label,
+    required this.icon,
     required this.on,
     required this.onToggle,
   });
@@ -7495,24 +7577,32 @@ class _MenuToggleRow extends StatelessWidget {
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: onToggle,
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(
-            label,
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 11.5,
-              fontWeight: FontWeight.w600,
+      child: SizedBox(
+        height: 38,
+        child: Row(
+          children: [
+            Icon(icon, size: 18, color: Colors.white70),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
             ),
-          ),
-          const SizedBox(width: 6),
-          Icon(
-            on ? Icons.toggle_on_rounded : Icons.toggle_off_rounded,
-            size: 22,
-            color: on ? AppColors.accent : Colors.white38,
-          ),
-        ],
+            const SizedBox(width: 8),
+            Icon(
+              on ? Icons.toggle_on_rounded : Icons.toggle_off_rounded,
+              size: 26,
+              color: on ? AppColors.accent : Colors.white30,
+            ),
+          ],
+        ),
       ),
     );
   }
