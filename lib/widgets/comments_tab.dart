@@ -824,6 +824,37 @@ class _CommentRow extends StatelessWidget {
                   fontStyle: c.deleted ? FontStyle.italic : null,
                 ),
               ),
+              // ── LAYK · JAVOB · O'CHIRISH ────────────────────────
+              //
+              // TOPILGAN XATO (foydalanuvchi: "layk bosib, javob
+              // qaytarib bo'lmayapti, o'z izohimni o'chirib
+              // bo'lmayapti"). Bu amal qatori qatordan tushib
+              // qolgan edi — tugmalar umuman chizilmasdi.
+              if (!c.deleted) ...[
+                const SizedBox(height: 2),
+                Row(
+                  children: [
+                    _LikeButton(
+                      comment: c,
+                      onTap: () async {
+                        final err = await controller.toggleLike(c.id);
+                        if (err != null) onLikeError(err);
+                      },
+                    ),
+                    const SizedBox(width: 4),
+                    _TextButton(
+                      label: 'Javob berish',
+                      onTap: () => onReply(c),
+                    ),
+                    if (mine)
+                      _TextButton(
+                        label: 'O\'chirish',
+                        color: Colors.red.shade300,
+                        onTap: () => onDelete(c),
+                      ),
+                  ],
+                ),
+              ],
             ],
           ),
         ),
