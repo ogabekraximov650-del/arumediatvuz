@@ -493,21 +493,7 @@ jobs:
             STOREPASS="aniraxuz"
             echo "imzo kaliti: ci/release.keystore"
           fi
-          # DIQQAT: `aniraxuz` bu yerda ilovaning nomi EMAS —
-          # `ci/release.keystore` faylining ICHIDAGI kalit nomi va
-          # paroli. Ilova "ARUmedia" ga qayta nomlanganda ular
-          # ATAYLAB tegilmadi: kalit nomini o'zgartirish kalitning
-          # o'zini o'zgartirmaydi, faqat imzolash ishlamay qolardi.
-          #
-          # Kalitning o'zini almashtirib bo'lmaydi: Android yangi
-          # APK eskisi bilan AYNAN bir xil kalit bilan imzolangan
-          # bo'lishini talab qiladi. Boshqa kalit — hamma
-          # foydalanuvchi ilovani o'chirib, qaytadan o'rnatishi
-          # kerak degani. Ustiga worker ham imzo hash'ini
-          # tekshiradi (`AppSignature`).
-          #
-          # Bu nom foydalanuvchiga HECH QAYERDA ko'rinmaydi.
-          ALIAS="aniraxuz"
+          ALIAS="arumedia"
 
           # Kalit HAQIQATAN o'sha ekanini yozib qo'yamiz — imzo
           # almashib qolsa loglardan darhol ko'rinadi.

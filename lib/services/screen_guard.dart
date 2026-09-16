@@ -32,9 +32,9 @@
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
-// `State` va `StatefulWidget` uchun — aralashma (mixin) shularga
-// bog'lanadi.
 import 'package:flutter/widgets.dart';
+
+import 'app_build.dart';
 
 class ScreenGuard {
   const ScreenGuard._();
@@ -49,13 +49,16 @@ class ScreenGuard {
   static bool _on = false;
 
   /// Himoyani yoqadi (ekran `initState` da chaqiradi).
+  /// Admin buildda screenshot va ekran yozuviga ruxsat beriladi.
   static void enable() {
+    if (kAdminBuild) return;
     _depth++;
     _apply();
   }
 
   /// Himoyani o'chiradi (ekran `dispose` da chaqiradi).
   static void disable() {
+    if (kAdminBuild) return;
     if (_depth > 0) _depth--;
     _apply();
   }
