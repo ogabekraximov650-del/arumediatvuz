@@ -536,6 +536,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // Surish o'rtasida ekran yopilsa, to'xtatish osilib qolmasin.
     _releaseDownloadUpdates();
     _epScrollCtrl.dispose();
+    _epListCtrl?.dispose();
     DownloadManager.instance.unwatch(this);
     _tabPages.dispose();
     _tabCtrl.dispose();
@@ -3082,7 +3083,34 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _scheduleHide();
   }
 
+  /// Fullscreen'dagi qismlar ro'yxati uchun surish nazoratchisi.
+  ///
+  /// Har ochilganda QAYTADAN yaratiladi: ro'yxat aynan hozir
+  /// ko'rilayotgan qismdan boshlanib ochilsin. Aks holda 200
+  /// qismli bo'limda foydalanuvchi har safar qo'lda surishga
+  /// majbur bo'lardi.
+  ScrollController? _epListCtrl;
+
+  /// Bitta qator taxminiy balandligi (padding 13*2 + yozuv +
+  /// margin). Aniq bo'lishi SHART emas: qiymat faqat boshlang'ich
+  /// surish uchun, ortiqchasini ro'yxatning o'zi qisqartiradi.
+  static const double _kEpRowHeight = 51;
+
   void _showEpisodeListPanel() {
+    final eps = _orderedEps;
+    var idx = -1;
+    if (_currentEp != null) {
+      final key = _epKeyOf(_currentEp!);
+      idx = eps.indexWhere((e) => _epKeyOf(e) == key);
+    }
+    // Joriy qism ro'yxat O'RTASIDAROQ turadi (tepaga yopishib
+    // qolmaydi) — oldingi qismlar ham ko'rinib tursin.
+    final offset =
+        idx <= 0 ? 0.0 : (idx * _kEpRowHeight - 90).clamp(0.0, 1e6).toDouble();
+
+    _epListCtrl?.dispose();
+    _epListCtrl = ScrollController(initialScrollOffset: offset);
+
     setState(() => _episodeListOpen = true);
     _hideTimer?.cancel();
   }
@@ -4235,39 +4263,70 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
               ),
             ),
 
+          // ── QISMLAR RO'YXATI: ILOJI BORICHA KATTA ──────────
+          //
+          // TALAB (foydalanuvchi): bu oyna kattaroq va qulayroq
+          // bo'lsin. Ilgari eni qat'iy 220 edi — uzun qism
+          // nomlari sig'masdi, tugmalar esa mayda edi.
+          //
+          // Endi eni EKRANGA QARAB olinadi (yarmigacha, 300–460
+          // oralig'ida), bo'yi esa deyarli to'liq (yuqori-quyi
+          // 12 dan). Qatorlar ham kattalashdi: barmoq bilan
+          // bosish oson.
           if (_episodeListOpen && isFullscreen)
             Align(
               alignment: Alignment.centerRight,
               child: Container(
-                width: 220,
-                margin: const EdgeInsets.symmetric(vertical: 20, horizontal: 8),
+                width: (MediaQuery.of(context).size.width * 0.5)
+                    .clamp(300.0, 460.0)
+                    .toDouble(),
+                margin: const EdgeInsets.symmetric(
+                    vertical: 12, horizontal: 16),
                 child: _PlayerPanel(
                   padding: const EdgeInsets.symmetric(
-                      horizontal: 10, vertical: 10),
+                      horizontal: 12, vertical: 12),
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Padding(
-                        padding: const EdgeInsets.only(bottom: 8, left: 4),
-                        child: Text(
-                          '${_seasonStr('nomi')} · '
-                          '${(_seasonNum('bolim_id') > 0 ? _seasonNum('bolim_id') : _seasonNum('season_id') > 0 ? _seasonNum('season_id') : 1)}-bo\'lim',
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 12,
-                            fontWeight: FontWeight.w700,
-                          ),
+                        padding: const EdgeInsets.only(bottom: 10, left: 4),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                '${_seasonStr('nomi')} · '
+                                '${(_seasonNum('bolim_id') > 0 ? _seasonNum('bolim_id') : _seasonNum('season_id') > 0 ? _seasonNum('season_id') : 1)}-bo\'lim',
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ),
+                            // Nechta qism borligi — ro'yxat uzun
+                            // bo'lsa foydali.
+                            const SizedBox(width: 8),
+                            Text(
+                              '${_orderedEps.length} qism',
+                              style: const TextStyle(
+                                color: Colors.white54,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
                         ),
                       ),
                       Divider(
                           height: 1,
                           color: Colors.white.withValues(alpha: 0.12)),
-                      const SizedBox(height: 4),
+                      const SizedBox(height: 6),
                       Flexible(
                         child: ListView.builder(
+                          controller: _epListCtrl,
                           shrinkWrap: true,
                           padding: EdgeInsets.zero,
                           itemCount: _orderedEps.length,
@@ -4288,9 +4347,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                               },
                               child: Container(
                                 padding: const EdgeInsets.symmetric(
-                                    horizontal: 8, vertical: 9),
+                                    horizontal: 12, vertical: 13),
                                 margin:
-                                    const EdgeInsets.symmetric(vertical: 1),
+                                    const EdgeInsets.symmetric(vertical: 2),
                                 decoration: BoxDecoration(
                                   color: isCurrent
                                       ? AppColors.accent
@@ -4306,7 +4365,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                                             const EdgeInsets.only(right: 6),
                                         child: Icon(
                                             Icons.play_arrow_rounded,
-                                            size: 16,
+                                            size: 20,
                                             color: AppColors.accent),
                                       ),
                                     Text(
@@ -4315,7 +4374,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                                         color: isCurrent
                                             ? AppColors.accent
                                             : Colors.white,
-                                        fontSize: 13,
+                                        fontSize: 16,
                                         fontWeight: isCurrent
                                             ? FontWeight.w800
                                             : FontWeight.w600,
@@ -4335,7 +4394,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                                                 ? AppColors.accent
                                                     .withValues(alpha: 0.7)
                                                 : Colors.white54,
-                                            fontSize: 11,
+                                            fontSize: 13,
                                           ),
                                         ),
                                       ),
