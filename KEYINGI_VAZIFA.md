@@ -2229,7 +2229,7 @@ ketardi.
 Kirish ishlamay qolsa BIRINCHI shu manzil ochiladi:
 
 ```
-https://arumediatv.ogabekraximov650.workers.dev/api/auth/telegram/health
+https://arumediatv.uzcom.workers.dev/api/auth/telegram/health
 ```
 
 `"ok": true` — hammasi joyida. `bot_token_configured: false` bo'lsa

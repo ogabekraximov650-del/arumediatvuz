@@ -13,7 +13,7 @@ import 'account_data.dart';
 import 'rust_bridge.dart';
 import 'sync_queue.dart';
 
-const String kApiBase = 'https://arumediatv.ogabekraximov650.workers.dev';
+const String kApiBase = 'https://arumediatv.uzcom.workers.dev';
 
 /// Ism eng ko'pi shuncha belgidan iborat bo'lishi mumkin.
 /// `TextField` ning `maxLength` i ham, tekshiruv ham shu qiymatga

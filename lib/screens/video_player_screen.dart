@@ -134,7 +134,7 @@ import 'billing_screen.dart';
 import '../widgets/glass.dart';
 import '../widgets/comments_tab.dart';
 
-const String _apiBase = 'https://arumediatv.ogabekraximov650.workers.dev';
+const String _apiBase = 'https://arumediatv.uzcom.workers.dev';
 
 class VideoPlayerScreen extends StatefulWidget {
   final Map<String, dynamic> season;

@@ -11,7 +11,7 @@ import '../theme/app_background.dart';
 import '../services/intro_times.dart';
 import '../widgets/glass.dart';
 
-const String _apiBase = 'https://arumediatv.ogabekraximov650.workers.dev';
+const String _apiBase = 'https://arumediatv.uzcom.workers.dev';
 
 // Worker javobi (yoki eski qatorlar) to'liq URL bo'lishi mumkin —
 // '/api/image/' dan keyingi qismini ajratib, bare fayl nomini oladi.

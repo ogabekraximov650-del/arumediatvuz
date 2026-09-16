@@ -6,7 +6,7 @@ import '../widgets/glass.dart';
 import '../services/rust_bridge.dart';
 import 'anime_detail_screen.dart';
 
-const String API_BASE = 'https://arumediatv.ogabekraximov650.workers.dev';
+const String API_BASE = 'https://arumediatv.uzcom.workers.dev';
 
 class SearchScreen extends StatefulWidget {
   const SearchScreen({super.key});

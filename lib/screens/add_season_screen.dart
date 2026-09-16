@@ -11,7 +11,7 @@ import '../services/ui_state.dart';
 import '../theme/app_background.dart';
 import '../widgets/glass.dart';
 
-const String API_BASE = 'https://arumediatv.ogabekraximov650.workers.dev';
+const String API_BASE = 'https://arumediatv.uzcom.workers.dev';
 
 const List<String> _turlar = ['TV', 'FILM', 'OVA'];
 const List<String> _holatlar = ['Davom etmoqda', 'Tugallangan'];
