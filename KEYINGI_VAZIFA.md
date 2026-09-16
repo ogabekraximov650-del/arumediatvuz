@@ -2130,7 +2130,7 @@ Ilova                          Worker                      Telegram
   │ POST /api/auth/telegram/start
   ├────────────────────────────>│ 16 xonali token yaratadi
   │<─── token + deep_link ──────│ login_tokens (pending, 5 daq)
-  │ t.me/aniraxuzloginbot   (bot manzili — o'zgarmadi)?start=<token>
+  │ t.me/arumedialoginbot   (bot manzili)?start=<token>
   ├─────────────────────────────────────────────────────────>│
   │                             │<── POST /api/telegram/webhook
   │                             │  users_db: topadi yoki yaratadi

@@ -486,11 +486,11 @@ jobs:
           KS="$RUNNER_TEMP/release.keystore"
           if [ -n "$KS_B64" ]; then
             echo "$KS_B64" | base64 -d > "$KS"
-            STOREPASS="${KS_PASS:-aniraxuz}"
+            STOREPASS="${KS_PASS:-arumedia}"
             echo "imzo kaliti: GitHub Secrets"
           else
             cp ci/release.keystore "$KS"
-            STOREPASS="aniraxuz"
+            STOREPASS="arumedia"
             echo "imzo kaliti: ci/release.keystore"
           fi
           ALIAS="arumedia"

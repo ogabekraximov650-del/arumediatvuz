@@ -1252,7 +1252,7 @@ async fn b2_auth_fetch(env: &Env) -> Result<Value> {
 /// ombor nomi. Foydalanuvchi B2 panelida `arumedia` nomli yangi,
 /// BO'SH ombor yaratdi (2026-09-15) va shu yerga o'tildi.
 ///
-/// ⚠️ Eski `aniraxuz` omboridagi fayllar (agar bo'lsa) bu yangi
+/// ⚠️ Eski omboridagi fayllar (agar bo'lsa) bu yangi
 /// omborda YO'Q. Baza ilgari tozalangani uchun bu muammo emas:
 /// yangi yuklangan har bir fayl to'g'ridan-to'g'ri shu omborga
 /// tushadi.
