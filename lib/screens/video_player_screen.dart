@@ -4148,16 +4148,22 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
               ),
             ),
 
+          // Tezlik paneli bilan BIR XIL: o'ngda, chetdan 24 joy
+          // qoldirib, ekran bo'yi bo'ylab o'rtada. Ilgari u
+          // `bottom: 90` edi va o'ng chekkaga yopishib turardi.
           if (_qualityPanelOpen && isFullscreen && _currentEp != null)
             Align(
-              alignment: Alignment.bottomRight,
+              alignment: Alignment.centerRight,
               child: Padding(
-                padding: const EdgeInsets.only(right: 12, bottom: 90),
+                padding: const EdgeInsets.only(right: 24),
                 child: _PlayerPanel(
                   padding: const EdgeInsets.symmetric(
-                      horizontal: 8, vertical: 8),
+                      horizontal: 10, vertical: 10),
                   child: ConstrainedBox(
-                    constraints: const BoxConstraints(maxHeight: 200),
+                    constraints: BoxConstraints(
+                      maxHeight:
+                          MediaQuery.of(context).size.height * 0.85,
+                    ),
                     child: SingleChildScrollView(
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
@@ -4174,11 +4180,11 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                                 behavior: HitTestBehavior.opaque,
                                 onTap: () => _selectQualityFromPanel(q),
                                 child: Container(
-                                  width: 120,
+                                  width: 160,
                                   padding: const EdgeInsets.symmetric(
-                                      horizontal: 10, vertical: 8),
+                                      horizontal: 14, vertical: 11),
                                   margin:
-                                      const EdgeInsets.symmetric(vertical: 2),
+                                      const EdgeInsets.symmetric(vertical: 3),
                                   decoration: BoxDecoration(
                                     color: sel
                                         ? AppColors.accent
@@ -4193,7 +4199,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                                               color: sel
                                                   ? AppColors.accent
                                                   : Colors.white,
-                                              fontSize: 13,
+                                              fontSize: 16,
                                               fontWeight: sel
                                                   ? FontWeight.w800
                                                   : FontWeight.w600)),
@@ -4205,7 +4211,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                                                     ? AppColors.accent
                                                         .withValues(alpha: 0.7)
                                                     : Colors.white54,
-                                                fontSize: 10)),
+                                                fontSize: 12)),
                                       ],
                                     ],
                                   ),
