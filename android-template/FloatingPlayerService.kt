@@ -95,6 +95,10 @@ class FloatingPlayerService : Service() {
         private const val CHANNEL_ID = "aru_floating_player"
         private const val NOTIF_ID = 4711
 
+        /// Tugmalar paneli balandligi (dp). Tugma 30dp + tepa-pastdan
+        /// 3dp havo.
+        private const val BAR_DP = 36
+
         /// Oyna hozir ochiqmi. Flutter tomoni shuni so'raydi.
         @Volatile
         var running: Boolean = false
@@ -118,11 +122,25 @@ class FloatingPlayerService : Service() {
     }
 
     private var windowManager: WindowManager? = null
-    private var rootView: FrameLayout? = null
+
+    /// Oynaning ildizi: tepada video, tagida tugmalar paneli.
+    private var rootView: LinearLayout? = null
+
+    /// Video va uning ustidagi bir nechta tugma.
+    private var videoBox: FrameLayout? = null
+
+    /// Video TAGIDAGI tugmalar paneli.
+    private var controlBar: LinearLayout? = null
+
     private var player: ExoPlayer? = null
     private var surfaceView: SurfaceView? = null
+
+    /// Paneldagi ijro tugmasi.
     private var btnPlay: ImageView? = null
-    private var controlsLayer: FrameLayout? = null
+
+    /// Rasm USTIDAGI ijro tugmasi — faqat panel sig'maydigan
+    /// darajada kichik oynada ko'rinadi.
+    private var btnPlayCenter: ImageView? = null
 
     // ── QISMLAR RO'YXATI ────────────────────────────────────────
     //
@@ -157,12 +175,6 @@ class FloatingPlayerService : Service() {
     /// Videoning haqiqiy nisbati — o'lcham o'zgartirilganda oyna
     /// shu nisbatni saqlaydi, aks holda rasm cho'zilib ketardi.
     private var videoRatio = 16f / 9f
-
-    /// Boshqaruv tugmalari ko'rinib turibdimi. Ular doim turib
-    /// qolsa rasmni to'sardi — shu sabab bosilganda chiqadi va
-    /// bir necha soniyadan keyin o'zi yashirinadi.
-    private var controlsVisible = true
-    private val hideRunnable = Runnable { setControlsVisible(false) }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -278,14 +290,13 @@ class FloatingPlayerService : Service() {
             WindowManager.LayoutParams.TYPE_PHONE
         }
 
-        // Boshlang'ich kenglik ATAYLAB 260dp: `applyAdaptiveControls`
-        // dagi 240dp chegarasidan yuqori, ya'ni qism o'tkazish
-        // tugmalari DARHOL ko'rinadi. Foydalanuvchi hohlasa
-        // kichraytiradi — o'shanda ular o'zi yashirinadi.
-        val w = dp(260)
+        // Boshlang'ich kenglik ATAYLAB 280dp: bunda panelga qism
+        // o'tkazish va sifat tugmalari ham sig'adi. Foydalanuvchi
+        // kichraytirsa ular o'zi kamayadi.
+        val w = dp(280)
         params = WindowManager.LayoutParams(
             w,
-            (w / videoRatio).roundToInt(),
+            (w / videoRatio).roundToInt() + dp(BAR_DP),
             type,
             // NOT_FOCUSABLE: oyna klaviatura fokusini olmaydi, ya'ni
             // ostidagi ilova odatdagidek ishlayveradi. Tegishlar
@@ -299,7 +310,20 @@ class FloatingPlayerService : Service() {
             y = dp(120)
         }
 
-        val root = FrameLayout(this).apply {
+        // ── TUZILISH: VIDEO TEPADA, TUGMALAR TAGIDA ───────────
+        //
+        // Tugmalar rasm USTIDA emas, uning TAGIDA alohida panelda.
+        // Shu sababli:
+        //   * ular rasmni hech qachon to'smaydi;
+        //   * ko'proq tugma sig'adi;
+        //   * o'z-o'zidan yashirinishi shart emas — panel doim
+        //     ko'rinib turaveradi.
+        //
+        // Juda kichik oynada panel nomutanosib katta bo'lib
+        // qolardi — o'shanda u yashiriladi va rasm ustida faqat
+        // ijro tugmasi qoladi (`applyAdaptiveControls`).
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
             background = GradientDrawable().apply {
                 setColor(Color.BLACK)
                 cornerRadius = dp(12).toFloat()
@@ -309,8 +333,19 @@ class FloatingPlayerService : Service() {
         }
         rootView = root
 
+        val box = FrameLayout(this)
+        videoBox = box
+        root.addView(
+            box,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            )
+        )
+
         surfaceView = SurfaceView(this).also {
-            root.addView(
+            box.addView(
                 it,
                 FrameLayout.LayoutParams(
                     FrameLayout.LayoutParams.MATCH_PARENT,
@@ -319,134 +354,146 @@ class FloatingPlayerService : Service() {
             )
         }
 
-        buildControls(root)
+        buildVideoOverlayButtons(box)
+        buildBar(root)
         attachDrag(root)
 
         wm.addView(root, params)
-        scheduleHideControls()
     }
 
-    private fun buildControls(root: FrameLayout) {
-        val layer = FrameLayout(this).apply {
-            setBackgroundColor(Color.argb(60, 0, 0, 0))
-        }
-        controlsLayer = layer
-        root.addView(
-            layer,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT
-            )
-        )
-
-        // ── O'RTADAGI QATOR: oldingi / ijro / keyingi ─────────
-        //
-        // Uchovi bitta qatorda: oyna kichrayganda chetdagilari
-        // yashiriladi va o'rtadagi ijro tugmasi joyida qoladi
-        // (`applyAdaptiveControls`).
-        btnPrev = iconButton(android.R.drawable.ic_media_previous, dp(30)).also {
-            val lp = FrameLayout.LayoutParams(dp(30), dp(30))
+    /// Rasm USTIDAGI tugmalar — atigi ikkitasi.
+    ///
+    /// Panel sig'maydigan darajada kichik oynada faqat shular
+    /// qoladi, panel ko'rinib turganda esa ijro tugmasi
+    /// yashiriladi (panelda o'zi bor).
+    private fun buildVideoOverlayButtons(box: FrameLayout) {
+        btnPlayCenter = iconButton(android.R.drawable.ic_media_pause, dp(38)).also {
+            val lp = FrameLayout.LayoutParams(dp(38), dp(38))
             lp.gravity = Gravity.CENTER
-            lp.rightMargin = dp(58)
-            layer.addView(it, lp)
-            it.setOnClickListener { _ -> stepEpisode(-1) }
-        }
-
-        btnPlay = iconButton(android.R.drawable.ic_media_pause, dp(40)).also {
-            val lp = FrameLayout.LayoutParams(dp(40), dp(40))
-            lp.gravity = Gravity.CENTER
-            layer.addView(it, lp)
+            box.addView(it, lp)
             it.setOnClickListener { _ -> togglePlay() }
         }
 
-        btnNext = iconButton(android.R.drawable.ic_media_next, dp(30)).also {
-            val lp = FrameLayout.LayoutParams(dp(30), dp(30))
-            lp.gravity = Gravity.CENTER
-            lp.leftMargin = dp(58)
-            layer.addView(it, lp)
-            it.setOnClickListener { _ -> stepEpisode(1) }
-        }
-
-        // Yuqori o'ng — yopish.
-        btnClose = iconButton(
-            android.R.drawable.ic_menu_close_clear_cancel, dp(28)
-        ).also {
-            val lp = FrameLayout.LayoutParams(dp(28), dp(28))
-            lp.gravity = Gravity.TOP or Gravity.END
-            lp.topMargin = dp(4); lp.rightMargin = dp(4)
-            layer.addView(it, lp)
-            it.setOnClickListener { _ ->
-                lastPositionMs = player?.currentPosition ?: -1L
-                stopEverything()
-            }
-        }
-
-        // Yuqori chap — ilovaga qaytish.
-        btnOpen = iconButton(android.R.drawable.ic_menu_view, dp(28)).also {
-            val lp = FrameLayout.LayoutParams(dp(28), dp(28))
-            lp.gravity = Gravity.TOP or Gravity.START
-            lp.topMargin = dp(4); lp.leftMargin = dp(4)
-            layer.addView(it, lp)
-            it.setOnClickListener { _ -> returnToApp() }
-        }
-
-        // Pastki chap — sifat tanlash.
-        btnQuality = iconButton(android.R.drawable.ic_menu_manage, dp(26)).also {
-            val lp = FrameLayout.LayoutParams(dp(26), dp(26))
-            lp.gravity = Gravity.BOTTOM or Gravity.START
-            lp.bottomMargin = dp(4); lp.leftMargin = dp(4)
-            layer.addView(it, lp)
-            it.setOnClickListener { _ -> toggleQualityMenu() }
-        }
-
-        // Pastki o'ng — o'lchamni o'zgartirish tutqichi.
-        handleResize = iconButton(android.R.drawable.ic_menu_crop, dp(26)).also {
-            val lp = FrameLayout.LayoutParams(dp(26), dp(26))
+        // O'lcham tutqichi rasm burchagida turadi: panelda unga
+        // joy ajratish shart emas va burchakdan tortish tabiiyroq.
+        handleResize = iconButton(android.R.drawable.ic_menu_crop, dp(24)).also {
+            val lp = FrameLayout.LayoutParams(dp(24), dp(24))
             lp.gravity = Gravity.BOTTOM or Gravity.END
             lp.bottomMargin = dp(4); lp.rightMargin = dp(4)
-            layer.addView(it, lp)
+            box.addView(it, lp)
             attachResize(it)
         }
     }
 
+    /// Video tagidagi tugmalar paneli.
+    private fun buildBar(root: LinearLayout) {
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setBackgroundColor(Color.rgb(18, 18, 28))
+        }
+        controlBar = bar
+        root.addView(
+            bar,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(BAR_DP)
+            )
+        )
+
+        btnOpen = barButton(bar, android.R.drawable.ic_menu_view) { returnToApp() }
+        btnPrev = barButton(bar, android.R.drawable.ic_media_previous) {
+            stepEpisode(-1)
+        }
+        btnPlay = barButton(bar, android.R.drawable.ic_media_pause) { togglePlay() }
+        btnNext = barButton(bar, android.R.drawable.ic_media_next) {
+            stepEpisode(1)
+        }
+        btnQuality = barButton(bar, android.R.drawable.ic_menu_manage) {
+            toggleQualityMenu()
+        }
+        btnClose = barButton(bar, android.R.drawable.ic_menu_close_clear_cancel) {
+            lastPositionMs = player?.currentPosition ?: -1L
+            stopEverything()
+        }
+    }
+
+    private fun barButton(
+        bar: LinearLayout,
+        res: Int,
+        onClick: () -> Unit
+    ): ImageView {
+        val b = ImageView(this).apply {
+            setImageResource(res)
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            setPadding(dp(5), dp(5), dp(5), dp(5))
+            isClickable = true
+            setOnClickListener { _ -> onClick() }
+        }
+        val lp = LinearLayout.LayoutParams(dp(30), dp(30))
+        lp.leftMargin = dp(5); lp.rightMargin = dp(5)
+        bar.addView(b, lp)
+        return b
+    }
+
     // ── TUGMALAR OYNA O'LCHAMIGA QARAB ──────────────────────────
     //
-    // Kichik oynada hamma tugma sig'maydi — ular bir-birining
-    // ustiga chiqib, rasmni butunlay to'sardi. Shu sabab oyna
-    // kengligiga qarab bosqichma-bosqich ko'payadi:
+    // Panel kengaygan sari tugmalar ko'payadi. Chegaralar panelga
+    // HAQIQATAN sig'adigan qilib tanlangan: har bir tugma 30dp +
+    // ikki tomondan 5dp oraliq = 40dp joy oladi.
     //
-    //   < 180dp  — faqat ijro/pauza va yopish (eng zarurlari);
-    //   < 240dp  — + ilovaga qaytish va o'lcham tutqichi;
-    //   < 300dp  — + oldingi/keyingi qism;
-    //   >= 300dp — + sifat tanlash (hammasi).
+    //   < 150dp — panel umuman yo'q (nomutanosib bo'lardi):
+    //             rasm ustida faqat ijro tugmasi;
+    //   >= 150dp — panel: ijro, yopish            (2 ta = 80dp)
+    //   >= 190dp — + ilovaga qaytish              (3 ta = 120dp)
+    //   >= 270dp — + oldingi/keyingi qism         (5 ta = 200dp)
+    //   >= 310dp — + sifat tanlash                (6 ta = 240dp)
     //
-    // Qism tugmalari ro'yxat bo'sh bo'lsa umuman chiqmaydi, sifat
-    // tugmasi esa tanlov bitta bo'lsa keraksiz.
+    // Qism tugmalari ro'yxat bitta bo'lsa, sifat tugmasi esa
+    // tanlov bitta bo'lsa umuman chiqmaydi — bosib bo'lmaydigan
+    // tugma faqat joy egallardi.
     private fun applyAdaptiveControls() {
         val wDp = params.width / resources.displayMetrics.density
 
-        val showBasics = wDp >= 180f
-        val showEpisodes = wDp >= 240f && episodes.size > 1
-        val showQuality = wDp >= 300f && (currentEpisode()?.qualities?.size ?: 0) > 1
+        val showBar = wDp >= 150f
+        val showOpen = wDp >= 190f
+        val showEpisodes = wDp >= 270f && episodes.size > 1
+        val showQuality = wDp >= 310f &&
+            (currentEpisode()?.qualities?.size ?: 0) > 1
 
-        btnOpen?.visibility = vis(showBasics)
-        handleResize?.visibility = vis(showBasics)
+        controlBar?.visibility = vis(showBar)
+        // Panel bor ekan, rasm ustidagi ijro tugmasi ortiqcha.
+        btnPlayCenter?.visibility = vis(!showBar)
 
-        // Ro'yxat chetida bo'lsa mos tugma o'chiriladi (ko'rinadi,
-        // lekin bosilmaydi) — birdan yo'qolib qolgani chalkash
-        // bo'lardi.
+        btnOpen?.visibility = vis(showOpen)
+        btnQuality?.visibility = vis(showQuality)
+
         btnPrev?.visibility = vis(showEpisodes)
         btnNext?.visibility = vis(showEpisodes)
+        // Ro'yxat chetida bo'lsa tugma ko'rinadi, lekin so'nadi va
+        // bosilmaydi — birdan yo'qolib qolgani chalkash bo'lardi.
         btnPrev?.isEnabled = epIndex < episodes.size - 1
         btnNext?.isEnabled = epIndex > 0
         btnPrev?.alpha = if (btnPrev?.isEnabled == true) 1f else 0.35f
         btnNext?.alpha = if (btnNext?.isEnabled == true) 1f else 0.35f
 
-        btnQuality?.visibility = vis(showQuality)
         if (!showQuality) closeQualityMenu()
+        updateWindowHeight()
     }
 
     private fun vis(show: Boolean): Int = if (show) View.VISIBLE else View.GONE
+
+    /// Oyna balandligini kenglik, video nisbati va panelga qarab
+    /// qayta hisoblaydi.
+    ///
+    /// Panel video BALANDLIGIGA QO'SHILADI (uning ustiga
+    /// chiqmaydi) — aks holda panel rasmning pastini kesardi.
+    private fun updateWindowHeight() {
+        val bar = if (controlBar?.visibility == View.VISIBLE) dp(BAR_DP) else 0
+        params.height = (params.width / videoRatio).roundToInt() + bar
+        clampToScreen()
+        safeUpdate()
+    }
 
     private fun iconButton(res: Int, size: Int): ImageView {
         return ImageView(this).apply {
@@ -491,9 +538,10 @@ class FloatingPlayerService : Service() {
                     true
                 }
                 MotionEvent.ACTION_UP -> {
-                    // Surilmagan bo'lsa — bu oddiy bosish: tugmalarni
-                    // ko'rsatib/yashirib qo'yamiz.
-                    if (!moved) setControlsVisible(!controlsVisible)
+                    // Rasmga bosilganda sifat menyusi ochiq bo'lsa
+                    // yopiladi — boshqa yashiriladigan narsa yo'q,
+                    // panel doim ko'rinib turadi.
+                    if (!moved) closeQualityMenu()
                     true
                 }
                 else -> false
@@ -516,15 +564,11 @@ class FloatingPlayerService : Service() {
                     val dx = (e.rawX - touchX).roundToInt()
                     // Kenglik bo'yicha boshqariladi, balandlik esa
                     // nisbatdan hisoblanadi — rasm cho'zilmaydi.
-                    val minW = dp(140)
+                    val minW = dp(120)
                     val maxW = resources.displayMetrics.widthPixels - dp(16)
-                    val w = (startW + dx).coerceIn(minW, maxW)
-                    params.width = w
-                    params.height = (w / videoRatio).roundToInt()
-                    clampToScreen()
-                    safeUpdate()
-                    // Oyna kattalashdi/kichraydi — tugmalar soni
-                    // ham shunga qarab o'zgaradi.
+                    params.width = (startW + dx).coerceIn(minW, maxW)
+                    // Kenglik o'zgardi — tugmalar soni va oyna
+                    // balandligi ham shunga qarab yangilanadi.
                     applyAdaptiveControls()
                     true
                 }
@@ -552,19 +596,6 @@ class FloatingPlayerService : Service() {
         } catch (e: Throwable) {
         }
     }
-
-    private fun setControlsVisible(v: Boolean) {
-        controlsVisible = v
-        controlsLayer?.visibility = if (v) View.VISIBLE else View.GONE
-        if (v) scheduleHideControls() else closeQualityMenu()
-    }
-
-    private fun scheduleHideControls() {
-        val v = rootView ?: return
-        v.removeCallbacks(hideRunnable)
-        v.postDelayed(hideRunnable, 3000)
-    }
-
     // ── QISMLAR VA SIFAT ────────────────────────────────────────
 
     /// Ilovadan kelgan JSON ro'yxatni o'qiydi.
@@ -628,7 +659,6 @@ class FloatingPlayerService : Service() {
         // Yangi qism BOSHIDAN boshlanadi.
         startPlayback(urlFor(ep), 0L)
         applyAdaptiveControls()
-        scheduleHideControls()
     }
 
     private fun toggleQualityMenu() {
@@ -642,7 +672,7 @@ class FloatingPlayerService : Service() {
     }
 
     private fun openQualityMenu() {
-        val layer = controlsLayer ?: return
+        val box = videoBox ?: return
         val ep = currentEpisode() ?: return
         closeQualityMenu()
 
@@ -675,13 +705,13 @@ class FloatingPlayerService : Service() {
             FrameLayout.LayoutParams.WRAP_CONTENT,
             FrameLayout.LayoutParams.WRAP_CONTENT
         )
+        // Menyu rasmning pastki chap burchagida, panelning ustida
+        // chiqadi. Panel `videoBox` dan TASHQARIDA bo'lgani uchun
+        // unga joy qoldirish shart emas.
         lp.gravity = Gravity.BOTTOM or Gravity.START
-        lp.bottomMargin = dp(34); lp.leftMargin = dp(4)
-        layer.addView(menu, lp)
+        lp.bottomMargin = dp(4); lp.leftMargin = dp(4)
+        box.addView(menu, lp)
         qualityMenu = menu
-
-        // Menyu ochiq turganda tugmalar o'z-o'zidan yashirinmasin.
-        rootView?.removeCallbacks(hideRunnable)
     }
 
     /// Sifatni almashtiradi va AYNAN o'sha soniyadan davom etadi.
@@ -690,7 +720,6 @@ class FloatingPlayerService : Service() {
         val at = player?.currentPosition ?: 0L
         startPlayback(q.url, at)
         closeQualityMenu()
-        scheduleHideControls()
     }
 
     // ── IJRO ────────────────────────────────────────────────────
@@ -704,10 +733,11 @@ class FloatingPlayerService : Service() {
                     if (videoSize.width > 0 && videoSize.height > 0) {
                         videoRatio = videoSize.width.toFloat() /
                             videoSize.height.toFloat()
-                        params.height =
-                            (params.width / videoRatio).roundToInt()
-                        clampToScreen()
-                        safeUpdate()
+                        // Balandlik `updateWindowHeight` orqali:
+                        // u tugmalar panelini ham hisobga oladi.
+                        // Qo'lda hisoblansa panel rasmning pastini
+                        // kesib qo'yardi.
+                        updateWindowHeight()
                     }
                 }
 
@@ -729,7 +759,6 @@ class FloatingPlayerService : Service() {
     private fun togglePlay() {
         val p = player ?: return
         if (p.isPlaying) p.pause() else p.play()
-        scheduleHideControls()
     }
 
     /// Ilovaga qaytadi va ijro nuqtasini u bilan birga olib boradi.
@@ -755,8 +784,6 @@ class FloatingPlayerService : Service() {
         }
         running = false
 
-        rootView?.removeCallbacks(hideRunnable)
-
         try {
             player?.release()
         } catch (e: Throwable) {
@@ -773,7 +800,9 @@ class FloatingPlayerService : Service() {
         }
         rootView = null
         surfaceView = null
-        controlsLayer = null
+        videoBox = null
+        controlBar = null
+        btnPlayCenter = null
         btnPlay = null
         btnPrev = null
         btnNext = null
