@@ -132,6 +132,7 @@ import '../services/watch_progress.dart';
 import '../theme/app_background.dart';
 import 'billing_screen.dart';
 import '../widgets/glass.dart';
+import '../services/mini_player_service.dart';
 import '../widgets/comments_tab.dart';
 
 const String _apiBase = 'https://arumediatv.uzcom.workers.dev';
@@ -2743,6 +2744,24 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _scheduleHide();
   }
 
+  void _activateMiniPlayer() {
+    final ep = _currentEp;
+    if (ep == null || _controller == null) return;
+    final pos = _controller!.value.position;
+    final title =
+        '${widget.season['nomi'] ?? ''} - ${ep['epizod_name'] ?? ''}';
+    _controller!.pause();
+    MiniPlayerService.instance.activate(MiniPlayerData(
+      season: widget.season,
+      episode: ep,
+      url: _currentUrl,
+      position: pos,
+      title: title,
+    ));
+    if (_isFullscreen) _toggleFullscreen();
+    Navigator.of(context).pop();
+  }
+
   void _setSleepTimer(int minutes) {
     _sleepTimer?.cancel();
     _sleepTickTimer?.cancel();
@@ -4274,6 +4293,36 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                           ],
                         ),
                       ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 6),
+                        child: Divider(
+                          height: 1,
+                          color: Colors.white.withValues(alpha: 0.12),
+                        ),
+                      ),
+                      GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: () {
+                          _closeMenu();
+                          _activateMiniPlayer();
+                        },
+                        child: const Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.picture_in_picture_alt_rounded,
+                                size: 16, color: Colors.white70),
+                            SizedBox(width: 6),
+                            Text(
+                              'Suzuvchi pleyer',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 11.5,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
                     ],
                   ),
                 ),
@@ -4445,6 +4494,36 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                                 color: _sleepMinutes > 0
                                     ? AppColors.accent
                                     : Colors.white,
+                                fontSize: 11.5,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 6),
+                        child: Divider(
+                          height: 1,
+                          color: Colors.white.withValues(alpha: 0.12),
+                        ),
+                      ),
+                      GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: () {
+                          _closeSettingsPanel();
+                          _activateMiniPlayer();
+                        },
+                        child: const Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.picture_in_picture_alt_rounded,
+                                size: 16, color: Colors.white70),
+                            SizedBox(width: 6),
+                            Text(
+                              'Suzuvchi pleyer',
+                              style: TextStyle(
+                                color: Colors.white,
                                 fontSize: 11.5,
                                 fontWeight: FontWeight.w600,
                               ),
