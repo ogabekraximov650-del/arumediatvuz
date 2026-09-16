@@ -804,8 +804,8 @@ jobs:
           # 1) Ilova nomi
           LABEL=$("$AAPT" dump badging "$APK" | grep -m1 "^application-label:" || true)
           echo "$LABEL"
-          echo "$LABEL" | grep -q "'ARUmedia'" \
-            || { echo "❌ XATO: ilova nomi ARUmedia emas"; exit 1; }
+          echo "$LABEL" | grep -q "'ARUmediaTv'" \
+            || { echo "❌ XATO: ilova nomi ARUmediaTv emas"; exit 1; }
 
           # 2) Barcha PNG resurslar ochiladi
           TMP=$(mktemp -d)
@@ -1015,7 +1015,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
-          name: ARUmedia (build ${{ github.run_number }})
+          name: ARUmediaTv (build ${{ github.run_number }})
           body: |
             Telefonga to'g'ridan-to'g'ri o'rnatish uchun `.apk`
             faylini yuklab oling (ZIP emas).
