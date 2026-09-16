@@ -332,6 +332,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   Timer? _hideTimer;
   double _playbackSpeed = 1.0;
   bool _speedPanelOpen = false;
+  bool _qualityPanelOpen = false;
 
   DateTime _lastPlayPauseTap = DateTime.fromMillisecondsSinceEpoch(0);
 
@@ -2685,6 +2686,31 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _closeSpeedPanel();
   }
 
+  void _showQualityPanel() {
+    setState(() => _qualityPanelOpen = true);
+    _hideTimer?.cancel();
+  }
+
+  void _closeQualityPanel() {
+    if (!_qualityPanelOpen) return;
+    setState(() => _qualityPanelOpen = false);
+    _scheduleHide();
+  }
+
+  void _selectQualityFromPanel(String q) {
+    final ep = _currentEp;
+    if (ep == null) return;
+    _closeQualityPanel();
+    final ctrl = _controller;
+    final resumeAt = ctrl?.value.position;
+    final resumePlaying = ctrl?.value.isPlaying ?? true;
+    setState(() {
+      _selectedQuality = q;
+      _qualityChosenByUser = true;
+    });
+    _playEpisode(ep, resumeAt: resumeAt, resumePlaying: resumePlaying);
+  }
+
   /// Tugmani ko'rsatadi.
   ///
   /// TALAB (foydalanuvchi): "intro tugmasi intro TUGAMAGUNCHA
@@ -3643,6 +3669,87 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
               ),
             ),
 
+          // ── SIFAT PANELI (faqat fullscreen) ──────────────────
+          if (_qualityPanelOpen && isFullscreen)
+            Positioned.fill(
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: _closeQualityPanel,
+              ),
+            ),
+
+          if (_qualityPanelOpen && isFullscreen && _currentEp != null)
+            Align(
+              alignment: Alignment.bottomRight,
+              child: Padding(
+                padding: const EdgeInsets.only(right: 12, bottom: 90),
+                child: _PlayerPanel(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 8, vertical: 8),
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 200),
+                    child: SingleChildScrollView(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          for (final q in ['1080p', '720p', '480p', '360p']
+                              .where(_availableQualities(_currentEp!).contains))
+                            () {
+                              final sel = _selectedQuality == q ||
+                                  (_selectedQuality == null &&
+                                      q == _qualityLabel(_currentEp!));
+                              final size =
+                                  (_currentEp!['size_$q'] as String?) ?? '';
+                              return GestureDetector(
+                                behavior: HitTestBehavior.opaque,
+                                onTap: () => _selectQualityFromPanel(q),
+                                child: Container(
+                                  width: 120,
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 10, vertical: 8),
+                                  margin:
+                                      const EdgeInsets.symmetric(vertical: 2),
+                                  decoration: BoxDecoration(
+                                    color: sel
+                                        ? AppColors.accent
+                                            .withValues(alpha: 0.2)
+                                        : Colors.transparent,
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      Text(q.toUpperCase(),
+                                          style: TextStyle(
+                                              color: sel
+                                                  ? AppColors.accent
+                                                  : Colors.white,
+                                              fontSize: 13,
+                                              fontWeight: sel
+                                                  ? FontWeight.w800
+                                                  : FontWeight.w600)),
+                                      if (size.isNotEmpty) ...[
+                                        const Spacer(),
+                                        Text(size,
+                                            style: TextStyle(
+                                                color: sel
+                                                    ? AppColors.accent
+                                                        .withValues(alpha: 0.7)
+                                                    : Colors.white54,
+                                                fontSize: 10)),
+                                      ],
+                                    ],
+                                  ),
+                                ),
+                              );
+                            }(),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+
           if (_menuOpen)
             Positioned.fill(
               child: GestureDetector(
@@ -3983,7 +4090,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
             _scheduleSeekTo(d);
             _scheduleHide();
           },
-          onQualityTap: _showQualityDialog,
+          onQualityTap: isFullscreen ? _showQualityPanel : _showQualityDialog,
           onFullscreen: _toggleFullscreen,
           isFullscreen: isFullscreen,
           onSpeedTap: isFullscreen ? _showSpeedPanel : null,
