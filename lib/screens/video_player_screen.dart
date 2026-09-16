@@ -334,6 +334,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   bool _speedPanelOpen = false;
   bool _qualityPanelOpen = false;
   bool _episodeListOpen = false;
+  bool _isLocked = false;
+  bool _settingsPanelOpen = false;
 
   DateTime _lastPlayPauseTap = DateTime.fromMillisecondsSinceEpoch(0);
 
@@ -2698,6 +2700,31 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _scheduleHide();
   }
 
+  void _toggleLock() {
+    setState(() => _isLocked = !_isLocked);
+    if (_isLocked) {
+      _hideTimer?.cancel();
+      _closeMenu();
+      _closeSpeedPanel();
+      _closeQualityPanel();
+      _closeEpisodeListPanel();
+      _closeSettingsPanel();
+    } else {
+      _scheduleHide();
+    }
+  }
+
+  void _showSettingsPanel() {
+    setState(() => _settingsPanelOpen = true);
+    _hideTimer?.cancel();
+  }
+
+  void _closeSettingsPanel() {
+    if (!_settingsPanelOpen) return;
+    setState(() => _settingsPanelOpen = false);
+    _scheduleHide();
+  }
+
   void _showEpisodeListPanel() {
     setState(() => _episodeListOpen = true);
     _hideTimer?.cancel();
@@ -2766,7 +2793,16 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   // ── Fullscreen: alohida sahifaga o'tmaydi — xuddi shu controller
   // joyida (soat mili bo'ylab) landscape rejimga aylanadi ─────────
   void _toggleFullscreen() {
-    setState(() => _isFullscreen = !_isFullscreen);
+    setState(() {
+      _isFullscreen = !_isFullscreen;
+      if (!_isFullscreen) {
+        _isLocked = false;
+        _settingsPanelOpen = false;
+        _episodeListOpen = false;
+        _speedPanelOpen = false;
+        _qualityPanelOpen = false;
+      }
+    });
     if (_isFullscreen) {
       SystemChrome.setPreferredOrientations([
         DeviceOrientation.landscapeLeft,
@@ -3354,11 +3390,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
               ),
             ),
 
-          if (_currentEp != null)
+          if (_currentEp != null && !_isLocked)
             AnimatedOpacity(
-              // Yuklanish/tayyorlanish paytida kontrollar MAJBURIY
-              // ko'rinadi — aks holda yagona aylanma halqa ham
-              // ko'rinmay qolardi.
               opacity: (_showControls || _playerLoading) ? 1.0 : 0.0,
               duration: const Duration(milliseconds: 200),
               child: IgnorePointer(
@@ -3400,7 +3433,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
           // Tap faqat kontrollar ochiq bo'lganda qabul qilinadi:
           // aks holda videoga bosish kontrollarni chiqarish
           // o'rniga pauza qilib qo'yardi.
-          if (_currentEp != null && _playerError == null)
+          if (_currentEp != null && _playerError == null && !_isLocked)
             IgnorePointer(
               ignoring: !_showControls,
               child: Center(
@@ -3514,8 +3547,17 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
           // Endi chap/o'ng tarafning YUQORISI, PASTI, CHETI va O'RTASI —
           // hamma joyi sek uchun ishlaydi; faqat haqiqiy tugmalar turgan
           // tor zonalar (markazdagi play/pause doirasi va pastki
+          // Qulflanganda tap faqat kontrollarni toggle qiladi
+          if (_currentEp != null && _isLocked)
+            Positioned.fill(
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: _onTapVideo,
+              ),
+            ),
+
           // boshqaruv paneli) bundan mustasno.
-          if (_currentEp != null)
+          if (_currentEp != null && !_isLocked)
             Positioned.fill(
               child: LayoutBuilder(
                 builder: (context, constraints) {
@@ -3598,7 +3640,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
           // "orqaga" tugmasi turadi — shu sabab intro tugmasi
           // o'sha qatorning TAGIGA tushadi, aks holda ular
           // ustma-ust kelardi.
-          if (_currentEp != null && _playerError == null && _introVisible)
+          if (_currentEp != null && _playerError == null && _introVisible && !_isLocked)
             Align(
               alignment: Alignment.topLeft,
               child: Padding(
@@ -3942,19 +3984,91 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
               ),
             ),
 
-          // Faqat kontrollar ochiq bo'lganda (yoki menyu ochiq
-          // turganda) ko'rinadi — video ko'rilayotganda ekran toza
-          // qolishi kerak.
+          // ── FULLSCREEN: yuqori o'ng burchak tugmalari ───────────
+          // Qulflanganda faqat qulf tugmasi ko'rinadi.
           if (_currentEp != null &&
               _playerError == null &&
+              isFullscreen &&
+              _isLocked &&
+              _showControls)
+            Align(
+              alignment: Alignment.topLeft,
+              child: Padding(
+                padding: const EdgeInsets.only(left: 12, top: 8),
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: _toggleLock,
+                  child: Container(
+                    width: 42,
+                    height: 42,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: AppColors.accent.withValues(alpha: 0.25),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                          color: AppColors.accent.withValues(alpha: 0.4)),
+                    ),
+                    child: Icon(Icons.lock_rounded,
+                        color: AppColors.accent, size: 20),
+                  ),
+                ),
+              ),
+            ),
+
+          // Fullscreen da yuqori o'ng burchak: qulf + sozlamalar + fullscreen chiqish
+          if (_currentEp != null &&
+              _playerError == null &&
+              isFullscreen &&
+              !_isLocked &&
+              (_showControls || _settingsPanelOpen))
+            Align(
+              alignment: Alignment.topRight,
+              child: Padding(
+                padding: const EdgeInsets.only(right: 8, top: 6),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: _toggleLock,
+                      child: Padding(
+                        padding: const EdgeInsets.all(9),
+                        child: Icon(Icons.lock_open_rounded,
+                            color: Colors.white, size: 22),
+                      ),
+                    ),
+                    GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: _showSettingsPanel,
+                      child: Padding(
+                        padding: const EdgeInsets.all(9),
+                        child: Icon(Icons.bolt_rounded,
+                            color: Colors.white, size: 22),
+                      ),
+                    ),
+                    GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: _toggleFullscreen,
+                      child: Padding(
+                        padding: const EdgeInsets.all(9),
+                        child: Icon(Icons.fullscreen_exit_rounded,
+                            color: Colors.white, size: 22),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+
+          // Normal (fullscreen bo'lmagan) rejimda uch nuqta tugmasi
+          if (_currentEp != null &&
+              _playerError == null &&
+              !isFullscreen &&
               (_showControls || _menuOpen))
             Align(
               alignment: Alignment.topRight,
               child: Padding(
-                padding: EdgeInsets.only(
-                  right: isFullscreen ? 8 : 4,
-                  top: isFullscreen ? 6 : 2,
-                ),
+                padding: const EdgeInsets.only(right: 4, top: 2),
                 child: GestureDetector(
                   behavior: HitTestBehavior.opaque,
                   onTap: _toggleMenu,
@@ -3962,6 +4076,50 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                     padding: EdgeInsets.all(9),
                     child: Icon(Icons.more_vert_rounded,
                         color: Colors.white, size: 22),
+                  ),
+                ),
+              ),
+            ),
+
+          // ── SOZLAMALAR PANELI (bolt tugmasi, fullscreen) ──────
+          if (_settingsPanelOpen && isFullscreen && !_isLocked)
+            Positioned.fill(
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: _closeSettingsPanel,
+              ),
+            ),
+
+          if (_settingsPanelOpen && isFullscreen && !_isLocked)
+            Align(
+              alignment: Alignment.topRight,
+              child: Padding(
+                padding: const EdgeInsets.only(right: 8, top: 50),
+                child: _PlayerPanel(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 12, vertical: 10),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      _MenuToggleRow(
+                        label: 'Avto intro o\'tkazish',
+                        on: AppSettings.instance.autoSkipIntro,
+                        onToggle: _toggleAutoSkipIntro,
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 6),
+                        child: Divider(
+                          height: 1,
+                          color: Colors.white.withValues(alpha: 0.12),
+                        ),
+                      ),
+                      _MenuToggleRow(
+                        label: 'Avto qism o\'tkazish',
+                        on: AppSettings.instance.autoNextEpisode,
+                        onToggle: _toggleAutoNextEpisode,
+                      ),
+                    ],
                   ),
                 ),
               ),
