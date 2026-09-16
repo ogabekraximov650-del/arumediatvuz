@@ -4,8 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'screens/root_screen.dart';
-import 'services/mini_player_service.dart';
-import 'widgets/mini_player_widget.dart';
 import 'services/app_build.dart';
 import 'services/app_http.dart';
 import 'services/app_keys.dart';
@@ -214,42 +212,8 @@ class FulutterApp extends StatelessWidget {
         ),
         useMaterial3: true,
       ),
-      home: const _AppShell(),
+      home: const RootScreen(),
     );
   }
 }
 
-/// Ilovaning asosiy ekrani va uning USTIDAGI kichik suzuvchi
-/// pleyer.
-///
-/// ── NEGA AYNAN SHU YERDA ──────────────────────────────────────
-///
-/// Kichik oyna hamma bo'limlarda (bosh sahifa, qidiruv, katalog,
-/// kutubxona, profil) ko'rinib turishi kerak — shu sabab u
-/// `RootScreen` NING ICHIDA emas, USTIDA turadi.
-///
-/// Pleyer ekrani esa bu daraxtning ustiga `Navigator` orqali
-/// qo'yiladi, ya'ni u ochiq turganda kichik oyna ko'rinmaydi.
-/// Bu ATAYLAB: bitta videoni ikki joyda ko'rsatishdan ma'no yo'q.
-///
-/// `RootScreen` `const` — ya'ni kichik oyna paydo bo'lganda yoki
-/// yopilganda u QAYTA CHIZILMAYDI (Flutter bir xil `const`
-/// widget'ni tanib, butun shoxni chetlab o'tadi).
-class _AppShell extends StatelessWidget {
-  const _AppShell();
-
-  @override
-  Widget build(BuildContext context) {
-    return ListenableBuilder(
-      listenable: MiniPlayerService.instance,
-      builder: (context, _) {
-        return Stack(
-          children: [
-            const RootScreen(),
-            if (MiniPlayerService.instance.active) const MiniPlayerOverlay(),
-          ],
-        );
-      },
-    );
-  }
-}

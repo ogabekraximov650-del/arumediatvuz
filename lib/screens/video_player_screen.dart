@@ -132,9 +132,6 @@ import '../services/watch_progress.dart';
 import '../theme/app_background.dart';
 import 'billing_screen.dart';
 import '../widgets/glass.dart';
-import '../services/mini_player_service.dart';
-import '../services/floating_player_service.dart';
-import '../services/pip_service.dart';
 import '../widgets/comments_tab.dart';
 
 const String _apiBase = 'https://arumediatv.uzcom.workers.dev';
@@ -586,21 +583,6 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     //   * `inactive`          -> tegilmaydi (parda, dialog);
     //   * `paused`/`hidden`   -> pauza qilinadi va ESLAB QOLINADI;
     //   * `resumed`           -> biz pauza qilgan bo'lsak qaytadi.
-    //
-    // ── TIZIM PiP OYNASI ISTISNO ─────────────────────────────
-    //
-    // PiP'ga o'tganda Android ham `paused` yuboradi — garchi
-    // video EKRANDA KO'RINIB tursa ham. Tekshiruvsiz u shu
-    // yerda to'xtatilib, PiP oynasi qotgan kadr bilan
-    // ochilardi.
-    //
-    // `active` (faqat `inPip` emas) ataylab: `paused` xabari
-    // PiP tasdig'idan OLDIN keladi (pip_service.dart izohi).
-    if (PipService.instance.active &&
-        state != AppLifecycleState.detached) {
-      return;
-    }
-
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.hidden ||
         state == AppLifecycleState.detached) {
@@ -613,12 +595,6 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       // yo'qolmasin.
       unawaited(WatchHistory.instance.flush());
     } else if (state == AppLifecycleState.resumed) {
-      // Suzuvchi oynada ko'rilgan bo'lsa — ijro AYNAN o'sha
-      // joydan davom etadi. Bu `_pausedByLifecycle` dan OLDIN
-      // tekshiriladi: oynaga o'tishda ijro qo'lda to'xtatilgan,
-      // ya'ni bayroq qo'yilmagan bo'ladi.
-      unawaited(_resumeFromFloating());
-
       if (!_pausedByLifecycle) return;
       _pausedByLifecycle = false;
       // Foydalanuvchi shu orada pauzani o'zi bosgan bo'lsa
@@ -626,25 +602,6 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       if (!_intendedPlaying) return;
       _controller?.play();
     }
-  }
-
-  /// Ilovalar ustidagi oyna yopilgan bo'lsa, o'sha nuqtadan
-  /// davom ettiradi.
-  ///
-  /// Nuqta native tomonda BIR MARTALIK saqlanadi: o'qilgach
-  /// tozalanadi, aks holda keyingi qaytishda pleyer eski joyga
-  /// sakrab ketardi.
-  Future<void> _resumeFromFloating() async {
-    final at = await FloatingPlayerService.instance.takeLastPosition();
-    if (at == null || !mounted) return;
-
-    final c = _controller;
-    if (c == null || !c.value.isInitialized) return;
-
-    await c.seekTo(at);
-    if (!mounted) return;
-    await c.play();
-    if (mounted) setState(() => _intendedPlaying = true);
   }
 
   // ── Ma'lumot yuklash ──────────────────────────────────────────
@@ -2808,255 +2765,6 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _scheduleHide();
   }
 
-  /// Ilova ichidagi kichik suzuvchi oynaga o'tadi: pleyer yopiladi,
-  /// video esa hamma sahifalar ustidagi kichik oynada davom etadi.
-  ///
-  /// ── NEGA POP BIR KADR KEYIN ────────────────────────────────
-  ///
-  /// Bu ekranda `PopScope(canPop: !_isFullscreen && !_commentsExpanded)`
-  /// turadi. Fullscreen'da yoki izohlar ochiq turganda `canPop`
-  /// FALSE, ya'ni `Navigator.pop()` BAJARILMAYDI — u ushlab
-  /// qolinadi va `onPopInvokedWithResult` chaqiriladi.
-  ///
-  /// `setState` esa daraxtni DARHOL qayta chizmaydi. Ya'ni
-  /// bayroqlarni o'zgartirib, o'sha zahoti `pop()` chaqirilsa,
-  /// tizim hali ESKI `canPop: false` ni ko'radi: pleyer yopilmay,
-  /// aksincha fullscreen qayta yoqilib ketardi.
-  ///
-  /// Shu sabab avval bayroqlar tozalanadi, keyin KADR OXIRIDA —
-  /// `canPop` allaqachon `true` bo'lganda — chiqiladi.
-  void _activateMiniPlayer() {
-    final ep = _currentEp;
-    final ctrl = _controller;
-    if (ep == null || ctrl == null || !ctrl.value.isInitialized) return;
-    if (_currentSource.isEmpty) return;
-
-    final name = _seasonStr('nomi');
-    final epName = (ep['epizod_name'] ?? '').toString();
-    final title = epName.isEmpty ? name : '$name — $epName';
-
-    ctrl.pause();
-
-    MiniPlayerService.instance.activate(MiniPlayerData(
-      season: widget.season,
-      epizodId: _epIdOf(ep),
-      url: _currentSource,
-      position: ctrl.value.position,
-      title: title,
-    ));
-
-    // Fullscreen'dan chiqish: `_toggleFullscreen()` ATAYLAB
-    // chaqirilmaydi — u `_scheduleHide()` bilan yangi taymer
-    // qo'yadi, holbuki ekran yopilmoqda. Ekran yo'nalishini
-    // `dispose()` ichidagi `_restoreSystemUI()` tiklaydi.
-    setState(() {
-      _isFullscreen = false;
-      _commentsExpanded = false;
-      _isLocked = false;
-      _menuOpen = false;
-      _settingsPanelOpen = false;
-      _episodeListOpen = false;
-      _speedPanelOpen = false;
-      _qualityPanelOpen = false;
-      _sleepPanelOpen = false;
-    });
-
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      Navigator.of(context).pop();
-    });
-  }
-
-  /// Ilovalar ustida suzuvchi oynani ochadi.
-  ///
-  /// ── IKKI YO'L, BIRI ZAXIRA ─────────────────────────────────
-  ///
-  /// Asosiysi — BIZNING oynamiz (`FloatingPlayerService`): unda
-  /// tugmalar bor, suriladi va o'lchami o'zgaradi, ya'ni ilova
-  /// ichidagi kichik pleyer kabi ishlaydi. Lekin u "ilovalar
-  /// ustida ko'rsatish" ruxsatini talab qiladi.
-  ///
-  /// Foydalanuvchi ruxsat bermasa — tizim PiP'iga tushamiz: u
-  /// ruxsatsiz ishlaydi, faqat oynasi tizimniki (tugmasiz,
-  /// surib bo'lmaydi). Ya'ni tugma HAR DOIM biror ish qiladi.
-  Future<void> _enterFloatingPlayer() async {
-    final ctrl = _controller;
-    if (ctrl == null || !ctrl.value.isInitialized) return;
-    if (_currentSource.isEmpty) return;
-
-    final float = FloatingPlayerService.instance;
-
-    if (!await float.hasPermission()) {
-      if (!mounted) return;
-      final go = await _askOverlayPermission();
-      if (!mounted) return;
-      if (go == true) {
-        await float.openPermissionSettings();
-        // Foydalanuvchi Sozlamalarda bo'lgani uchun bu yerda
-        // kutib turmaymiz — qaytib kelib tugmani qayta bosadi.
-        return;
-      }
-      // Rad etdi — zaxira yo'l.
-      await _enterSystemPip();
-      return;
-    }
-
-    final ep = _currentEp;
-    final name = _seasonStr('nomi');
-    final epName = (ep?['epizod_name'] ?? '').toString();
-
-    // Qism o'tkazish va sifat tanlash oyna ICHIDA ishlashi uchun
-    // butun ro'yxat oldindan tayyorlanadi: oyna ochilgach ilova
-    // fonga ketadi va undan qo'shimcha ma'lumot so'rab bo'lmaydi.
-    final playlist = await _floatingPlaylist();
-    if (!mounted) return;
-
-    final epId = ep == null ? 0 : _epIdOf(ep);
-    var index = playlist.indexWhere((e) => e['id'] == epId);
-    if (index < 0) index = 0;
-
-    // Hozir qaysi sifat ijro etilyapti — oyna o'shandan boshlaydi.
-    final quality =
-        ep == null ? '' : _qualityOfUrl(ep, _currentUrl);
-
-    // Ikkita pleyer bir vaqtda ovoz chiqarmasin: ilovaniki
-    // to'xtatiladi, ijroni endi native oyna davom ettiradi.
-    await ctrl.pause();
-    if (mounted) setState(() => _intendedPlaying = false);
-
-    final ok = await float.start(
-      url: _currentSource,
-      position: ctrl.value.position,
-      title: epName.isEmpty ? name : '$name — $epName',
-      playlist: playlist,
-      index: index,
-      quality: quality,
-    );
-
-    if (!ok && mounted) {
-      _showNotice('Suzuvchi oyna ochilmadi');
-    }
-  }
-
-  /// Xom manzilni IJRO ETSA BO'LADIGAN manzilga aylantiradi.
-  ///
-  /// Fayl to'liq yuklangan bo'lsa — mahalliy proksi (tarmoqqa
-  /// umuman chiqmaydi), aks holda worker oqimi. `_playEpisode`
-  /// dagi tanlov bilan bir xil; farqi shundaki, bu yerda BOSHQA
-  /// qismlar uchun ham hisoblanadi (suzuvchi oynadagi keyingi/
-  /// oldingi qism tugmalari uchun).
-  ///
-  /// Mahalliy server javob bermasa worker manzili qaytadi —
-  /// oyna baribir ishlaydi.
-  Future<String> _playableUrl(String rawUrl) async {
-    if (rawUrl.isEmpty) return '';
-    if (_isFullyDownloaded(rawUrl)) {
-      try {
-        final u = await VideoCacheServer.instance.proxyUri(rawUrl);
-        return u.toString();
-      } catch (_) {}
-    }
-    return _workerPlayUrl(rawUrl);
-  }
-
-  /// Suzuvchi oyna uchun qismlar ro'yxati.
-  ///
-  /// Har bir qism uchun MAVJUD sifatlar va ularning ijro
-  /// manzillari yig'iladi — oyna ichida sifat almashtirish va
-  /// qism o'tkazish uchun.
-  ///
-  /// Ro'yxat `_orderedEps` tartibida (yangisi yuqorida), shu
-  /// sabab oynadagi "keyingi qism" indeksni KAMAYTIRADI —
-  /// buni native tomon biladi.
-  Future<List<Map<String, dynamic>>> _floatingPlaylist() async {
-    final out = <Map<String, dynamic>>[];
-    for (final ep in _orderedEps) {
-      final quals = <Map<String, String>>[];
-      for (final q in ['1080p', '720p', '480p', '360p']) {
-        final raw = (ep['url_$q'] ?? '').toString();
-        if (raw.isEmpty) continue;
-        // Oflayn: faqat to'liq yuklangan sifatlar ishlaydi.
-        if (_offline && !_isComplete(raw)) continue;
-        final playable = await _playableUrl(raw);
-        if (playable.isEmpty) continue;
-        quals.add({'label': q, 'url': playable});
-      }
-      if (quals.isEmpty) continue;
-
-      final num = _epNumOf(ep);
-      final name = (ep['epizod_name'] ?? '').toString();
-      out.add({
-        'id': _epIdOf(ep),
-        'title': name.isEmpty ? '$num-qism' : name,
-        'qualities': quals,
-      });
-    }
-    return out;
-  }
-
-  /// Ruxsat nima uchun kerakligini tushuntiradi.
-  ///
-  /// `true` — Sozlamalarni ochamiz, `false`/`null` — tizim
-  /// PiP'i bilan davom etamiz.
-  Future<bool?> _askOverlayPermission() {
-    return showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF15151F),
-        shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(20)),
-        title: const Text(
-          'Ruxsat kerak',
-          style: TextStyle(
-              color: Colors.white,
-              fontSize: 17,
-              fontWeight: FontWeight.w700),
-        ),
-        content: const Text(
-          'Pleyer boshqa ilovalar ustida ko\'rinishi uchun '
-          '"Ilovalar ustida ko\'rsatish" ruxsati kerak.\n\n'
-          'Ruxsat bermasangiz ham suzuvchi oyna ishlaydi, lekin '
-          'uni surib bo\'lmaydi va tugmalari bo\'lmaydi.',
-          style: TextStyle(color: Colors.white70, fontSize: 14),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('Ruxsatsiz davom etish',
-                style: TextStyle(color: Colors.white54)),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: Text('Sozlamalarni ochish',
-                style: TextStyle(
-                    color: AppColors.accent,
-                    fontWeight: FontWeight.w700)),
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// Tizim PiP'iga (ilovalar ustida suzuvchi oyna) o'tadi.
-  ///
-  /// Bu yerda pleyer YOPILMAYDI: PiP'da ekranning O'ZI kichik
-  /// oynaga aylanadi, ya'ni ijro uzilmaydi va kontroller
-  /// o'zgarmaydi. Qaytganda hammasi joyida bo'ladi.
-  Future<void> _enterSystemPip() async {
-    final ctrl = _controller;
-    if (ctrl == null || !ctrl.value.isInitialized) return;
-
-    final sz = ctrl.value.size;
-    final ok = await PipService.instance.enter(
-      width: sz.width.toInt(),
-      height: sz.height.toInt(),
-    );
-
-    if (!ok && mounted) {
-      _showNotice('Bu qurilma suzuvchi oynani qo\'llamaydi');
-    }
-  }
-
   void _setSleepTimer(int minutes) {
     _sleepTickTimer?.cancel();
 
@@ -3559,55 +3267,23 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
           return const _SubRequiredScreen();
         }
 
-        // ── TIZIM PiP OYNASI ──────────────────────────────────
-        //
-        // PiP'da ekran bir necha santimetr bo'lib qoladi. Unda
-        // tugmalar, sarlavha, tablar va izohlar ortiqcha: ular
-        // butun oynani egallab, rasm ko'rinmay qolardi. Shu
-        // sabab o'sha holatda FAQAT video chiziladi.
-        //
-        // Boshqaruvni tizimning o'zi beradi (oyna ustiga bosilsa
-        // to'liq ekranga qaytarish tugmasi chiqadi).
-        return AnimatedBuilder(
-          animation: PipService.instance,
-          builder: (context, __) {
-            if (PipService.instance.inPip) return _buildPipView();
-
-            return PopScope(
-              // Izohlar butun ekranni egallagan bo'lsa "orqaga"
-              // AVVAL uni yig'adi — ekrandan chiqib ketmaydi.
-              canPop: !_isFullscreen && !_commentsExpanded,
-              onPopInvokedWithResult: (didPop, _) {
-                if (didPop) return;
-                if (_isFullscreen) {
-                  _toggleFullscreen();
-                } else if (_commentsExpanded) {
-                  _setCommentsExpanded(false);
-                }
-              },
-              child: _isFullscreen
-                  ? _buildFullscreenPlayer()
-                  : _buildNormalScreen(),
-            );
+        return PopScope(
+          // Izohlar butun ekranni egallagan bo'lsa "orqaga"
+          // AVVAL uni yig'adi — ekrandan chiqib ketmaydi.
+          canPop: !_isFullscreen && !_commentsExpanded,
+          onPopInvokedWithResult: (didPop, _) {
+            if (didPop) return;
+            if (_isFullscreen) {
+              _toggleFullscreen();
+            } else if (_commentsExpanded) {
+              _setCommentsExpanded(false);
+            }
           },
+          child: _isFullscreen
+              ? _buildFullscreenPlayer()
+              : _buildNormalScreen(),
         );
       },
-    );
-  }
-
-  /// Tizim PiP oynasidagi ko'rinish — faqat video, boshqaruvsiz.
-  Widget _buildPipView() {
-    final ctrl = _controller;
-    return ColoredBox(
-      color: Colors.black,
-      child: (ctrl != null && ctrl.value.isInitialized)
-          ? Center(
-              child: AspectRatio(
-                aspectRatio: ctrl.value.aspectRatio,
-                child: VideoPlayer(ctrl),
-              ),
-            )
-          : const SizedBox.expand(),
     );
   }
 
@@ -4668,36 +4344,6 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                           ],
                         ),
                       ),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 6),
-                        child: Divider(
-                          height: 1,
-                          color: Colors.white.withValues(alpha: 0.12),
-                        ),
-                      ),
-                      _MenuActionRow(
-                        icon: Icons.branding_watermark_rounded,
-                        label: 'Ilova ichida suzuvchi pleyer',
-                        onTap: () {
-                          _closeMenu();
-                          _activateMiniPlayer();
-                        },
-                      ),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 6),
-                        child: Divider(
-                          height: 1,
-                          color: Colors.white.withValues(alpha: 0.12),
-                        ),
-                      ),
-                      _MenuActionRow(
-                        icon: Icons.picture_in_picture_alt_rounded,
-                        label: 'Ilovalar ustida suzuvchi pleyer',
-                        onTap: () {
-                          _closeMenu();
-                          _enterFloatingPlayer();
-                        },
-                      ),
                     ],
                   ),
                   ),
@@ -4899,36 +4545,6 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                             ),
                           ],
                         ),
-                      ),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 6),
-                        child: Divider(
-                          height: 1,
-                          color: Colors.white.withValues(alpha: 0.12),
-                        ),
-                      ),
-                      _MenuActionRow(
-                        icon: Icons.branding_watermark_rounded,
-                        label: 'Ilova ichida suzuvchi pleyer',
-                        onTap: () {
-                          _closeSettingsPanel();
-                          _activateMiniPlayer();
-                        },
-                      ),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 6),
-                        child: Divider(
-                          height: 1,
-                          color: Colors.white.withValues(alpha: 0.12),
-                        ),
-                      ),
-                      _MenuActionRow(
-                        icon: Icons.picture_in_picture_alt_rounded,
-                        label: 'Ilovalar ustida suzuvchi pleyer',
-                        onTap: () {
-                          _closeSettingsPanel();
-                          _enterFloatingPlayer();
-                        },
                       ),
                     ],
                   ),
@@ -7548,53 +7164,6 @@ class _SkipIntroButton extends StatelessWidget {
 // Ko'rinishi pastki paneldagi `HQ` tugmasidan olingan: fon oq
 // 15%, chekkasi `white30`, burchagi 7 — uchovi birga
 // o'zgartiriladi.
-/// Menyudagi ODDIY qator: belgi + yozuv, bosilsa bir ish bajaradi.
-///
-/// `_MenuToggleRow` dan farqi — bu yoqib/o'chiriladigan sozlama
-/// emas, bir martalik amal (masalan suzuvchi oynaga o'tish).
-/// Uch nuqta menyusi va fullscreen sozlamalarida BIR XIL
-/// ko'rinishi uchun alohida ajratilgan.
-class _MenuActionRow extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final VoidCallback onTap;
-
-  const _MenuActionRow({
-    required this.icon,
-    required this.label,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: onTap,
-      child: SizedBox(
-        height: 38,
-        child: Row(
-          children: [
-            Icon(icon, size: 18, color: Colors.white70),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Text(
-                label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
 class _MenuToggleRow extends StatelessWidget {
   final String label;
   final IconData icon;

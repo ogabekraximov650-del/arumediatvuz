@@ -32,17 +32,11 @@
 
 package __PKG__
 
-import android.app.PictureInPictureParams
-import android.content.Intent
 import android.content.pm.PackageManager
-import android.content.res.Configuration
-import android.net.Uri
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
 import android.os.Build
-import android.provider.Settings
 import android.util.Base64
-import android.util.Rational
 import android.view.WindowManager
 import java.security.MessageDigest
 import io.flutter.embedding.android.FlutterActivity
@@ -51,11 +45,6 @@ import io.flutter.plugin.common.MethodChannel
 import java.io.ByteArrayOutputStream
 
 class MainActivity : FlutterActivity() {
-    /// PiP holatini Flutter tomonga xabar qilish uchun saqlanadi.
-    /// `configureFlutterEngine` da to'ldiriladi, tizim PiP'ga
-    /// kirganda/chiqqanda ishlatiladi.
-    private var pipChannel: MethodChannel? = null
-
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "aru/thumb")
@@ -152,157 +141,6 @@ class MainActivity : FlutterActivity() {
                 }
             }
 
-        // ── ILOVALAR USTIDA SUZUVCHI PLEYER (PiP) ─────────────
-        //
-        // TALAB (foydalanuvchi): pleyer boshqa ilovalar ustida
-        // ham ko'rinib tursin.
-        //
-        // ── NEGA TIZIM PiP'i, OVERLAY EMAS ────────────────────
-        //
-        // Boshqa ilovalar ustiga chizishning ikki yo'li bor:
-        //
-        //   1. SYSTEM_ALERT_WINDOW — ilova o'z oynasini hamma
-        //      narsa ustiga chizadi. Tugmalar, o'lcham va surish
-        //      to'liq bizning ixtiyorimizda BO'LARDI, lekin:
-        //      foydalanuvchidan alohida ruxsat so'raladi
-        //      (Sozlamalar ichida qo'lda yoqiladi), doimiy
-        //      bildirishnoma bilan foreground service kerak,
-        //      va Play Store bunga shubha bilan qaraydi.
-        //
-        //   2. Tizim PiP'i — Android'ning O'ZI beradigan kichik
-        //      oyna. Hech qanday ruxsat so'ralmaydi, tizim o'zi
-        //      boshqaradi: foydalanuvchi uni surib qo'yadi,
-        //      ikki barobar bosib kattalashtiradi.
-        //
-        // Ikkinchisi tanlandi: ruxsatsiz ishlaydi va tizimning
-        // odatiy xulqiga mos. Evaziga oyna kichik va tugmalar
-        // cheklangan — bu PiP'ning tabiati, kamchilik emas.
-        //
-        // ── MANIFEST TALABI ───────────────────────────────────
-        //
-        // Activity'da `supportsPictureInPicture="true"` va
-        // `configChanges` da `screenLayout|smallestScreenSize`
-        // bo'lishi SHART, aks holda PiP'ga o'tganda Activity
-        // qayta yaratiladi va ijro uziladi. Buni CI qo'shadi
-        // (.github/workflows/build-flutter-apk.yml).
-        pipChannel = MethodChannel(
-            flutterEngine.dartExecutor.binaryMessenger, "aru/pip"
-        )
-        pipChannel?.setMethodCallHandler { call, result ->
-            when (call.method) {
-                // Qurilma PiP'ni umuman qo'llab-quvvatlaydimi.
-                // Arzon va Android 8 dan eski qurilmalarda yo'q —
-                // ilova tugmani o'shanda ko'rsatmasligi uchun.
-                "supported" -> result.success(isPipSupported())
-
-                "enter" -> {
-                    if (!isPipSupported()) {
-                        result.success(false)
-                    } else {
-                        // Video nisbati beriladi — aks holda oyna
-                        // kvadratga yaqin chiqib, rasm yon-tomondan
-                        // qirqiladi. Nisbat kelmasa 16:9.
-                        val w = call.argument<Int>("width") ?: 16
-                        val h = call.argument<Int>("height") ?: 9
-                        result.success(enterPip(w, h))
-                    }
-                }
-
-                else -> result.notImplemented()
-            }
-        }
-
-        // ── ILOVALAR USTIDA SUZUVCHI PLEYER (to'liq oyna) ──────
-        //
-        // Yuqoridagi PiP — tizimning oynasi: tugmalarsiz va
-        // surib bo'lmaydigan. Bu esa BIZNING oynamiz:
-        // `FloatingPlayerService` uni `WindowManager` ga qo'yadi,
-        // ya'ni ilova ichidagi kichik pleyer kabi to'liq
-        // boshqariladi. Batafsil — o'sha fayl boshidagi izohda.
-        //
-        // Evaziga "ilovalar ustida ko'rsatish" ruxsati kerak. Uni
-        // oddiy dialog bilan so'rab bo'lmaydi — foydalanuvchi
-        // Sozlamalarda qo'lda yoqadi, shu sabab bu yerda o'sha
-        // sahifani ochadigan alohida metod bor.
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "aru/float")
-            .setMethodCallHandler { call, result ->
-                when (call.method) {
-                    "canDraw" -> result.success(
-                        FloatingPlayerService.canDraw(this)
-                    )
-
-                    // Sozlamalardagi "Ilovalar ustida ko'rsatish"
-                    // sahifasini ochadi. Javob — sahifa ochildimi;
-                    // foydalanuvchi ruxsat berdimi degani EMAS, uni
-                    // qaytib kelgach `canDraw` bilan tekshiriladi.
-                    "requestPermission" -> result.success(openOverlaySettings())
-
-                    "start" -> {
-                        if (!FloatingPlayerService.canDraw(this)) {
-                            result.success(false)
-                        } else {
-                            val i = Intent(this, FloatingPlayerService::class.java)
-                                .setAction(FloatingPlayerService.ACTION_START)
-                                .putExtra(
-                                    FloatingPlayerService.EXTRA_URL,
-                                    call.argument<String>("url") ?: ""
-                                )
-                                .putExtra(
-                                    FloatingPlayerService.EXTRA_POSITION_MS,
-                                    (call.argument<Number>("positionMs")
-                                        ?: 0).toLong()
-                                )
-                                .putExtra(
-                                    FloatingPlayerService.EXTRA_TITLE,
-                                    call.argument<String>("title") ?: ""
-                                )
-                                .putExtra(
-                                    FloatingPlayerService.EXTRA_PLAYLIST,
-                                    call.argument<String>("playlist") ?: ""
-                                )
-                                .putExtra(
-                                    FloatingPlayerService.EXTRA_INDEX,
-                                    call.argument<Int>("index") ?: 0
-                                )
-                                .putExtra(
-                                    FloatingPlayerService.EXTRA_QUALITY,
-                                    call.argument<String>("quality") ?: ""
-                                )
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                                startForegroundService(i)
-                            } else {
-                                startService(i)
-                            }
-                            // Oyna ochilgach ilovani orqaga olamiz —
-                            // aks holda u o'z ustida turib qolardi.
-                            moveTaskToBack(true)
-                            result.success(true)
-                        }
-                    }
-
-                    "stop" -> {
-                        startService(
-                            Intent(this, FloatingPlayerService::class.java)
-                                .setAction(FloatingPlayerService.ACTION_STOP)
-                        )
-                        result.success(true)
-                    }
-
-                    "isRunning" -> result.success(FloatingPlayerService.running)
-
-                    // Oyna yopilgandagi ijro nuqtasi (ms). `-1` —
-                    // yo'q. O'qilgach tozalanadi: bir xil qiymat
-                    // ikkinchi marta ishlatilib qolmasin.
-                    "takeLastPosition" -> {
-                        val p = FloatingPlayerService.lastPositionMs
-                        FloatingPlayerService.lastPositionMs = -1L
-                        result.success(p)
-                    }
-
-                    else -> result.notImplemented()
-                }
-            }
-
         // ── TRAFIK KANALI OLIB TASHLANGAN ──────────────────────
         //
         // Bu yerda ilgari `TrafficStats.getUidRxBytes` bor edi.
@@ -321,94 +159,6 @@ class MainActivity : FlutterActivity() {
         // `aru/storage` kanali ham bor edi; profil sahifasidan
         // "telefon xotirasi N% band" qatori olib tashlangach
         // (foydalanuvchi talabi) u ham keraksiz bo'lib qoldi.
-    }
-
-    /// "Ilovalar ustida ko'rsatish" sozlamasini ochadi.
-    ///
-    /// Bu ruxsat ODDIY ruxsat emas: `requestPermissions` bilan
-    /// so'rab bo'lmaydi, foydalanuvchi uni Sozlamalarda qo'lda
-    /// yoqishi kerak. Shu sabab bu yerda faqat o'sha sahifa
-    /// ochiladi.
-    private fun openOverlaySettings(): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return false
-        return try {
-            startActivity(
-                Intent(
-                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    Uri.parse("package:$packageName")
-                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            )
-            true
-        } catch (e: Throwable) {
-            // Ba'zi qobiqlarda bu sahifa yo'q — o'shanda ilovaning
-            // umumiy sozlamalari ochiladi.
-            try {
-                startActivity(
-                    Intent(
-                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                        Uri.parse("package:$packageName")
-                    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                )
-                true
-            } catch (e2: Throwable) {
-                false
-            }
-        }
-    }
-
-    /// Qurilma PiP'ni qo'llab-quvvatlaydimi.
-    ///
-    /// Android 8.0 (API 26) dan past — umuman yo'q. Undan
-    /// yuqorida ham tizim xususiyati bo'lishi SHART emas:
-    /// ba'zi arzon va Go-nashr qurilmalarda u o'chirilgan.
-    private fun isPipSupported(): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return false
-        return packageManager.hasSystemFeature(
-            PackageManager.FEATURE_PICTURE_IN_PICTURE
-        )
-    }
-
-    /// PiP rejimiga o'tadi. Muvaffaqiyatli bo'lsa `true`.
-    ///
-    /// Nisbat Android tomonidan CHEKLANGAN: taxminan 1:2.39 dan
-    /// 2.39:1 gacha. Chetdan chiqqan qiymat bilan tizim istisno
-    /// otadi — shu sabab qiymat shu oraliqqa siqiladi.
-    private fun enterPip(width: Int, height: Int): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return false
-        return try {
-            val w = if (width > 0) width else 16
-            val h = if (height > 0) height else 9
-
-            // Nisbatni ruxsat etilgan oraliqqa siqish. 100 ga
-            // ko'paytirib butun son bilan ishlanadi — Rational
-            // kasr qabul qilmaydi.
-            val ratio = w.toDouble() / h.toDouble()
-            val safe = ratio.coerceIn(0.42, 2.39)
-            val num = (safe * 1000).toInt()
-
-            val params = PictureInPictureParams.Builder()
-                .setAspectRatio(Rational(num, 1000))
-                .build()
-            enterPictureInPictureMode(params)
-        } catch (e: Throwable) {
-            false
-        }
-    }
-
-    /// Tizim PiP'ga kirganda/chiqqanda Flutter tomonga xabar.
-    ///
-    /// Ilova buni bilishi KERAK: PiP oynasida boshqaruv tugmalari
-    /// va sarlavha ortiqcha — ular kichik oynani to'ldirib
-    /// yuboradi. Flutter tomoni shu xabarni olib ularni yashiradi.
-    override fun onPictureInPictureModeChanged(
-        isInPictureInPictureMode: Boolean,
-        newConfig: Configuration
-    ) {
-        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
-        pipChannel?.invokeMethod(
-            "changed",
-            mapOf("inPip" to isInPictureInPictureMode)
-        )
     }
 
     /// APK imzo sertifikatining SHA-256 hash'i (base64).
