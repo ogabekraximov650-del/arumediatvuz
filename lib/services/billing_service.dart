@@ -43,6 +43,20 @@ class SubPlan {
   final int days;
   final int price;
   const SubPlan(this.days, this.price);
+
+  /// Necha oylik (30 kun = 1 oy). 365 kun — 12 oy deb olinadi.
+  int get months => days >= 365 ? 12 : (days / 30).round();
+}
+
+/// Tarif nomi: "1 oylik", "3 oylik", ...
+///
+/// O'ZGARDI (foydalanuvchi talabi): tariflar endi OYLIK
+/// (kunlik mayda tariflar olib tashlandi). Kutilmagan kunlik
+/// qiymat kelsa — eski ko'rinishga qaytadi.
+String planLabel(int days) {
+  if (days >= 365) return '12 oylik';
+  if (days > 0 && days % 30 == 0) return '${days ~/ 30} oylik';
+  return '$days kunlik';
 }
 
 /// Faol to'lov havolasi.

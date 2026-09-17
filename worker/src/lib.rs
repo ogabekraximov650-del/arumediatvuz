@@ -5035,16 +5035,34 @@ const PAY_MAX: i64 = 10_000_000;
 ///
 /// Narx FAQAT shu yerda — ilova hech qanday summa yubormaydi,
 /// u faqat tarifning kunini aytadi.
-const PLANS: [(i64, i64); 5] = [
-    (1, 1_000),
-    (5, 4_000),
-    (10, 7_000),
-    (20, 12_000),
+///
+/// O'ZGARDI (foydalanuvchi talabi): kunlik mayda tariflar
+/// (1/5/10/20 kun) OLIB TASHLANDI, o'rniga oylik tariflar.
+/// Chegirma 1 oylik narxga nisbatan hisoblanadi: 3 oy ~13%,
+/// 6 oy ~27%, 12 oy ~33%.
+const PLANS: [(i64, i64); 4] = [
     (30, 15_000),
+    (90, 39_000),
+    (180, 66_000),
+    (365, 120_000),
 ];
 
 fn plan_price(days: i64) -> Option<i64> {
     PLANS.iter().find(|(d, _)| *d == days).map(|(_, p)| *p)
+}
+
+/// Tarif nomi: "1 oylik obuna", "3 oylik obuna", ...
+///
+/// Ilovadagi `planLabel()` bilan bir xil qoida — jurnal yozuvlari
+/// ekrandagi nom bilan mos tushsin.
+fn plan_label(days: i64) -> String {
+    if days >= 365 {
+        return "12 oylik obuna".to_string();
+    }
+    if days > 0 && days % 30 == 0 {
+        return format!("{} oylik obuna", days / 30);
+    }
+    format!("{days} kunlik obuna")
 }
 
 /// Tezchek xatosini odam o'qiydigan matnga aylantiradi.
@@ -5308,7 +5326,8 @@ async fn billing_subscribe(mut req: Request, env: &Env) -> Result<Response> {
          vec![
             TursoArg::text(&format!("s{me}-{now}")), TursoArg::int(me),
             TursoArg::int(-price), TursoArg::int(days),
-            TursoArg::text(&format!("{days} kunlik obuna")),
+            // Yozuv nomi ham oylik ko'rinishda (30 kun = 1 oy).
+            TursoArg::text(&plan_label(days)),
             TursoArg::int(now),
          ]),
     ]).await?;

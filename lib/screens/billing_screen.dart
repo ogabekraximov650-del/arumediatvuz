@@ -308,7 +308,11 @@ class _SubscribePage extends StatelessWidget {
               const SizedBox(height: 12),
             ],
             for (final p in b.plans) ...[
-              _PlanTile(plan: p, locked: locked),
+              _PlanTile(
+                plan: p,
+                locked: locked,
+                discountPercent: _discountOf(p, b.plans),
+              ),
               const SizedBox(height: 10),
             ],
             const SizedBox(height: 4),
@@ -327,6 +331,24 @@ class _SubscribePage extends StatelessWidget {
       },
     );
   }
+}
+
+/// Tarifning eng qisqasiga (1 oylik) nisbatan tejash foizi.
+///
+/// Hisob kun narxi bo'yicha: uzoq tarifning bir kuni qanchaga
+/// tushishini 1 oylik tarifning bir kuni bilan solishtiradi.
+/// Ro'yxat bo'sh yoki baza topilmasa — 0.
+int _discountOf(SubPlan plan, List<SubPlan> all) {
+  if (all.isEmpty || plan.days <= 0) return 0;
+  var base = all.first;
+  for (final p in all) {
+    if (p.days > 0 && p.days < base.days) base = p;
+  }
+  if (base.days <= 0 || base.price <= 0 || plan.days <= base.days) return 0;
+  final basePerDay = base.price / base.days;
+  final perDay = plan.price / plan.days;
+  final saved = ((1 - perDay / basePerDay) * 100).round();
+  return saved < 0 ? 0 : saved;
 }
 
 /// "Sizda faol obuna bor" izohi.
@@ -402,7 +424,15 @@ class _PlanTile extends StatefulWidget {
 
   /// Obuna hali faol — tugma bosilmaydi.
   final bool locked;
-  const _PlanTile({required this.plan, this.locked = false});
+
+  /// Eng qisqa (1 oylik) tarifga nisbatan tejash foizi.
+  final int discountPercent;
+
+  const _PlanTile({
+    required this.plan,
+    this.locked = false,
+    this.discountPercent = 0,
+  });
 
   @override
   State<_PlanTile> createState() => _PlanTileState();
@@ -428,7 +458,7 @@ class _PlanTileState extends State<_PlanTile> {
         title: const Text('Obunani tasdiqlang',
             style: TextStyle(color: Colors.white, fontSize: 17)),
         content: Text(
-          '${widget.plan.days} kunlik obuna — '
+          '${planLabel(widget.plan.days)} obuna — '
           '${formatSum(widget.plan.price)}.\n'
           'Summa balansingizdan yechiladi.',
           style: const TextStyle(color: Colors.white70, height: 1.45),
@@ -479,13 +509,42 @@ class _PlanTileState extends State<_PlanTile> {
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text(
-                  '${widget.plan.days} kunlik',
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w700,
-                  ),
+                Row(
+                  children: [
+                    Text(
+                      '+ ${planLabel(widget.plan.days)}',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    // ── CHEGIRMA BELGISI ────────────────────
+                    //
+                    // 1 oylik narxga nisbatan hisoblanadi
+                    // (3 oy ~13%, 6 oy ~27%, 12 oy ~33%). Faqat
+                    // sezilarli (>=5%) bo'lsa ko'rsatiladi.
+                    if (widget.discountPercent >= 5) ...[
+                      const SizedBox(width: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 7, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF7BD88F)
+                              .withValues(alpha: 0.18),
+                          borderRadius: BorderRadius.circular(7),
+                        ),
+                        child: Text(
+                          '${widget.discountPercent}% chegirma',
+                          style: const TextStyle(
+                            color: Color(0xFF7BD88F),
+                            fontSize: 10.5,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
                 ),
                 const SizedBox(height: 3),
                 Text(
@@ -954,7 +1013,7 @@ class _HistoryPage extends StatelessWidget {
                           Text(
                             up
                                 ? 'Balans to\'ldirildi'
-                                : '${e.days} kunlik obuna',
+                                : '${planLabel(e.days)} obuna',
                             style: const TextStyle(
                               color: Colors.white,
                               fontSize: 13.5,
