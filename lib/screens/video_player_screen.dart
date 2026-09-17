@@ -2350,6 +2350,28 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   /// Mutlaq sek (progress chizig'i) — eng qisqa tanaffus.
   void _scheduleSeekTo(Duration target) => _requestSeek(target);
 
+  /// Maqsad pleyerning ALLAQACHON YIG'GAN buferi ichidami.
+  ///
+  /// TOPILGAN MUAMMO (foydalanuvchi): "sek qilganda bufer
+  /// tozalanib ketyapti va kutish vaqti ko'payyapti — hattoki
+  /// yig'ilgan buferning yarmigacha sek qilsam ham".
+  ///
+  /// Sabablardan biri BIZNING tomonda edi: har bir sek, hatto
+  /// bufer ICHIDAGISI ham, avval 200 ms "tinchlik" kutardi, keyin
+  /// `_ensureWindowFor` orqali kesh oynasi holatini so'rardi.
+  /// Bufer ichidagi nuqta uchun bularning IKKALASI ham keraksiz:
+  /// ma'lumot allaqachon pleyerning o'zida.
+  ///
+  /// Endi bunday sek DARHOL va to'g'ridan-to'g'ri bajariladi.
+  bool _targetInBuffer(VideoPlayerController c, Duration t) {
+    final v = c.value;
+    if (!v.isInitialized) return false;
+    for (final r in v.buffered) {
+      if (t >= r.start && t <= r.end) return true;
+    }
+    return false;
+  }
+
   void _requestSeek(Duration target, {Duration? idle}) {
     final ctrl = _controller;
     if (ctrl == null || !ctrl.value.isInitialized) return;
@@ -2383,7 +2405,10 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
 
     // Har bir yangi sek kutish taymerini QAYTADAN boshlaydi.
     _seekIdleTimer?.cancel();
-    _seekIdleTimer = Timer(idle ?? _seekIdle, _commitPendingSeek);
+    // Bufer ichidagi nuqtaga sek — yig'iladigan narsa yo'q, tanaffus
+    // ham kerak emas (yuqoridagi `_targetInBuffer` izohiga qarang).
+    final wait = _targetInBuffer(ctrl, t) ? Duration.zero : (idle ?? _seekIdle);
+    _seekIdleTimer = Timer(wait, _commitPendingSeek);
   }
 
   /// Qisqa tinchlikdan keyin: BITTA sek va ijroni davom ettirish.
@@ -2402,7 +2427,11 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // keyin sek bajariladi. Pleyerga bu paytda umuman tegilmaydi,
     // ya'ni yig'ilgan bufer joyida qoladi.
     final wasPlaying = _intendedPlaying;
-    if (!await _ensureWindowFor(target, c.value.duration)) {
+    // Maqsad pleyerning o'z buferida bo'lsa — kesh oynasini umuman
+    // tekshirmaymiz: ma'lumot allaqachon qo'lda, kutishning ma'nosi
+    // yo'q (va "tayyorlanmoqda" halqasi ham chiqmaydi).
+    final inBuffer = _targetInBuffer(c, target);
+    if (!inBuffer && !await _ensureWindowFor(target, c.value.duration)) {
       // Tayyorlab bo'lmadi (masalan internet uzildi). Sekni BEKOR
       // qilamiz — pleyerni buzib, buferni yo'qotishdan ko'ra
       // foydalanuvchini o'z joyida qoldirgan yaxshiroq.
