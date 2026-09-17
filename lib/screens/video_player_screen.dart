@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
-import 'dart:ui' as ui;
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
@@ -3544,7 +3543,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     showDialog(
       context: context,
       builder: (ctx) => Dialog(
-        backgroundColor: const Color(0xFF15151F),
+        backgroundColor: AppColors.card,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
         insetPadding: const EdgeInsets.symmetric(horizontal: 24),
         child: Padding(
@@ -5901,7 +5900,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF15151F),
+        backgroundColor: AppColors.card,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
         title: const Text('Tozalash',
             style: TextStyle(
@@ -6171,7 +6170,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                   icon: info != null && info.myStars > 0
                       ? Icons.star_rounded
                       : Icons.star_border_rounded,
-                  color: const Color(0xFFFFC83D),
+                  color: AppColors.gold,
                   label: info != null && info.myStars > 0
                       ? 'Bahoyingiz: ${info.myStars}'
                       : 'Baholash',
@@ -7632,7 +7631,7 @@ class _RatingSheetState extends State<_RatingSheet> {
                               : Icons.star_border_rounded,
                           size: 28,
                           color: star <= _hover
-                              ? const Color(0xFFFFC83D)
+                              ? AppColors.gold
                               : Colors.white24,
                         ),
                       ),
@@ -7697,11 +7696,28 @@ class _RatingSheetState extends State<_RatingSheet> {
 /// kadr ustida yozuv ham, chegara ham yo'qolib ketardi.
 ///
 /// Endi uch qatlam:
-///   1. `BackdropFilter` — ORQADAGI kadr xiralashtiriladi, ya'ni
-///      yozuv har qanday kadr ustida o'qiladi;
-///   2. quyuq fon (oq emas, QORA asosli) — kontrast keskin
-///      oshadi;
-///   3. aniq chegara va soya — oynaning qirrasi ko'rinib turadi.
+///   1. quyuq, DEYARLI TO'LA fon — yozuv har qanday kadr ustida
+///      o'qiladi;
+///   2. aniq chegara — oynaning qirrasi ko'rinib turadi.
+///
+/// ── `BackdropFilter` NEGA OLIB TASHLANDI ────────────────────
+///
+/// TALAB (foydalanuvchi): "uini tez va qotmasdan ishlaydigan
+/// qil".
+///
+/// Ilgari bu yerda `BackdropFilter(sigma: 18)` turardi — orqadagi
+/// kadrni xiralashtirardi. Bu ilovadagi ENG QIMMAT chizma edi:
+///
+///   * u `saveLayer` ochadi, ya'ni GPU oynaning ostidagi butun
+///     sohani alohida buferga ko'chiradi va blur qiladi;
+///   * ostida esa JONLI VIDEO turadi — demak bu ish soniyasiga
+///     24-60 marta, HAR KADRDA qaytarilardi;
+///   * oyna esa allaqachon 92% quyuq edi, ya'ni xiralashtirilgan
+///     kadr deyarli KO'RINMASDI ham.
+///
+/// Endi fon to'la quyuq. Ko'rinishi deyarli o'sha (rasmdagi
+/// uslubda ham oynalar tekis to'q rangli), pleyer esa blursiz
+/// ishlaydi.
 class _PlayerPanel extends StatelessWidget {
   final Widget child;
   final EdgeInsets padding;
@@ -7716,32 +7732,16 @@ class _PlayerPanel extends StatelessWidget {
     // (0.28) edi: orqadagi video ichidan ko'rinib turib, yozuvni
     // o'qish qiyinlashardi va oyna "iflos" ko'rinardi.
     //
-    // Endi fon deyarli to'q, chekka esa zo'rg'a sezilarli — oyna
+    // Endi fon TO'LA to'q, chekka esa zo'rg'a sezilarli — oyna
     // videodan aniq ajralib turadi va yozuv tiniq o'qiladi.
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(12),
-      child: BackdropFilter(
-        filter: ui.ImageFilter.blur(sigmaX: 18, sigmaY: 18),
-        child: Container(
-          padding: padding,
-          decoration: BoxDecoration(
-            color: const Color(0xFF15151F).withValues(alpha: 0.92),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(
-              color: Colors.white.withValues(alpha: 0.10),
-              width: 1,
-            ),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.55),
-                blurRadius: 20,
-                offset: const Offset(0, 6),
-              ),
-            ],
-          ),
-          child: child,
-        ),
+    return Container(
+      padding: padding,
+      decoration: BoxDecoration(
+        color: AppColors.card,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.borderBright, width: 1),
       ),
+      child: child,
     );
   }
 }
@@ -7995,21 +7995,21 @@ class _SubRequiredScreen extends StatelessWidget {
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
                       gradient: const LinearGradient(
-                        colors: [Color(0xFFFFC93C), Color(0xFFFF8A3D)],
+                        colors: [AppColors.gold, AppColors.accent2],
                         begin: Alignment.topLeft,
                         end: Alignment.bottomRight,
                       ),
                       boxShadow: [
                         BoxShadow(
                           color:
-                              const Color(0xFFFFC93C).withValues(alpha: 0.30),
+                              AppColors.gold.withValues(alpha: 0.30),
                           blurRadius: 26,
                           offset: const Offset(0, 10),
                         ),
                       ],
                     ),
                     child: const Icon(Icons.workspace_premium_rounded,
-                        size: 44, color: Color(0xFF2A1800)),
+                        size: 44, color: AppColors.accentTint),
                   ),
                   const SizedBox(height: 22),
                   const Text(

@@ -314,7 +314,7 @@ class _AdminAppScreenState extends State<AdminAppScreen> {
                             'Himoya',
                             _gateOn ? 'YOQILGAN' : 'o\'chiq',
                             color: _gateOn
-                                ? const Color(0xFF7BD88F)
+                                ? AppColors.success
                                 : Colors.orange.shade300,
                           ),
                         ],
@@ -406,7 +406,7 @@ class _AdminAppScreenState extends State<AdminAppScreen> {
                             color: _mySig.isEmpty
                                 ? Colors.orange.shade300
                                 : (_myTrusted
-                                    ? const Color(0xFF7BD88F)
+                                    ? AppColors.success
                                     : Colors.orange.shade300),
                           ),
                           if (_mySig.isNotEmpty) ...[

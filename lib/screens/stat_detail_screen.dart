@@ -512,12 +512,12 @@ class _StarBadge extends StatelessWidget {
       decoration: BoxDecoration(
         color: Colors.black.withValues(alpha: 0.62),
         borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: const Color(0x33FFFFFF)),
+        border: Border.all(color: AppColors.borderBright),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(Icons.star_rounded, size: 13, color: Color(0xFFFFC93C)),
+          const Icon(Icons.star_rounded, size: 13, color: AppColors.gold),
           const SizedBox(width: 3),
           Text('$stars',
               style: const TextStyle(

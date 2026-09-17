@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import 'glass.dart';
+
 /// TELEGRAM LOGOTIPI — sof kod bilan chiziladi.
 ///
 /// NEGA rasm fayl emas: ilovada hech qanday `assets/` papkasi yo'q
@@ -43,11 +45,11 @@ class TelegramLogo extends StatelessWidget {
         gradient: const LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
-          colors: [Color(0xFF2AABEE), Color(0xFF229ED9)],
+          colors: [AppColors.telegramLight, AppColors.telegram],
         ),
         boxShadow: [
           BoxShadow(
-            color: const Color(0xFF229ED9).withValues(alpha: 0.35),
+            color: AppColors.telegram.withValues(alpha: 0.35),
             blurRadius: size * 0.28,
             spreadRadius: size * 0.02,
           ),

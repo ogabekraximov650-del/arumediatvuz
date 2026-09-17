@@ -174,7 +174,7 @@ class _BalanceBar extends StatelessWidget {
                     SubCountdown(
                       style: TextStyle(
                         color: b.active
-                            ? const Color(0xFF7BD88F)
+                            ? AppColors.success
                             : Colors.white.withValues(alpha: 0.7),
                         fontSize: 14,
                         fontWeight: FontWeight.w700,
@@ -393,7 +393,7 @@ class _ActiveSubNote extends StatelessWidget {
                       child: SubCountdown(
                         expired: 'tugadi',
                         style: const TextStyle(
-                          color: Color(0xFF7BD88F),
+                          color: AppColors.success,
                           fontSize: 12.5,
                           fontWeight: FontWeight.w700,
                         ),
@@ -530,14 +530,14 @@ class _PlanTileState extends State<_PlanTile> {
                         padding: const EdgeInsets.symmetric(
                             horizontal: 7, vertical: 3),
                         decoration: BoxDecoration(
-                          color: const Color(0xFF7BD88F)
+                          color: AppColors.success
                               .withValues(alpha: 0.18),
                           borderRadius: BorderRadius.circular(7),
                         ),
                         child: Text(
                           '${widget.discountPercent}% chegirma',
                           style: const TextStyle(
-                            color: Color(0xFF7BD88F),
+                            color: AppColors.success,
                             fontSize: 10.5,
                             fontWeight: FontWeight.w700,
                           ),
@@ -989,7 +989,7 @@ class _HistoryPage extends StatelessWidget {
                       height: 34,
                       decoration: BoxDecoration(
                         color: (up
-                                ? const Color(0xFF7BD88F)
+                                ? AppColors.success
                                 : AppColors.accent)
                             .withValues(alpha: 0.16),
                         borderRadius: BorderRadius.circular(10),
@@ -1000,7 +1000,7 @@ class _HistoryPage extends StatelessWidget {
                             : Icons.workspace_premium_rounded,
                         size: 18,
                         color: up
-                            ? const Color(0xFF7BD88F)
+                            ? AppColors.success
                             : AppColors.accent,
                       ),
                     ),
@@ -1035,7 +1035,7 @@ class _HistoryPage extends StatelessWidget {
                       '${up ? '+' : '−'}${formatSum(e.amount)}',
                       style: TextStyle(
                         color: up
-                            ? const Color(0xFF7BD88F)
+                            ? AppColors.success
                             : Colors.white.withValues(alpha: 0.8),
                         fontSize: 13.5,
                         fontWeight: FontWeight.w800,

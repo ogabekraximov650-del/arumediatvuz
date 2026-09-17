@@ -616,6 +616,9 @@ class _DownloadRow extends StatelessWidget {
                         cacheManager: AppImageCache.manager,
                         imageUrl: item.poster,
                         fit: BoxFit.cover,
+                        // Qator 16:9 va ekran kengligining yarmi —
+                        // 540 px yetib ortadi.
+                        memCacheWidth: 540,
                         placeholder: (_, __) =>
                             Container(color: AppColors.cardAlt),
                         errorWidget: (_, __, ___) =>
@@ -792,7 +795,7 @@ class _DownloadRow extends StatelessWidget {
                       _percent(item.ratio * 100),
                       style: TextStyle(
                         color: item.complete
-                            ? const Color(0xFF7BD88F)
+                            ? AppColors.success
                             : AppColors.accent,
                         fontSize: 13,
                         fontWeight: FontWeight.w800,
@@ -1202,7 +1205,7 @@ class _QualityRow extends StatelessWidget {
               const Padding(
                 padding: EdgeInsets.symmetric(horizontal: 8),
                 child: Icon(Icons.check_circle_rounded,
-                    size: 22, color: Color(0xFF7BD88F)),
+                    size: 22, color: AppColors.success),
               )
             else
               FilledButton(
@@ -1963,6 +1966,9 @@ class _Poster extends StatelessWidget {
       cacheManager: AppImageCache.manager,
       imageUrl: url,
       fit: BoxFit.cover,
+      // Tarix qatoridagi poster — kichik. To'liq o'lchamda ochish
+      // xotirani bekorga yeydi (`PosterImage` izohiga qarang).
+      memCacheWidth: 540,
       placeholder: (_, __) => Container(color: AppColors.cardAlt),
       errorWidget: (_, __, ___) => Container(color: AppColors.cardAlt),
     );

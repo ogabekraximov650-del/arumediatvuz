@@ -142,11 +142,11 @@ class _TelegramButton extends StatelessWidget {
           gradient: const LinearGradient(
             begin: Alignment.topLeft,
             end: Alignment.bottomRight,
-            colors: [Color(0xFF2AABEE), Color(0xFF229ED9)],
+            colors: [AppColors.telegramLight, AppColors.telegram],
           ),
           boxShadow: [
             BoxShadow(
-              color: const Color(0xFF229ED9).withValues(alpha: 0.34),
+              color: AppColors.telegram.withValues(alpha: 0.34),
               blurRadius: 22,
               offset: const Offset(0, 8),
             ),
@@ -414,7 +414,7 @@ class _ProfileBody extends StatelessWidget {
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                   style: const TextStyle(
-                                      color: Color(0xFF6BC7F0), fontSize: 15)),
+                                      color: AppColors.textDim, fontSize: 15)),
                             ],
                             const SizedBox(height: 8),
                             // ID cho'zinchoq aylana ichida — uning
@@ -863,14 +863,14 @@ class _PremiumBadgeState extends State<_PremiumBadge> {
                   horizontal: c ? 6 : 8, vertical: c ? 2.5 : 3),
               decoration: BoxDecoration(
                 gradient: const LinearGradient(
-                  colors: [Color(0xFFFFC93C), Color(0xFFFF8A3D)],
+                  colors: [AppColors.gold, AppColors.accent2],
                   begin: Alignment.topLeft,
                   end: Alignment.bottomRight,
                 ),
                 borderRadius: BorderRadius.circular(20),
                 boxShadow: [
                   BoxShadow(
-                    color: const Color(0xFFFFC93C).withValues(alpha: 0.35),
+                    color: AppColors.gold.withValues(alpha: 0.35),
                     blurRadius: 10,
                     offset: const Offset(0, 3),
                   ),
@@ -880,12 +880,12 @@ class _PremiumBadgeState extends State<_PremiumBadge> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Icon(Icons.workspace_premium_rounded,
-                      size: c ? 11 : 13, color: const Color(0xFF2A1800)),
+                      size: c ? 11 : 13, color: AppColors.accentTint),
                   SizedBox(width: c ? 2 : 3),
                   Text(
                     'PREMIUM',
                     style: TextStyle(
-                      color: const Color(0xFF2A1800),
+                      color: AppColors.accentTint,
                       fontSize: c ? 8 : 9.5,
                       fontWeight: FontWeight.w900,
                       letterSpacing: c ? 0.2 : 0.4,
@@ -1320,13 +1320,13 @@ class _TrafficBoxState extends State<_TrafficBox> {
 
 /// Trafik toifalarining ranglari.
 const Map<String, Color> _kTrafficColors = {
-  TrafficKind.video: Color(0xFF4CC2FF),
-  TrafficKind.image: Color(0xFFFFC83D),
-  TrafficKind.api: Color(0xFF7BD88F),
+  TrafficKind.video: AppColors.accent,
+  TrafficKind.image: AppColors.gold,
+  TrafficKind.api: AppColors.success,
 };
 
 Color trafficColorOf(String label) =>
-    _kTrafficColors[label] ?? const Color(0xFF5C6368);
+    _kTrafficColors[label] ?? AppColors.textFaint;
 
 /// `12,34%` — ikki kasr xona (foydalanuvchi ko'rsatgan ko'rinish).
 String _pct(double share) {
@@ -1713,6 +1713,11 @@ class _AvatarState extends State<_Avatar> {
             width: _size,
             height: _size,
             fit: BoxFit.cover,
+            // Avatar ekranda `_size` dp — xotirada ham shuncha
+            // tursin. Telegram avatarlari 640 px keladi, ya'ni
+            // cheklanmasa 100 dp lik doira uchun ~1,6 MB bekorga
+            // ushlab turilardi.
+            memCacheWidth: (_size * 3).round(),
             placeholder: (_, __) => fallback,
             errorWidget: (_, __, ___) => fallback,
           );

@@ -146,7 +146,7 @@ class _SessionsScreenState extends State<SessionsScreen> {
                   current
                       ? Icons.phone_iphone_rounded
                       : Icons.devices_other_rounded,
-                  color: current ? const Color(0xFF4ADE80) : Colors.white70,
+                  color: current ? AppColors.success : Colors.white70,
                   size: 20,
                 ),
                 const SizedBox(width: 10),
@@ -164,12 +164,12 @@ class _SessionsScreenState extends State<SessionsScreen> {
                     padding:
                         const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
                     decoration: BoxDecoration(
-                      color: const Color(0xFF4ADE80).withValues(alpha: 0.16),
+                      color: AppColors.success.withValues(alpha: 0.16),
                       borderRadius: BorderRadius.circular(8),
                     ),
                     child: const Text('Shu qurilma',
                         style: TextStyle(
-                            color: Color(0xFF4ADE80),
+                            color: AppColors.success,
                             fontSize: 11,
                             fontWeight: FontWeight.w600)),
                   )

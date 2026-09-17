@@ -358,7 +358,7 @@ class _TelegramLoginScreenState extends State<TelegramLoginScreen>
 
       case _Stage.success:
         return const [
-          Icon(Icons.check_circle_rounded, color: Color(0xFF4ADE80), size: 46),
+          Icon(Icons.check_circle_rounded, color: AppColors.success, size: 46),
           SizedBox(height: 16),
           Text('Kirdingiz!',
               style: TextStyle(

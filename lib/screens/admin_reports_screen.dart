@@ -741,6 +741,8 @@ class _Avatar extends StatelessWidget {
         width: size,
         height: size,
         fit: BoxFit.cover,
+        // Rasm kichkina — xotirada ham kichik tursin.
+        memCacheWidth: (size * 3).round(),
         placeholder: (_, __) => fallback,
         errorWidget: (_, __, ___) => fallback,
       ),

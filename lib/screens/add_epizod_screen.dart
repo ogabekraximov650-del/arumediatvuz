@@ -290,7 +290,7 @@ class _AddEpizodScreenState extends State<AddEpizodScreen> {
     final confirm = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF1E1E2E),
+        backgroundColor: AppColors.cardAlt,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
         title: Text('${q.label} faylni o\'chirish?',
             style: const TextStyle(color: Colors.white)),

@@ -117,7 +117,7 @@ class _AnimeManagementScreenState extends State<AnimeManagementScreen> {
     final confirm = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF1E1E2E),
+        backgroundColor: AppColors.cardAlt,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
         title: const Text('Animeni o\'chirish?',
             style: TextStyle(color: Colors.white)),

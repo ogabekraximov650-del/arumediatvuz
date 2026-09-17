@@ -915,15 +915,15 @@ class _ReportAcceptedBanner extends StatelessWidget {
         width: double.infinity,
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
         decoration: BoxDecoration(
-          color: const Color(0xFF7BD88F).withValues(alpha: 0.13),
+          color: AppColors.success.withValues(alpha: 0.13),
           borderRadius: BorderRadius.circular(14),
           border: Border.all(
-              color: const Color(0xFF7BD88F).withValues(alpha: 0.35)),
+              color: AppColors.success.withValues(alpha: 0.35)),
         ),
         child: Row(
           children: [
             const Icon(Icons.check_circle_rounded,
-                size: 20, color: Color(0xFF7BD88F)),
+                size: 20, color: AppColors.success),
             const SizedBox(width: 10),
             const Expanded(
               child: Text(

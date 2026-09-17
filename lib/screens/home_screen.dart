@@ -427,16 +427,17 @@ class SeasonCard extends StatelessWidget {
     return GlassTappable(
       onTap: onTap,
       child: Container(
+        // ── SOYA OLIB TASHLANDI ──────────────────────────────
+        //
+        // Ikki sabab: (1) rasmdagi uslubda kartalarda soya yo'q;
+        // (2) bu karta TO'RDA — ekranda bir vaqtda 6-8 tasi
+        // turadi va har biri GPU dan alohida blur o'tishini
+        // talab qilardi. Qora fondagi qora soya baribir
+        // ko'rinmasdi ham.
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(20),
           color: AppColors.card,
           border: Border.all(color: AppColors.border),
-          boxShadow: [
-            BoxShadow(
-                color: Colors.black.withValues(alpha: 0.32),
-                blurRadius: 14,
-                offset: const Offset(0, 6)),
-          ],
         ),
         child: ClipRRect(
           borderRadius: BorderRadius.circular(20),
@@ -502,7 +503,7 @@ class SeasonCard extends StatelessWidget {
                           _CardBadge(
                             icon: Icons.star_rounded,
                             text: rating.toStringAsFixed(1),
-                            iconColor: const Color(0xFFFFC93C),
+                            iconColor: AppColors.gold,
                           ),
                         const Spacer(),
                         if (views > 0)
@@ -644,8 +645,12 @@ class _CardBadge extends StatelessWidget {
 // ── Yosh chegarasi belgisi ──────────────────────────────────────
 //
 // Rang chegaraning O'ZIGA qarab o'zgaradi: 18+ qizil, 16+ to'q
-// sariq, qolgani ko'kroq. Ya'ni belgini o'qimasdan ham ko'z
-// bilan ajratib olsa bo'ladi.
+// sariq, qolgani oltin. Ya'ni belgini o'qimasdan ham ko'z bilan
+// ajratib olsa bo'ladi.
+//
+// Ilgari pastki daraja MOVIY edi — ilovaning yangi palitrasida
+// (neytral qora + apelsin) u begona rang bo'lib turardi. Oltin
+// esa qolgan belgilar bilan bir oilada.
 class _AgeBadge extends StatelessWidget {
   final int yosh;
   const _AgeBadge({required this.yosh});
@@ -653,8 +658,8 @@ class _AgeBadge extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final color = yosh >= 18
-        ? const Color(0xFFE5484D)
-        : (yosh >= 16 ? const Color(0xFFF76B15) : const Color(0xFF3E9BFF));
+        ? AppColors.danger
+        : (yosh >= 16 ? AppColors.accent2 : AppColors.gold);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2.5),
       decoration: BoxDecoration(

@@ -275,7 +275,7 @@ class _PublicProfileScreenState extends State<PublicProfileScreen> {
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
-                                color: Color(0xFF6BC7F0), fontSize: 15)),
+                                color: AppColors.textDim, fontSize: 15)),
                       ],
                       const SizedBox(height: 10),
                       _IdPill(id: widget.userId),
@@ -375,11 +375,11 @@ class _PremiumTag extends StatelessWidget {
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(999),
         gradient: const LinearGradient(
-          colors: [Color(0xFFFFC93C), Color(0xFFFF9A2E)],
+          colors: [AppColors.gold, AppColors.accent2],
         ),
         boxShadow: [
           BoxShadow(
-            color: const Color(0xFFFFC93C).withValues(alpha: 0.35),
+            color: AppColors.gold.withValues(alpha: 0.35),
             blurRadius: 12,
           ),
         ],

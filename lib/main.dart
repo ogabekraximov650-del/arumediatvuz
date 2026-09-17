@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'screens/root_screen.dart';
+import 'widgets/glass.dart';
 import 'services/app_build.dart';
 import 'services/app_http.dart';
 import 'services/app_keys.dart';
@@ -203,13 +204,45 @@ class FulutterApp extends StatelessWidget {
     return MaterialApp(
       title: 'ARUmediaTV',
       debugShowCheckedModeBanner: false,
+      // ── MAVZU HAM O'SHA PALITRADAN ─────────────────────────
+      //
+      // TOPILGAN XATO: bu yerda urug' rang ALOHIDA yozilgan edi
+      // (`#E94560` — pushti). Ya'ni ilovaning o'z kartalari bir
+      // rangda, Flutter'ning O'Z widgetlari (kursor, tanlangan
+      // matn, kalit tugmachalar, yuklanish aylanasi, dialog,
+      // bildirishnoma pasti) esa BUTUNLAY boshqa rangda chiqardi.
+      //
+      // Endi urug' ham `AppColors.accent` — palitra bitta joyda
+      // (`lib/widgets/glass.dart`).
       theme: ThemeData(
         brightness: Brightness.dark,
         scaffoldBackgroundColor: Colors.transparent,
         colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFFE94560),
+          seedColor: AppColors.accent,
           brightness: Brightness.dark,
+        ).copyWith(
+          primary: AppColors.accent,
+          secondary: AppColors.accent2,
+          surface: AppColors.card,
+          error: AppColors.danger,
+          onPrimary: AppColors.onAccent,
+          onSurface: AppColors.text,
         ),
+        // Matn kiritish: kursor va tanlov ham apelsin.
+        textSelectionTheme: const TextSelectionThemeData(
+          cursorColor: AppColors.accent,
+          selectionHandleColor: AppColors.accent,
+        ),
+        progressIndicatorTheme:
+            const ProgressIndicatorThemeData(color: AppColors.accent),
+        // ── TEZLIK: BOSISH TO'LQINI YENGILLASHTIRILDI ────────
+        //
+        // Material 3 ning Android'dagi boshlang'ich to'lqini —
+        // `InkSparkle`, va u FRAGMENT SHEYDER bilan chiziladi.
+        // Arzon telefonlarda har bosish bir kadrni yeb qo'yadi.
+        // `InkRipple` esa oddiy chizma — ko'rinishi deyarli o'sha,
+        // narxi esa bir necha barobar past.
+        splashFactory: InkRipple.splashFactory,
         useMaterial3: true,
       ),
       home: const RootScreen(),

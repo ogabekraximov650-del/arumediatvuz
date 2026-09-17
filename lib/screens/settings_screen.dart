@@ -228,11 +228,13 @@ class _PrivacyRow extends StatelessWidget {
         children: [
           Container(
             padding: const EdgeInsets.all(8),
+            // Rasmdagi uslub: apelsin tusli yumaloq kvadratcha,
+            // ichida apelsin belgi (oq emas).
             decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: 0.10),
+              color: AppColors.accent.withValues(alpha: 0.14),
               borderRadius: BorderRadius.circular(12),
             ),
-            child: Icon(icon, color: Colors.white, size: 18),
+            child: Icon(icon, color: AppColors.accent, size: 18),
           ),
           const SizedBox(width: 12),
           Expanded(

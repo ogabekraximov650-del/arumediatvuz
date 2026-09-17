@@ -342,7 +342,7 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
         );
       case _Check.bosh:
         return const Icon(Icons.check_circle_rounded,
-            color: Color(0xFF4ADE80), size: 20);
+            color: AppColors.success, size: 20);
       case _Check.band:
       case _Check.xato:
         return const Icon(Icons.error_outline_rounded,
@@ -370,7 +370,7 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
           color = Colors.white.withValues(alpha: 0.45);
         case _Check.bosh:
           text = 'Bu username bo\'sh — olsangiz bo\'ladi';
-          color = const Color(0xFF4ADE80);
+          color = AppColors.success;
         case _Check.band:
         case _Check.xato:
           text = _problem;

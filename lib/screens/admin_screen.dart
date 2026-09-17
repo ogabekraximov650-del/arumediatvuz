@@ -250,11 +250,13 @@ class _AdminButton extends StatelessWidget {
           children: [
             Container(
               padding: const EdgeInsets.all(12),
+              // Rasmdagi uslub: apelsin tusli yumaloq kvadratcha,
+              // ichida apelsin belgi (oq emas).
               decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: 0.12),
+                color: AppColors.accent.withValues(alpha: 0.14),
                 borderRadius: BorderRadius.circular(14),
               ),
-              child: Icon(icon, color: Colors.white, size: 26),
+              child: Icon(icon, color: AppColors.accent, size: 26),
             ),
             const SizedBox(width: 16),
             Expanded(
