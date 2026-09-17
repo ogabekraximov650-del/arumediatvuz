@@ -2164,9 +2164,20 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     });
   }
 
+  /// Boshqaruv ko'rinib turadigan vaqt.
+  ///
+  /// TALAB (foydalanuvchi): "pleyerdagi tugmalarni bosganda
+  /// juda tez yashirilyapti — bosgandan keyin ham 5 soniya
+  /// tursin". Ilgari 3 soniya edi.
+  ///
+  /// Taymer HAR BOSISHDA qaytadan boshlanadi (`_scheduleHide`
+  /// tugma ishlovchilarining oxirida chaqiriladi), ya'ni ketma-ket
+  /// bosilsa boshqaruv yo'qolmaydi.
+  static const Duration _controlsHideDelay = Duration(seconds: 5);
+
   void _scheduleHide() {
     _hideTimer?.cancel();
-    _hideTimer = Timer(const Duration(seconds: 3), () {
+    _hideTimer = Timer(_controlsHideDelay, () {
       if (!mounted) return;
       setState(() => _showControls = false);
       _syncThinBar();
@@ -5580,6 +5591,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
         resumeAt: _savedPositionOf(eps[target]),
         resumePlaying: _intendedPlaying);
     _centerOnEpisode(eps[target]);
+    // Keyingi/oldingi qism bosilgandan keyin ham boshqaruv
+    // 5 soniya turadi.
+    _scheduleHide();
   }
 
   /// Tanlangan qism qatorini ro'yxatning O'RTASIGA olib keladi.

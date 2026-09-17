@@ -67,13 +67,25 @@ jobs:
       max-parallel: 1
       matrix:
         include:
-          # HOZIRCHA FAQAT ADMIN 32-BIT (foydalanuvchi talabi).
-          # Qolgan uchtasi (user-32, user-64, admin-64) vaqtincha
-          # o'chirildi — kerak bo'lganda shu ro'yxatga qaytariladi.
+          # IKKITA APK (foydalanuvchi talabi):
+          #   1. admin uchun 32-bit;
+          #   2. foydalanuvchi uchun 64-bit — admin paneli kodi
+          #      BUTUNLAY chiqarib tashlangan (`admin: 'false'`,
+          #      ya'ni `ADMIN_BUILD=false` -> `app_build.dart`
+          #      dagi `const bool` false bo'ladi va Dart
+          #      kompilyatori admin ekranlariga boradigan yo'lni
+          #      topmay, ularni APK'ga umuman qo'shmaydi).
+          #
+          # Qolgan ikkitasi (user-32, admin-64) kerak bo'lganda shu
+          # ro'yxatga qo'shiladi.
           - name: admin-32
             admin: 'true'
             abi: armeabi-v7a
             platform: android-arm
+          - name: user-64
+            admin: 'false'
+            abi: arm64-v8a
+            platform: android-arm64
 
     steps:
       - name: Checkout code
@@ -828,10 +840,9 @@ jobs:
             hajmi kichik. Telefoningiz 64-bitli bo'lsa `-64`,
             eskiroq bo'lsa `-32` ni oling.
 
-            * `arumedia-user-32.apk`  — foydalanuvchi, 32-bit (armeabi-v7a)
-            * `arumedia-user-64.apk`  — foydalanuvchi, 64-bit (arm64-v8a)
-            * `arumedia-admin-32.apk` — admin paneli bilan, 32-bit
-            * `arumedia-admin-64.apk` — admin paneli bilan, 64-bit
+            * `arumedia-admin-32.apk` — admin paneli bilan, 32-bit (armeabi-v7a)
+            * `arumedia-user-64.apk`   — foydalanuvchi, 64-bit (arm64-v8a),
+              admin paneli kodi umuman yo'q
 
             Versiya: ${{ github.run_number }}
             Commit: ${{ github.sha }}
