@@ -4478,7 +4478,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                 padding: const EdgeInsets.only(right: 24),
                 child: _PlayerPanel(
                   padding: const EdgeInsets.symmetric(
-                      horizontal: 8, vertical: 8),
+                      horizontal: 8, vertical: 6),
                   child: ConstrainedBox(
                     constraints: BoxConstraints(
                       maxHeight:
@@ -4496,8 +4496,12 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                               onTap: () => _setSpeed(s),
                               child: Container(
                                 width: 72,
+                                // Bo'yi kichraytirildi (9 -> 5):
+                                // sakkizta qator ekranda juda
+                                // baland turardi (foydalanuvchi
+                                // talabi). Eni o'zgarmadi.
                                 padding: const EdgeInsets.symmetric(
-                                    vertical: 9),
+                                    vertical: 5),
                                 alignment: Alignment.center,
                                 decoration: BoxDecoration(
                                   color: _playbackSpeed == s
@@ -4512,7 +4516,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                                     color: _playbackSpeed == s
                                         ? AppColors.accent
                                         : Colors.white,
-                                    fontSize: 15,
+                                    fontSize: 14,
                                     fontWeight: _playbackSpeed == s
                                         ? FontWeight.w800
                                         : FontWeight.w600,
@@ -4922,7 +4926,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                       maxHeight: MediaQuery.of(context).size.height * 0.5,
                     ),
                     child: SizedBox(
-                      width: 230,
+                      width: 260,
                       child: SingleChildScrollView(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
@@ -4935,7 +4939,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                         onToggle: _toggleAutoSkipIntro,
                       ),
                       Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 6),
+                        padding: const EdgeInsets.symmetric(vertical: 4),
                         child: Divider(
                           height: 1,
                           color: Colors.white.withValues(alpha: 0.12),
@@ -4948,40 +4952,55 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                         onToggle: _toggleAutoNextEpisode,
                       ),
                       Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 6),
+                        padding: const EdgeInsets.symmetric(vertical: 4),
                         child: Divider(
                           height: 1,
                           color: Colors.white.withValues(alpha: 0.12),
                         ),
                       ),
+                      // ── UXLASH VAQTI (fullscreen sozlamalari) ──
+                      //
+                      // TALAB (foydalanuvchi): "sozlamalardagi vaqt
+                      // tugmasini ham kattalashtir — faqat uch
+                      // nuqtadagini kattalashtiribsan".
+                      //
+                      // Endi u yuqoridagi ikki qator bilan BIR XIL:
+                      // 46 px balandlik, belgi 20, yozuv 14/w600
+                      // va butun eni bo'ylab bosiladi.
                       GestureDetector(
                         behavior: HitTestBehavior.opaque,
                         onTap: () {
                           _closeSettingsPanel();
                           _showSleepPanel();
                         },
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(Icons.schedule_rounded,
-                                size: 16,
-                                color: _sleepMinutes > 0
-                                    ? AppColors.accent
-                                    : Colors.white70),
-                            const SizedBox(width: 6),
-                            Text(
-                              _sleepMinutes > 0
-                                  ? 'Uxlash: ${_sleepTimeLabel()}'
-                                  : 'Uxlash vaqti',
-                              style: TextStyle(
-                                color: _sleepMinutes > 0
-                                    ? AppColors.accent
-                                    : Colors.white,
-                                fontSize: 11.5,
-                                fontWeight: FontWeight.w600,
+                        child: SizedBox(
+                          height: 46,
+                          child: Row(
+                            children: [
+                              Icon(Icons.schedule_rounded,
+                                  size: 20,
+                                  color: _sleepMinutes > 0
+                                      ? AppColors.accent
+                                      : Colors.white70),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text(
+                                  _sleepMinutes > 0
+                                      ? 'Uxlash: ${_sleepTimeLabel()}'
+                                      : 'Uxlash vaqti',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    color: _sleepMinutes > 0
+                                        ? AppColors.accent
+                                        : Colors.white,
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
                               ),
-                            ),
-                          ],
+                            ],
+                          ),
                         ),
                       ),
                     ],
