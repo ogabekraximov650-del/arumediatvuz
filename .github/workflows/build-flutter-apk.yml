@@ -68,24 +68,26 @@ jobs:
       matrix:
         include:
           # UCHTA APK (foydalanuvchi talabi):
-          #   1. admin paneli KODI BOR — 32-bit;
-          #   2. admin paneli KODI BOR — 64-bit;
-          #   3. foydalanuvchi uchun 64-bit — admin paneli kodi
-          #      BUTUNLAY chiqarib tashlangan (`admin: 'false'`,
-          #      ya'ni `ADMIN_BUILD=false` -> `app_build.dart`
-          #      dagi `const bool` false bo'ladi va Dart
-          #      kompilyatori admin ekranlariga boradigan yo'lni
-          #      topmay, ularni APK'ga umuman qo'shmaydi).
+          #   1. admin paneli KODI BOR — faqat 32-bit (o'zim uchun);
+          #   2. foydalanuvchi uchun 32-bit;
+          #   3. foydalanuvchi uchun 64-bit.
           #
-          # `user-32` kerak bo'lganda shu ro'yxatga qo'shiladi.
+          # Foydalanuvchi APK'larida admin paneli kodi BUTUNLAY
+          # chiqarib tashlanadi (`admin: 'false'`, ya'ni
+          # `ADMIN_BUILD=false` -> `app_build.dart` dagi
+          # `const bool` false bo'ladi va Dart kompilyatori admin
+          # ekranlariga boradigan yo'lni topmay, ularni APK'ga
+          # umuman qo'shmaydi).
+          #
+          # `admin-64` kerak bo'lganda shu ro'yxatga qo'shiladi.
           - name: admin-32
             admin: 'true'
             abi: armeabi-v7a
             platform: android-arm
-          - name: admin-64
-            admin: 'true'
-            abi: arm64-v8a
-            platform: android-arm64
+          - name: user-32
+            admin: 'false'
+            abi: armeabi-v7a
+            platform: android-arm
           - name: user-64
             admin: 'false'
             abi: arm64-v8a
@@ -845,9 +847,10 @@ jobs:
             eskiroq bo'lsa `-32` ni oling.
 
             * `arumedia-admin-32.apk` — admin paneli bilan, 32-bit (armeabi-v7a)
-            * `arumedia-admin-64.apk` — admin paneli bilan, 64-bit (arm64-v8a)
-            * `arumedia-user-64.apk`   — foydalanuvchi, 64-bit (arm64-v8a),
-              admin paneli kodi umuman yo'q
+            * `arumedia-user-32.apk`  — foydalanuvchi, 32-bit (armeabi-v7a)
+            * `arumedia-user-64.apk`  — foydalanuvchi, 64-bit (arm64-v8a)
+
+            Foydalanuvchi APK'larida admin paneli kodi umuman yo'q.
 
             Versiya: ${{ github.run_number }}
             Commit: ${{ github.sha }}
