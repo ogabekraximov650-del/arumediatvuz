@@ -2734,6 +2734,41 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     _showIntroButton();
   }
 
+  /// Pastki boshqaruv paneli va yuqori o'ng tugmalar qatorining
+  /// ekrandagi o'rnini o'lchash uchun kalitlar.
+  ///
+  /// TOPILGAN XATO (foydalanuvchi): "tugmalarni bosganda 5 soniya
+  /// tursin degandim, lekin bosishim bilan yashirilyapti".
+  ///
+  /// Sabab: sek gesture qatlami (`Listener`) Stack'ning ENG
+  /// USTIDA va SHAFFOF — ya'ni tugmaga bosilgan tapni tugmaning
+  /// o'zi ham, bu qatlam ham oladi. Qatlam esa uni "videoga
+  /// bosildi" deb hisoblab, 300 ms dan keyin `_onTapVideo()` bilan
+  /// boshqaruvni YASHIRARDI. Tugmaning `_scheduleHide()` si
+  /// (5 soniya) hech qanday rol o'ynamasdi.
+  ///
+  /// Ilgari bundan "chekka zonalar" (`bottomGuard`/`topGuard`)
+  /// himoya qilardi, lekin pastki panel balandligi o'zgargach
+  /// (vaqt va progress chizig'i pastga tushdi) tugmalar o'sha
+  /// 78 px lik zonadan YUQORIDA qolib ketdi.
+  ///
+  /// Endi taxminiy zona o'rniga ANIQ o'lcham: tap shu ikki
+  /// qatorning haqiqiy to'rtburchagiga tushsa, sek qatlami unga
+  /// UMUMAN tegmaydi.
+  final GlobalKey _bottomBarKey = GlobalKey();
+  final GlobalKey _topBtnsKey = GlobalKey();
+
+  /// Tap boshqaruv tugmalari ustiga tushdimi.
+  bool _hitsControls(Offset globalPos) {
+    for (final k in [_bottomBarKey, _topBtnsKey]) {
+      final box = k.currentContext?.findRenderObject() as RenderBox?;
+      if (box == null || !box.hasSize) continue;
+      final rect = box.localToGlobal(Offset.zero) & box.size;
+      if (rect.contains(globalPos)) return true;
+    }
+    return false;
+  }
+
   /// Uch nuqta tugmasining o'rnini o'lchash uchun kalit.
   ///
   /// Menyu endi PLEYER ICHIDA emas, BUTUN EKRAN ustidagi
@@ -4321,6 +4356,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                           const Duration(milliseconds: 350)) {
                         return;
                       }
+                      // Tap haqiqiy tugmalar ustiga tushgan bo'lsa
+                      // — bu "videoga bosish" emas, tegilmaydi.
+                      if (_showControls && _hitsControls(e.position)) return;
                       final dy = e.localPosition.dy;
                       if (dy > constraints.maxHeight - bottomGuard) return;
                       if (dy < topGuard) return;
@@ -4360,6 +4398,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
                       controller: _controller,
                       currentUrl: _currentUrl,
                       visible: _thinBarOn,
+                      playViaLocal: _playViaLocal,
                     ),
                   ),
                 ),
@@ -4772,6 +4811,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
               child: Padding(
                 padding: EdgeInsets.only(right: 8 * btnS, top: 6 * btnS),
                 child: Row(
+                  key: _topBtnsKey,
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     GestureDetector(
@@ -5085,7 +5125,10 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
 
             const Spacer(),
 
-            _bottomBarReactive(isFullscreen: isFullscreen, scale: s),
+            KeyedSubtree(
+              key: _bottomBarKey,
+              child: _bottomBarReactive(isFullscreen: isFullscreen, scale: s),
+            ),
           ],
         ),
       ),
@@ -5263,8 +5306,24 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       for (final r in value.buffered) {
         if (r.end > ahead) ahead = r.end;
       }
+      // ── OQ CHIZIQ ROSTINI KO'RSATSIN ────────────────────
+      //
+      // TOPILGAN XATO: bu yerda diskdagi ulush (`dlStat.ratio`)
+      // PLEYERNING BUFERI o'rniga ko'rsatilardi — fayl qisman
+      // yuklab olingan bo'lsa ham. Ya'ni oq chiziq "shu yergacha
+      // tayyor" deb turardi, aslida esa pleyerda o'sha ma'lumot
+      // YO'Q edi: u worker'dan oqim oladi.
+      //
+      // Natijada foydalanuvchi "bufer ichiga" sek qilaman deb
+      // o'ylab, aslida bufer TASHQARISIGA sek qilardi — pleyer
+      // esa tabiiy ravishda hammasini qaytadan yuklardi.
+      //
+      // Endi disk ulushi FAQAT mahalliy ijroda (fayl to'liq
+      // yuklangan va 127.0.0.1 dan o'qilayotganda) ko'rsatiladi —
+      // o'shanda u haqiqatan "tayyor" degani. Aks holda
+      // pleyerning O'Z buferi.
       final dlStat = DownloadManager.instance.statOf(_currentUrl);
-      if (dlStat.ratio > 0) {
+      if (_playViaLocal && dlStat.ratio > 0) {
         bufferedRatio = dlStat.ratio;
       } else {
         bufferedRatio = (ahead.inMilliseconds / value.duration.inMilliseconds)
@@ -7081,7 +7140,7 @@ class _BottomBarState extends State<_BottomBar> {
                     label: 'HQ', onTap: widget.onQualityTap, scale: s),
               ],
             ),
-            SizedBox(height: 8 * s),
+            SizedBox(height: 6 * s),
             // ── QISM BOSHQARUVI — O'NG CHETDA ─────────────────
             //
             // TALAB (foydalanuvchi, aynan shu so'zlar bilan):
@@ -7131,39 +7190,45 @@ class _BottomBarState extends State<_BottomBar> {
                 ),
               ],
             ),
-            SizedBox(height: 8 * s),
-            // ── VAQT: TUGMALAR TAGIDA, CHIZIQ USTIDA, O'NGDA ──
+            SizedBox(height: 6 * s),
+            // ── ENG PASTKI QATOR: CHIZIQ + YONIDA VAQT ────────
             //
-            // TALAB (foydalanuvchi): "vaqtni progress chizig'ining
-            // o'ng tarafi ustiga va next/prev/play-pause
-            // tugmalarining tagiga qo'y — tezlik tugmasi yonida
-            // ko'rinmayapti".
-            Align(
-              alignment: Alignment.centerRight,
-              child: Padding(
-                padding: EdgeInsets.only(right: 4 * s, bottom: 4 * s),
-                child: Text(
+            // TALAB (foydalanuvchi): "progress chizig'ining o'ng
+            // tarafini birozgina qisqartir va chiziqning
+            // to'g'risiga vaqtni qo'y; vaqt ustidagi tugmalarni
+            // pastga tushir — ular ekran o'rtasiga yaqin turibdi".
+            //
+            // Vaqt endi ALOHIDA qatorda emas, chiziq bilan BIR
+            // qatorda: shu sabab tugmalar bir qator pastga
+            // tushdi va chiziq o'ng tarafdan vaqt egallagan
+            // joycha qisqardi.
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Expanded(
+                  child: _VideoProgressBar(
+                    played: ratio,
+                    buffered: widget.buffered,
+                    trackHeight: 5.0 * s,
+                    thumbRadius: 8.0 * s,
+                    onDragStart: () {
+                      setState(() => _dragValue = ratio);
+                      widget.onScrubStart();
+                    },
+                    onDragUpdate: (v) => setState(() => _dragValue = v),
+                    onDragEnd: _commit,
+                    onTapSeek: _commit,
+                  ),
+                ),
+                SizedBox(width: 10 * s),
+                Text(
                   '${widget.fmt(shownPosition)} / ${widget.fmt(widget.duration)}',
                   style: TextStyle(
                       color: Colors.white,
                       fontSize: 13 * s,
                       fontWeight: FontWeight.w700),
                 ),
-              ),
-            ),
-            // ── PROGRESS CHIZIG'I — ENG PASTDA ────────────────
-            _VideoProgressBar(
-              played: ratio,
-              buffered: widget.buffered,
-              trackHeight: 5.0 * s,
-              thumbRadius: 8.0 * s,
-              onDragStart: () {
-                setState(() => _dragValue = ratio);
-                widget.onScrubStart();
-              },
-              onDragUpdate: (v) => setState(() => _dragValue = v),
-              onDragEnd: _commit,
-              onTapSeek: _commit,
+              ],
             ),
           ],
         ),
@@ -7696,10 +7761,17 @@ class _AlwaysVisibleProgress extends StatelessWidget {
   final String currentUrl;
   final bool visible;
 
+  /// Mahalliy (to'liq yuklangan) fayldan ijro etilyaptimi.
+  /// Faqat o'shanda diskdagi ulush "tayyor" degani — aks holda
+  /// pleyerning O'Z buferi ko'rsatiladi (asosiy chiziqdagi
+  /// izohga qarang).
+  final bool playViaLocal;
+
   const _AlwaysVisibleProgress({
     required this.controller,
     required this.currentUrl,
     required this.visible,
+    required this.playViaLocal,
   });
 
   @override
@@ -7721,7 +7793,7 @@ class _AlwaysVisibleProgress extends StatelessWidget {
           if (r.end > ahead) ahead = r.end;
         }
         final dlStat = DownloadManager.instance.statOf(currentUrl);
-        final buffered = dlStat.ratio > 0
+        final buffered = (playViaLocal && dlStat.ratio > 0)
             ? dlStat.ratio
             : (ahead.inMilliseconds / value.duration.inMilliseconds)
                 .clamp(0.0, 1.0);
