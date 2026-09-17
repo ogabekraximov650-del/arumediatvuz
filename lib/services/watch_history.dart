@@ -255,6 +255,13 @@ class WatchHistory extends ChangeNotifier {
   // faqat `flush()` da bitta so'rov ketadi.
   Map<String, dynamic>? _pending;
 
+  /// Oxirgi yuborilgan holat ("nuqta/ko'rilgan vaqt/sifat").
+  ///
+  /// `flush()` endi tez-tez chaqiriladi va `_pending` o'chmaydi,
+  /// shu sabab AYNAN o'sha holatni qayta yuborib yurmaslik uchun
+  /// oxirgisi eslab qolinadi.
+  String _flushedStamp = '';
+
   /// Shu ochilish hali tarixga "yangi ko'rish" deb yozilmagan.
   ///
   /// Bitta ochilish = BITTA ko'rish: ilova fonga chiqib qaytsa
@@ -311,6 +318,12 @@ class WatchHistory extends ChangeNotifier {
     // YO'QOLMASLIGI kerak, shu sabab kattasini olamiz.
     final carried = sameEpisode ? ((prev['watched_ms'] as int?) ?? 0) : 0;
     final saved = before?.watchedMs ?? 0;
+    // Yangi yozuv — oldingi "yuborilgan holat" belgisi bekor.
+    if (!sameEpisode) _flushedStamp = '';
+    // Birinchi oldindan tayyorlash qism ochilganidan 45 soniya
+    // keyin bo'lsin (boshidagi nuqtadan kadr yasashning ma'nosi
+    // yo'q).
+    _lastPrewarm = DateTime.now();
     _pending = {
       'anime_id': animeId,
       'season_id': seasonId,
@@ -341,6 +354,47 @@ class WatchHistory extends ChangeNotifier {
     p['duration_ms'] = duration.inMilliseconds;
   }
 
+  /// Kadr oxirgi marta qachon OLDINDAN tayyorlangan.
+  DateTime _lastPrewarm = DateTime.fromMillisecondsSinceEpoch(0);
+
+  /// Ko'rish davomida kadr shuncha vaqtda bir marta tayyorlanadi.
+  static const Duration _prewarmGap = Duration(seconds: 45);
+
+  /// KADRNI KO'RISH DAVOMIDA TAYYORLAB QO'YADI.
+  ///
+  /// TOPILGAN MUAMMO (foydalanuvchi: "tomosha tarixidagi kadr
+  /// yangilanishi juda sekin").
+  ///
+  /// Sabab: kadr FAQAT pleyerdan chiqqanda yasala boshlardi.
+  /// O'shanda esa hamma ish bir joyga to'planardi — mahalliy
+  /// serverni ko'tarish, `moov` jadvalini o'qish, kalit kadrni
+  /// olish, undan JPEG ajratish. Foydalanuvchi tarixni darhol
+  /// ochsa, u yerda hali eski rasm turardi.
+  ///
+  /// Endi bu ish KO'RISH DAVOMIDA, 45 soniyada bir marta fon'da
+  /// bajariladi. Shu sabab pleyerdan chiqqanda:
+  ///
+  ///   * shu qismning yaqinginadagi kadri ALLAQACHON diskda
+  ///     bo'ladi va tarixda DARHOL ko'rinadi;
+  ///   * aniq nuqtadagi kadr esa tez yasaladi — `moov` jadvali
+  ///     Rust yadrosida hali xotirada turadi.
+  ///
+  /// Trafik ortmaydi: kerakli baytlar ko'rish paytida allaqachon
+  /// keshga tushgan bo'ladi, ya'ni kadr diskdan olinadi.
+  void prewarmThumb() {
+    final p = _pending;
+    if (p == null) return;
+    final position = (p['position_ms'] as int?) ?? 0;
+    final duration = (p['duration_ms'] as int?) ?? 0;
+    if (duration <= 0 || position <= 0) return;
+    // Kadr yasash ketayotgan bo'lsa — aralashmaymiz.
+    if (_thumbRunning > 0) return;
+    final now = DateTime.now();
+    if (now.difference(_lastPrewarm) < _prewarmGap) return;
+    _lastPrewarm = now;
+    unawaited(_prepareThumb(Map<String, dynamic>.from(p)));
+  }
+
   /// Haqiqatda ko'rilgan vaqt qo'shiladi.
   ///
   /// TALAB (foydalanuvchi): "videoni 1x tezlikda ko'rganda
@@ -364,6 +418,29 @@ class WatchHistory extends ChangeNotifier {
 
   /// Kutayotgan yozuvni serverga yuboradi. Pleyerdan chiqilganda,
   /// qism almashganda va ilova fonga ketganda chaqiriladi.
+  ///
+  /// ── TOPILGAN XATO: YOZUV BIR MARTADAN KEYIN O'LIB QOLARDI ──
+  ///
+  /// Foydalanuvchi: "tomosha tarixidagi kadr yangilanishi ba'zida
+  /// ishlamay qolyabdi".
+  ///
+  /// Sabab shu yerda edi: `flush()` yuborgandan keyin `_pending`
+  /// NI TOZALAB YUBORARDI. Bu esa faqat pleyerdan chiqishda emas,
+  /// ILOVA FONGA KETGANDA ham chaqiriladi (`didChangeAppLifecycle`).
+  /// Ya'ni odam ko'rish o'rtasida boshqa ilovaga chiqib qaytsa:
+  ///
+  ///   * `_pending` null bo'lib qolardi;
+  ///   * `note()` (har soniya keladigan nuqta) JIMGINA tashlanardi;
+  ///   * pleyerdan chiqqanda `flush()` "yuboradigan narsa yo'q" deb
+  ///     darhol qaytardi.
+  ///
+  /// Natijada tarixda na to'xtagan joy, na kadr yangilanardi —
+  /// yozuv fonga chiqqan lahzadagi holatda qotib qolardi.
+  ///
+  /// Endi `_pending` YASHAB QOLADI: u faqat `startEpisode` boshqa
+  /// qismni ochganda almashadi. `flush()` esa istalgancha marta
+  /// chaqirilishi mumkin — har safar o'sha damdagi holatni
+  /// yuboradi.
   Future<void> flush() async {
     final p = _pending;
     if (p == null) return;
@@ -382,11 +459,19 @@ class WatchHistory extends ChangeNotifier {
     final minMs = WatchProgress.minPositionFor(
       Duration(milliseconds: duration),
     ).inMilliseconds;
-    if (duration <= 0 || position < minMs) {
-      _pending = null;
-      return;
-    }
-    _pending = null;
+    // Hali chegaraga yetmagan — yozuv KUTIB TURADI (yo'q
+    // qilinmaydi: ko'rish davom etsa chegaradan o'tadi).
+    if (duration <= 0 || position < minMs) return;
+
+    // ── AYNAN O'SHA HOLAT IKKINCHI MARTA YUBORILMAYDI ───────
+    //
+    // `flush()` endi tez-tez chaqiriladi (fonga chiqish, qism
+    // almashish, chiqish). Holat o'zgarmagan bo'lsa serverga ham,
+    // ro'yxatga ham tegishning hojati yo'q.
+    final watched = (p['watched_ms'] as int?) ?? 0;
+    final stamp = '$position/$watched/${p['last_quality']}';
+    if (!_pendingNewView && stamp == _flushedStamp) return;
+    _flushedStamp = stamp;
 
     final row = Map<String, dynamic>.from(p);
     row['updated_at'] = DateTime.now().millisecondsSinceEpoch;
@@ -779,18 +864,53 @@ class WatchHistory extends ChangeNotifier {
   /// ilova o'nlab megabaytni ushlab turmasin (har biri ~20 KB).
   static const int _thumbMemoryLimit = 60;
 
+  /// VAQTINCHA kadrlar: shu videoning boshqa nuqtasidagi eski
+  /// rasmi, haqiqiysi tayyor bo'lgunicha ko'rsatib turish uchun.
+  ///
+  /// ── NEGA ALOHIDA SAQLANADI (TOPILGAN XATO) ────────────────
+  ///
+  /// Foydalanuvchi: "tomosha tarixidagi kadr yangilanishi juda
+  /// sekin va ba'zida ishlamay qolyabdi".
+  ///
+  /// Ilgari eski rasm YANGI kalit bilan `_thumbMemory` ga
+  /// yozilardi. Shundan keyin:
+  ///
+  ///   * `peekThumb` "kadr tayyor" deb o'sha ESKI rasmni berardi;
+  ///   * `thumbnail()` xotiradan topib, DARHOL qaytarardi;
+  ///   * ya'ni haqiqiy kadrni yasash boshqa HECH QACHON
+  ///     takrorlanmasdi — bir marta yasalmay qolsa (internet
+  ///     uzildi, kanal javob bermadi), o'sha eski rasm butunlay
+  ///     qotib qolardi.
+  ///
+  /// Endi vaqtinchalik rasm ALOHIDA turadi: ekranda darhol
+  /// ko'rinadi, lekin "kadr tayyor" deb hisoblanmaydi va haqiqiysi
+  /// yasalishda davom etadi (kerak bo'lsa qaytadan urinib).
+  final Map<String, Uint8List> _thumbFallback = {};
+
   /// Xotirada tayyor kadr bormi (kutmasdan).
   ///
   /// Tarix qatorlari shu orqali REAL VAQTDA yangilanadi: kadr
   /// tayyor bo'lishi bilan `notifyListeners` chaqiriladi va qator
   /// o'sha zahoti yangi rasmni oladi.
-  Uint8List? peekThumb(String key) => _thumbMemory[key];
+  ///
+  /// Haqiqiy kadr bo'lmasa vaqtinchasi beriladi — bo'sh joy
+  /// ko'rinib turgandan ko'ra shu yaxshi.
+  Uint8List? peekThumb(String key) => _thumbMemory[key] ?? _thumbFallback[key];
+
+  void _rememberFallback(String key, Uint8List bytes) {
+    if (_thumbFallback.length >= _thumbMemoryLimit) {
+      _thumbFallback.remove(_thumbFallback.keys.first);
+    }
+    _thumbFallback[key] = bytes;
+  }
 
   void _rememberThumb(String key, Uint8List bytes) {
     if (_thumbMemory.length >= _thumbMemoryLimit) {
       _thumbMemory.remove(_thumbMemory.keys.first);
     }
     _thumbMemory[key] = bytes;
+    // Haqiqiysi keldi — vaqtinchasi endi kerak emas.
+    _thumbFallback.remove(key);
   }
 
   String? _thumbPath(String key) {
@@ -878,6 +998,8 @@ class WatchHistory extends ChangeNotifier {
   /// qaytsa, ro'yxat posterni ko'rsatadi.
   Future<Uint8List?> thumbnail(HistoryItem item) async {
     final key = item.thumbKey;
+    // FAQAT haqiqiy kadr ishni to'xtatadi: vaqtinchasi turgan
+    // bo'lsa ham yasash davom etishi kerak.
     final inMemory = _thumbMemory[key];
     if (inMemory != null) return inMemory;
 
@@ -930,9 +1052,12 @@ class WatchHistory extends ChangeNotifier {
     //      mumkin, eski kadr esa posterdan ancha yaxshi.
     final previous = _anyThumbOfVideo(item.videoKey);
     if (previous != null) {
-      _rememberThumb(key, previous);
-      // Yangisini yasashga baribir urinamiz — tayyor bo'lsa
-      // ro'yxat keyingi qurilishda uni oladi.
+      // MUHIM: VAQTINCHA javonga — `_thumbMemory` ga EMAS
+      // (`_thumbFallback` izohiga qarang). Aks holda haqiqiy kadr
+      // boshqa hech qachon yasalmasdi.
+      _rememberFallback(key, previous);
+      // Yangisini yasash FON'DA davom etadi — tayyor bo'lishi
+      // bilan ro'yxat o'zi yangilanadi (`notifyListeners`).
       if (!_thumbBuilding.contains(key)) {
         unawaited(_buildThumb(item, key));
       }
@@ -942,13 +1067,52 @@ class WatchHistory extends ChangeNotifier {
     return _buildThumb(item, key);
   }
 
+  /// Bitta kadr uchun eng ko'pi shuncha marta urinib ko'riladi.
+  ///
+  /// TOPILGAN XATO (foydalanuvchi: "kadr ba'zida yangilanmay
+  /// qolyabdi"): urinish BITTA edi. Kadr yasash mahalliy serverni
+  /// ishga tushirishni va faylning bir necha yuz kilobaytini
+  /// o'qishni talab qiladi — pleyerdan chiqqan lahzada (tarmoq
+  /// almashayotgan, server hali ko'tarilayotgan payt) bu urinish
+  /// oson uzilardi va rasm o'sha holicha eski qolib ketardi.
+  static const int _thumbTries = 3;
+
   /// Kadrni HAQIQATAN yasaydi (tarmoq yoki diskdagi bo'laklardan).
   Future<Uint8List?> _buildThumb(HistoryItem item, String key) async {
     final path = _thumbPath(key);
     if (path == null) return null;
     if (!_thumbBuilding.add(key)) return null;
+    try {
+      for (var attempt = 1; attempt <= _thumbTries; attempt++) {
+        final data = await _grabThumb(item);
+        if (data != null) {
+          _rememberThumb(key, data);
+          // Ro'yxat DARHOL yangi kadrga o'tsin (kutib turmasin).
+          notifyListeners();
+          // Shifrlab saqlaymiz va shu videoning eski kadrlarini
+          // o'chiramiz (foydalanuvchi oldinga surgan bo'lsa,
+          // eskisi endi noto'g'ri).
+          RustCore.instance.secureSave(path, 'thumb:$key', base64Encode(data));
+          _removeStaleThumbs(item.videoKey, key);
+          return data;
+        }
+        if (attempt < _thumbTries) {
+          await Future<void>.delayed(Duration(milliseconds: 600 * attempt));
+        }
+      }
+      return null;
+    } finally {
+      _thumbBuilding.remove(key);
+    }
+  }
 
-    // Navbat: bir vaqtda ikkitadan ko'p yasalmasin.
+  /// BITTA urinish: mahalliy serverdan kadr olib, JPEG qaytaradi.
+  ///
+  /// Navbat AYNAN shu yerda: bir vaqtda ikkitadan ko'p kadr
+  /// yasalmasin. Urinishlar orasidagi tanaffusda navbat BAND
+  /// QILINMAYDI — aks holda bitta muvaffaqiyatsiz kadr qolgan
+  /// qatorlarni ushlab turardi.
+  Future<Uint8List?> _grabThumb(HistoryItem item) async {
     while (_thumbRunning >= _maxParallelThumbs) {
       await Future<void>.delayed(const Duration(milliseconds: 120));
     }
@@ -962,21 +1126,12 @@ class WatchHistory extends ChangeNotifier {
         'quality': 72,
       }).timeout(const Duration(seconds: 25));
       if (data == null || data.isEmpty) return null;
-
-      _rememberThumb(key, data);
-      // Ro'yxat DARHOL yangi kadrga o'tsin (kutib turmasin).
-      notifyListeners();
-      // Shifrlab saqlaymiz va shu videoning eski kadrlarini
-      // o'chiramiz (foydalanuvchi oldinga surgan bo'lsa, eskisi
-      // endi noto'g'ri).
-      RustCore.instance.secureSave(path, 'thumb:$key', base64Encode(data));
-      _removeStaleThumbs(item.videoKey, key);
       return data;
     } catch (_) {
+      // Urinish uzildi — yuqorida yana bir marta sinaladi.
       return null;
     } finally {
       _thumbRunning--;
-      _thumbBuilding.remove(key);
     }
   }
 
@@ -1032,6 +1187,7 @@ class WatchHistory extends ChangeNotifier {
   /// Yozuv o'chirilganda uning kadri ham kerak emas.
   void _dropThumb(HistoryItem item) {
     _thumbMemory.remove(item.thumbKey);
+    _thumbFallback.remove(item.thumbKey);
     final dir = RustCore.instance.dataDirPath;
     if (dir == null) return;
     try {

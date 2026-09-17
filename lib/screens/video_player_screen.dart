@@ -679,7 +679,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       _introRanges = introRangesOf(e);
       // Hozir qaysi oraliqdaligi endi boshqacha bo'lishi mumkin.
       _introIndex = -1;
-      _introDone.clear();
+      _introTries.clear();
       return;
     }
   }
@@ -1034,7 +1034,13 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     );
 
     // Yangi qism — intro oraliqlari qaytadan o'qiladi.
+    //
+    // MUHIM: urinishlar hisobi ham TOZALANADI. Ilgari u qolib
+    // ketardi va avto o'tkazish faqat BIRINCHI qismda ishlardi
+    // (`_introTries` izohiga qarang).
     _introIndex = -1;
+    _introTries.clear();
+    _lastIntroSkip = DateTime.fromMillisecondsSinceEpoch(0);
     _introRanges = introRangesOf(ep);
 
     setState(() {
@@ -1883,6 +1889,11 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
         // Tarix uchun ham eslab qo'yiladi — bu ham faqat XOTIRAGA,
         // serverga emas.
         WatchHistory.instance.note(v.position, v.duration);
+        // To'xtagan joydagi kadr KO'RISH DAVOMIDA tayyorlanadi
+        // (45 soniyada bir marta, fon'da) — shunda tarix oynasi
+        // ochilganda rasm allaqachon joyida turadi.
+        // Izohi: `WatchHistory.prewarmThumb`.
+        if (v.isPlaying) WatchHistory.instance.prewarmThumb();
       }
 
       // ── TOMOSHA VAQTI ────────────────────────────────────
@@ -2666,9 +2677,42 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   /// Tugma ayni damda ekrandami.
   bool _introVisible = false;
 
-  /// Shu qismda ALLAQACHON avtomatik o'tkazilgan oraliqlar.
-  /// (`_updateIntro` dagi cheksiz sek halqasi izohiga qarang.)
-  final Set<int> _introDone = <int>{};
+  /// Har bir oraliq uchun AVTOMATIK o'tkazish necha marta
+  /// urinilgani (`oraliq -> urinishlar soni`).
+  ///
+  /// ── TOPILGAN XATO: AVTO O'TKAZISH ISHLAMAY QOLARDI ────────
+  ///
+  /// Foydalanuvchi: "avto intro o'tkazish ishlamayabdi".
+  ///
+  /// Ilgari bu yerda oddiy `Set<int> _introDone` turardi va unga
+  /// urinish BOSHLANISHIDA yozib qo'yilardi. Ikkita og'ir oqibati
+  /// bor edi:
+  ///
+  ///   1. TO'PLAM QISM ALMASHGANDA TOZALANMASDI. Birinchi qismda
+  ///      intro o'tkazilgach, to'plamda `0` qolardi — keyingi
+  ///      qismning HAM birinchi oralig'i "allaqachon o'tkazilgan"
+  ///      hisoblanib, avto o'tkazish boshqa umuman ishlamasdi.
+  ///      Ya'ni sozlama faqat bitta qismga yetardi.
+  ///
+  ///   2. SEK BAJARILMASA HAM "O'TKAZILDI" DEB YOZILARDI. Sek
+  ///      esa bekor bo'lishi mumkin: pleyer hali tayyor emas,
+  ///      yoki o'sha joy keshda yo'q (`_commitPendingSeek` uni
+  ///      ataylab bekor qiladi). Bunday holda video intro ichida
+  ///      qolar, qayta urinish esa BO'LMASDI.
+  ///
+  /// Endi urinishlar SANALADI: o'tkazib bo'lmasa qaytadan
+  /// urinamiz, lekin cheksiz emas — shu sabab kalit kadr sabab
+  /// paydo bo'ladigan "sekdan sekka" halqasi ham qaytmaydi.
+  final Map<int, int> _introTries = <int, int>{};
+
+  /// Bitta oraliq uchun eng ko'p urinish.
+  static const int _introMaxTries = 3;
+
+  /// Urinishlar orasidagi eng kam tanaffus.
+  static const Duration _introRetryGap = Duration(milliseconds: 1200);
+
+  /// Oxirgi avtomatik o'tkazish urinishi qachon bo'lgan.
+  DateTime _lastIntroSkip = DateTime.fromMillisecondsSinceEpoch(0);
 
   /// Sek oraliq oxiridan shuncha millisekund KEYINGA qilinadi.
   static const int _introSkipPad = 400;
@@ -2696,13 +2740,17 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   /// Har bir pozitsiya yangilanishida chaqiriladi.
   void _updateIntro(Duration pos) {
     final idx = _introAt(pos);
-    if (idx == _introIndex) return;
-    _introIndex = idx;
     if (idx < 0) {
       // Oraliq tugadi — tugma ham ketadi.
-      if (_introVisible && mounted) setState(() => _introVisible = false);
+      if (_introIndex != -1) {
+        _introIndex = -1;
+        if (_introVisible && mounted) setState(() => _introVisible = false);
+      }
       return;
     }
+    final entered = idx != _introIndex;
+    _introIndex = idx;
+
     // ── AVTOMATIK O'TKAZISH ─────────────────────────────────
     //
     // TALAB (foydalanuvchi): uch nuqta ostidagi tugma yoqilgan
@@ -2721,14 +2769,24 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // `_introAt` yana o'sha oraliqni topar, `_skipIntro` yana
     // chaqirilar — video sekdan sekka o'tib, halqa aylanaverardi.
     //
-    // Ikkita himoya qo'yildi:
+    // Himoyalar:
     //   1. sek oraliq oxiridan `_introSkipPad` keyinga qilinadi;
-    //   2. o'tkazilgan oraliq ESLAB QOLINADI va ikkinchi marta
-    //      AVTOMATIK o'tkazilmaydi (foydalanuvchi o'zi orqaga
-    //      qaytargan bo'lsa — qo'lda bosishi mumkin, tugma
-    //      ko'rinaveradi).
-    if (AppSettings.instance.autoSkipIntro && !_introDone.contains(idx)) {
-      _skipIntro();
+    //   2. urinishlar SANALADI (`_introTries`) — eng ko'pi uchta
+    //      va orasida tanaffus bilan. Ya'ni sek bajarilmay qolsa
+    //      qayta urinamiz, halqa esa uchinchi urinishda to'xtaydi
+    //      va tugma qo'lda bosish uchun ekranda qoladi.
+    if (AppSettings.instance.autoSkipIntro &&
+        (_introTries[idx] ?? 0) < _introMaxTries) {
+      final waited =
+          DateTime.now().difference(_lastIntroSkip) >= _introRetryGap;
+      if (entered || waited) {
+        _introTries[idx] = (_introTries[idx] ?? 0) + 1;
+        _lastIntroSkip = DateTime.now();
+        _seekIntroTo(idx);
+      }
+      // O'tkazish ketyapti (yoki keyingi urinish kutilmoqda) —
+      // tugma chiqmaydi, aks holda u bir ko'rinib bir yo'qolardi.
+      if (_introVisible && mounted) setState(() => _introVisible = false);
       return;
     }
     _showIntroButton();
@@ -2818,7 +2876,20 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     setState(() {});
     // Hozir intro oralig'ida turgan bo'lsa — darhol o'tkaziladi,
     // ya'ni tugma bosilishi bilan natija ko'rinadi.
-    if (on && _introIndex >= 0) _skipIntro();
+    //
+    // Sozlama endi yoqildi — oldingi urinishlar hisobi bekor
+    // qilinadi, aks holda "uch marta urinib bo'lingan" oraliq
+    // o'tkazilmay qolardi.
+    if (on) {
+      _introTries.clear();
+      _lastIntroSkip = DateTime.fromMillisecondsSinceEpoch(0);
+      if (_introIndex >= 0) {
+        _introTries[_introIndex] = 1;
+        _lastIntroSkip = DateTime.now();
+        _seekIntroTo(_introIndex);
+        setState(() => _introVisible = false);
+      }
+    }
   }
 
   /// "Avto qism o'tkazish" tugmasi bosildi.
@@ -3395,16 +3466,26 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   }
 
   /// Tugma bosildi — video oraliqning OXIRIGA sakraydi.
+  ///
+  /// Qo'lda bosilgani uchun shu oraliq boshqa AVTOMATIK
+  /// o'tkazilmaydi: foydalanuvchi orqaga qaytarsa, qarori o'ziniki.
   void _skipIntro() {
-    final ranges = _introRanges;
-    if (_introIndex < 0 || _introIndex >= ranges.length) return;
-    // Oraliqning OXIRIDAN sal keyinga — kalit kadr yaxlitlanishi
-    // bizni yana o'sha oraliq ichiga tushirib qo'ymasin.
-    final to = Duration(milliseconds: ranges[_introIndex].$2 + _introSkipPad);
-    _introDone.add(_introIndex);
+    final idx = _introIndex;
+    if (idx < 0 || idx >= _introRanges.length) return;
+    _introTries[idx] = _introMaxTries;
     _introIndex = -1;
     if (mounted) setState(() => _introVisible = false);
-    _scheduleSeekTo(to);
+    _seekIntroTo(idx);
+  }
+
+  /// Berilgan intro oralig'ining oxiriga sek qiladi.
+  ///
+  /// Oraliqning OXIRIDAN sal keyinga — kalit kadr yaxlitlanishi
+  /// bizni yana o'sha oraliq ichiga tushirib qo'ymasin.
+  void _seekIntroTo(int idx) {
+    final ranges = _introRanges;
+    if (idx < 0 || idx >= ranges.length) return;
+    _scheduleSeekTo(Duration(milliseconds: ranges[idx].$2 + _introSkipPad));
   }
 
   /// Pleyerdagi vaqt — FAQAT DAQIQA VA SONIYA.
