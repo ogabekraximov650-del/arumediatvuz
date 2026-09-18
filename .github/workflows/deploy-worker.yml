@@ -54,20 +54,33 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          printf '%s' "${{ secrets.TURSO_URL }}" | wrangler secret put TURSO_URL --env production
-          printf '%s' "${{ secrets.TURSO_TOKEN }}" | wrangler secret put TURSO_TOKEN --env production
-          printf '%s' "${{ secrets.B2_KEY_ID }}" | wrangler secret put B2_KEY_ID --env production
-          printf '%s' "${{ secrets.B2_APPLICATION_KEY }}" | wrangler secret put B2_APPLICATION_KEY --env production
-          printf '%s' "${{ secrets.TELEGRAM_BOT_TOKEN }}" | wrangler secret put TELEGRAM_BOT_TOKEN --env production
+          # ── BO'SH SIR TIRIK SIRNI O'CHIRIB YUBORMASIN ──────
+          #
+          # TOPILGAN XAVF: bu qadam HAR deployda sirlarni qaytadan
+          # yozadi. Agar biror sir GitHub'da yo'q bo'lsa (masalan
+          # `wrangler secret put` bilan QO'LDA qo'yilgan bo'lsa),
+          # `printf '%s' ""` uni BO'SH qiymat bilan almashtirardi —
+          # va to'lovlar jimgina ishlamay qolardi.
+          #
+          # Endi bo'sh sir shunchaki o'tkazib yuboriladi: qo'lda
+          # qo'yilgan qiymat joyida qoladi.
+          put() {
+            if [ -n "$2" ]; then
+              printf '%s' "$2" | wrangler secret put "$1" --env production
+            else
+              echo "⚠️  $1 — GitHub'da yo'q, o'tkazib yuborildi (Cloudflare'dagi qiymat saqlanadi)"
+            fi
+          }
+          put TURSO_URL "${{ secrets.TURSO_URL }}"
+          put TURSO_TOKEN "${{ secrets.TURSO_TOKEN }}"
+          put B2_KEY_ID "${{ secrets.B2_KEY_ID }}"
+          put B2_APPLICATION_KEY "${{ secrets.B2_APPLICATION_KEY }}"
+          put TELEGRAM_BOT_TOKEN "${{ secrets.TELEGRAM_BOT_TOKEN }}"
           # tezcheck.uz — balans to'ldirish to'lov havolalari uchun.
-          printf '%s' "${{ secrets.TEZCHECK_TOKEN }}" | wrangler secret put TEZCHECK_TOKEN --env production
-          printf '%s' "${{ secrets.TEZCHECK_DESK }}" | wrangler secret put TEZCHECK_DESK --env production
-          # Webhook siri ixtiyoriy: qo'yilmagan bo'lsa o'tkazib
-          # yuboriladi (bo'sh qiymat yozilsa webhook 503 qaytarardi
-          # va sabab ko'rinmasdi).
-          if [ -n "${{ secrets.TEZCHECK_WEBHOOK_SECRET }}" ]; then
-            printf '%s' "${{ secrets.TEZCHECK_WEBHOOK_SECRET }}" | wrangler secret put TEZCHECK_WEBHOOK_SECRET --env production
-          fi
+          put TEZCHECK_TOKEN "${{ secrets.TEZCHECK_TOKEN }}"
+          put TEZCHECK_DESK "${{ secrets.TEZCHECK_DESK }}"
+          # Webhook siri ixtiyoriy — qo'yilmasa webhook o'chiq turadi.
+          put TEZCHECK_WEBHOOK_SECRET "${{ secrets.TEZCHECK_WEBHOOK_SECRET }}"
 
       - name: Deploy to Cloudflare Workers
         working-directory: worker

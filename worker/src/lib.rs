@@ -5118,16 +5118,38 @@ fn plan_label(days: i64) -> String {
 /// ham qaraladi: matn topilmasa hech bo'lmasa kod ko'rinadi, aks
 /// holda jurnalda "noma'lum xato" dan boshqa hech narsa qolmasdi.
 fn tezcheck_why(resp: &Value) -> String {
+    // ── KOD HAM KO'RSATILADI ────────────────────────────────
+    //
+    // TOPILGAN MUAMMO: ekranda faqat sayt yuborgan MATN chiqardi
+    // ("Joriy holatda bu amalga ruxsat berilmaydi"). Bunday matn
+    // bir necha xil xatoga to'g'ri keladi — kassa to'lov qabul
+    // qilmayaptimi, token boshqa kassaga tegishlimi, yoki hisob
+    // hali faollashtirilmaganmi — ajratib bo'lmasdi.
+    //
+    // Kod (`auth.permission_denied`, `resource.state_invalid`,
+    // `merchant.suspended`, ...) buni bir zumda ayirib beradi, shu
+    // sabab u matn yoniga qo'shiladi.
+    let code = [&resp["error"]["code"], &resp["code"]]
+        .iter()
+        .find_map(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("");
     for v in [
         &resp["error"]["message"], &resp["message"], &resp["error"],
         &resp["reason"], &resp["detail"],
-        &resp["error"]["code"], &resp["code"],
     ] {
         if let Some(s) = v.as_str() {
             if !s.is_empty() {
-                return s.to_string();
+                return if code.is_empty() {
+                    s.to_string()
+                } else {
+                    format!("{s} [{code}]")
+                };
             }
         }
+    }
+    if !code.is_empty() {
+        return code.to_string();
     }
     // 422 da maydonlar bo'yicha xatolar keladi: {"errors":{"amount_minor":["..."]}}
     if let Some(m) = resp["errors"].as_object() {
