@@ -5406,6 +5406,77 @@ async fn billing_check(mut req: Request, env: &Env) -> Result<Response> {
     }))
 }
 
+/// GET /api/billing/desks — KASSALARNI TEKSHIRISH (faqat admin).
+///
+/// ── NEGA KERAK ────────────────────────────────────────────────
+///
+/// TOPILGAN MUAMMO: to'lov havolasi yaratilmayotgan edi va sayt
+/// `resource.state_invalid` qaytarardi. Sabab kodda emas — kassa
+/// to'lov qabul qilmayotgan bo'lishi mumkin, yoki sirlarda
+/// BOSHQA kassaning kodi turgan bo'lishi mumkin.
+///
+/// Buni tekshirishning yagona ishonchli yo'li — AYNAN worker
+/// ishlatayotgan sirlar bilan so'rov yuborish. Kalitni qo'lda
+/// terminalga ko'chirib tekshirish esa boshqa narsani tekshiradi:
+/// Cloudflare'da qanday qiymat turganini u ko'rsatmaydi.
+///
+/// Javobda har bir kassaning `accepts_payments` bayrog'i bor —
+/// to'lov faqat `true` bo'lganida yaratiladi.
+///
+/// ── NIMA CHIQMAYDI ────────────────────────────────────────────
+///
+/// Token HECH QACHON qaytarilmaydi. Faqat uning oxirgi belgilari
+/// (`token_hint`) ko'rinadi — "qaysi token qo'yilgan" degan
+/// savolga javob berish uchun shu yetadi.
+async fn billing_desks(req: Request, env: &Env) -> Result<Response> {
+    let Some(u) = session_user(env, &bearer(&req)).await? else {
+        return json_resp(&json!({"error": "unauthorized"}), 401);
+    };
+    if !is_admin(&u) {
+        return json_resp(&json!({"error": "forbidden"}), 403);
+    }
+
+    // Sirlarda qaysi kassa kodi turganini ko'rsatamiz. Kassa kodi
+    // maxfiy emas (hujjat: "not sensitive alone"), lekin baribir
+    // to'liq emas — boshi va oxiri yetarli.
+    let desk = env.secret("TEZCHECK_DESK")
+        .map(|s| s.to_string().trim().to_string())
+        .unwrap_or_default();
+    let desk_hint = if desk.len() > 12 {
+        format!("{}…{}", &desk[..8], &desk[desk.len() - 4..])
+    } else {
+        desk.clone()
+    };
+
+    let (me_code, me_resp) = tezcheck(env, "/me", json!({})).await
+        .unwrap_or((0, json!({})));
+    let (code, resp) = tezcheck(env, "/cash-desks", json!({})).await?;
+
+    ok_nostore(json!({
+        "ok": (200..300).contains(&code),
+        "sirlardagi_kassa": desk_hint,
+        "me": {
+            "http": me_code,
+            "kassa": me_resp["data"]["cash_desk"],
+            "token": me_resp["data"]["api_client"]["token_hint"],
+            "xato": if (200..300).contains(&me_code) {
+                json!(null)
+            } else {
+                json!(tezcheck_why(&me_resp))
+            },
+        },
+        "kassalar": {
+            "http": code,
+            "royxat": resp["data"],
+            "xato": if (200..300).contains(&code) {
+                json!(null)
+            } else {
+                json!(tezcheck_why(&resp))
+            },
+        },
+    }))
+}
+
 // ═══════════════════════════════════════════════════════════════
 //  WEBHOOK — PUL O'ZI TUSHADI
 // ═══════════════════════════════════════════════════════════════
@@ -9208,6 +9279,10 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
     // tasdiqlaydi (`billing_webhook` izohiga qarang).
     if path == "/api/billing/webhook" && method == Method::Post {
         return billing_webhook(req, &env).await;
+    }
+    // Kassalarni tekshirish — faqat admin (`billing_desks` izohi).
+    if path == "/api/billing/desks" && method == Method::Get {
+        return billing_desks(req, &env).await;
     }
 
     // ── ADMIN BILAN YOZISHMA ──────────────────────────────────
