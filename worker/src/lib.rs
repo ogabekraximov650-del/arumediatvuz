@@ -5429,8 +5429,46 @@ async fn billing_check(mut req: Request, env: &Env) -> Result<Response> {
 /// (`token_hint`) ko'rinadi — "qaysi token qo'yilgan" degan
 /// savolga javob berish uchun shu yetadi.
 async fn billing_desks(req: Request, env: &Env) -> Result<Response> {
-    let Some(u) = session_user(env, &bearer(&req)).await? else {
-        return json_resp(&json!({"error": "unauthorized"}), 401);
+    // ── BRAUZERDAN HAM OCHILSIN ─────────────────────────────
+    //
+    // Bu yo'l odatdagidek `Authorization: Bearer ...` bilan
+    // ishlaydi, lekin brauzer bunday sarlavha yubora olmaydi —
+    // manzilni oddiy ochganda faqat `unauthorized` chiqardi va
+    // tekshiruvdan foyda bo'lmasdi.
+    //
+    // Shu sabab FAQAT SHU yo'l uchun token manzildan ham olinadi:
+    // `?t=<sessiya tokeni>`.
+    //
+    // ── NEGA BOSHQA YO'LLARDA BUNDAY QILINMAYDI ─────────────
+    //
+    // Manzildagi token brauzer tarixida, `Referer` sarlavhasida va
+    // server jurnallarida qolib ketadi. Bu — nosozlikni topish
+    // uchun ATAYLAB qilingan yon berish, va aynan shu yerda:
+    //   * yo'l faqat ADMINGA ochiq;
+    //   * javobda na token, na kassa kodi to'liq chiqmaydi;
+    //   * u hech qanday ma'lumotni o'zgartirmaydi (faqat o'qish).
+    //
+    // Nosozlik topilgach bu yo'lni olib tashlash mumkin.
+    let token = {
+        let t = bearer(&req);
+        if !t.is_empty() {
+            t
+        } else {
+            req.url()
+                .ok()
+                .and_then(|u| {
+                    u.query_pairs()
+                        .find(|(k, _)| k == "t")
+                        .map(|(_, v)| v.trim().to_string())
+                })
+                .unwrap_or_default()
+        }
+    };
+    let Some(u) = session_user(env, &token).await? else {
+        return json_resp(&json!({
+            "error": "unauthorized",
+            "izoh": "Admin sessiya tokeni kerak: ?t=<token>",
+        }), 401);
     };
     if !is_admin(&u) {
         return json_resp(&json!({"error": "forbidden"}), 403);
