@@ -59,8 +59,15 @@ jobs:
           printf '%s' "${{ secrets.B2_KEY_ID }}" | wrangler secret put B2_KEY_ID --env production
           printf '%s' "${{ secrets.B2_APPLICATION_KEY }}" | wrangler secret put B2_APPLICATION_KEY --env production
           printf '%s' "${{ secrets.TELEGRAM_BOT_TOKEN }}" | wrangler secret put TELEGRAM_BOT_TOKEN --env production
-          # tezchek.uz — balans to'ldirish to'lov havolalari uchun.
-          printf '%s' "${{ secrets.TEZCHEK_API_KEY }}" | wrangler secret put TEZCHEK_API_KEY --env production
+          # tezcheck.uz — balans to'ldirish to'lov havolalari uchun.
+          printf '%s' "${{ secrets.TEZCHECK_TOKEN }}" | wrangler secret put TEZCHECK_TOKEN --env production
+          printf '%s' "${{ secrets.TEZCHECK_DESK }}" | wrangler secret put TEZCHECK_DESK --env production
+          # Webhook siri ixtiyoriy: qo'yilmagan bo'lsa o'tkazib
+          # yuboriladi (bo'sh qiymat yozilsa webhook 503 qaytarardi
+          # va sabab ko'rinmasdi).
+          if [ -n "${{ secrets.TEZCHECK_WEBHOOK_SECRET }}" ]; then
+            printf '%s' "${{ secrets.TEZCHECK_WEBHOOK_SECRET }}" | wrangler secret put TEZCHECK_WEBHOOK_SECRET --env production
+          fi
 
       - name: Deploy to Cloudflare Workers
         working-directory: worker

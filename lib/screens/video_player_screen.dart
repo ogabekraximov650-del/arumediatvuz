@@ -8044,9 +8044,13 @@ class _SubRequiredScreen extends StatelessWidget {
                           borderRadius: BorderRadius.circular(14),
                         ),
                       ),
+                      // Tugma nomi "Obuna olish" — demak AYNAN
+                      // Obuna oynasi ochilsin. Oynalar tartibi
+                      // almashtirilgach (0 — To'ldirish) bu
+                      // raqamsiz To'ldirish ochilib qolardi.
                       onPressed: () => Navigator.of(context).push(
                         MaterialPageRoute<void>(
-                          builder: (_) => const BillingScreen(),
+                          builder: (_) => const BillingScreen(startPage: 1),
                         ),
                       ),
                       child: const Text(

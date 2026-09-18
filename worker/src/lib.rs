@@ -711,7 +711,7 @@ async fn init_db(env: &Env) -> bool {
 
         // ── BALANS, OBUNA VA TO'LOVLAR ────────────────────────
         //
-        // `payments_db` — tezchek.uz da yaratilgan har bir to'lov
+        // `payments_db` — tezcheck.uz da yaratilgan har bir to'lov
         // havolasi. `status` faqat `pending` -> `paid` yo'nalishida
         // o'zgaradi, shu sabab balans ikki marta oshmaydi.
         ("CREATE TABLE IF NOT EXISTS payments_db (
@@ -4992,7 +4992,7 @@ async fn sync_route(mut req: Request, env: &Env) -> Result<Response> {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  BALANS, OBUNA VA TO'LOVLAR (tezchek.uz)
+//  BALANS, OBUNA VA TO'LOVLAR (tezcheck.uz)
 // ═══════════════════════════════════════════════════════════════
 //
 // TALAB (foydalanuvchi): profil sahifasida "Obuna olish va Balans
@@ -5007,20 +5007,37 @@ async fn sync_route(mut req: Request, env: &Env) -> Result<Response> {
 //     ISHONILMAYDI, aks holda o'zgartirilgan ilova 30 kunlik
 //     obunani 1 so'mga sotib olardi;
 //   * balansdan pul yechish va obunani uzaytirish BITTA quvurda;
-//   * to'lov haqiqatan bo'lganini FAQAT tezchek.uz tasdiqlaydi.
+//   * to'lov haqiqatan bo'lganini FAQAT tezcheck.uz tasdiqlaydi.
 //
-// Tezchek API kaliti (`TEZCHEK_API_KEY`) worker sirlarida turadi
-// va ilovaga hech qachon chiqmaydi.
+// Kassa kalitlari (`TEZCHECK_TOKEN`, `TEZCHECK_DESK`) worker
+// sirlarida turadi va ilovaga hech qachon chiqmaydi.
+//
+// ── TO'LOV TIZIMI ALMASHTIRILDI ───────────────────────────────
+//
+// Ilgari `tezchek.uz` (bitta `api_key` so'rov TANASIDA) ishlatilar
+// edi. Endi `tezcheck.uz` ning savdogar API si:
+//
+//   * ikkita kalit va ikkovi ham SARLAVHADA:
+//       `Authorization: Bearer aps_...` — hisob tokeni (maxfiy;
+//       saytda faqat uning SHA-256 xeshi saqlanadi),
+//       `X-Cash-Desk-Code: cdk_...` — kassa kodi;
+//   * summa TIYINDA (`amount_minor`), ya'ni so'm × 100;
+//   * hisob-faktura `POST /bills` bilan yaratiladi, holati esa
+//     `POST /bills/{id}` bilan so'raladi;
+//   * qo'shimcha: WEBHOOK — pul tushishi bilan sayt bizga o'zi
+//     xabar beradi (`billing_webhook`).
 //
 // ── PUL IKKI MARTA QO'SHILMASLIGI ─────────────────────────────
 //
-// "Tekshirish" tugmasini necha marta bossa ham balans BIR MARTA
-// oshadi: `payments_db.status` `pending` dan `paid` ga faqat
-// SHARTLI o'tadi (`WHERE status='pending'`), balans esa o'sha
-// o'tish muvaffaqiyatli bo'lgandagina oshiriladi.
+// "Tekshirish" tugmasini necha marta bossa ham (va webhook necha
+// marta takrorlansa ham) balans BIR MARTA oshadi: `payments_db.
+// status` `pending` dan `paid` ga faqat SHARTLI o'tadi
+// (`WHERE status='pending'`), balans esa o'sha o'tish
+// muvaffaqiyatli bo'lgandagina oshiriladi. Ikkinchi urinish
+// hech qanday qatorga tegmaydi.
 
-/// Tezchek API manzili.
-const TEZCHEK_API: &str = "https://tezchek.uz/api";
+/// Tezcheck savdogar API manzili.
+const TEZCHECK_API: &str = "https://api.tezcheck.uz/api/merchant/v1";
 
 /// To'lov havolasi shuncha vaqt faol turadi (foydalanuvchi
 /// talabi: "har bitta havola 1 soat faol turadi, undan ko'p
@@ -5028,8 +5045,33 @@ const TEZCHEK_API: &str = "https://tezchek.uz/api";
 const PAY_LINK_TTL_MS: i64 = 60 * 60 * 1000;
 
 /// Eng kam va eng ko'p to'ldirish miqdori (so'm).
+///
+/// Pastki chegara tasodifiy emas: tezcheck.uz ning o'zi 1 000
+/// so'mdan kam hisob-fakturani qabul qilmaydi.
 const PAY_MIN: i64 = 1_000;
 const PAY_MAX: i64 = 10_000_000;
+
+/// Qaysi to'lov usullari ko'rsatiladi (bo'sh — HAMMASI).
+///
+/// ── SAVOL: BANK ILOVASIGA TO'G'RIDAN-TO'G'RI O'TIB BO'LADIMI ──
+///
+/// Foydalanuvchi so'radi: "avval saytga, saytdan keyin bank
+/// ilovaga o'tmasdan to'g'ridan to'g'ri bank ilovasiga o'tsa
+/// bo'ladimi".
+///
+/// Tekshirildi (haqiqiy hisob-faktura yaratib ko'rildi): YO'Q.
+/// Tezcheck API si faqat O'Z sahifasining havolasini qaytaradi
+/// (`payment_url` -> `tezcheck.uz/pay/plk_...`) va hech qanday
+/// maydonda `click://` yoki `payme://` kabi to'g'ridan-to'g'ri
+/// havola bermaydi. Bitta usul tanlab qo'yilganda ham o'sha
+/// sahifa ochiladi — faqat ro'yxatdan tanlash bosqichi tushib
+/// qoladi, telefon raqami baribir o'sha yerda so'raladi.
+///
+/// Shu sabab bu yerda ro'yxat BO'SH qoldirildi: odam Click va
+/// Payme dan xohlaganini tanlaydi. Agar bitta bosqichni kamaytirish
+/// muhimroq bo'lsa, `&["click"]` deb yozing — o'shanda ro'yxat
+/// ko'rsatilmaydi.
+const PAY_PROVIDERS: &[&str] = &[];
 
 /// Obuna tariflari: (kun, narx so'mda).
 ///
@@ -5065,44 +5107,75 @@ fn plan_label(days: i64) -> String {
     format!("{days} kunlik obuna")
 }
 
-/// Tezchek xatosini odam o'qiydigan matnga aylantiradi.
+/// Tezcheck xatosini odam o'qiydigan matnga aylantiradi.
 ///
 /// Sayt xatoni bir necha xil ko'rinishda qaytaradi: ba'zan
 /// `{"error":"..."}` satr, ba'zan `{"error":{"message":"..."}}`
 /// obyekt, ba'zan esa `{"message":"..."}`. Ilgari faqat bittasi
 /// o'qilardi va qolganida ekranda "noma'lum xato" chiqardi.
-fn tezchek_why(resp: &Value) -> String {
-    for v in [&resp["error"]["message"], &resp["error"], &resp["message"],
-              &resp["reason"], &resp["detail"]] {
+///
+/// Xato KODI (`auth.unauthenticated`, `request.rate_limited`, ...)
+/// ham qaraladi: matn topilmasa hech bo'lmasa kod ko'rinadi, aks
+/// holda jurnalda "noma'lum xato" dan boshqa hech narsa qolmasdi.
+fn tezcheck_why(resp: &Value) -> String {
+    for v in [
+        &resp["error"]["message"], &resp["message"], &resp["error"],
+        &resp["reason"], &resp["detail"],
+        &resp["error"]["code"], &resp["code"],
+    ] {
         if let Some(s) = v.as_str() {
-            if !s.is_empty() { return s.to_string(); }
+            if !s.is_empty() {
+                return s.to_string();
+            }
+        }
+    }
+    // 422 da maydonlar bo'yicha xatolar keladi: {"errors":{"amount_minor":["..."]}}
+    if let Some(m) = resp["errors"].as_object() {
+        if let Some((field, list)) = m.iter().next() {
+            if let Some(first) = list.as_array().and_then(|a| a.first()) {
+                if let Some(s) = first.as_str() {
+                    return format!("{field}: {s}");
+                }
+            }
         }
     }
     "noma'lum xato".to_string()
 }
 
-/// Tezchek'ga POST so'rovi.
-async fn tezchek(env: &Env, path: &str, mut body: Value) -> Result<Value> {
+/// Tezcheck'ga POST so'rovi: `(HTTP holati, javob)`.
+///
+/// HTTP holati ham qaytariladi, chunki yangi API "bo'ldi/bo'lmadi"
+/// ni javob TANASIDAGI bayroq bilan emas, HOLAT KODI bilan
+/// bildiradi (muvaffaqiyat — 2xx). Ilgarigi `ok: true` maydoni
+/// yo'q.
+async fn tezcheck(env: &Env, path: &str, body: Value) -> Result<(u16, Value)> {
     // `wrangler secret put` ba'zan oxiriga qator tashlashni ham
-    // qo'shib yuboradi. O'sha ko'rinmas belgi tufayli tezchek.uz
-    // "Invalid shop api_key" deb javob berardi — shuning uchun
-    // kalitni ishlatishdan oldin chetlarini albatta tozalaymiz.
-    let key = env.secret("TEZCHEK_API_KEY")?.to_string().trim().to_string();
-    if key.is_empty() {
-        return Err(Error::RustError("TEZCHEK_API_KEY qo'yilmagan".into()));
+    // qo'shib yuboradi. O'sha ko'rinmas belgi tufayli sayt
+    // "Invalid api key" deb javob berardi — shuning uchun
+    // kalitlarning chetlarini albatta tozalaymiz.
+    let token = env.secret("TEZCHECK_TOKEN")?.to_string().trim().to_string();
+    let desk = env.secret("TEZCHECK_DESK")?.to_string().trim().to_string();
+    if token.is_empty() || desk.is_empty() {
+        return Err(Error::RustError(
+            "TEZCHECK_TOKEN yoki TEZCHECK_DESK qo'yilmagan".into(),
+        ));
     }
-    if let Some(m) = body.as_object_mut() {
-        m.insert("api_key".to_string(), json!(key));
-    }
+
     let h = Headers::new();
     h.set("Content-Type", "application/json")?;
+    h.set("Accept", "application/json")?;
+    h.set("Authorization", &format!("Bearer {token}"))?;
+    h.set("X-Cash-Desk-Code", &desk)?;
     let req = Request::new_with_init(
-        &format!("{TEZCHEK_API}{path}"),
-        RequestInit::new().with_method(Method::Post).with_headers(h)
+        &format!("{TEZCHECK_API}{path}"),
+        RequestInit::new()
+            .with_method(Method::Post)
+            .with_headers(h)
             .with_body(Some(body.to_string().into())),
     )?;
     let mut r = Fetch::Request(req).send().await?;
-    Ok(r.json().await.unwrap_or(json!({})))
+    let status = r.status_code();
+    Ok((status, r.json().await.unwrap_or(json!({}))))
 }
 
 /// Obuna tugash vaqti (ms). Obunasi yo'q bo'lsa 0.
@@ -5113,6 +5186,15 @@ async fn sub_until(env: &Env, user: i64) -> i64 {
         .and_then(|r| first_row(&r))
         .and_then(|r| r["expires_at"].as_i64())
         .unwrap_or(0)
+}
+
+/// So'mni tiyinga: tezcheck.uz barcha summani TIYINDA oladi.
+///
+/// TOPILGAN XATA XAVFI: bu o'girish unutilsa, 15 000 so'mlik
+/// obuna uchun 150 so'm undirilardi (yoki teskarisi — odam 100
+/// barobar ko'p to'lardi). Shu sabab o'girish BITTA joyda.
+fn to_minor(sum: i64) -> i64 {
+    sum * 100
 }
 
 /// POST /api/billing/create — to'lov havolasi yaratish.
@@ -5129,19 +5211,38 @@ async fn billing_create(mut req: Request, env: &Env) -> Result<Response> {
         }), 400);
     }
 
-    let resp = tezchek(env, "/create_invoice", json!({"amount": amount})).await?;
-    if resp["ok"] != json!(true) {
+    // Bizning tomondagi raqam: sayt uni `external_reference` da
+    // qaytaradi va webhook kelganda YOZUVNI TOPISH uchun ishlaydi.
+    let reference = format!("aru-{me}-{}", now_ms());
+
+    let mut body = json!({
+        "amount_minor": to_minor(amount),
+        "title": format!("ARUmediaTV — balans to'ldirish ({amount} so'm)"),
+        "external_reference": reference,
+    });
+    // Bitta to'lov usuli tanlab qo'yilgan bo'lsa — foydalanuvchi
+    // ro'yxatdan tanlamaydi (`PAY_PROVIDERS` izohiga qarang).
+    if !PAY_PROVIDERS.is_empty() {
+        body["allowed_provider_codes"] = json!(PAY_PROVIDERS);
+    }
+
+    let (code, resp) = tezcheck(env, "/bills", body).await?;
+    // Yangi API muvaffaqiyatni HOLAT KODI bilan bildiradi (201).
+    if !(200..300).contains(&code) {
         return json_resp(&json!({
-            "error": format!("To'lov yaratilmadi: {}", tezchek_why(&resp))
+            "error": format!("To'lov yaratilmadi: {}", tezcheck_why(&resp))
         }), 502);
     }
-    // `order_id` son ham, satr ham kelishi mumkin.
-    let order_id = match &resp["order_id"] {
-        Value::Number(n) => n.to_string(),
-        Value::String(s) => s.clone(),
-        _ => return json_resp(&json!({"error": "order_id kelmadi"}), 502),
-    };
-    let pay_url = resp["pay_url"].as_str().unwrap_or("").to_string();
+    let order_id = resp["data"]["bill"]["id"].as_str().unwrap_or("").to_string();
+    if order_id.is_empty() {
+        return json_resp(&json!({"error": "hisob raqami kelmadi"}), 502);
+    }
+    // ── HAVOLA BIR MARTA BERILADI ───────────────────────────
+    //
+    // Sayt `payment_url` ni FAQAT yaratilganda qaytaradi (keyin u
+    // `null` bo'ladi). Shu sabab uni shu zahoti bazaga yozamiz —
+    // aks holda odam oynani yopsa havola butunlay yo'qolardi.
+    let pay_url = resp["data"]["payment_url"].as_str().unwrap_or("").to_string();
     if pay_url.is_empty() {
         return json_resp(&json!({"error": "to'lov havolasi kelmadi"}), 502);
     }
@@ -5176,9 +5277,51 @@ async fn billing_create(mut req: Request, env: &Env) -> Result<Response> {
     }))
 }
 
+/// To'langan to'lovni HISOBGA OLADI: balansni oshiradi va
+/// tarixga yozadi. Ikki joydan chaqiriladi — "Tekshirish" tugmasi
+/// (`billing_check`) va webhook (`billing_webhook`).
+///
+/// ── PUL BIR MARTA QO'SHILADI ──────────────────────────────────
+///
+/// Holat `pending` dan `paid` ga SHARTLI o'tadi. Ikkinchi chaqiruv
+/// (tugma qayta bosildi, webhook takrorlandi, ikkovi bir vaqtda
+/// keldi) HECH QANDAY qatorga tegmaydi, ya'ni balans ikkinchi
+/// marta oshmaydi. Idempotentlik AYNAN shu yerda — webhook
+/// hodisasining raqamiga tayanmaydi.
+///
+/// `true` — aynan shu chaqiruv pulni qo'shdi.
+async fn credit_payment(env: &Env, order_id: &str, user: i64, amount: i64)
+    -> Result<bool>
+{
+    let now = now_ms();
+    let upd = turso_exec(env,
+        "UPDATE payments_db SET status='paid', paid_at=?
+          WHERE order_id=? AND status='pending' RETURNING order_id",
+        vec![TursoArg::int(now), TursoArg::text(order_id)]).await?;
+    if first_row(&upd).is_none() {
+        return Ok(false);
+    }
+    turso_batch(env, &[
+        ("UPDATE users_db SET balance=COALESCE(balance,0)+? WHERE id=?",
+         vec![TursoArg::int(amount), TursoArg::int(user)]),
+        ("INSERT INTO billing_log (id,user_id,kind,amount,days,note,created_at)
+          VALUES (?,?,'topup',?,0,?,?)",
+         vec![
+            TursoArg::text(&format!("t{order_id}")), TursoArg::int(user),
+            TursoArg::int(amount),
+            TursoArg::text(&format!("Balans to'ldirildi (#{order_id})")),
+            TursoArg::int(now),
+         ]),
+    ]).await?;
+    Ok(true)
+}
+
 /// POST /api/billing/check — to'lov bo'ldimi?
 ///
-/// Bo'lgan bo'lsa balans BIR MARTA oshiriladi va tarixga yoziladi.
+/// Webhook qo'yilgan bo'lsa bu yo'l odatda "allaqachon to'langan"
+/// deb qaytadi — pul webhook bilan tushib bo'lgan bo'ladi. Tugma
+/// baribir qoldirilgan: webhook kechiksa yoki sayt uni yubora
+/// olmasa, odam kutib qolmasligi kerak.
 async fn billing_check(mut req: Request, env: &Env) -> Result<Response> {
     let Some(u) = session_user(env, &bearer(&req)).await? else {
         return json_resp(&json!({"error": "unauthorized"}), 401);
@@ -5205,55 +5348,190 @@ async fn billing_check(mut req: Request, env: &Env) -> Result<Response> {
         }));
     }
 
-    let resp = tezchek(env, "/status_invoice",
-        json!({"order_id": order_id})).await?;
-    let status = resp["payment"]["status"].as_str().unwrap_or("").to_string();
-    if resp["ok"] != json!(true) || status != "paid" {
+    let (code, resp) = tezcheck(env, &format!("/bills/{order_id}"), json!({})).await?;
+    if !(200..300).contains(&code) {
+        return json_resp(&json!({
+            "error": format!("Tekshirib bo'lmadi: {}", tezcheck_why(&resp))
+        }), 502);
+    }
+    let bill = &resp["data"]["bill"];
+    if bill["paid"] != json!(true) {
         return ok_nostore(json!({
             "ok": true,
-            "status": if status.is_empty() { "pending".to_string() } else { status },
+            "status": "pending",
             "balance": u["balance"].as_i64().unwrap_or(0),
         }));
     }
 
-    // ── PUL BIR MARTA QO'SHILADI ──────────────────────────────
+    // ── SUMMA MOS KELISHI SHART ─────────────────────────────
     //
-    // Holat `pending` dan `paid` ga SHARTLI o'tadi. Ikkinchi
-    // "Tekshirish" bosilganda bu yangilanish HECH QANDAY qatorga
-    // tegmaydi, ya'ni balans ikkinchi marta oshmaydi.
-    let now = now_ms();
-    let upd = turso_exec(env,
-        "UPDATE payments_db SET status='paid', paid_at=?
-          WHERE order_id=? AND status='pending' RETURNING order_id",
-        vec![TursoArg::int(now), TursoArg::text(&order_id)]).await?;
-    if first_row(&upd).is_none() {
-        // Boshqa so'rov bizdan oldin ulgurgan — balans allaqachon
-        // oshirilgan.
-        return ok_nostore(json!({
-            "ok": true, "status": "paid", "already": true,
-            "balance": u["balance"].as_i64().unwrap_or(0),
-        }));
+    // Sayt qaytargan summa bizdagidan farq qilsa, balansni
+    // BIZDAGI yozuvga qarab oshirish xato bo'lardi. Bunday holat
+    // amalda bo'lmaydi (summani biz belgilaymiz), lekin pul bilan
+    // ishlaganda "bo'lmaydi" degan gap yetarli emas.
+    if bill["amount_minor"].as_i64().unwrap_or(0) != to_minor(amount) {
+        return json_resp(&json!({
+            "error": "To'lov summasi mos kelmadi — qo'llab-quvvatlashga murojaat qiling"
+        }), 409);
     }
 
-    turso_batch(env, &[
-        ("UPDATE users_db SET balance=COALESCE(balance,0)+? WHERE id=?",
-         vec![TursoArg::int(amount), TursoArg::int(me)]),
-        ("INSERT INTO billing_log (id,user_id,kind,amount,days,note,created_at)
-          VALUES (?,?,'topup',?,0,?,?)",
-         vec![
-            TursoArg::text(&format!("t{order_id}")), TursoArg::int(me),
-            TursoArg::int(amount),
-            TursoArg::text(&format!("Balans to'ldirildi (#{order_id})")),
-            TursoArg::int(now),
-         ]),
-    ]).await?;
-
+    let added = credit_payment(env, &order_id, me, amount).await?;
     ok_nostore(json!({
         "ok": true,
         "status": "paid",
-        "already": false,
-        "balance": u["balance"].as_i64().unwrap_or(0) + amount,
+        "already": !added,
+        "balance": u["balance"].as_i64().unwrap_or(0) + if added { amount } else { 0 },
     }))
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  WEBHOOK — PUL O'ZI TUSHADI
+// ═══════════════════════════════════════════════════════════════
+//
+// TALAB (foydalanuvchi): "ilovani ham tekshirishsiz avto pul
+// tushadigan qilish kerak".
+//
+// Pul tushishi bilan tezcheck.uz SHU manzilga xabar yuboradi va
+// balans o'sha zahoti oshadi — odam hech narsa bosmaydi. Ilova esa
+// balansni o'zi yangilab turadi, ya'ni raqam ko'z oldida o'zgaradi.
+//
+// ── NEGA IMZO TEKSHIRILADI ────────────────────────────────────
+//
+// Bu manzil INTERNETDAN OCHIQ: unga istalgan odam so'rov yubora
+// oladi. Imzosiz u "balansimni oshir" tugmasiga aylanardi.
+//
+// Imzo — HMAC-SHA256, kaliti webhook siri (`wbs_...`), matni esa
+// `{timestamp}.{delivery_id}.{tana}`. Tana AYNAN kelgan holida
+// olinadi: JSON ni o'qib qayta yozish probel va maydonlar
+// tartibini o'zgartiradi va imzo boshqa hech qachon to'g'ri
+// chiqmasdi.
+//
+// Uchta to'siq:
+//   1. sir qo'yilmagan bo'lsa manzil UMUMAN ishlamaydi (503) —
+//      "sir yo'q ekan, o'tkazib yuboraman" degan yo'l yo'q;
+//   2. vaqt tamg'asi 5 daqiqadan eski bo'lsa rad etiladi (eski
+//      xabarni ushlab olib qayta yuborish ishlamaydi);
+//   3. imzo doimiy vaqtda solishtiriladi (`verify_slice`).
+//
+// Sayt sirni almashtirganda 24 soat davomida IKKALA imzoni ham
+// yuboradi (vergul bilan), shu sabab har bir nomzod alohida
+// tekshiriladi.
+
+/// Webhook vaqt tamg'asi shuncha soniyadan eski bo'lsa — rad.
+const WEBHOOK_SKEW_SECS: i64 = 300;
+
+/// Baytlarni kichik harfli hex ga.
+fn hex_of(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+/// POST /api/billing/webhook — tezcheck.uz dan kelgan hodisa.
+async fn billing_webhook(mut req: Request, env: &Env) -> Result<Response> {
+    // Sir qo'yilmagan — webhook o'chiq. `?` emas, chunki sir
+    // umuman yo'q bo'lsa `secret()` xato qaytaradi va bu XATO
+    // emas, sozlanmagan holat.
+    let secret = match env.secret("TEZCHECK_WEBHOOK_SECRET") {
+        Ok(s) => s.to_string().trim().to_string(),
+        Err(_) => String::new(),
+    };
+    if secret.is_empty() {
+        return json_resp(&json!({"error": "webhook sozlanmagan"}), 503);
+    }
+
+    // Sarlavhalar AVVAL o'qib olinadi: pastdagi `req.text()` so'rovni
+    // O'ZGARUVCHAN qilib oladi va bu yerda hali `req.headers()`
+    // dan qarz turgan bo'lsa kod yig'ilmasdi.
+    let (ts, delivery, sig_header) = {
+        let h = req.headers();
+        let get = |n: &str| h.get(n).ok().flatten().unwrap_or_default();
+        (
+            get("X-Checkout-Timestamp"),
+            get("X-Checkout-Delivery"),
+            get("X-Checkout-Signature"),
+        )
+    };
+    // Tana AYNAN kelgan holida — imzo shu baytlar ustidan qo'yilgan.
+    // JSON ni o'qib qayta yozish probel va maydonlar tartibini
+    // o'zgartiradi, ya'ni imzo boshqa hech qachon to'g'ri chiqmasdi.
+    let raw = req.text().await.unwrap_or_default();
+
+    if ts.is_empty() || delivery.is_empty() || sig_header.is_empty() {
+        return json_resp(&json!({"error": "imzo sarlavhalari yo'q"}), 400);
+    }
+    let ts_num = ts.parse::<i64>().unwrap_or(0);
+    if (now_ms() / 1000 - ts_num).abs() > WEBHOOK_SKEW_SECS {
+        return json_resp(&json!({"error": "vaqt tamg'asi eskirgan"}), 400);
+    }
+
+    // ── IMZO ──────────────────────────────────────────────────
+    //
+    // ── NEGA IKKITA KALIT SINALADI ──────────────────────────
+    //
+    // Hujjatda ikki xil yozilgan: formulada kalit sifatida
+    // `SHA256_secret` ko'rsatilgan, ishlaydigan PHP namunasida esa
+    // sirning O'ZI berilgan. Qaysi biri to'g'riligini faqat
+    // haqiqiy webhook kelganda bilib bo'ladi.
+    //
+    // Shu sabab ikkalasi ham hisoblanadi va mos kelgani qabul
+    // qilinadi. Bu xavfsizlikni SUSAYTIRMAYDI: ikkala holatda ham
+    // kalit — faqat bizda va tezcheck.uz da bor sir. Tanlashda
+    // yanglishib, to'lovlar jimgina tushmay qolgandan ko'ra shu
+    // yaxshi.
+    let msg = format!("{ts}.{delivery}.{raw}");
+    let sha_key: [u8; 32] = <sha2::Sha256 as sha2::Digest>::digest(secret.as_bytes()).into();
+    let mut expected: Vec<String> = Vec::with_capacity(2);
+    for key in [secret.as_bytes(), &sha_key[..]] {
+        let mut mac = <hmac::Hmac<sha2::Sha256> as hmac::Mac>::new_from_slice(key)
+            .map_err(|_| Error::RustError("webhook siri yaroqsiz".into()))?;
+        hmac::Mac::update(&mut mac, msg.as_bytes());
+        expected.push(format!("v1={}", hex_of(&hmac::Mac::finalize(mac).into_bytes())));
+    }
+    // Bir nechta nomzod vergul bilan kelishi mumkin (sir
+    // almashtirilayotgan 24 soat ichida sayt eski va yangi imzoni
+    // birga yuboradi).
+    let ok = sig_header.split(',').any(|c| {
+        let c = c.trim();
+        expected.iter().any(|e| c.eq_ignore_ascii_case(e))
+    });
+    if !ok {
+        return json_resp(&json!({"error": "imzo to'g'ri kelmadi"}), 401);
+    }
+
+    // ── HODISA ────────────────────────────────────────────────
+    let ev: Value = serde_json::from_str(&raw).unwrap_or(json!({}));
+    // Bizni faqat MUVAFFAQIYATLI to'lov qiziqtiradi. Qolgan
+    // hodisalar (processing, failed) uchun 200 qaytariladi —
+    // aks holda sayt ularni 8 marta qayta yuborib turardi.
+    if ev["type"].as_str() != Some("payment.succeeded") {
+        return ok_nostore(json!({"ok": true, "ignored": true}));
+    }
+    let d = &ev["data"];
+    let bill_id = d["bill_id"].as_str().unwrap_or("").to_string();
+    if bill_id.is_empty() {
+        return ok_nostore(json!({"ok": true, "ignored": true}));
+    }
+
+    let row = turso_exec(env, "SELECT * FROM payments_db WHERE order_id=?",
+        vec![TursoArg::text(&bill_id)]).await?;
+    let Some(pay) = first_row(&row) else {
+        // Bizda bunday yozuv yo'q (masalan boshqa tizimdan
+        // yaratilgan hisob). Qayta yuborilmasin — 200.
+        return ok_nostore(json!({"ok": true, "unknown": true}));
+    };
+    let user = pay["user_id"].as_i64().unwrap_or(0);
+    let amount = pay["amount"].as_i64().unwrap_or(0);
+    // Summa mos kelmasa pul QO'SHILMAYDI (`billing_check` dagi
+    // bilan bitta qoida).
+    if d["amount_minor"].as_i64().unwrap_or(0) != to_minor(amount) || user <= 0 {
+        return ok_nostore(json!({"ok": true, "mismatch": true}));
+    }
+
+    let added = credit_payment(env, &bill_id, user, amount).await?;
+    ok_nostore(json!({"ok": true, "credited": added}))
 }
 
 /// POST /api/billing/subscribe — balansdan obuna sotib olish.
@@ -8902,6 +9180,12 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
     }
     if path == "/api/billing/subscribe" && method == Method::Post {
         return billing_subscribe(req, &env).await;
+    }
+    // Webhook — tezcheck.uz chaqiradi, foydalanuvchi emas. Shu
+    // sabab bu yerda sessiya tekshirilmaydi: haqiqiyligini IMZO
+    // tasdiqlaydi (`billing_webhook` izohiga qarang).
+    if path == "/api/billing/webhook" && method == Method::Post {
+        return billing_webhook(req, &env).await;
     }
 
     // ── ADMIN BILAN YOZISHMA ──────────────────────────────────

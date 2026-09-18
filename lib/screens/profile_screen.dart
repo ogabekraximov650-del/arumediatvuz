@@ -933,7 +933,10 @@ class _BillingButtonState extends State<_BillingButton> {
   void _open() {
     final b = BillingService.instance;
     // Balansda pul bo'lsa — Obuna, bo'lmasa — To'ldirish.
-    final start = b.balance > 0 ? 0 : 1;
+    //
+    // Oynalar tartibi almashtirilgan (foydalanuvchi talabi), shu
+    // sabab raqamlar ham almashdi: 0 — To'ldirish, 1 — Obuna.
+    final start = b.balance > 0 ? 1 : 0;
     Navigator.of(context).push(
       PageRouteBuilder(
         transitionDuration: const Duration(milliseconds: 300),

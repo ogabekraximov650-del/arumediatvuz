@@ -16,7 +16,19 @@ workers_dev = true
 # wrangler secret put B2_KEY_ID --env production
 # wrangler secret put B2_APPLICATION_KEY --env production
 # wrangler secret put TELEGRAM_BOT_TOKEN --env production
-# wrangler secret put TEZCHEK_API_KEY --env production
+# wrangler secret put TEZCHECK_TOKEN --env production
+# wrangler secret put TEZCHECK_DESK --env production
+# wrangler secret put TEZCHECK_WEBHOOK_SECRET --env production
 #
-# TEZCHEK_API_KEY — tezchek.uz kassasining API kaliti. U FAQAT
-# worker ichida ishlatiladi va ilovaga hech qachon chiqmaydi.
+# TEZCHECK_TOKEN  — hisob tokeni (`aps_...`). MAXFIY: tezcheck.uz
+#                   faqat uning SHA-256 xeshini saqlaydi, ya'ni
+#                   yo'qotilsa qaytarib bo'lmaydi, yangisi
+#                   yaratiladi.
+# TEZCHECK_DESK   — kassa kodi (`cdk_...`).
+# TEZCHECK_WEBHOOK_SECRET — webhook imzosi kaliti (`wbs_...`).
+#                   Qo'yilmasa webhook manzili UMUMAN ishlamaydi
+#                   (503) va pul faqat "Tekshirish" tugmasi bilan
+#                   hisobga olinadi.
+#
+# Uchalasi ham FAQAT worker ichida ishlatiladi va ilovaga hech
+# qachon chiqmaydi.

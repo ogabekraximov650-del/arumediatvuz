@@ -7,7 +7,7 @@
 // "Profil sahifasidagi profil ma'lumotlari va shaxsiy statistika
 //  orasiga 'Obuna olish va Balans to'ldirish' degan eniga
 //  cho'zilgan bitta uzun tugma qo'sh. Tugmani bosganda yuqorida
-//  3 ta tugma bo'lsin: Obuna, To'ldirish, Tarix.
+//  3 ta tugma bo'lsin: To'ldirish, Obuna, Tarix.
 //
 //  Agar foydalanuvchi balansida pul bo'lsa obuna oynasi ochiladi,
 //  agar yo'q bo'lsa to'ldirish oynasi ochiladi.
@@ -34,7 +34,7 @@ import '../theme/app_background.dart';
 import '../widgets/glass.dart';
 
 class BillingScreen extends StatefulWidget {
-  /// Qaysi oynadan boshlansin: 0 — Obuna, 1 — To'ldirish, 2 — Tarix.
+  /// Qaysi oynadan boshlansin: 0 — To'ldirish, 1 — Obuna, 2 — Tarix.
   final int startPage;
 
   const BillingScreen({super.key, this.startPage = 0});
@@ -93,7 +93,15 @@ class _BillingScreenState extends State<BillingScreen> {
                   controller: _pages,
                   onPageChanged: (i) => setState(() => _page = i),
                   children: [
-                    const _SubscribePage(),
+                    // ── TARTIB ALMASHTIRILDI ────────────────
+                    //
+                    // TALAB (foydalanuvchi): "Obuna sotib olish va
+                    // Balans to'ldirish oynasini almashtir".
+                    //
+                    // Endi birinchi o'rinda To'ldirish turadi —
+                    // obuna balansdan olinadi, ya'ni ko'pchilik
+                    // baribir avval balansni to'ldiradi.
+                    //
                     // To'lov tasdiqlangan zahoti Tarix oynasiga
                     // o'tiladi: havola ro'yxatdan yo'qoladi va
                     // yozuv tarixda ko'rinadi (foydalanuvchi
@@ -101,6 +109,7 @@ class _BillingScreenState extends State<BillingScreen> {
                     // to'lov oynasidan olib tashlanib tarix
                     // oynasiga yozilishi kerak").
                     _TopUpPage(onPaid: () => _goTo(2)),
+                    const _SubscribePage(),
                     const _HistoryPage(),
                   ],
                 ),
@@ -200,7 +209,7 @@ class _Switcher extends StatelessWidget {
   final ValueChanged<int> onChanged;
   const _Switcher({required this.page, required this.onChanged});
 
-  static const _labels = ['Obuna', 'To\'ldirish', 'Tarix'];
+  static const _labels = ['To\'ldirish', 'Obuna', 'Tarix'];
 
   @override
   Widget build(BuildContext context) {
@@ -616,22 +625,50 @@ class _TopUpPageState extends State<_TopUpPage> {
     super.dispose();
   }
 
+  /// Summani yozgach — DARHOL to'lov sahifasiga.
+  ///
+  /// TALAB (foydalanuvchi): "balans to'ldirishda turmoqchi bo'lgan
+  /// summani yozgach to'g'ri havolaga yo'naltirilsin va avtomatik
+  /// ravishda pul hisobiga tushsin".
+  ///
+  /// Ilgari uch qadam bor edi: summani yozish -> havola qatorini
+  /// kutish -> "To'lash" tugmasini bosish. Endi bitta: summa
+  /// yoziladi va brauzer o'zi ochiladi.
+  ///
+  /// Pul esa hisobga O'ZI tushadi — `_LinkTileState` izohiga
+  /// qarang (webhook + ilova tomonidagi kuzatuvchi).
   Future<void> _create() async {
+    if (_busy) return;
     final n = int.tryParse(_amount.text.replaceAll(RegExp(r'[^0-9]'), ''));
     if (n == null || n <= 0) {
       _say('Summani yozing');
       return;
     }
     setState(() => _busy = true);
-    final err = await BillingService.instance.createLink(n);
+    final r = await BillingService.instance.createLink(n);
     if (!mounted) return;
     setState(() => _busy = false);
-    if (err != null) {
-      _say(err);
+    if (r.error != null) {
+      _say(r.error!);
       return;
     }
     _amount.clear();
     FocusScope.of(context).unfocus();
+
+    final url = r.url == null ? null : Uri.tryParse(r.url!);
+    if (url == null) {
+      // Havola yaratildi, lekin manzil kelmadi — qator baribir
+      // ro'yxatda turadi, odam undan ocha oladi.
+      _say('Havola tayyor — pastdagi "To\'lash" tugmasini bosing');
+      return;
+    }
+    try {
+      await launchUrl(url, mode: LaunchMode.externalApplication);
+    } catch (_) {
+      if (mounted) {
+        _say('Brauzer ochilmadi — pastdagi "To\'lash" tugmasini bosing');
+      }
+    }
   }
 
   void _say(String text) {
@@ -714,7 +751,10 @@ class _TopUpPageState extends State<_TopUpPage> {
                             child: CircularProgressIndicator(
                                 strokeWidth: 2, color: Colors.white),
                           )
-                        : const Text('To\'lov havolasi yaratish',
+                        // Tugma endi havola YARATMAYDI — u
+                        // to'g'ridan-to'g'ri to'lov sahifasini
+                        // ochadi, shu sabab nomi ham shunga mos.
+                        : const Text('To\'lashga o\'tish',
                             style: TextStyle(
                                 fontSize: 14, fontWeight: FontWeight.w700)),
                   ),
@@ -724,8 +764,9 @@ class _TopUpPageState extends State<_TopUpPage> {
             const SizedBox(height: 16),
             if (links.isEmpty)
               Text(
-                'Faol havola yo\'q. Summani yozib, havola yarating —\n'
-                'har bir havola 1 soat faol turadi.',
+                'Summani yozing — to\'lov sahifasi o\'zi ochiladi.\n'
+                'Pul hisobingizga avtomatik tushadi, havola esa\n'
+                '1 soat faol turadi.',
                 style: TextStyle(
                   color: Colors.white.withValues(alpha: 0.45),
                   fontSize: 12,
@@ -754,65 +795,127 @@ class _LinkTile extends StatefulWidget {
   State<_LinkTile> createState() => _LinkTileState();
 }
 
-class _LinkTileState extends State<_LinkTile> {
+class _LinkTileState extends State<_LinkTile> with WidgetsBindingObserver {
   bool _busy = false;
 
-  // ── MUDDAT TUGASHIDAN OLDIN BIR MARTA TEKSHIRAMIZ ────────
+  // ══════════════════════════════════════════════════════════
+  //  PUL O'ZI TUSHADI — TUGMA BOSILMAYDI
+  // ══════════════════════════════════════════════════════════
   //
-  // Havola muddati tugagach qator BAZADAN o'chiriladi
-  // (foydalanuvchi talabi: "bir soatdan o'tgach bazadan
-  // o'chirib tashlanishi kerak").
+  // TALAB (foydalanuvchi): "ilovani ham tekshirishsiz avto pul
+  // tushadigan qilish kerak".
   //
-  // XAVF: odam oxirgi daqiqalarda to'lab, "Tekshirish" tugmasini
-  // bosishga ulgurmasa — qator o'chib ketadi va pul balansga
-  // tushmay qoladi. Shu sabab muddat tugashiga oz qolganda ilova
-  // O'ZI bir marta tekshiradi: to'lov bo'lgan bo'lsa qator
-  // o'chishidan OLDIN `paid` ga o'tadi va balans yangilanadi.
+  // Ikki tomondan qaralgan:
   //
-  // Bir marta: takroriy so'rov hech narsani o'zgartirmaydi,
-  // faqat tarmoqqa yuk bo'lardi.
-  Timer? _autoCheck;
-  bool _autoChecked = false;
+  //   1. SERVER. tezcheck.uz pul tushishi bilan worker'ga xabar
+  //      yuboradi (webhook) va balans o'sha zahoti oshadi —
+  //      ilova umuman qatnashmaydi.
+  //
+  //   2. ILOVA. Bu yerdagi kuzatuvchi balansni o'zi so'rab
+  //      turadi, ya'ni raqam ko'z oldida yangilanadi. Webhook
+  //      sozlanmagan bo'lsa ham pul shu yo'l bilan tushadi.
+  //
+  // "Tekshirish" tugmasi OLIB TASHLANMADI: ikkala yo'l ham
+  // tarmoqqa bog'liq va odam baribir qo'lda turtish imkoniga ega
+  // bo'lishi kerak.
+  //
+  // ── NEGA TEZLIK O'ZGARIB TURADI ──────────────────────────
+  //
+  // Havola bir soat yashaydi. Har 5 soniyada so'rov yuborilsa —
+  // bitta to'lov uchun 720 ta so'rov, ya'ni bekorga yoqilgan
+  // trafik va server yuki.
+  //
+  // Amalda odam Click/Payme'ga o'tib, 1-2 daqiqada qaytadi. Shu
+  // sabab: boshida tez-tez, keyin siyraklashib boradi. Eng
+  // muhim payt esa — ILOVAGA QAYTGAN LAHZA: o'shanda taymerni
+  // kutmasdan DARHOL tekshiriladi (`didChangeAppLifecycleState`).
+  static const List<(Duration, Duration)> _pollPlan = [
+    // (shu vaqtgacha, shu oraliqda)
+    (Duration(minutes: 2), Duration(seconds: 4)),
+    (Duration(minutes: 10), Duration(seconds: 15)),
+    (Duration(hours: 2), Duration(seconds: 60)),
+  ];
+
+  Timer? _poll;
+
+  /// Kuzatuv boshlangan payt — oraliqni tanlash uchun.
+  DateTime _watchFrom = DateTime.now();
+
+  /// So'rov ayni damda ketyaptimi (ikkitasi bir vaqtda ketmasin).
+  bool _checking = false;
+
+  /// To'lov topildi — kuzatish tugadi.
+  bool _done = false;
 
   @override
   void initState() {
     super.initState();
-    _armAutoCheck();
+    WidgetsBinding.instance.addObserver(this);
+    _armPoll();
   }
 
   @override
   void didUpdateWidget(_LinkTile old) {
     super.didUpdateWidget(old);
     if (old.link.orderId != widget.link.orderId) {
-      _autoChecked = false;
-      _armAutoCheck();
+      _done = false;
+      _watchFrom = DateTime.now();
+      _armPoll();
     }
   }
 
-  void _armAutoCheck() {
-    _autoCheck?.cancel();
-    if (_autoChecked) return;
-    // Muddat tugashiga 20 soniya qolganda.
-    final when = widget.link.left - const Duration(seconds: 20);
-    if (when <= Duration.zero) {
-      // Allaqachon oz qolgan (yoki o'tgan) — darhol.
-      _autoCheck = Timer(const Duration(milliseconds: 300), _runAutoCheck);
-      return;
-    }
-    _autoCheck = Timer(when, _runAutoCheck);
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Odam bank ilovasidan/brauzerdan QAYTDI — eng ehtimolli
+    // payt. Taymer nechada turganidan qat'i nazar darhol
+    // tekshiramiz va sanoqni boshidan boshlaymiz (yana bir necha
+    // marta tez-tez so'raladi).
+    if (state != AppLifecycleState.resumed || _done) return;
+    _watchFrom = DateTime.now();
+    unawaited(_silentCheck());
+    _armPoll();
   }
 
-  Future<void> _runAutoCheck() async {
-    if (_autoChecked || !mounted) return;
-    _autoChecked = true;
-    final r = await BillingService.instance.check(widget.link.orderId);
-    if (!mounted || !r.paid) return;
-    widget.onPaid();
+  /// Keyingi so'rovgacha qancha kutiladi.
+  Duration get _gap {
+    final since = DateTime.now().difference(_watchFrom);
+    for (final (until, gap) in _pollPlan) {
+      if (since < until) return gap;
+    }
+    return _pollPlan.last.$2;
+  }
+
+  void _armPoll() {
+    _poll?.cancel();
+    if (_done || !mounted) return;
+    _poll = Timer(_gap, () async {
+      await _silentCheck();
+      _armPoll();
+    });
+  }
+
+  /// Jimgina tekshiradi: xato bo'lsa ekranga HECH NARSA
+  /// chiqarilmaydi (odam so'ramagan — xabar ham kerak emas).
+  Future<void> _silentCheck() async {
+    if (_checking || _done || !mounted) return;
+    _checking = true;
+    try {
+      final r = await BillingService.instance.check(widget.link.orderId);
+      if (!mounted || !r.paid) return;
+      _done = true;
+      _poll?.cancel();
+      widget.onPaid();
+    } catch (_) {
+      // Tarmoq yo'q — keyingi urinishda.
+    } finally {
+      _checking = false;
+    }
   }
 
   @override
   void dispose() {
-    _autoCheck?.cancel();
+    _poll?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
 
@@ -834,6 +937,7 @@ class _LinkTileState extends State<_LinkTile> {
   }
 
   Future<void> _check() async {
+    if (_busy) return;
     setState(() => _busy = true);
     final r = await BillingService.instance.check(widget.link.orderId);
     if (!mounted) return;
@@ -849,6 +953,8 @@ class _LinkTileState extends State<_LinkTile> {
     // Havola SERVERDA `paid` ga o'tdi, ya'ni `load()` dan keyin u
     // faol havolalar ro'yxatida umuman qaytmaydi va o'rniga
     // tarixda "Balans to'ldirildi" yozuvi paydo bo'ladi.
+    _done = true;
+    _poll?.cancel();
     _say('To\'lov qabul qilindi — balans yangilandi');
     widget.onPaid();
   }

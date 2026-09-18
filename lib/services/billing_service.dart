@@ -268,8 +268,24 @@ class BillingService extends ChangeNotifier {
     _saveLocal();
   }
 
-  /// To'lov havolasi yaratadi. Xato bo'lsa matn qaytadi.
-  Future<String?> createLink(int amount) async {
+  /// To'lov havolasi yaratadi.
+  ///
+  /// Qaytaradi: xato matni (bo'lsa) va TO'LOV HAVOLASI.
+  ///
+  /// ── NEGA HAVOLA HAM QAYTADI ─────────────────────────────
+  ///
+  /// TALAB (foydalanuvchi): "balans to'ldirishda turmoqchi
+  /// bo'lgan summani yozgach to'g'ri havolaga yo'naltirilsin".
+  ///
+  /// Ilgari bu metod faqat xatoni qaytarardi: havola ro'yxatga
+  /// tushar, odam esa uni ko'rib, ustidagi "To'lash" tugmasini
+  /// ALOHIDA bosishi kerak edi — ya'ni bitta ortiqcha qadam.
+  /// Endi ekran havolani shu yerdan olib, brauzerni o'zi ochadi.
+  ///
+  /// Havola ro'yxatda baribir qoladi: brauzer ochilmay qolsa yoki
+  /// odam uni yopib yuborsa, qaytadan ochish imkoni bo'lishi
+  /// kerak.
+  Future<({String? error, String? url})> createLink(int amount) async {
     try {
       final r = await http
           .post(
@@ -280,13 +296,17 @@ class BillingService extends ChangeNotifier {
           .timeout(const Duration(seconds: 25));
       final j = jsonDecode(r.body) as Map<String, dynamic>;
       if (r.statusCode != 200) {
-        return '${j['error'] ?? 'Havola yaratilmadi'}';
+        return (error: '${j['error'] ?? 'Havola yaratilmadi'}', url: null);
       }
+      final url = '${j['pay_url'] ?? ''}';
       // Ro'yxat yangilansin — yangi havola darhol ko'rinadi.
       await load(force: true);
-      return null;
+      return (error: null, url: url.isEmpty ? null : url);
     } catch (_) {
-      return 'Internet yo\'q — qaytadan urinib ko\'ring';
+      return (
+        error: 'Internet yo\'q — qaytadan urinib ko\'ring',
+        url: null,
+      );
     }
   }
 
