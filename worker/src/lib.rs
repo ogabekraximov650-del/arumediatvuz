@@ -9055,23 +9055,43 @@ async fn app_gate(req: &Request, env: &Env, path: &str) -> Option<Response> {
     // sir qo'yilishidan OLDIN deploy qilinsa, ilova uzilib
     // qolmasligi kerak. Sir qo'yilgan zahoti tekshiruv QAT'IY
     // bo'ladi va eski imzo umuman qabul qilinmaydi.
+    // ── O'TISH DAVRI: IKKALA USUL HAM QABUL QILINADI ────────
+    //
+    // TALAB (foydalanuvchi): "hozircha eski ilovalar ham
+    // ishlaydigan qil, keyinchalik eski tizimni to'liq uzamiz".
+    //
+    // Shu sabab so'rov IKKI yo'ldan birortasi bilan o'tsa yetadi:
+    //
+    //   * yangi usul — `v2.<vaqt>.<HMAC>` (sir qo'yilgan bo'lsa);
+    //   * eski usul  — `app_config` dagi o'zgarmas hash.
+    //
+    // Tarqatilgan eski APK'lar uzilib qolmaydi. Hamma yangi
+    // versiyaga o'tgach eski yo'lni uzish uchun admin oynasidan
+    // imzolar ro'yxatini TOZALASH kifoya (`app_sig` bo'sh
+    // bo'lsa, quyidagi `if let Some(...)` umuman ishlamaydi va
+    // faqat yangi usul qoladi) — kodga tegish shart emas.
     let secret = env
         .secret("APP_SIGN_SECRET")
         .map(|s| s.to_string().trim().to_string())
         .unwrap_or_default();
-    if !secret.is_empty() {
-        if !verify_app_sig(&secret, &head("X-App-Sig"), req.method().to_string().as_str(), path) {
-            return Some(
-                json_resp(&json!({"error": "forbidden"}), 403)
-                    .unwrap_or_else(|_| Response::empty().unwrap()),
-            );
-        }
-    } else if let Some(want) = config_get(env, "app_sig").await {
-        // Eski yo'l — sir qo'yilgunicha.
-        let got = head("X-App-Sig");
-        let ok = !got.is_empty()
-            && want.split(',').any(|w| w.trim() == got);
-        if !ok {
+    let got = head("X-App-Sig");
+
+    // 1. Yangi usul.
+    let v2_ok = !secret.is_empty()
+        && verify_app_sig(&secret, &got, req.method().to_string().as_str(), path);
+
+    if !v2_ok {
+        // 2. Eski usul — ro'yxat turgan ekan, hali ham o'tadi.
+        let old_list = config_get(env, "app_sig").await;
+        let old_ok = match &old_list {
+            Some(want) => !got.is_empty() && want.split(',').any(|w| w.trim() == got),
+            None => false,
+        };
+        // Ikkala tekshiruv ham SOZLANMAGAN bo'lsa — eshik ochiq
+        // (ishlab chiqish rejimi). Bittasi sozlangan-u, ikkalasi
+        // ham o'tmagan bo'lsa — rad etiladi.
+        let configured = !secret.is_empty() || old_list.is_some();
+        if configured && !old_ok {
             return Some(
                 json_resp(&json!({"error": "forbidden"}), 403)
                     .unwrap_or_else(|_| Response::empty().unwrap()),

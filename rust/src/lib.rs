@@ -61,10 +61,63 @@ pub extern "C" fn rust_core_version() -> *mut c_char {
 // (CI uni GitHub sirlaridan beradi). Berilmagan bo'lsa imzo BO'SH
 // qaytadi va ilova sarlavhani umuman qo'ymaydi — ishlab chiqish
 // rejimida server ham tekshiruvni o'chirib qo'ygan bo'ladi.
-const APP_SIGN_SECRET: &str = match option_env!("APP_SIGN_SECRET") {
+//
+// ── NEGA KALIT OCHIQ SAQLANMAYDI ──────────────────────────────
+//
+// TEKSHIRIB KO'RILDI: kalit oddiy `&str` bo'lib turganda u tayyor
+// `.so` faylning ichida OCHIQ bayt bo'lib yotardi va `strings`
+// buyrug'i uni bir zumda topib berardi:
+//
+//     $ strings librust_core.so | grep -o "...KALIT..."
+//     fulutter-video-v1janriDEADBEEF...TESTKALITRust kesh-server
+//
+// Ya'ni APK'ni ochgan odam uchun bu bir necha daqiqalik ish edi.
+//
+// Endi kalit XOR niqobi ostida saqlanadi va faqat ishlatilish
+// payti tiklanadi. `strings` endi hech narsa topmaydi — kalitni
+// olish uchun kodning o'zini disassembler bilan o'qish kerak.
+//
+// Bu MUTLAQ himoya emas (telefondagi ilova hech qachon mukammal
+// sir saqlay olmaydi), lekin to'siq "bir necha daqiqa" dan
+// "teskari muhandislik" darajasiga ko'tariladi.
+
+/// Kompilyatsiya paytida kiritilgan kalit (xom ko'rinishda —
+/// pastda darhol niqoblanadi va binarga tushmaydi).
+const RAW_SECRET: &str = match option_env!("APP_SIGN_SECRET") {
     Some(v) => v,
     None => "",
 };
+
+const SECRET_LEN: usize = RAW_SECRET.len();
+
+/// Har bir bayt uchun boshqacha niqob — bir xil bayt ketma-ket
+/// kelsa ham natijada takrorlanuvchi naqsh chiqmaydi.
+const fn mask_at(i: usize) -> u8 {
+    0x5Au8 ^ (i as u8).wrapping_mul(31).wrapping_add(7)
+}
+
+/// Niqoblangan kalit — binarda AYNAN shu baytlar turadi.
+const OBFUSCATED: [u8; SECRET_LEN] = {
+    let src = RAW_SECRET.as_bytes();
+    let mut out = [0u8; SECRET_LEN];
+    let mut i = 0;
+    while i < SECRET_LEN {
+        out[i] = src[i] ^ mask_at(i);
+        i += 1;
+    }
+    out
+};
+
+/// Kalitni ishlatish paytida tiklaydi.
+fn app_secret() -> Vec<u8> {
+    let mut out = Vec::with_capacity(SECRET_LEN);
+    let mut i = 0;
+    while i < SECRET_LEN {
+        out.push(OBFUSCATED[i] ^ mask_at(i));
+        i += 1;
+    }
+    out
+}
 
 /// `<vaqt>.<METOD>.<yo'l>` matnini imzolaydi.
 ///
@@ -81,7 +134,7 @@ pub unsafe extern "C" fn app_sign(
 ) -> *mut c_char {
     use hmac::Mac;
 
-    if APP_SIGN_SECRET.is_empty() {
+    if SECRET_LEN == 0 {
         return string_to_cptr(String::new());
     }
     let read = |p: *const c_char| -> String {
@@ -95,8 +148,7 @@ pub unsafe extern "C" fn app_sign(
         return string_to_cptr(String::new());
     }
 
-    let Ok(mut mac) = hmac::Hmac::<sha2::Sha256>::new_from_slice(APP_SIGN_SECRET.as_bytes())
-    else {
+    let Ok(mut mac) = hmac::Hmac::<sha2::Sha256>::new_from_slice(&app_secret()) else {
         return string_to_cptr(String::new());
     };
     mac.update(format!("{ts}.{}.{path}", method.to_uppercase()).as_bytes());
