@@ -9082,6 +9082,23 @@ fn needs_app_check(path: &str) -> bool {
     if path.starts_with("/api/telegram/") {
         return false;
     }
+    // ── TO'LOV WEBHOOK'I ─────────────────────────────────────
+    //
+    // TOPILGAN XATO: ilova imzosi tekshiruvi yoqilganda bu yo'l
+    // 403 qaytarardi va webhook HECH QACHON ishlamasdi.
+    //
+    // Sabab: uni tezcheck.uz SERVERI chaqiradi, ilova emas. Unda
+    // APK imzosi yo'q va hech qachon bo'lmaydi — xuddi Telegram
+    // webhook'idagi kabi.
+    //
+    // Himoyasiz qolmaydi: haqiqiyligini HMAC-SHA256 IMZOSI
+    // tasdiqlaydi (`billing_webhook` izohiga qarang), va u APK
+    // imzosidan kuchliroq — APK imzosining hash'ini ilovani
+    // ochgan har kim topa oladi, webhook sirini esa faqat biz va
+    // tezcheck.uz bilamiz.
+    if path == "/api/billing/webhook" {
+        return false;
+    }
     // ── RUST YADROSI VA RASM KESHI ───────────────────────────
     //
     // Bu yo'llarga so'rovni Flutter EMAS, Rust yadrosi (video)
