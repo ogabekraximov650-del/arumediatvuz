@@ -120,6 +120,7 @@ import '../services/app_settings.dart';
 import '../services/billing_service.dart';
 import '../services/comments_service.dart';
 import '../services/download_manager.dart';
+import '../services/app_http.dart';
 import '../services/rust_bridge.dart';
 import '../services/screen_guard.dart';
 import '../services/video_cache_server.dart';
@@ -1481,11 +1482,30 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   /// uzatiladi) va tanani oqim bilan beradi. Aynan shu farq
   /// "video tugadi deb boshidan boshlanishi" muammosini yo'q
   /// qiladi.
+  /// `/api/image/<fayl>` -> `/api/play/<fayl>?t=<token>`.
+  ///
+  /// ── NEGA TOKEN ──────────────────────────────────────────
+  ///
+  /// Bu manzilni ExoPlayer'ning O'ZI ochadi
+  /// (`VideoPlayerController.networkUrl`) va unga sarlavha
+  /// qo'shib bo'lmaydi. Worker esa endi hamma yo'lni tekshiradi,
+  /// ya'ni tokensiz so'rov 403 oladi va video ochilmaydi.
+  ///
+  /// Token AYNAN shu faylga bog'langan va 6 soat yashaydi — bitta
+  /// ijro seansiga yetadi, lekin manzil abadiy ochiq qolmaydi.
+  /// Oddiy so'rov imzosi bu yerda yaramaydi: u 2 daqiqada o'ladi,
+  /// ExoPlayer esa butun ijro davomida oraliq so'rovlar yuboradi.
+  ///
+  /// Cloudflare keshiga ta'sir qilmaydi — worker kesh kalitini
+  /// fayl nomidan quradi, so'rov qismidan emas.
   static String _workerPlayUrl(String url) {
     const mark = '/api/image/';
     final i = url.indexOf(mark);
     if (i < 0) return url;
-    return '${url.substring(0, i)}/api/play/${url.substring(i + mark.length)}';
+    final name = url.substring(i + mark.length);
+    // Token `nativeMediaUrl` da qo'shiladi — bitta joyda, ya'ni
+    // yangi manzil qo'shilganda unutilmaydi.
+    return nativeMediaUrl('${url.substring(0, i)}/api/play/$name');
   }
 
   // ═══════════════════════════════════════════════════════════

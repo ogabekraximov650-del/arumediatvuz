@@ -122,6 +122,10 @@ typedef _AppSignDart = Pointer<Utf8> Function(
 typedef _SetAppVersionC = Void Function(Pointer<Utf8>);
 typedef _SetAppVersionDart = void Function(Pointer<Utf8>);
 
+// Pleyer manzili uchun muddatli token (`app_play_token`).
+typedef _PlayTokenC = Pointer<Utf8> Function(Pointer<Utf8>, Uint64);
+typedef _PlayTokenDart = Pointer<Utf8> Function(Pointer<Utf8>, int);
+
 class RustCore {
   RustCore._();
   static final RustCore instance = RustCore._();
@@ -162,6 +166,7 @@ class RustCore {
   late final _SecureClearDart _secureClear;
   late final _AppSignDart _appSign;
   late final _SetAppVersionDart _setAppVersion;
+  late final _PlayTokenDart _playToken;
 
   bool _loaded = false;
   String? _cacheFilePath;
@@ -203,6 +208,8 @@ class RustCore {
     _setAppVersion = _lib
         .lookupFunction<_SetAppVersionC, _SetAppVersionDart>(
             'rust_set_app_version');
+    _playToken =
+        _lib.lookupFunction<_PlayTokenC, _PlayTokenDart>('app_play_token');
     _videoCacheStart =
         _lib.lookupFunction<_VideoCacheStartC, _VideoCacheStartDart>(
             'rust_video_cache_start');
@@ -566,6 +573,26 @@ class RustCore {
       // Eski yadro — bu funksiya yo'q. Video baribir ishlaydi.
     } finally {
       malloc.free(v);
+    }
+  }
+
+  /// PLEYER MANZILI UCHUN MUDDATLI TOKEN.
+  ///
+  /// `/api/play/...` ni ExoPlayer ochadi va unga sarlavha qo'shib
+  /// bo'lmaydi. Shu sabab ruxsat manzilning o'ziga qo'yiladi:
+  /// `?t=<muddat>.<hex>`.
+  ///
+  /// Oddiy imzo bu yerda yaramaydi — u 2 daqiqada o'ladi, ijro esa
+  /// soatlab davom etadi.
+  String playToken(String path, {int ttlSeconds = 6 * 60 * 60}) {
+    if (!_loaded) return '';
+    final p = path.toNativeUtf8();
+    try {
+      return _readAndFree(_playToken(p, ttlSeconds)) ?? '';
+    } catch (_) {
+      return '';
+    } finally {
+      malloc.free(p);
     }
   }
 

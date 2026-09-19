@@ -22,6 +22,7 @@ import 'dart:async';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
+import '../services/app_http.dart';
 import '../services/image_cache.dart';
 
 class MediaViewScreen extends StatefulWidget {
@@ -115,7 +116,10 @@ class _MediaViewScreenState extends State<MediaViewScreen> {
     // qisqa video uchun ularning hammasi ortiqcha.
     setState(() => _error = false);
     final c = VideoPlayerController.networkUrl(
-      Uri.parse(widget.url),
+      // Manzilni ExoPlayer ochadi — unga sarlavha qo'shib
+      // bo'lmaydi, shu sabab ruxsat manzilning o'zida keladi
+      // (`nativeMediaUrl` izohiga qarang).
+      Uri.parse(nativeMediaUrl(widget.url)),
       viewType: VideoViewType.platformView,
       videoPlayerOptions: VideoPlayerOptions(
         allowBackgroundPlayback: false,

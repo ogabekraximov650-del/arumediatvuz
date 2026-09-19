@@ -163,6 +163,52 @@ pub(crate) fn sign_v2(method: &str, url_or_path: &str) -> Option<String> {
     Some(format!("v2.{ts}.{}", hex::encode(mac.finalize().into_bytes())))
 }
 
+// ── PLEYER UCHUN MUDDATLI TOKEN ────────────────────────────────
+//
+// TOPILGAN XATO (video ochilmay qoldi): `/api/play/...` manzilini
+// bizning kodimiz EMAS, ExoPlayer'ning o'zi ochadi
+// (`VideoPlayerController.networkUrl`). Unga sarlavha qo'shib
+// bo'lmaydi va u har so'rovda imzo hisoblay olmaydi — ya'ni
+// yo'l yopilgach video butunlay ishlamay qoldi.
+//
+// Sarlavha o'rniga MANZILNING O'ZIGA token qo'yiladi:
+//
+//     /api/play/<fayl>?t=<muddat>.<hex HMAC>
+//     imzolanadigan matn: "play.<yo'l>.<muddat>"
+//
+// Nega alohida token, oddiy imzo emas: oddiy imzo 2 daqiqada
+// o'ladi, ijro esa soatlab davom etadi va ExoPlayer butun
+// davomida oraliq so'rovlar yuboradi — ular 403 olardi.
+//
+// Token AYNAN SHU faylga bog'langan va muddati bor. Uni yasash
+// uchun kalit kerak, ya'ni begona dastur o'zi yasay olmaydi.
+//
+// CLOUDFLARE KESHIGA TA'SIR QILMAYDI: worker kesh kalitini
+// so'rov qismidan emas, fayl nomidan quradi (`cache_key_url`).
+
+/// Pleyer manzili uchun muddatli token: `<muddat>.<hex>`.
+///
+/// # Safety
+/// `path` nol bilan tugaydigan UTF-8 satrga ishora qilishi shart.
+#[no_mangle]
+pub unsafe extern "C" fn app_play_token(path: *const c_char, ttl_secs: u64) -> *mut c_char {
+    use hmac::Mac;
+
+    if SECRET_LEN == 0 || path.is_null() {
+        return string_to_cptr(String::new());
+    }
+    let path = std::ffi::CStr::from_ptr(path).to_string_lossy().into_owned();
+    if path.is_empty() {
+        return string_to_cptr(String::new());
+    }
+    let exp = unix_now() + ttl_secs.clamp(60, 24 * 60 * 60);
+    let Ok(mut mac) = hmac::Hmac::<sha2::Sha256>::new_from_slice(&app_secret()) else {
+        return string_to_cptr(String::new());
+    };
+    mac.update(format!("play.{path}.{exp}").as_bytes());
+    string_to_cptr(format!("{exp}.{}", hex::encode(mac.finalize().into_bytes())))
+}
+
 // ── ILOVA VERSIYASI ────────────────────────────────────────────
 //
 // Yadro o'z so'rovlariga `X-App-Version` ni ham qo'yishi kerak:

@@ -9054,6 +9054,46 @@ fn verify_app_sig(secret: &str, got: &str, method: &str, path: &str) -> bool {
     want.len() == mac.len() && want.eq_ignore_ascii_case(mac)
 }
 
+/// `/api/play/...` va `/api/media/...` uchun manzildagi tokenni
+/// tekshiradi.
+///
+/// ── NEGA PLEYER UCHUN ALOHIDA YO'L ──────────────────────────
+///
+/// TOPILGAN XATO: bu manzilni bizning kodimiz emas, ExoPlayer'ning
+/// o'zi ochadi (`VideoPlayerController.networkUrl`). Unga sarlavha
+/// qo'shib bo'lmaydi — ya'ni yo'l yopilgach video butunlay
+/// ishlamay qoldi.
+///
+/// Sarlavha o'rniga manzilning o'zida token keladi:
+///
+///     /api/play/<fayl>?t=<muddat>.<hex HMAC>
+///     imzolanadigan matn: "play.<yo'l>.<muddat>"
+///
+/// Oddiy imzo bu yerda yaramaydi: u 2 daqiqada o'ladi, ijro esa
+/// soatlab davom etadi va ExoPlayer butun davomida oraliq
+/// so'rovlar yuboradi.
+///
+/// Token AYNAN SHU faylga bog'langan va muddati bor. Uni yasash
+/// uchun kalit kerak — begona dastur o'zi yasay olmaydi.
+fn verify_play_token(secret: &str, token: &str, path: &str) -> bool {
+    let Some((exp, mac)) = token.split_once('.') else {
+        return false;
+    };
+    let Ok(exp_num) = exp.parse::<i64>() else {
+        return false;
+    };
+    if now_ms() / 1000 > exp_num {
+        return false;
+    }
+    let Ok(mut h) = <hmac::Hmac<sha2::Sha256> as hmac::Mac>::new_from_slice(secret.as_bytes())
+    else {
+        return false;
+    };
+    hmac::Mac::update(&mut h, format!("play.{path}.{exp}").as_bytes());
+    let want = hex_of(&hmac::Mac::finalize(h).into_bytes());
+    want.len() == mac.len() && want.eq_ignore_ascii_case(mac)
+}
+
 /// So'rovni o'tkazamizmi. `None` — o'tadi, `Some(resp)` — rad.
 async fn app_gate(req: &Request, env: &Env, path: &str) -> Option<Response> {
     if !needs_app_check(path) {
@@ -9125,6 +9165,43 @@ async fn app_gate(req: &Request, env: &Env, path: &str) -> Option<Response> {
         .map(|s| s.to_string().trim().to_string())
         .unwrap_or_default();
     let got = head("X-App-Sig");
+
+    // ── MANZILDAGI TOKEN ────────────────────────────────────
+    //
+    // Ba'zi manzillarni ilova emas, ANDROID'NING O'ZI ochadi va
+    // ularga sarlavha qo'shib bo'lmaydi:
+    //
+    //   `/api/play/`   — ExoPlayer (video oqimi);
+    //   `/api/media/`  — yozishmadagi video;
+    //   `/api/image/`  — admin oynasidagi `Image.network` ko'rinishi;
+    //   `/api/avatar/` — xuddi shunday.
+    //
+    // Ular uchun ruxsat manzilning o'zida keladi
+    // (`verify_play_token` izohiga qarang).
+    //
+    // MUHIM: token bo'lmasa DARHOL rad etilmaydi — pastdagi
+    // odatdagi sarlavha tekshiruviga o'tiladi. Chunki aynan shu
+    // yo'llarni Rust yadrosi ham so'raydi va u SARLAVHA bilan
+    // keladi. Ikkala yo'l ham ochiq bo'lishi shart.
+    if !secret.is_empty()
+        && (path.starts_with("/api/play/")
+            || path.starts_with("/api/media/")
+            || path.starts_with("/api/image/")
+            || path.starts_with("/api/avatar/"))
+    {
+        let token = req
+            .url()
+            .ok()
+            .and_then(|u| {
+                u.query_pairs()
+                    .find(|(k, _)| k == "t")
+                    .map(|(_, v)| v.to_string())
+            })
+            .unwrap_or_default();
+        if !token.is_empty() && verify_play_token(&secret, &token, path) {
+            return None;
+        }
+    }
 
     if !secret.is_empty() {
         if !verify_app_sig(&secret, &got, req.method().to_string().as_str(), path) {

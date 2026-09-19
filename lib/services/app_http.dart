@@ -29,6 +29,59 @@ import 'package:http/http.dart' as http;
 import 'app_build.dart';
 import 'rust_bridge.dart';
 
+/// NATIVE PLEYER UCHUN MANZIL — `?t=<token>` bilan.
+///
+/// ═══════════════════════════════════════════════════════════
+///  NEGA ALOHIDA YO'L KERAK
+/// ═══════════════════════════════════════════════════════════
+///
+/// `AppHttpClient` ilovaning HAMMA `package:http` so'roviga imzo
+/// qo'yadi. Lekin ba'zi manzillarni ilova emas, ANDROID'NING
+/// O'ZI ochadi:
+///
+///   * video — `VideoPlayerController.networkUrl(...)` orqali
+///     ExoPlayer;
+///   * yozishmadagi video — `MediaViewScreen`.
+///
+/// Ularga sarlavha qo'shib bo'lmaydi. Worker esa endi hamma
+/// yo'lni tekshiradi, ya'ni bunday so'rov 403 oladi va video
+/// ochilmaydi.
+///
+/// Shu sabab ruxsat MANZILNING O'ZIGA qo'yiladi:
+/// `?t=<muddat>.<hex HMAC>` (`RustCore.playToken`).
+///
+/// ── NEGA ODDIY IMZO EMAS ────────────────────────────────────
+///
+/// So'rov imzosi 2 daqiqada o'ladi. Ijro esa soatlab davom etadi
+/// va ExoPlayer butun davomida oraliq so'rovlar yuboradi — ular
+/// 403 olardi. Token 6 soat yashaydi va AYNAN shu faylga
+/// bog'langan.
+///
+/// ── KESHGA TA'SIRI YO'Q ─────────────────────────────────────
+///
+/// Worker kesh kalitini fayl nomidan quradi, so'rov qismidan
+/// emas (`cache_key_url`) — ya'ni token Cloudflare keshini
+/// bo'lib tashlamaydi.
+///
+/// Yangi joyda native pleyerga manzil berilsa — SHU funksiyadan
+/// o'tkazing, aks holda u jimgina 403 oladi.
+String nativeMediaUrl(String url) {
+  final uri = Uri.tryParse(url);
+  // Mahalliy server (127.0.0.1) va boshqa manbalarga token kerak
+  // emas — tekshiruv faqat worker tomonida.
+  if (uri == null || !uri.path.startsWith('/api/')) return url;
+  if (uri.host == '127.0.0.1' || uri.host == 'localhost') return url;
+  // Allaqachon qo'yilgan bo'lsa ikkinchi marta qo'shmaymiz.
+  if (uri.queryParameters.containsKey('t')) return url;
+
+  final token = RustCore.instance.playToken(uri.path);
+  if (token.isEmpty) return url;
+  return uri.replace(queryParameters: {
+    ...uri.queryParameters,
+    't': token,
+  }).toString();
+}
+
 /// Sarlavhalarni qo'shib yuboradigan klient.
 class AppHttpClient extends http.BaseClient {
   final http.Client _inner;

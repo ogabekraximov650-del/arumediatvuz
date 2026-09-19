@@ -6,6 +6,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import '../data/janrlar.dart';
+import '../services/app_http.dart';
 import '../services/storage_janitor.dart';
 import '../services/ui_state.dart';
 import '../theme/app_background.dart';
@@ -341,7 +342,13 @@ class _AddSeasonScreenState extends State<AddSeasonScreen> {
                                 : _photoUrl != null && _photoUrl!.isNotEmpty
                                     ? ClipRRect(
                                         borderRadius: BorderRadius.circular(16),
-                                        child: Image.network(_photoUrl!,
+                                        child: Image.network(
+                                            // `Image.network` ni tizim
+                                            // yuklaydi — unga sarlavha
+                                            // qo'shib bo'lmaydi, shu sabab
+                                            // ruxsat manzilda keladi
+                                            // (`nativeMediaUrl` izohi).
+                                            nativeMediaUrl(_photoUrl!),
                                             cacheWidth: 1080,
                                             fit: BoxFit.cover),
                                       )
