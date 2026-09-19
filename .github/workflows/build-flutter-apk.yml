@@ -37,6 +37,20 @@ permissions:
 jobs:
   build-apk:
     runs-on: ubuntu-latest
+    # ── SIRLAR BITTA JOYDAN OLINADI ──────────────────────────
+    #
+    # TALAB (foydalanuvchi): "hammasi bitta joydan oladigan qil,
+    # hozirgi Environment secretdan".
+    #
+    # MUHIM: "Environment secrets" ga kirish uchun job AYNAN shu
+    # environment nomini e'lon qilishi shart — `deploy-worker.yml`
+    # da bu allaqachon bor edi, bu yerda esa YO'Q edi.
+    #
+    # Oqibati jimgina bo'lardi: `APP_SIGN_SECRET` environment
+    # ichida tursa, worker uni ko'rar, APK esa KO'RMASDI. Natijada
+    # ilova kalitsiz yig'ilib chiqar va yangi imzo hech qachon
+    # ishlamasdi — hech qanday xato xabarisiz.
+    environment: secret
 
     # ── TO'RTTA ALOHIDA APK (foydalanuvchi talabi) ────────────
     #
