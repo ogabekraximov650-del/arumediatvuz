@@ -9088,43 +9088,42 @@ async fn app_gate(req: &Request, env: &Env, path: &str) -> Option<Response> {
     // sir qo'yilishidan OLDIN deploy qilinsa, ilova uzilib
     // qolmasligi kerak. Sir qo'yilgan zahoti tekshiruv QAT'IY
     // bo'ladi va eski imzo umuman qabul qilinmaydi.
-    // ── O'TISH DAVRI: IKKALA USUL HAM QABUL QILINADI ────────
+    // ── FAQAT YANGI USUL ─────────────────────────────────────
     //
-    // TALAB (foydalanuvchi): "hozircha eski ilovalar ham
-    // ishlaydigan qil, keyinchalik eski tizimni to'liq uzamiz".
+    // TALAB (foydalanuvchi): "faqat yangi APK'lar ishlaydigan qil".
     //
-    // Shu sabab so'rov IKKI yo'ldan birortasi bilan o'tsa yetadi:
+    // O'tish davri tugadi. Sir qo'yilgan bo'lsa — SO'ROV FAQAT
+    // `v2.<vaqt>.<HMAC>` imzosi bilan o'tadi. Eski o'zgarmas hash
+    // endi umuman qabul qilinmaydi.
     //
-    //   * yangi usul — `v2.<vaqt>.<HMAC>` (sir qo'yilgan bo'lsa);
-    //   * eski usul  — `app_config` dagi o'zgarmas hash.
+    // MUHIM OQIBAT: admin oynasidagi "Shu ilovaga ishonish"
+    // tugmasi endi bu eshikka TA'SIR QILMAYDI. Ilgari u imzolar
+    // ro'yxatini to'ldirib, eski APK'larni qayta o'tkazardi.
+    // Endi ro'yxat to'ldirilgani bilan eski APK baribir 403
+    // oladi — chunki uning imzosi `v2` emas.
     //
-    // Tarqatilgan eski APK'lar uzilib qolmaydi. Hamma yangi
-    // versiyaga o'tgach eski yo'lni uzish uchun admin oynasidan
-    // imzolar ro'yxatini TOZALASH kifoya (`app_sig` bo'sh
-    // bo'lsa, quyidagi `if let Some(...)` umuman ishlamaydi va
-    // faqat yangi usul qoladi) — kodga tegish shart emas.
+    // ── SIR QO'YILMAGAN BO'LSA ──────────────────────────────
+    //
+    // Eski qoida ishlaydi. Bu ataylab: sir tasodifan o'chib
+    // ketsa yoki hali qo'yilmagan bo'lsa, ilova butunlay
+    // ishlamay qolgandan ko'ra eski yo'l bilan ishlagani
+    // yaxshiroq.
     let secret = env
         .secret("APP_SIGN_SECRET")
         .map(|s| s.to_string().trim().to_string())
         .unwrap_or_default();
     let got = head("X-App-Sig");
 
-    // 1. Yangi usul.
-    let v2_ok = !secret.is_empty()
-        && verify_app_sig(&secret, &got, req.method().to_string().as_str(), path);
-
-    if !v2_ok {
-        // 2. Eski usul — ro'yxat turgan ekan, hali ham o'tadi.
-        let old_list = config_get(env, "app_sig").await;
-        let old_ok = match &old_list {
-            Some(want) => !got.is_empty() && want.split(',').any(|w| w.trim() == got),
-            None => false,
-        };
-        // Ikkala tekshiruv ham SOZLANMAGAN bo'lsa — eshik ochiq
-        // (ishlab chiqish rejimi). Bittasi sozlangan-u, ikkalasi
-        // ham o'tmagan bo'lsa — rad etiladi.
-        let configured = !secret.is_empty() || old_list.is_some();
-        if configured && !old_ok {
+    if !secret.is_empty() {
+        if !verify_app_sig(&secret, &got, req.method().to_string().as_str(), path) {
+            return Some(
+                json_resp(&json!({"error": "forbidden"}), 403)
+                    .unwrap_or_else(|_| Response::empty().unwrap()),
+            );
+        }
+    } else if let Some(want) = config_get(env, "app_sig").await {
+        let ok = !got.is_empty() && want.split(',').any(|w| w.trim() == got);
+        if !ok {
             return Some(
                 json_resp(&json!({"error": "forbidden"}), 403)
                     .unwrap_or_else(|_| Response::empty().unwrap()),
