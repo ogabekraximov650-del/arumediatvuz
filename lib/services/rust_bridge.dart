@@ -117,6 +117,11 @@ typedef _AppSignC = Pointer<Utf8> Function(
 typedef _AppSignDart = Pointer<Utf8> Function(
     Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>);
 
+// Ilova versiyasini yadroga bildirish — yadro O'Z so'rovlariga
+// (video, rasm) `X-App-Version` ni qo'yishi uchun.
+typedef _SetAppVersionC = Void Function(Pointer<Utf8>);
+typedef _SetAppVersionDart = void Function(Pointer<Utf8>);
+
 class RustCore {
   RustCore._();
   static final RustCore instance = RustCore._();
@@ -156,6 +161,7 @@ class RustCore {
   late final _SecureLoadDart _secureLoad;
   late final _SecureClearDart _secureClear;
   late final _AppSignDart _appSign;
+  late final _SetAppVersionDart _setAppVersion;
 
   bool _loaded = false;
   String? _cacheFilePath;
@@ -194,6 +200,9 @@ class RustCore {
     _version =
         _lib.lookupFunction<_VersionC, _VersionDart>('rust_core_version');
     _appSign = _lib.lookupFunction<_AppSignC, _AppSignDart>('app_sign');
+    _setAppVersion = _lib
+        .lookupFunction<_SetAppVersionC, _SetAppVersionDart>(
+            'rust_set_app_version');
     _videoCacheStart =
         _lib.lookupFunction<_VideoCacheStartC, _VideoCacheStartDart>(
             'rust_video_cache_start');
@@ -542,6 +551,24 @@ class RustCore {
 
   /// Shifrlangan fayldan matnni o'qiydi. Fayl yo'q, buzilgan yoki
   /// boshqa kalit bilan yozilgan bo'lsa — bo'sh satr.
+  /// Ilova versiyasini yadroga bildiradi.
+  ///
+  /// Yadro video va rasm so'rovlarini O'ZI yuboradi, ya'ni
+  /// `X-App-Version` ni ham o'zi qo'yishi kerak. Aks holda admin
+  /// oynasidan "eng past versiya" tekshiruvi yoqilgan zahoti
+  /// video ishlamay qolardi.
+  void setAppVersion(String version) {
+    if (!_loaded || version.isEmpty) return;
+    final v = version.toNativeUtf8();
+    try {
+      _setAppVersion(v);
+    } catch (_) {
+      // Eski yadro — bu funksiya yo'q. Video baribir ishlaydi.
+    } finally {
+      malloc.free(v);
+    }
+  }
+
   /// SO'ROV IMZOSI — `v2.<vaqt>.<hex>`.
   ///
   /// Sir Rust yadrosining ichida (`app_sign`), Dart tomonida

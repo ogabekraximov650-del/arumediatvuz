@@ -78,6 +78,9 @@ Future<void> _main() async {
 
   // Rust yadrosi (kesh, qidiruv, shifrlash) shu yerda yuklanadi.
   await RustCore.instance.init();
+  // Yadro video va rasm so'rovlarini O'ZI yuboradi, shu sabab
+  // versiyani ham o'zi qo'yishi kerak (`setAppVersion` izohi).
+  RustCore.instance.setAppVersion(kAppVersion);
 
   // Shifrlash kalitini Keystore'dan olib Rust'ga uzatamiz.
   // Muvaffaqiyatsiz bo'lsa ilova shifrlashsiz, avvalgidek ishlaydi.

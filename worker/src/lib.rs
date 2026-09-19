@@ -8960,26 +8960,27 @@ fn needs_app_check(path: &str) -> bool {
     if path == "/api/billing/webhook" {
         return false;
     }
-    // ── RUST YADROSI VA RASM KESHI ───────────────────────────
+    // ── VIDEO VA RASM YO'LLARI ENDI OCHIQ EMAS ───────────────
     //
-    // Bu yo'llarga so'rovni Flutter EMAS, Rust yadrosi (video)
-    // va rasm keshi yuboradi — ular bizning sarlavhamizni
-    // qo'ymaydi.
+    // TALAB (foydalanuvchi): "worker faqat yangi xavfsiz ilovaga
+    // javob bersin va tashqaridan hech kim hech narsa so'ray
+    // olmasin".
     //
-    // MUHIM: `/api/play` va `/api/warm` aynan videoning
-    // yo'llari (`rust/src/video_cache.rs`). Ular ro'yxatda
-    // bo'lmasa VIDEO UMUMAN ISHLAMAY QOLARDI.
+    // Ilgari bu yo'llar (`/api/image/`, `/api/avatar/`,
+    // `/api/media/`, `/api/play`, `/api/warm`) ro'yxatdan OZOD
+    // edi. Sabab texnik edi: bu so'rovlarni Flutter emas, Rust
+    // yadrosi yuboradi va u imzo yasay olmasdi. Oqibati: eski
+    // (imzosiz) ilovada ham video bemalol ochilaverardi.
     //
-    // Ustiga bular ochiq tarkib: himoyaning ma'nosi ham yo'q,
-    // ular baribir manzilni bilgan odamga ochiq edi.
-    if path.starts_with("/api/image/")
-        || path.starts_with("/api/avatar/")
-        || path.starts_with("/api/media/")
-        || path.starts_with("/api/play")
-        || path.starts_with("/api/warm")
-    {
-        return false;
-    }
+    // Endi yadro ham imzolaydi (`rust/src/video_cache.rs` dagi
+    // `signed()` va `crate::sign_v2`), shu sabab ozodlik kerak
+    // emas va u OLIB TASHLANDI.
+    //
+    // DIQQAT: yadro va ilova AYNAN bir xil kalit bilan
+    // yig'ilishi shart. Aks holda video ham, posterlar ham
+    // ochilmay qoladi. Zudlik bilan qaytarish yo'li:
+    // `wrangler secret delete APP_SIGN_SECRET` — o'shanda
+    // tekshiruv butunlay o'chadi.
     // Qolgan HAMMA `/api/` so'rovi ilovadan kelishi kerak.
     path.starts_with("/api/")
 }

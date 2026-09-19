@@ -119,6 +119,80 @@ fn app_secret() -> Vec<u8> {
     out
 }
 
+/// Hozirgi vaqt (Unix soniya).
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Manzildan yo'lni ajratadi: `https://host/api/play/x?a=b` -> `/api/play/x`.
+///
+/// Imzo AYNAN yo'l ustidan qo'yiladi (so'rov qismisiz), chunki
+/// worker ham shunday hisoblaydi.
+fn path_of(url: &str) -> &str {
+    let rest = match url.find("://") {
+        Some(i) => &url[i + 3..],
+        None => url,
+    };
+    let path = match rest.find('/') {
+        Some(i) => &rest[i..],
+        None => "/",
+    };
+    match path.find('?') {
+        Some(i) => &path[..i],
+        None => path,
+    }
+}
+
+/// So'rov imzosi — `v2.<vaqt>.<hex>`. Sir yo'q bo'lsa `None`.
+///
+/// Bu FFI (`app_sign`) va yadroning O'Z so'rovlari (video keshi)
+/// uchun BITTA joy: ikkovi ham aynan bir xil imzo yasashi shart.
+pub(crate) fn sign_v2(method: &str, url_or_path: &str) -> Option<String> {
+    use hmac::Mac;
+
+    if SECRET_LEN == 0 {
+        return None;
+    }
+    let ts = unix_now();
+    let path = path_of(url_or_path);
+    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&app_secret()).ok()?;
+    mac.update(format!("{ts}.{}.{path}", method.to_uppercase()).as_bytes());
+    Some(format!("v2.{ts}.{}", hex::encode(mac.finalize().into_bytes())))
+}
+
+// ── ILOVA VERSIYASI ────────────────────────────────────────────
+//
+// Yadro o'z so'rovlariga `X-App-Version` ni ham qo'yishi kerak:
+// aks holda admin oynasidan "eng past versiya" tekshiruvi
+// yoqilgan zahoti VIDEO ishlamay qolardi (yadro versiyasini
+// aytmagani uchun "eski ilova" deb rad etilardi).
+//
+// Qiymatni ilova ishga tushganda beradi (`rust_set_app_version`).
+static APP_VERSION: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// Ilova versiyasini yadroga bildiradi (`0.0.9+230`).
+///
+/// # Safety
+/// `v` nol bilan tugaydigan UTF-8 satrga ishora qilishi shart.
+#[no_mangle]
+pub unsafe extern "C" fn rust_set_app_version(v: *const c_char) {
+    if v.is_null() {
+        return;
+    }
+    let s = std::ffi::CStr::from_ptr(v).to_string_lossy().into_owned();
+    if let Ok(mut g) = APP_VERSION.lock() {
+        *g = s;
+    }
+}
+
+/// Yadro so'rovlariga qo'yiladigan versiya (bo'sh bo'lishi mumkin).
+pub(crate) fn app_version() -> String {
+    APP_VERSION.lock().map(|g| g.clone()).unwrap_or_default()
+}
+
 /// `<vaqt>.<METOD>.<yo'l>` matnini imzolaydi.
 ///
 /// Qaytaradi: `v2.<vaqt>.<hex>` yoki bo'sh satr (sir yo'q).
@@ -148,9 +222,11 @@ pub unsafe extern "C" fn app_sign(
         return string_to_cptr(String::new());
     }
 
+    // Vaqtni Dart beradi (u so'rov yuborishdan oldin oladi), qolgani
+    // `sign_v2` bilan bir xil qoida.
     let Ok(mut mac) = hmac::Hmac::<sha2::Sha256>::new_from_slice(&app_secret()) else {
         return string_to_cptr(String::new());
     };
-    mac.update(format!("{ts}.{}.{path}", method.to_uppercase()).as_bytes());
-    string_to_cptr(format!("v2.{ts}.{}", hex::encode(mac.finalize().into_bytes())))
+    hmac::Mac::update(&mut mac, format!("{ts}.{}.{path}", method.to_uppercase()).as_bytes());
+    string_to_cptr(format!("v2.{ts}.{}", hex::encode(hmac::Mac::finalize(mac).into_bytes())))
 }

@@ -977,7 +977,7 @@ fn ensure_meta(shared: &Shared, dir: &PathBuf, url: &str) -> Result<CacheMeta, S
         // taqdirda ham, biz shunchaki ulanishni tashlab, hech narsa
         // yuklamagan bo'lamiz (ureq javob tanasini faqat talab qilinsa
         // o'qiydi).
-        match shared.agent.get(url).set("Range", "bytes=0-0").call() {
+        match signed(shared.agent.get(url), url).set("Range", "bytes=0-0").call() {
             Ok(resp) => {
                 if let Some(cr) = resp.header("Content-Range") {
                     if let Some(total_str) = cr.rsplit('/').next() {
@@ -3012,7 +3012,7 @@ fn maybe_warm(url: &str, key: &str, byte_pos: u64) {
             let tag = tag_for_thread;
             let Some(shared) = SHARED.get() else { return };
             log(format!("Oyna #{widx} keshga isitilmoqda: {warm_url}"));
-            match shared.warm_agent.get(&warm_url).call() {
+            match signed(shared.warm_agent.get(&warm_url), &warm_url).call() {
                 Ok(resp) => {
                     let status = resp.status();
                     let body = resp.into_string().unwrap_or_default();
@@ -3137,7 +3137,7 @@ fn warm_one_window(url: &str, key: &str, widx: u64, force: bool) -> (bool, u64) 
         return (false, 0);
     };
     log(format!("Isitish: {warm_url}"));
-    match shared.warm_agent.get(&warm_url).call() {
+    match signed(shared.warm_agent.get(&warm_url), &warm_url).call() {
         Ok(resp) => {
             let body = resp.into_string().unwrap_or_default();
             log(format!("Isitish javobi: {body}"));
@@ -3759,6 +3759,32 @@ static TRAFFIC_USER: AtomicI64 = AtomicI64::new(0);
 ///
 /// Hozircha yadro undan foydalanmaydi — so'rovlarga hech qanday
 /// qo'shimcha sarlavha qo'yilmaydi.
+// ── YADRONING O'Z SO'ROVLARI HAM IMZOLANADI ───────────────────
+//
+// TALAB (foydalanuvchi): "worker faqat yangi xavfsiz ilovaga javob
+// bersin va tashqaridan hech kim hech narsa so'ray olmasin".
+//
+// Ilgari video yo'llari (`/api/play`, `/api/warm`, `/api/image`)
+// tekshiruvdan OZOD edi — ular "ochiq tarkib" deb hisoblanardi.
+// Sababi texnik edi: bu so'rovlarni Flutter emas, SHU YADRO
+// yuboradi va u imzo yasay olmasdi.
+//
+// Endi yasay oladi (`crate::sign_v2`), shu sabab ozodlik kerak
+// emas: yadro ham har so'roviga imzo va versiya qo'yadi, worker
+// esa hamma yo'lni bir xil tekshiradi.
+fn signed(req: ureq::Request, url: &str) -> ureq::Request {
+    let req = match crate::sign_v2("GET", url) {
+        Some(sig) => req.set("X-App-Sig", &sig),
+        None => req,
+    };
+    let ver = crate::app_version();
+    if ver.is_empty() {
+        req
+    } else {
+        req.set("X-App-Version", &ver)
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn rust_set_user_id(id: i64) {
     let old = TRAFFIC_USER.swap(id.max(0), Ordering::Relaxed);
@@ -3936,9 +3962,7 @@ fn fetch_span(
         "Bo'laklar {first}..={last} worker'dan olinmoqda ({range_start}-{range_end})..."
     ));
     let t_req = Instant::now();
-    let resp = shared
-        .agent
-        .get(url)
+    let resp = signed(shared.agent.get(url), url)
         .set("Range", &format!("bytes={range_start}-{range_end}"))
         .call()
         .map_err(|e| e.to_string())?;
@@ -4344,10 +4368,7 @@ impl ThumbReader<'_> {
 
     fn read_from_net(&self, start: u64, len: u64) -> Option<Vec<u8>> {
         let end = start + len - 1;
-        let resp = self
-            .shared
-            .agent
-            .get(&self.url)
+        let resp = signed(self.shared.agent.get(&self.url), &self.url)
             .set("Range", &format!("bytes={start}-{end}"))
             .call()
             .ok()?;
