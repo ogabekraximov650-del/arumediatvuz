@@ -5219,6 +5219,77 @@ fn to_minor(sum: i64) -> i64 {
     sum * 100
 }
 
+/// XATO CHIQQANDA KASSA HOLATINI O'QIB BERADI.
+///
+/// ── NEGA KERAK ────────────────────────────────────────────────
+///
+/// `POST /bills` rad etilganda sayt faqat umumiy sabab qaytaradi
+/// ("Joriy holatda bu amalga ruxsat berilmaydi"). Bu bir necha
+/// xil holatga to'g'ri keladi va ularni bir-biridan ajratib
+/// bo'lmaydi:
+///
+///   * sirdagi kassa kodi umuman boshqa kassaniki;
+///   * kassa `paused`/`suspended`/`draft` holatida;
+///   * kassa hali to'lov qabul qilmaydi (`accepts_payments:false`).
+///
+/// Shu sabab xato chiqqan ZAHOTI kassalar ro'yxati so'raladi va
+/// javobga qo'shiladi — ya'ni sabab ekranda ko'rinadi, qidirib
+/// yurish kerak emas.
+///
+/// Bu so'rov FAQAT xato bo'lganda yuboriladi: muvaffaqiyatli
+/// to'lovda qo'shimcha so'rov yo'q.
+async fn desk_diagnosis(env: &Env) -> String {
+    let desk = env.secret("TEZCHECK_DESK")
+        .map(|s| s.to_string().trim().to_string())
+        .unwrap_or_default();
+    let hint = if desk.len() > 12 {
+        format!("{}…{}", &desk[..8], &desk[desk.len() - 4..])
+    } else if desk.is_empty() {
+        "QO'YILMAGAN".to_string()
+    } else {
+        desk.clone()
+    };
+
+    let Ok((code, resp)) = tezcheck(env, "/cash-desks", json!({})).await else {
+        return format!("sirdagi kassa: {hint}; ro'yxat so'ralmadi");
+    };
+    if !(200..300).contains(&code) {
+        return format!(
+            "sirdagi kassa: {hint}; ro'yxat olinmadi ({code}: {})",
+            tezcheck_why(&resp)
+        );
+    }
+
+    let empty = vec![];
+    let list = resp["data"].as_array().unwrap_or(&empty);
+    // Sirdagi kod tokenga ruxsat etilgan kassalar orasida bormi?
+    for d in list {
+        if d["code"].as_str() == Some(desk.as_str()) {
+            return format!(
+                "sirdagi kassa: {hint} (id={}, state={}, accepts_payments={})",
+                d["id"].as_str().unwrap_or("?"),
+                d["state"].as_str().unwrap_or("?"),
+                d["accepts_payments"],
+            );
+        }
+    }
+    // Topilmadi — ro'yxatda nima borligini ko'rsatamiz.
+    let others: Vec<String> = list
+        .iter()
+        .map(|d| {
+            format!(
+                "id={} accepts_payments={}",
+                d["id"].as_str().unwrap_or("?"),
+                d["accepts_payments"]
+            )
+        })
+        .collect();
+    format!(
+        "sirdagi kassa: {hint} — TOKENGA RUXSAT ETILGAN RO'YXATDA YO'Q. Ro'yxat: [{}]",
+        others.join("; ")
+    )
+}
+
 /// POST /api/billing/create — to'lov havolasi yaratish.
 async fn billing_create(mut req: Request, env: &Env) -> Result<Response> {
     let Some(u) = session_user(env, &bearer(&req)).await? else {
@@ -5251,8 +5322,11 @@ async fn billing_create(mut req: Request, env: &Env) -> Result<Response> {
     let (code, resp) = tezcheck(env, "/bills", body).await?;
     // Yangi API muvaffaqiyatni HOLAT KODI bilan bildiradi (201).
     if !(200..300).contains(&code) {
+        // Sabab ekranda ko'rinsin (`desk_diagnosis` izohiga qarang).
+        let why = tezcheck_why(&resp);
+        let desk = desk_diagnosis(env).await;
         return json_resp(&json!({
-            "error": format!("To'lov yaratilmadi: {}", tezcheck_why(&resp))
+            "error": format!("To'lov yaratilmadi: {why} | {desk}")
         }), 502);
     }
     let order_id = resp["data"]["bill"]["id"].as_str().unwrap_or("").to_string();
