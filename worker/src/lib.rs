@@ -5451,22 +5451,82 @@ fn hex_of(bytes: &[u8]) -> String {
     s
 }
 
+/// Webhook imzosi to'g'rimi (`X-Checkout-Signature`).
+///
+/// ── NEGA IKKITA KALIT SINALADI ──────────────────────────────
+///
+/// Hujjatda ikki xil yozilgan: formulada kalit sifatida
+/// `SHA256_secret` ko'rsatilgan, ishlaydigan PHP namunasida esa
+/// sirning O'ZI berilgan. Ikkalasi ham hisoblanadi va mos kelgani
+/// qabul qilinadi — bu xavfsizlikni susaytirmaydi, chunki ikkala
+/// holatda ham kalit faqat bizda va tezcheck.uz da bor.
+fn webhook_sig_ok(secret: &str, ts: &str, delivery: &str, sig_header: &str, raw: &str) -> bool {
+    if ts.is_empty() || delivery.is_empty() || sig_header.is_empty() {
+        return false;
+    }
+    // Eski xabarni ushlab olib qayta yuborib bo'lmasin.
+    if (now_ms() / 1000 - ts.parse::<i64>().unwrap_or(0)).abs() > WEBHOOK_SKEW_SECS {
+        return false;
+    }
+    let msg = format!("{ts}.{delivery}.{raw}");
+    let sha_key: [u8; 32] = <sha2::Sha256 as sha2::Digest>::digest(secret.as_bytes()).into();
+    let mut expected: Vec<String> = Vec::with_capacity(2);
+    for key in [secret.as_bytes(), &sha_key[..]] {
+        let Ok(mut mac) = <hmac::Hmac<sha2::Sha256> as hmac::Mac>::new_from_slice(key) else {
+            return false;
+        };
+        hmac::Mac::update(&mut mac, msg.as_bytes());
+        expected.push(format!("v1={}", hex_of(&hmac::Mac::finalize(mac).into_bytes())));
+    }
+    // Sir almashtirilayotgan 24 soat ichida sayt eski va yangi
+    // imzoni vergul bilan birga yuboradi.
+    sig_header.split(',').any(|c| {
+        let c = c.trim();
+        expected.iter().any(|e| c.eq_ignore_ascii_case(e))
+    })
+}
+
 /// POST /api/billing/webhook — tezcheck.uz dan kelgan hodisa.
+///
+/// ═══════════════════════════════════════════════════════════
+///  XABARGA ISHONILMAYDI — TEZCHECK'DAN QAYTA SO'RALADI
+/// ═══════════════════════════════════════════════════════════
+///
+/// TALAB (foydalanuvchi): "tezchek pul tushgani haqida javob
+/// qaytarsa worker tekshirishi kerak, agar haqiqiy bo'lsa keyin
+/// javob beradi".
+///
+/// Aynan shunday ishlaydi, va eng muhimi — bu yerda kelgan
+/// xabarning HECH BIR RAQAMIGA ishonilmaydi. Xabar faqat
+/// "borib tekshir" degan turtki, xolos:
+///
+///   1. xabardan FAQAT hisob raqami (`bill_id`) olinadi;
+///   2. worker tezcheck.uz ga o'zi murojaat qilib so'raydi:
+///      "shu hisob to'landimi va qancha?";
+///   3. pul AYNAN tezcheck aytgan summa bo'yicha qo'shiladi —
+///      xabarda yozilgani bo'yicha emas.
+///
+/// Shu sabab soxta xabar hech narsa qila olmaydi: u faqat
+/// workerni bitta ortiqcha so'rovga majburlaydi. "Menga 1 000 000
+/// so'm tushdi" deb yozilgan xabar tezcheck'da tasdiqlanmasa,
+/// balans qimirlamaydi.
+///
+/// ── IMZO ENDI IXTIYORIY ─────────────────────────────────────
+///
+/// Ilgari sir (`TEZCHECK_WEBHOOK_SECRET`) qo'yilmagan bo'lsa
+/// manzil umuman ishlamasdi (503). Endi kerak emas: ishonch
+/// yuqoridagi qayta so'rashga tayanadi. Sir qo'yilgan bo'lsa —
+/// arzon birinchi filtr sifatida ishlaydi va soxta xabarlar
+/// tezcheck'ga so'rov yubormasdanoq to'xtaydi.
 async fn billing_webhook(mut req: Request, env: &Env) -> Result<Response> {
-    // Sir qo'yilmagan — webhook o'chiq. `?` emas, chunki sir
-    // umuman yo'q bo'lsa `secret()` xato qaytaradi va bu XATO
-    // emas, sozlanmagan holat.
     let secret = match env.secret("TEZCHECK_WEBHOOK_SECRET") {
         Ok(s) => s.to_string().trim().to_string(),
         Err(_) => String::new(),
     };
-    if secret.is_empty() {
-        return json_resp(&json!({"error": "webhook sozlanmagan"}), 503);
-    }
 
     // Sarlavhalar AVVAL o'qib olinadi: pastdagi `req.text()` so'rovni
-    // O'ZGARUVCHAN qilib oladi va bu yerda hali `req.headers()`
-    // dan qarz turgan bo'lsa kod yig'ilmasdi.
+    // O'ZGARUVCHAN qilib oladi va bu yerda hali `req.headers()` dan
+    // qarz turgan bo'lsa kod yig'ilmasdi.
     let (ts, delivery, sig_header) = {
         let h = req.headers();
         let get = |n: &str| h.get(n).ok().flatten().unwrap_or_default();
@@ -5481,74 +5541,47 @@ async fn billing_webhook(mut req: Request, env: &Env) -> Result<Response> {
     // o'zgartiradi, ya'ni imzo boshqa hech qachon to'g'ri chiqmasdi.
     let raw = req.text().await.unwrap_or_default();
 
-    if ts.is_empty() || delivery.is_empty() || sig_header.is_empty() {
-        return json_resp(&json!({"error": "imzo sarlavhalari yo'q"}), 400);
-    }
-    let ts_num = ts.parse::<i64>().unwrap_or(0);
-    if (now_ms() / 1000 - ts_num).abs() > WEBHOOK_SKEW_SECS {
-        return json_resp(&json!({"error": "vaqt tamg'asi eskirgan"}), 400);
-    }
-
-    // ── IMZO ──────────────────────────────────────────────────
-    //
-    // ── NEGA IKKITA KALIT SINALADI ──────────────────────────
-    //
-    // Hujjatda ikki xil yozilgan: formulada kalit sifatida
-    // `SHA256_secret` ko'rsatilgan, ishlaydigan PHP namunasida esa
-    // sirning O'ZI berilgan. Qaysi biri to'g'riligini faqat
-    // haqiqiy webhook kelganda bilib bo'ladi.
-    //
-    // Shu sabab ikkalasi ham hisoblanadi va mos kelgani qabul
-    // qilinadi. Bu xavfsizlikni SUSAYTIRMAYDI: ikkala holatda ham
-    // kalit — faqat bizda va tezcheck.uz da bor sir. Tanlashda
-    // yanglishib, to'lovlar jimgina tushmay qolgandan ko'ra shu
-    // yaxshi.
-    let msg = format!("{ts}.{delivery}.{raw}");
-    let sha_key: [u8; 32] = <sha2::Sha256 as sha2::Digest>::digest(secret.as_bytes()).into();
-    let mut expected: Vec<String> = Vec::with_capacity(2);
-    for key in [secret.as_bytes(), &sha_key[..]] {
-        let mut mac = <hmac::Hmac<sha2::Sha256> as hmac::Mac>::new_from_slice(key)
-            .map_err(|_| Error::RustError("webhook siri yaroqsiz".into()))?;
-        hmac::Mac::update(&mut mac, msg.as_bytes());
-        expected.push(format!("v1={}", hex_of(&hmac::Mac::finalize(mac).into_bytes())));
-    }
-    // Bir nechta nomzod vergul bilan kelishi mumkin (sir
-    // almashtirilayotgan 24 soat ichida sayt eski va yangi imzoni
-    // birga yuboradi).
-    let ok = sig_header.split(',').any(|c| {
-        let c = c.trim();
-        expected.iter().any(|e| c.eq_ignore_ascii_case(e))
-    });
-    if !ok {
+    if !secret.is_empty() && !webhook_sig_ok(&secret, &ts, &delivery, &sig_header, &raw) {
         return json_resp(&json!({"error": "imzo to'g'ri kelmadi"}), 401);
     }
 
-    // ── HODISA ────────────────────────────────────────────────
+    // ── XABARDAN FAQAT HISOB RAQAMI OLINADI ─────────────────
     let ev: Value = serde_json::from_str(&raw).unwrap_or(json!({}));
-    // Bizni faqat MUVAFFAQIYATLI to'lov qiziqtiradi. Qolgan
-    // hodisalar (processing, failed) uchun 200 qaytariladi —
-    // aks holda sayt ularni 8 marta qayta yuborib turardi.
-    if ev["type"].as_str() != Some("payment.succeeded") {
-        return ok_nostore(json!({"ok": true, "ignored": true}));
-    }
-    let d = &ev["data"];
-    let bill_id = d["bill_id"].as_str().unwrap_or("").to_string();
+    let bill_id = ev["data"]["bill_id"].as_str().unwrap_or("").to_string();
     if bill_id.is_empty() {
+        // Turi boshqa hodisa (processing, failed) yoki tanib
+        // bo'lmaydigan xabar. 200 qaytaramiz, aks holda sayt uni
+        // 8 marta qayta yuborib turardi.
         return ok_nostore(json!({"ok": true, "ignored": true}));
     }
 
+    // Bizda bunday yozuv bormi (va kimniki).
     let row = turso_exec(env, "SELECT * FROM payments_db WHERE order_id=?",
         vec![TursoArg::text(&bill_id)]).await?;
     let Some(pay) = first_row(&row) else {
-        // Bizda bunday yozuv yo'q (masalan boshqa tizimdan
-        // yaratilgan hisob). Qayta yuborilmasin — 200.
         return ok_nostore(json!({"ok": true, "unknown": true}));
     };
     let user = pay["user_id"].as_i64().unwrap_or(0);
     let amount = pay["amount"].as_i64().unwrap_or(0);
-    // Summa mos kelmasa pul QO'SHILMAYDI (`billing_check` dagi
-    // bilan bitta qoida).
-    if d["amount_minor"].as_i64().unwrap_or(0) != to_minor(amount) || user <= 0 {
+    if user <= 0 || amount <= 0 {
+        return ok_nostore(json!({"ok": true, "ignored": true}));
+    }
+
+    // ── ASOSIY QULF: TEZCHECK'NING O'ZIDAN SO'RAYMIZ ────────
+    let (code, resp) = tezcheck(env, &format!("/bills/{bill_id}"), json!({})).await?;
+    if !(200..300).contains(&code) {
+        // So'rab bo'lmadi — 500 qaytaramiz, sayt keyin qayta
+        // yuboradi (uning o'z takroriy yuborish tartibi bor).
+        return json_resp(&json!({"error": "tasdiqlab bo'lmadi"}), 500);
+    }
+    let bill = &resp["data"]["bill"];
+    if bill["paid"] != json!(true) {
+        // Tezcheck "to'lanmagan" deydi — xabarda nima yozilganidan
+        // qat'i nazar, pul qo'shilmaydi.
+        return ok_nostore(json!({"ok": true, "paid": false}));
+    }
+    // Summa ham TEZCHECK aytganicha tekshiriladi.
+    if bill["amount_minor"].as_i64().unwrap_or(0) != to_minor(amount) {
         return ok_nostore(json!({"ok": true, "mismatch": true}));
     }
 
