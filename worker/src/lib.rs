@@ -7217,7 +7217,18 @@ async fn admin_app_config(mut req: Request, env: &Env) -> Result<Response> {
         // Shu so'rov yuborgan ilova ro'yxatdami.
         "my_sig": my_sig,
         "my_sig_trusted": !my_sig.is_empty() && list.iter().any(|x| x == &my_sig),
-        "gate_on": !list.is_empty(),
+        // ── HIMOYA HOLATI ENDI IMZO SIRIGA QARAB ─────────────
+        //
+        // TOPILGAN XATO: bu yerda `app_sig` ro'yxati bo'sh bo'lsa
+        // "himoya o'chiq" deb ko'rsatilardi. Endi esa himoya
+        // butunlay boshqa narsaga tayanadi — har so'rovdagi HMAC
+        // imzosiga. Natijada admin oynasida "o'chiq" yozilib
+        // turardi, aslida esa eshik QAT'IY yopiq edi.
+        "gate_on": !env.secret("APP_SIGN_SECRET")
+            .map(|s| s.to_string().trim().to_string())
+            .unwrap_or_default()
+            .is_empty()
+            || !list.is_empty(),
     }))
 }
 

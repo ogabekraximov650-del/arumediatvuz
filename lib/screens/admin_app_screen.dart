@@ -55,13 +55,10 @@ class _AdminAppScreenState extends State<AdminAppScreen> {
   String _minVersion = '';
 
   /// Nechta imzo qabul qilinadi.
-  int _sigCount = 0;
 
   /// SHU ilovaning imzosi (server so'rov sarlavhasidan oladi).
-  String _mySig = '';
 
   /// SHU ilova ro'yxatdami.
-  bool _myTrusted = false;
 
   bool _gateOn = false;
 
@@ -107,9 +104,6 @@ class _AdminAppScreenState extends State<AdminAppScreen> {
         final j = jsonDecode(r.body) as Map<String, dynamic>;
         setState(() {
           _minVersion = '${j['min_version'] ?? ''}';
-          _sigCount = ((j['sig_count'] as num?) ?? 0).toInt();
-          _mySig = '${j['my_sig'] ?? ''}';
-          _myTrusted = j['my_sig_trusted'] == true;
           _gateOn = j['gate_on'] == true;
           _version.text = _minVersion;
           _loading = false;
@@ -232,36 +226,10 @@ class _AdminAppScreenState extends State<AdminAppScreen> {
   ///
   /// Eskilari JOYIDA QOLADI: aks holda yangi APK tarqatilguncha
   /// hamma uzilib qolardi.
-  Future<void> _trustMe() async {
-    final ok = await _confirm(
-      'Shu ilovaga ishonilsinmi?',
-      'Bundan keyin server FAQAT shunday imzolangan ilovalarga '
-      'javob beradi. Ilgari qo\'shilgan imzolar ham ishlaydi.',
-    );
-    if (!ok) return;
-    await _post({'trust_me': true}, 'Qo\'shildi');
-  }
 
   /// Faqat shu imzoni qoldiradi.
-  Future<void> _onlyMe() async {
-    final ok = await _confirm(
-      'Faqat shu ilova qolsinmi?',
-      'Boshqa imzoli ilovalar SHU ZAHOTI ishlamay qoladi. Yangi '
-      'APK hamma tarqatilganiga ishonch hosil qiling.',
-    );
-    if (!ok) return;
-    await _post({'only_me': true}, 'Faqat shu ilova qoldi');
-  }
 
   /// Tekshiruvni butunlay o'chiradi.
-  Future<void> _clearSigs() async {
-    final ok = await _confirm(
-      'Imzo tekshiruvi o\'chirilsinmi?',
-      'Serverga tashqaridan ham so\'rov yuborish mumkin bo\'ladi.',
-    );
-    if (!ok) return;
-    await _post({'clear': true}, 'O\'chirildi');
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -383,102 +351,23 @@ class _AdminAppScreenState extends State<AdminAppScreen> {
                     ),
                     const SizedBox(height: 24),
 
-                    // ── ILOVA IMZOSI ──────────────────────────
-                    _label('ILOVA HAQIQIYLIGI'),
-                    const SizedBox(height: 8),
-                    Glass(
-                      borderRadius: 16,
-                      blur: 14,
-                      padding: const EdgeInsets.all(14),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          _row(
-                            'Qabul qilinadigan imzolar',
-                            _sigCount == 0 ? 'yo\'q' : '$_sigCount ta',
-                          ),
-                          const SizedBox(height: 8),
-                          _row(
-                            'Shu ilova',
-                            _mySig.isEmpty
-                                ? 'imzo kelmadi'
-                                : (_myTrusted ? 'ISHONCHLI' : 'ro\'yxatda yo\'q'),
-                            color: _mySig.isEmpty
-                                ? Colors.orange.shade300
-                                : (_myTrusted
-                                    ? AppColors.success
-                                    : Colors.orange.shade300),
-                          ),
-                          if (_mySig.isNotEmpty) ...[
-                            const SizedBox(height: 10),
-                            SelectableText(
-                              _mySig,
-                              style: TextStyle(
-                                color: Colors.white.withValues(alpha: 0.7),
-                                fontSize: 11.5,
-                                fontFamily: 'monospace',
-                                height: 1.4,
-                              ),
-                            ),
-                          ],
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      'Imzo APK\'ni qanday kalit bilan imzolanganidan '
-                      'kelib chiqadi va uni ilova O\'ZI tanlay olmaydi — '
-                      'tizim beradi. Kimdir ilovani o\'zgartirib qayta '
-                      'yig\'sa, u boshqa kalit bilan imzolanadi va '
-                      'server uni rad etadi.\n\n'
-                      'Hech narsa ko\'chirib yozish shart emas: siz shu '
-                      'ilovadan turib "Shu ilovaga ishonish"ni bosasiz.',
-                      style: TextStyle(
-                        color: Colors.white.withValues(alpha: 0.42),
-                        fontSize: 12,
-                        height: 1.5,
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    if (!_myTrusted && _mySig.isNotEmpty)
-                      FilledButton.icon(
-                        onPressed: _busy ? null : _trustMe,
-                        style: FilledButton.styleFrom(
-                          minimumSize: const Size(double.infinity, 46),
-                          backgroundColor: AppColors.accent,
-                        ),
-                        icon: const Icon(Icons.verified_user_rounded, size: 19),
-                        label: const Text('Shu ilovaga ishonish',
-                            style: TextStyle(fontWeight: FontWeight.w700)),
-                      ),
-                    if (_sigCount > 1 && _myTrusted) ...[
-                      OutlinedButton(
-                        onPressed: _busy ? null : _onlyMe,
-                        style: OutlinedButton.styleFrom(
-                          minimumSize: const Size(double.infinity, 46),
-                          foregroundColor: Colors.orange.shade300,
-                          side: BorderSide(
-                              color: Colors.orange.shade300
-                                  .withValues(alpha: 0.4)),
-                        ),
-                        child: const Text('Faqat shu ilova qolsin'),
-                      ),
-                      const SizedBox(height: 8),
-                    ],
-                    if (_gateOn) ...[
-                      const SizedBox(height: 8),
-                      OutlinedButton(
-                        onPressed: _busy ? null : _clearSigs,
-                        style: OutlinedButton.styleFrom(
-                          minimumSize: const Size(double.infinity, 46),
-                          foregroundColor: Colors.red.shade300,
-                          side: BorderSide(
-                              color:
-                                  Colors.red.shade300.withValues(alpha: 0.4)),
-                        ),
-                        child: const Text('Tekshiruvni o\'chirish'),
-                      ),
-                    ],
+                    // ── "ILOVA HAQIQIYLIGI" BO'LIMI OLIB TASHLANDI ──
+                    //
+                    // TALAB (foydalanuvchi): "ilova haqiqiyligi
+                    // deganni olib tashla".
+                    //
+                    // Sabab: u endi hech narsaga ta'sir qilmaydi.
+                    // Ilgari bu yerda APK imzosining hash'i
+                    // ro'yxatga qo'shilardi va server o'sha
+                    // ro'yxat bo'yicha tekshirardi. Endi tekshiruv
+                    // butunlay boshqacha: har bir so'rov vaqtga
+                    // bog'langan HMAC bilan imzolanadi
+                    // (`app_http.dart` va worker'dagi
+                    // `verify_app_sig` izohlariga qarang).
+                    //
+                    // Ya'ni bu yerdagi tugmalar bosilgani bilan
+                    // eski APK baribir o'tmasdi — oyna faqat
+                    // chalg'itardi.
                   ],
                 ),
         ),
