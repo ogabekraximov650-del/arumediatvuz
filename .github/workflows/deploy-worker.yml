@@ -81,6 +81,10 @@ jobs:
           put TEZCHECK_DESK "${{ secrets.TEZCHECK_DESK }}"
           # Webhook siri ixtiyoriy — qo'yilmasa webhook o'chiq turadi.
           put TEZCHECK_WEBHOOK_SECRET "${{ secrets.TEZCHECK_WEBHOOK_SECRET }}"
+          # So'rov imzosining siri. AYNAN shu qiymat APK'ni yig'ishda
+          # ham berilishi shart (`build-flutter-apk.yml`), aks holda
+          # ilovaning hamma so'rovi 403 oladi.
+          put APP_SIGN_SECRET "${{ secrets.APP_SIGN_SECRET }}"
 
       - name: Deploy to Cloudflare Workers
         working-directory: worker

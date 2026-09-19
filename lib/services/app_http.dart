@@ -27,6 +27,7 @@
 import 'package:http/http.dart' as http;
 
 import 'app_build.dart';
+import 'rust_bridge.dart';
 
 /// Sarlavhalarni qo'shib yuboradigan klient.
 class AppHttpClient extends http.BaseClient {
@@ -36,12 +37,31 @@ class AppHttpClient extends http.BaseClient {
 
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) {
-    // Imzo yoki versiya berilmagan bo'lsa sarlavha ham
-    // qo'shilmaydi — server bunday holatda tekshiruvni o'chirib
-    // qo'ygan bo'lsa ilova baribir ishlaydi.
-    final sig = AppSignature.value;
-    if (sig.isNotEmpty) {
-      request.headers['X-App-Sig'] = sig;
+    // ── HAR SO'ROV ALOHIDA IMZOLANADI ──────────────────────
+    //
+    // Ilgari bu yerda APK sertifikatining hash'i (o'zgarmas satr)
+    // yuborilardi. U SIR EMAS — APK'ni ochgan har kim hisoblab
+    // oladi — va O'ZGARMAYDI, ya'ni bir marta nusxa ko'chirilgach
+    // abadiy ishlardi.
+    //
+    // Endi imzo har so'rovda qaytadan hisoblanadi va ichida VAQT,
+    // METOD va YO'L bor (`RustCore.appSign` izohiga qarang):
+    //   * ushlab olingan imzo 2 daqiqadan keyin o'lik;
+    //   * bir yo'l uchun olingani boshqasiga yaramaydi.
+    //
+    // Sir Rust yadrosida turadi, Dart tomonida umuman yo'q.
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final sig = RustCore.instance.appSign(
+      now,
+      request.method,
+      request.url.path,
+    );
+    // Yadro sirsiz yig'ilgan bo'lsa (ishlab chiqish rejimi) imzo
+    // bo'sh keladi — o'shanda eski usulga qaytamiz, server ham
+    // tekshiruvni o'chirgan bo'ladi.
+    final value = sig.isNotEmpty ? sig : AppSignature.value;
+    if (value.isNotEmpty) {
+      request.headers['X-App-Sig'] = value;
     }
     if (kAppVersion.isNotEmpty) {
       request.headers['X-App-Version'] = kAppVersion;

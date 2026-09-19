@@ -112,7 +112,25 @@ jobs:
       # tayyorlanishi kerak ... hajmi katta bo'lib ketgan").
       - name: Build rust_core for Android (${{ matrix.abi }})
         working-directory: rust
+        env:
+          # ── SO'ROV IMZOSINING SIRI ──────────────────────────
+          #
+          # Yadro ichiga KOMPILYATSIYA paytida kiritiladi
+          # (`rust/src/lib.rs` -> `APP_SIGN_SECRET`). Dart
+          # kodiga umuman tushmaydi.
+          #
+          # Server tomonda AYNAN shu qiymat `wrangler secret put
+          # APP_SIGN_SECRET` bilan turishi shart — aks holda
+          # hamma so'rov 403 oladi.
+          #
+          # Berilmasa yadro imzosiz yig'iladi va ilova eski
+          # usulga qaytadi (server ham tekshiruvni o'chirgan
+          # bo'lishi kerak).
+          APP_SIGN_SECRET: ${{ secrets.APP_SIGN_SECRET }}
         run: |
+          if [ -z "$APP_SIGN_SECRET" ]; then
+            echo "⚠️  APP_SIGN_SECRET yo'q — yadro imzosiz yig'ilmoqda"
+          fi
           cargo ndk \
             -t ${{ matrix.abi }} \
             -o ../jniLibs-out \

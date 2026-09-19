@@ -5219,77 +5219,6 @@ fn to_minor(sum: i64) -> i64 {
     sum * 100
 }
 
-/// XATO CHIQQANDA KASSA HOLATINI O'QIB BERADI.
-///
-/// ── NEGA KERAK ────────────────────────────────────────────────
-///
-/// `POST /bills` rad etilganda sayt faqat umumiy sabab qaytaradi
-/// ("Joriy holatda bu amalga ruxsat berilmaydi"). Bu bir necha
-/// xil holatga to'g'ri keladi va ularni bir-biridan ajratib
-/// bo'lmaydi:
-///
-///   * sirdagi kassa kodi umuman boshqa kassaniki;
-///   * kassa `paused`/`suspended`/`draft` holatida;
-///   * kassa hali to'lov qabul qilmaydi (`accepts_payments:false`).
-///
-/// Shu sabab xato chiqqan ZAHOTI kassalar ro'yxati so'raladi va
-/// javobga qo'shiladi — ya'ni sabab ekranda ko'rinadi, qidirib
-/// yurish kerak emas.
-///
-/// Bu so'rov FAQAT xato bo'lganda yuboriladi: muvaffaqiyatli
-/// to'lovda qo'shimcha so'rov yo'q.
-async fn desk_diagnosis(env: &Env) -> String {
-    let desk = env.secret("TEZCHECK_DESK")
-        .map(|s| s.to_string().trim().to_string())
-        .unwrap_or_default();
-    let hint = if desk.len() > 12 {
-        format!("{}…{}", &desk[..8], &desk[desk.len() - 4..])
-    } else if desk.is_empty() {
-        "QO'YILMAGAN".to_string()
-    } else {
-        desk.clone()
-    };
-
-    let Ok((code, resp)) = tezcheck(env, "/cash-desks", json!({})).await else {
-        return format!("sirdagi kassa: {hint}; ro'yxat so'ralmadi");
-    };
-    if !(200..300).contains(&code) {
-        return format!(
-            "sirdagi kassa: {hint}; ro'yxat olinmadi ({code}: {})",
-            tezcheck_why(&resp)
-        );
-    }
-
-    let empty = vec![];
-    let list = resp["data"].as_array().unwrap_or(&empty);
-    // Sirdagi kod tokenga ruxsat etilgan kassalar orasida bormi?
-    for d in list {
-        if d["code"].as_str() == Some(desk.as_str()) {
-            return format!(
-                "sirdagi kassa: {hint} (id={}, state={}, accepts_payments={})",
-                d["id"].as_str().unwrap_or("?"),
-                d["state"].as_str().unwrap_or("?"),
-                d["accepts_payments"],
-            );
-        }
-    }
-    // Topilmadi — ro'yxatda nima borligini ko'rsatamiz.
-    let others: Vec<String> = list
-        .iter()
-        .map(|d| {
-            format!(
-                "id={} accepts_payments={}",
-                d["id"].as_str().unwrap_or("?"),
-                d["accepts_payments"]
-            )
-        })
-        .collect();
-    format!(
-        "sirdagi kassa: {hint} — TOKENGA RUXSAT ETILGAN RO'YXATDA YO'Q. Ro'yxat: [{}]",
-        others.join("; ")
-    )
-}
-
 /// POST /api/billing/create — to'lov havolasi yaratish.
 async fn billing_create(mut req: Request, env: &Env) -> Result<Response> {
     let Some(u) = session_user(env, &bearer(&req)).await? else {
@@ -5322,11 +5251,8 @@ async fn billing_create(mut req: Request, env: &Env) -> Result<Response> {
     let (code, resp) = tezcheck(env, "/bills", body).await?;
     // Yangi API muvaffaqiyatni HOLAT KODI bilan bildiradi (201).
     if !(200..300).contains(&code) {
-        // Sabab ekranda ko'rinsin (`desk_diagnosis` izohiga qarang).
-        let why = tezcheck_why(&resp);
-        let desk = desk_diagnosis(env).await;
         return json_resp(&json!({
-            "error": format!("To'lov yaratilmadi: {why} | {desk}")
+            "error": format!("To'lov yaratilmadi: {}", tezcheck_why(&resp))
         }), 502);
     }
     let order_id = resp["data"]["bill"]["id"].as_str().unwrap_or("").to_string();
@@ -5477,115 +5403,6 @@ async fn billing_check(mut req: Request, env: &Env) -> Result<Response> {
         "status": "paid",
         "already": !added,
         "balance": u["balance"].as_i64().unwrap_or(0) + if added { amount } else { 0 },
-    }))
-}
-
-/// GET /api/billing/desks — KASSALARNI TEKSHIRISH (faqat admin).
-///
-/// ── NEGA KERAK ────────────────────────────────────────────────
-///
-/// TOPILGAN MUAMMO: to'lov havolasi yaratilmayotgan edi va sayt
-/// `resource.state_invalid` qaytarardi. Sabab kodda emas — kassa
-/// to'lov qabul qilmayotgan bo'lishi mumkin, yoki sirlarda
-/// BOSHQA kassaning kodi turgan bo'lishi mumkin.
-///
-/// Buni tekshirishning yagona ishonchli yo'li — AYNAN worker
-/// ishlatayotgan sirlar bilan so'rov yuborish. Kalitni qo'lda
-/// terminalga ko'chirib tekshirish esa boshqa narsani tekshiradi:
-/// Cloudflare'da qanday qiymat turganini u ko'rsatmaydi.
-///
-/// Javobda har bir kassaning `accepts_payments` bayrog'i bor —
-/// to'lov faqat `true` bo'lganida yaratiladi.
-///
-/// ── NIMA CHIQMAYDI ────────────────────────────────────────────
-///
-/// Token HECH QACHON qaytarilmaydi. Faqat uning oxirgi belgilari
-/// (`token_hint`) ko'rinadi — "qaysi token qo'yilgan" degan
-/// savolga javob berish uchun shu yetadi.
-async fn billing_desks(req: Request, env: &Env) -> Result<Response> {
-    // ── BRAUZERDAN HAM OCHILSIN ─────────────────────────────
-    //
-    // Bu yo'l odatdagidek `Authorization: Bearer ...` bilan
-    // ishlaydi, lekin brauzer bunday sarlavha yubora olmaydi —
-    // manzilni oddiy ochganda faqat `unauthorized` chiqardi va
-    // tekshiruvdan foyda bo'lmasdi.
-    //
-    // Shu sabab FAQAT SHU yo'l uchun token manzildan ham olinadi:
-    // `?t=<sessiya tokeni>`.
-    //
-    // ── NEGA BOSHQA YO'LLARDA BUNDAY QILINMAYDI ─────────────
-    //
-    // Manzildagi token brauzer tarixida, `Referer` sarlavhasida va
-    // server jurnallarida qolib ketadi. Bu — nosozlikni topish
-    // uchun ATAYLAB qilingan yon berish, va aynan shu yerda:
-    //   * yo'l faqat ADMINGA ochiq;
-    //   * javobda na token, na kassa kodi to'liq chiqmaydi;
-    //   * u hech qanday ma'lumotni o'zgartirmaydi (faqat o'qish).
-    //
-    // Nosozlik topilgach bu yo'lni olib tashlash mumkin.
-    let token = {
-        let t = bearer(&req);
-        if !t.is_empty() {
-            t
-        } else {
-            req.url()
-                .ok()
-                .and_then(|u| {
-                    u.query_pairs()
-                        .find(|(k, _)| k == "t")
-                        .map(|(_, v)| v.trim().to_string())
-                })
-                .unwrap_or_default()
-        }
-    };
-    let Some(u) = session_user(env, &token).await? else {
-        return json_resp(&json!({
-            "error": "unauthorized",
-            "izoh": "Admin sessiya tokeni kerak: ?t=<token>",
-        }), 401);
-    };
-    if !is_admin(&u) {
-        return json_resp(&json!({"error": "forbidden"}), 403);
-    }
-
-    // Sirlarda qaysi kassa kodi turganini ko'rsatamiz. Kassa kodi
-    // maxfiy emas (hujjat: "not sensitive alone"), lekin baribir
-    // to'liq emas — boshi va oxiri yetarli.
-    let desk = env.secret("TEZCHECK_DESK")
-        .map(|s| s.to_string().trim().to_string())
-        .unwrap_or_default();
-    let desk_hint = if desk.len() > 12 {
-        format!("{}…{}", &desk[..8], &desk[desk.len() - 4..])
-    } else {
-        desk.clone()
-    };
-
-    let (me_code, me_resp) = tezcheck(env, "/me", json!({})).await
-        .unwrap_or((0, json!({})));
-    let (code, resp) = tezcheck(env, "/cash-desks", json!({})).await?;
-
-    ok_nostore(json!({
-        "ok": (200..300).contains(&code),
-        "sirlardagi_kassa": desk_hint,
-        "me": {
-            "http": me_code,
-            "kassa": me_resp["data"]["cash_desk"],
-            "token": me_resp["data"]["api_client"]["token_hint"],
-            "xato": if (200..300).contains(&me_code) {
-                json!(null)
-            } else {
-                json!(tezcheck_why(&me_resp))
-            },
-        },
-        "kassalar": {
-            "http": code,
-            "royxat": resp["data"],
-            "xato": if (200..300).contains(&code) {
-                json!(null)
-            } else {
-                json!(tezcheck_why(&resp))
-            },
-        },
     }))
 }
 
@@ -9153,6 +8970,45 @@ fn version_rank(v: &str) -> i64 {
     major * 1_000_000_000 + minor * 1_000_000 + patch * 1000 + build.clamp(0, 999)
 }
 
+/// Imzo shuncha soniyadan eski bo'lsa qabul qilinmaydi.
+///
+/// 120 soniya — telefon soati bir oz og'ishiga va sekin tarmoqqa
+/// yetadigan, lekin nusxa ko'chirilgan sarlavhani uzoq ishlatishga
+/// imkon bermaydigan oraliq.
+const APP_SIG_SKEW_SECS: i64 = 120;
+
+/// `X-App-Sig: v2.<vaqt>.<hex>` ni tekshiradi.
+///
+/// Imzolanadigan matn: `"<vaqt>.<METOD>.<yo'l>"`.
+fn verify_app_sig(secret: &str, got: &str, method: &str, path: &str) -> bool {
+    let mut parts = got.split('.');
+    if parts.next() != Some("v2") {
+        return false;
+    }
+    let (Some(ts), Some(mac)) = (parts.next(), parts.next()) else {
+        return false;
+    };
+    // Ortiqcha bo'lak bo'lsa — yaroqsiz.
+    if parts.next().is_some() {
+        return false;
+    }
+    let Ok(ts_num) = ts.parse::<i64>() else {
+        return false;
+    };
+    if (now_ms() / 1000 - ts_num).abs() > APP_SIG_SKEW_SECS {
+        return false;
+    }
+
+    let Ok(mut h) = <hmac::Hmac<sha2::Sha256> as hmac::Mac>::new_from_slice(secret.as_bytes())
+    else {
+        return false;
+    };
+    hmac::Mac::update(&mut h, format!("{ts}.{}.{path}", method.to_uppercase()).as_bytes());
+    let want = hex_of(&hmac::Mac::finalize(h).into_bytes());
+    // Uzunligi bir xil bo'lsa — belgi-belgi solishtirish.
+    want.len() == mac.len() && want.eq_ignore_ascii_case(mac)
+}
+
 /// So'rovni o'tkazamizmi. `None` — o'tadi, `Some(resp)` — rad.
 async fn app_gate(req: &Request, env: &Env, path: &str) -> Option<Response> {
     if !needs_app_check(path) {
@@ -9162,15 +9018,56 @@ async fn app_gate(req: &Request, env: &Env, path: &str) -> Option<Response> {
         req.headers().get(k).ok().flatten().unwrap_or_default()
     };
 
-    // ── 1. ILOVA IMZOSI ──────────────────────────────────────
+    // ── 1. SO'ROV IMZOSI ─────────────────────────────────────
     //
-    // Kutilgan hash `app_config` da. Qo'yilmagan bo'lsa
-    // tekshiruv o'chiq (yuqoridagi izohga qarang).
+    // ── NEGA ESKI USUL YETARLI EMAS EDI ────────────────────
     //
-    // Bir nechta hash vergul bilan yozilishi mumkin: imzo
-    // almashtirilganda eski ilovalar ham bir muddat ishlab
-    // tursin.
-    if let Some(want) = config_get(env, "app_sig").await {
+    // Ilgari `X-App-Sig` da APK sertifikatining hash'i turardi va
+    // u O'ZGARMAS satr edi. Ikkita jiddiy kamchilik:
+    //
+    //   1. U SIR EMAS. Hash — ochiq ma'lumot: APK'ni ochgan har
+    //      kim uni hisoblab oladi, admin oynasida ham ko'rinadi.
+    //   2. U O'ZGARMAYDI. Bir marta nusxa ko'chirilgach abadiy
+    //      ishlaydi — istalgan skriptga qo'yib yuborish kifoya.
+    //
+    // (Bu nazariy gap emas: tirik serverda sinab ko'rilganda
+    // skrinshotdan ko'chirilgan hash bemalol o'tdi.)
+    //
+    // ── YANGI USUL ──────────────────────────────────────────
+    //
+    //   X-App-Sig: v2.<vaqt>.<hex HMAC-SHA256>
+    //   imzolanadigan matn: "<vaqt>.<METOD>.<yo'l>"
+    //   kalit: `APP_SIGN_SECRET` — ilova va server IKKALASI
+    //          biladigan sir.
+    //
+    // Nima o'zgaradi:
+    //   * nusxa ko'chirilgan sarlavha 2 DAQIQADAN keyin o'lik
+    //     (vaqt tamg'asi tekshiriladi);
+    //   * bitta yo'l uchun olingan imzo BOSHQA yo'lga yaramaydi
+    //     (metod va yo'l imzo ichida);
+    //   * sir ilovada Rust yadrosida (native `.so`) turadi —
+    //     uni chiqarib olish Dart satridan ko'chirishdan ancha
+    //     qiyin.
+    //
+    // ── SIR QO'YILMAGAN BO'LSA ──────────────────────────────
+    //
+    // Eski qoida (`app_config` dagi hash) ishlaydi. Bu ATAYLAB:
+    // sir qo'yilishidan OLDIN deploy qilinsa, ilova uzilib
+    // qolmasligi kerak. Sir qo'yilgan zahoti tekshiruv QAT'IY
+    // bo'ladi va eski imzo umuman qabul qilinmaydi.
+    let secret = env
+        .secret("APP_SIGN_SECRET")
+        .map(|s| s.to_string().trim().to_string())
+        .unwrap_or_default();
+    if !secret.is_empty() {
+        if !verify_app_sig(&secret, &head("X-App-Sig"), req.method().to_string().as_str(), path) {
+            return Some(
+                json_resp(&json!({"error": "forbidden"}), 403)
+                    .unwrap_or_else(|_| Response::empty().unwrap()),
+            );
+        }
+    } else if let Some(want) = config_get(env, "app_sig").await {
+        // Eski yo'l — sir qo'yilgunicha.
         let got = head("X-App-Sig");
         let ok = !got.is_empty()
             && want.split(',').any(|w| w.trim() == got);
@@ -9408,10 +9305,6 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
     // tasdiqlaydi (`billing_webhook` izohiga qarang).
     if path == "/api/billing/webhook" && method == Method::Post {
         return billing_webhook(req, &env).await;
-    }
-    // Kassalarni tekshirish — faqat admin (`billing_desks` izohi).
-    if path == "/api/billing/desks" && method == Method::Get {
-        return billing_desks(req, &env).await;
     }
 
     // ── ADMIN BILAN YOZISHMA ──────────────────────────────────

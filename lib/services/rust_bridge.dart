@@ -111,6 +111,12 @@ typedef _SecureLoadDart = Pointer<Utf8> Function(Pointer<Utf8>, Pointer<Utf8>);
 typedef _SecureClearC = Int32 Function(Pointer<Utf8>);
 typedef _SecureClearDart = int Function(Pointer<Utf8>);
 
+// So'rov imzosi (`app_sign` — rust/src/lib.rs izohiga qarang).
+typedef _AppSignC = Pointer<Utf8> Function(
+    Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>);
+typedef _AppSignDart = Pointer<Utf8> Function(
+    Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>);
+
 class RustCore {
   RustCore._();
   static final RustCore instance = RustCore._();
@@ -149,6 +155,7 @@ class RustCore {
   late final _SecureSaveDart _secureSave;
   late final _SecureLoadDart _secureLoad;
   late final _SecureClearDart _secureClear;
+  late final _AppSignDart _appSign;
 
   bool _loaded = false;
   String? _cacheFilePath;
@@ -186,6 +193,7 @@ class RustCore {
         _lib.lookupFunction<_FreeStringC, _FreeStringDart>('rust_free_string');
     _version =
         _lib.lookupFunction<_VersionC, _VersionDart>('rust_core_version');
+    _appSign = _lib.lookupFunction<_AppSignC, _AppSignDart>('app_sign');
     _videoCacheStart =
         _lib.lookupFunction<_VideoCacheStartC, _VideoCacheStartDart>(
             'rust_video_cache_start');
@@ -534,6 +542,31 @@ class RustCore {
 
   /// Shifrlangan fayldan matnni o'qiydi. Fayl yo'q, buzilgan yoki
   /// boshqa kalit bilan yozilgan bo'lsa — bo'sh satr.
+  /// SO'ROV IMZOSI — `v2.<vaqt>.<hex>`.
+  ///
+  /// Sir Rust yadrosining ichida (`app_sign`), Dart tomonida
+  /// UMUMAN YO'Q — shu sabab uni APK ichidagi Dart tasviridan
+  /// topib bo'lmaydi.
+  ///
+  /// Bo'sh qaytsa (yadro yuklanmagan yoki sir berilmagan) ilova
+  /// sarlavhani qo'ymaydi va server tekshiruvni o'chirgan bo'lsa
+  /// baribir ishlayveradi.
+  String appSign(int unixSeconds, String method, String path) {
+    if (!_loaded) return '';
+    final t = '$unixSeconds'.toNativeUtf8();
+    final m = method.toNativeUtf8();
+    final p = path.toNativeUtf8();
+    try {
+      return _readAndFree(_appSign(t, m, p)) ?? '';
+    } catch (_) {
+      return '';
+    } finally {
+      malloc.free(t);
+      malloc.free(m);
+      malloc.free(p);
+    }
+  }
+
   String secureLoad(String path, String label) {
     if (!_loaded) return '';
     final p = path.toNativeUtf8();

@@ -30,6 +30,8 @@ cbc = { version = "0.1", features = ["alloc"] }
 aes-gcm = "0.10"
 hkdf = "0.12"
 sha2 = "0.10"
+# hmac — serverga yuboriladigan so'rov imzosi (`app_sign`).
+hmac = "0.12"
 getrandom = "0.2"
 hex = "0.4"
 
