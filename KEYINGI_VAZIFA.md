@@ -768,9 +768,34 @@ Shu sabab surish paytidagi qulf endi KERAK EMAS va OLIB
 TASHLANDI — qulfsiz ham surish silliq, chunki surish paytida
 bajariladigan ish umuman qolmadi.
 
-### YOZISHMADAGI VIDEO KADRI — QAYTARIB OLINDI
+### YOZISHMADAGI VIDEO KADRI — KADRNI YUBORUVCHI YASAYDI
 
-Yozishmadagi videoga kadr qo'yish sinab ko'rildi va **orqaga
+**Hozirgi (to'g'ri) usul — Telegram qanday qilsa, shunday:**
+
+1. Video tanlanadi — fayl YUBORUVCHINING telefonida turibdi.
+   Undan kadr ajratish MAHALLIY ish, tarmoq kerak emas
+   (`chat_send_thumb.dart`, `MainActivity.grabFrame` `atMs` bilan).
+2. Kadr yuklash boshlanishi bilan puffakda ko'rinadi (progress
+   aylanasining orqasida) — foydalanuvchi talabi.
+3. Kichik JPEG (~15-30 KB) video bilan birga B2'ga ketadi,
+   xabarda esa uning NOMI (`media_thumb`).
+4. Qabul qiluvchi TAYYOR rasmni ko'rsatadi — `CachedNetworkImage`,
+   xuddi yozishmadagi oddiy rasm kabi. **Hech narsa hisoblanmaydi.**
+
+**Qoidalar:**
+
+* Kadr yuklanmasa yuborish TO'XTAMAYDI — video kadrsiz ketadi.
+* Kadr faqat `media_type == "video"` uchun saqlanadi.
+* Xabar/yozishma o'chirilganda kadr fayli ham B2'dan o'chadi.
+* **Yetim fayllar tozalovchisida `media_thumb` ham "saqlanadigan"
+  ro'yxatda bo'lishi SHART** — aks holda u kadrlarni o'chirib
+  yuboradi.
+* Faqat YANGI videolarda ishlaydi; eski xabarlar kadrsiz qoladi.
+
+### AVVALGI (XATO) USUL — QAYTARIB OLINGAN, TAKRORLAMANG
+
+Avval kadr KO'RUVCHI telefonda, UZOQDAGI fayldan, tarmoq orqali
+ajratilardi (Rust `/thumb` + sun'iy mini-MP4). U **orqaga
 qaytarildi**. Sabab kadrning chiqmagani emas — u VIDEO IJROSINI
 sekinlashtirdi.
 

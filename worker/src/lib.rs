@@ -906,6 +906,15 @@ async fn init_db(env: &Env) -> bool {
             -- 'image' yoki 'video'.
             media_type TEXT DEFAULT '',
             media_ms INTEGER DEFAULT 0,
+            -- ── VIDEONING KADRI (thumbnail) ─────────────────
+            --
+            -- Kichik JPEG'ning B2'dagi nomi. Uni YUBORUVCHI
+            -- yasaydi: fayl uning telefonida turgani uchun kadr
+            -- ajratish mahalliy va tezkor ish.
+            --
+            -- Qabul qiluvchi hech narsa hisoblamaydi — tayyor
+            -- rasmni oladi. Telegram ham aynan shunday qiladi.
+            media_thumb TEXT DEFAULT '',
             seen INTEGER DEFAULT 0,
             created_at INTEGER
         )", vec![]),
@@ -1146,6 +1155,11 @@ async fn init_db(env: &Env) -> bool {
     // holat, xato emas.
     let _ = turso_exec(env,
         "ALTER TABLE chat_threads ADD COLUMN chat_ver INTEGER DEFAULT 0",
+        vec![]).await;
+
+    // Xuddi shunday: videoning kadri (yuqoridagi izohga qarang).
+    let _ = turso_exec(env,
+        "ALTER TABLE chat_messages ADD COLUMN media_thumb TEXT DEFAULT ''",
         vec![]).await;
 
     ok
@@ -3058,7 +3072,11 @@ async fn b2_cleanup(mut req: Request, env: &Env) -> Result<Response> {
         ("SELECT photo_url FROM season_db", vec![]),
         ("SELECT url_360p, url_480p, url_720p, url_1080p FROM epizod_db", vec![]),
         ("SELECT avatar_file FROM users_db", vec![]),
-        ("SELECT media_file FROM chat_messages", vec![]),
+        // Kadr (`media_thumb`) ham SHU YERDA bo'lishi SHART: aks
+        // holda tozalovchi uni "yetim" deb o'chirib yuborardi va
+        // videolar kadrsiz qolardi. Pastdagi halqa qatordagi
+        // BARCHA ustunni oladi, shu sabab ikkovi ham yetadi.
+        ("SELECT media_file, media_thumb FROM chat_messages", vec![]),
     ]).await?;
 
     let mut keep: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -6235,6 +6253,12 @@ fn chat_msg_public(origin: &str, r: &Value) -> Value {
         },
         "media_type": r["media_type"].as_str().unwrap_or(""),
         "media_ms": r["media_ms"].as_i64().unwrap_or(0),
+        // Videoning kadri — oddiy rasm, o'sha `/api/media/` yo'li
+        // bilan beriladi. Eski xabarlarda bo'sh.
+        "media_thumb_url": match r["media_thumb"].as_str().unwrap_or("") {
+            "" => String::new(),
+            t => format!("{origin}/api/media/{t}"),
+        },
         // Suhbatdosh o'qiganmi: ilovada bitta yoki ikkita belgi.
         "seen": r["seen"].as_i64().unwrap_or(0) != 0,
         "created_at": r["created_at"].as_i64().unwrap_or(0),
@@ -6488,6 +6512,9 @@ async fn chat_send(mut req: Request, env: &Env, origin: &str) -> Result<Response
     // Ovozli xabarning uzunligi — ilova yozib olganda o'lchaydi.
     // 0 dan kichik yoki bemaza katta qiymat qabul qilinmaydi.
     let media_ms = b["media_ms"].as_i64().unwrap_or(0).clamp(0, 3_600_000);
+    // Videoning kadri — YUBORUVCHI yasagan kichik JPEG. Faqat
+    // fayl NOMI keladi (yo'l emas), xuddi `media_file` kabi.
+    let media_thumb = bare_name(b["media_thumb"].as_str().unwrap_or("")).trim().to_string();
     // Nomi bor-u turi yo'q (yoki aksincha) — yaroqsiz juftlik.
     let has_media = !media_file.is_empty() && !media_type.is_empty();
     if body.is_empty() && !has_media {
@@ -6543,8 +6570,9 @@ async fn chat_send(mut req: Request, env: &Env, origin: &str) -> Result<Response
     };
     turso_batch(env, &[
         ("INSERT INTO chat_messages
-            (id,user_id,from_admin,body,media_file,media_type,media_ms,created_at)
-          VALUES (?,?,?,?,?,?,?,?)",
+            (id,user_id,from_admin,body,media_file,media_type,media_ms,
+             media_thumb,created_at)
+          VALUES (?,?,?,?,?,?,?,?,?)",
          vec![
             TursoArg::text(&id), TursoArg::int(target),
             TursoArg::int(if from_admin { 1 } else { 0 }),
@@ -6552,6 +6580,12 @@ async fn chat_send(mut req: Request, env: &Env, origin: &str) -> Result<Response
             TursoArg::text(if has_media { &media_file } else { "" }),
             TursoArg::text(if has_media { media_type } else { "" }),
             TursoArg::int(if has_media { media_ms } else { 0 }),
+            // Kadr FAQAT video uchun ma'noli.
+            TursoArg::text(if has_media && media_type == "video" {
+                &media_thumb
+            } else {
+                ""
+            }),
             TursoArg::int(now),
          ]),
         ("INSERT INTO chat_threads
@@ -6583,6 +6617,12 @@ async fn chat_send(mut req: Request, env: &Env, origin: &str) -> Result<Response
         },
         "media_type": if has_media { media_type } else { "" },
         "media_ms": if has_media { media_ms } else { 0 },
+        "media_thumb_url": if has_media && media_type == "video"
+            && !media_thumb.is_empty() {
+            format!("{origin}/api/media/{media_thumb}")
+        } else {
+            String::new()
+        },
         "seen": false,
         "created_at": now,
     }))
@@ -6891,7 +6931,8 @@ async fn chat_del_message(req: &Request, env: &Env, id: &str) -> Result<Response
     // unga ishora qilgan yagona qator ham yo'q bo'lgan bo'lardi.
     // Ya'ni fayl abadiy yotib, ombor uchun pul yeb turardi.
     let row = turso_exec(env,
-        "DELETE FROM chat_messages WHERE id=? RETURNING user_id, media_file",
+        "DELETE FROM chat_messages WHERE id=? RETURNING user_id, media_file,
+                media_thumb",
         vec![TursoArg::text(id)]).await?;
     let Some(r) = first_row(&row) else {
         return json_resp(&json!({"error": "Xabar topilmadi"}), 404);
@@ -6900,6 +6941,12 @@ async fn chat_del_message(req: &Request, env: &Env, id: &str) -> Result<Response
     let file = r["media_file"].as_str().unwrap_or("");
     if !file.is_empty() {
         b2_delete(env, file).await;
+    }
+    // Videoning kadri ham yetim qolmasin: unga ishora qilgan
+    // yagona qator hozirgina o'chdi.
+    let thumb = r["media_thumb"].as_str().unwrap_or("");
+    if !thumb.is_empty() {
+        b2_delete(env, thumb).await;
     }
 
     // Suhbat qatoridagi "oxirgi xabar" endi boshqa bo'lishi
@@ -6969,16 +7016,18 @@ async fn chat_del_many(mut req: Request, env: &Env) -> Result<Response> {
 
     // B2'dagi fayllar ham o'chiriladi (yuqoridagi izohga qarang).
     let files_res = turso_exec(env,
-        &format!("SELECT media_file FROM chat_messages
-                   WHERE id IN ({holes}) AND media_file <> ''"),
+        &format!("SELECT media_file, media_thumb FROM chat_messages
+                   WHERE id IN ({holes})"),
         args.clone()).await?;
+    // Qatordagi HAR IKKI ustun olinadi: faylning o'zi va kadri.
     let files: Vec<String> = files_res["rows"]
         .as_array()
         .map(|rows| {
             rows.iter()
                 .filter_map(|r| r.as_array())
-                .filter_map(|r| r.first())
+                .flat_map(|r| r.iter())
                 .filter_map(|c| c["value"].as_str())
+                .filter(|v| !v.is_empty())
                 .map(|v| v.to_string())
                 .collect()
         })
@@ -7009,16 +7058,18 @@ async fn chat_del_thread(req: &Request, env: &Env, user: i64) -> Result<Response
     // B2'dagi fayllar ham o'chiriladi (`chat_del_message`
     // izohiga qarang).
     let files_res = turso_exec(env,
-        "SELECT media_file FROM chat_messages
-          WHERE user_id=? AND media_file <> ''",
+        "SELECT media_file, media_thumb FROM chat_messages
+          WHERE user_id=?",
         vec![TursoArg::int(user)]).await?;
+    // Qatordagi HAR IKKI ustun olinadi: faylning o'zi va kadri.
     let files: Vec<String> = files_res["rows"]
         .as_array()
         .map(|rows| {
             rows.iter()
                 .filter_map(|r| r.as_array())
-                .filter_map(|r| r.first())
+                .flat_map(|r| r.iter())
                 .filter_map(|c| c["value"].as_str())
+                .filter(|v| !v.is_empty())
                 .map(|v| v.to_string())
                 .collect()
         })

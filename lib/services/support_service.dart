@@ -52,6 +52,15 @@ class ChatMessage {
   /// shu sabab uzunlik faylni yuklamasdan turib ko'rinadi.
   final int mediaMs;
 
+  /// VIDEONING KADRI (thumbnail) — oddiy rasm manzili.
+  ///
+  /// Kadrni YUBORUVCHI yasaydi va video bilan birga yuklaydi
+  /// (`chat_send_thumb.dart` izohiga qarang), shu sabab bu yerda
+  /// hech narsa hisoblanmaydi — tayyor rasm ko'rsatiladi.
+  ///
+  /// Bo'sh: eski xabar yoki kadr yasalmagan.
+  final String thumbUrl;
+
   /// Hali serverga yetib bormagan (ekranda DARHOL ko'rsatilgan)
   /// nusxa.
   ///
@@ -75,6 +84,7 @@ class ChatMessage {
     this.mediaUrl = '',
     this.mediaType = '',
     this.mediaMs = 0,
+    this.thumbUrl = '',
     this.pending = false,
     this.seen = false,
   });
@@ -87,6 +97,7 @@ class ChatMessage {
         mediaUrl: mediaUrl,
         mediaType: mediaType,
         mediaMs: mediaMs,
+        thumbUrl: thumbUrl,
         seen: true,
       );
 
@@ -106,6 +117,9 @@ class ChatMessage {
         mediaUrl: '${j['media_url'] ?? ''}',
         mediaType: '${j['media_type'] ?? ''}',
         mediaMs: ((j['media_ms'] as num?) ?? 0).toInt(),
+        // Eski diskdagi nusxada bu maydon YO'Q — bo'sh qoladi va
+        // xabar avvalgidek, kadrsiz ko'rinadi.
+        thumbUrl: '${j['media_thumb_url'] ?? ''}',
         seen: j['seen'] == true,
       );
 
@@ -117,6 +131,7 @@ class ChatMessage {
         'media_url': mediaUrl,
         'media_type': mediaType,
         'media_ms': mediaMs,
+        'media_thumb_url': thumbUrl,
         'seen': seen,
       };
 }
@@ -596,6 +611,7 @@ class ChatController extends ChangeNotifier {
     String mediaFile = '',
     String mediaType = '',
     int mediaMs = 0,
+    String mediaThumb = '',
   }) async {
     final text = body.trim();
     if (text.isEmpty && mediaFile.isEmpty) return null;
@@ -635,6 +651,9 @@ class ChatController extends ChangeNotifier {
               if (mediaFile.isNotEmpty) 'media_file': mediaFile,
               if (mediaType.isNotEmpty) 'media_type': mediaType,
               if (mediaMs > 0) 'media_ms': mediaMs,
+              // Videoning kadri — yuboruvchi yasab, video bilan
+              // birga yuklagan kichik JPEG'ning nomi.
+              if (mediaThumb.isNotEmpty) 'media_thumb': mediaThumb,
             }),
           )
           .timeout(const Duration(seconds: 20));

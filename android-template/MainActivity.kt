@@ -55,11 +55,22 @@ class MainActivity : FlutterActivity() {
                     val url = call.argument<String>("url") ?: ""
                     val maxWidth = call.argument<Int>("maxWidth") ?: 640
                     val quality = call.argument<Int>("quality") ?: 72
+                    // ── QAYSI KADR ────────────────────────────
+                    //
+                    // -1 (odatdagi) — manzilda BITTA KADRLIK bo'lak
+                    // turibdi va uning OXIRGI kadri kerak. Tomosha
+                    // tarixi shu yo'ldan ishlaydi.
+                    //
+                    // 0 va katta — manzilda TO'LIQ video turibdi va
+                    // aynan shu millisekunddagi kalit kadr kerak.
+                    // Yozishmaga video YUBORILAYOTGANDA shu yo'l
+                    // ishlatiladi (`chat_send_thumb.dart` izohi).
+                    val atMs = (call.argument<Int>("atMs") ?: -1).toLong()
                     // Dekodlash bir necha yuz millisekund olishi
                     // mumkin — UI oqimida bajarilmaydi, aks holda
                     // ro'yxat sirg'alayotganda ilova qotib qolardi.
                     Thread {
-                        val bytes = grabFrame(url, maxWidth, quality)
+                        val bytes = grabFrame(url, maxWidth, quality, atMs)
                         runOnUiThread { result.success(bytes) }
                     }.start()
                 }
@@ -211,30 +222,62 @@ class MainActivity : FlutterActivity() {
     ///
     /// Kadr olinmasa `null` — bu XATO EMAS, oddiy zaxira yo'l:
     /// ilova o'shanda posterni ko'rsatadi.
-    private fun grabFrame(url: String, maxWidth: Int, quality: Int): ByteArray? {
+    private fun grabFrame(
+        url: String,
+        maxWidth: Int,
+        quality: Int,
+        atMs: Long = -1L
+    ): ByteArray? {
         if (url.isEmpty()) return null
         val retriever = MediaMetadataRetriever()
         try {
-            retriever.setDataSource(url, HashMap<String, String>())
+            // ── MANZIL IKKI XIL BO'LISHI MUMKIN ───────────────
+            //
+            // Tarmoq manzili (mahalliy kesh-server yoki worker) —
+            // sarlavhalar bilan ochiladi.
+            //
+            // MAHALLIY FAYL — galereyadan tanlangan video. U uchun
+            // ALOHIDA chaqiruv kerak: `setDataSource(url, headers)`
+            // manzil (URI) kutadi va oddiy fayl yo'li berilsa xato
+            // beradi.
+            if (url.startsWith("http://") || url.startsWith("https://")) {
+                retriever.setDataSource(url, HashMap<String, String>())
+            } else {
+                retriever.setDataSource(url)
+            }
 
-            // Bo'lakning davomiyligi (ms). O'qilmasa 0 — pastdagi
-            // zaxira yo'l ishlaydi.
+            // Davomiyligi (ms). O'qilmasa 0 — pastdagi zaxira yo'l
+            // ishlaydi.
             val durationMs = retriever
                 .extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
                 ?.toLongOrNull() ?: 0L
 
-            // Oxiridan 1 ms berida: bu AYNAN oxirgi kadrning ichiga
-            // tushadi (kadr kamida bir necha o'nlab millisekund
-            // ko'rsatiladi), davomiylikdan tashqariga chiqmaydi.
             var bmp: Bitmap? = null
-            if (durationMs > 1) {
+            if (atMs >= 0) {
+                // TO'LIQ video: aynan shu lahzadagi kalit kadr.
+                // Video so'ralgan lahzadan qisqa bo'lsa — oxiriga
+                // yaqin joy olinadi.
+                val want = if (durationMs > 1 && atMs >= durationMs) {
+                    durationMs - 1
+                } else {
+                    atMs
+                }
+                bmp = retriever.getFrameAtTime(
+                    want * 1000,
+                    MediaMetadataRetriever.OPTION_CLOSEST_SYNC
+                )
+            } else if (durationMs > 1) {
+                // Oxiridan 1 ms berida: bu AYNAN oxirgi kadrning
+                // ichiga tushadi (kadr kamida bir necha o'nlab
+                // millisekund ko'rsatiladi), davomiylikdan
+                // tashqariga chiqmaydi.
                 bmp = retriever.getFrameAtTime(
                     (durationMs - 1) * 1000,
                     MediaMetadataRetriever.OPTION_CLOSEST
                 )
             }
-            // Zaxira: dekoder oxirgi kadrni ocholmasa — kalit kadr.
-            // Rasm bir oz eskiroq bo'ladi, lekin bo'sh joydan yaxshi.
+            // Zaxira: dekoder so'ralgan kadrni ocholmasa — eng
+            // birinchi kalit kadr. Bo'sh joydan yaxshi.
             if (bmp == null) {
                 bmp = retriever.getFrameAtTime(
                     0,
