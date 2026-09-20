@@ -409,27 +409,27 @@ jobs:
         run: |
           # ── VERSIYA TO'LIQ `pubspec.yaml` DAN ────────────────
           #
-          # TALAB (foydalanuvchi): "version name'ni 0.0.2 qilib
-          # qo'y, version code'ni esa 4 qil".
+          # TALAB (foydalanuvchi): "version name 0.0.1 bo'lsin,
+          # version code 1 bo'lsin".
           #
           # Ya'ni ikkala raqam ham `pubspec.yaml` dagi
-          # `version: 0.0.2+4` dan olinadi:
-          #   * `0.0.2` -> `versionName` (ko'rinadigan yozuv);
-          #   * `4`     -> `versionCode` (Android o'rnatish
+          # `version: 0.0.1+1` dan olinadi:
+          #   * `0.0.1` -> `versionName` (ko'rinadigan yozuv);
+          #   * `1`     -> `versionCode` (Android o'rnatish
           #                qarorini shu bo'yicha qabul qiladi).
           #
           # ⚠️ BILIB QO'YISH KERAK. 265-build'gacha `versionCode`
           # `github.run_number` edi, ya'ni telefonlarga 265 gacha
-          # raqamlar o'rnatilgan. 4 esa undan KICHIK — agar
+          # raqamlar o'rnatilgan. 1 esa undan KICHIK — agar
           # telefonda o'sha davrdagi ilova TURGAN bo'lsa, Android
           # buni downgrade deb rad etadi va MIUI hech qanday
           # tushuntirishsiz "Ilova o'rnatilmadi" deydi.
           #
           # TOZA o'rnatishda (eski ilova butunlay o'chirilgan)
-          # `versionCode` ning kattaligi ahamiyatsiz — 4 bemalol
+          # `versionCode` ning kattaligi ahamiyatsiz — 1 bemalol
           # o'rnatiladi.
           #
-          # Keyingi APK chiqarganda `pubspec.yaml` dagi `+4` ni
+          # Keyingi APK chiqarganda `pubspec.yaml` dagi `+1` ni
           # OSHIRISHNI unutmang, aks holda telefondagi ilova
           # ustiga yangisi tushmaydi.
           FULL=$(grep '^version:' pubspec.yaml | sed 's/version: *//')

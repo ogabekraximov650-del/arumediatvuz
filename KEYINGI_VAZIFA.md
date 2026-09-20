@@ -768,69 +768,81 @@ Shu sabab surish paytidagi qulf endi KERAK EMAS va OLIB
 TASHLANDI — qulfsiz ham surish silliq, chunki surish paytida
 bajariladigan ish umuman qolmadi.
 
-### YOZISHMADAGI VIDEO KADRI — KADRNI YUBORUVCHI YASAYDI
+### YOZISHMADAGI VIDEO KADRI — KO'RUVCHI O'ZI YASAYDI
 
-**Hozirgi (to'g'ri) usul — Telegram qanday qilsa, shunday:**
+**TALAB (foydalanuvchi):** «serverga thumbnail yuklanmasin»,
+«tomosha tarixidagidek, faqat support chatga mos qilib,
+xatolarsiz va tez ishlaydigan qilib video boshidan kadr olinsin»,
+«kadr 2-chi soniyadan emas — 100 ms dagi kadr».
 
-1. Video tanlanadi — fayl YUBORUVCHINING telefonida turibdi.
-   Undan kadr ajratish MAHALLIY ish, tarmoq kerak emas
-   (`chat_send_thumb.dart`, `MainActivity.grabFrame` `atMs` bilan).
-2. Kadr yuklash boshlanishi bilan puffakda ko'rinadi (progress
-   aylanasining orqasida) — foydalanuvchi talabi.
-3. Kichik JPEG (~15-30 KB) video bilan birga B2'ga ketadi,
-   xabarda esa uning NOMI (`media_thumb`).
-4. Qabul qiluvchi TAYYOR rasmni ko'rsatadi — `CachedNetworkImage`,
-   xuddi yozishmadagi oddiy rasm kabi. **Hech narsa hisoblanmaydi.**
+**Hozirgi usul (`lib/services/chat_video_thumb.dart`):**
 
-**Qoidalar:**
+1. Rust yadrosining `"/thumb?u=<manzil>&ms=100"` yo'li faylning
+   faqat kerakli baytlarini (`moov` + birinchi kalit kadr) olib,
+   BITTA KADRLIK haqiqiy MP4 yasaydi. Yozishmadagi video 2-5 MB
+   bo'lgani uchun bu odatda ~100-300 KB.
+2. `MainActivity.grabFrame` shundan JPEG chiqaradi.
+3. JPEG **shifrlanib diskka** yoziladi
+   (`chatthumb_<fayl>.rustbin`) — shu video uchun tarmoqqa boshqa
+   hech qachon chiqilmaydi.
 
-* Kadr yuklanmasa yuborish TO'XTAMAYDI — video kadrsiz ketadi.
-* Kadr faqat `media_type == "video"` uchun saqlanadi.
-* Xabar/yozishma o'chirilganda kadr fayli ham B2'dan o'chadi.
-* **Yetim fayllar tozalovchisida `media_thumb` ham "saqlanadigan"
-  ro'yxatda bo'lishi SHART** — aks holda u kadrlarni o'chirib
-  yuboradi.
-* Faqat YANGI videolarda ishlaydi; eski xabarlar kadrsiz qoladi.
+Serverga HECH NARSA yuklanmaydi: `media_thumb` maydoni ham,
+B2'dagi `thumb_*.jpg` fayllari ham endi ishlatilmaydi.
 
-### AVVALGI (XATO) USUL — QAYTARIB OLINGAN, TAKRORLAMANG
+**Kadr qaysi lahzadan:** `ms=100`. 2 soniya ko'p edi (videoning
+boshi ko'rinmasdi), 0 ms esa ko'pincha qora chiqadi. 100 ms
+baribir birinchi kalit kadrning ichida bo'ladi, ya'ni 0 ms bilan
+bir xil baytlar olinadi — qo'shimcha narxi YO'Q.
 
-Avval kadr KO'RUVCHI telefonda, UZOQDAGI fayldan, tarmoq orqali
-ajratilardi (Rust `/thumb` + sun'iy mini-MP4). U **orqaga
-qaytarildi**. Sabab kadrning chiqmagani emas — u VIDEO IJROSINI
-sekinlashtirdi.
+### BU XUSUSIYAT BIR MARTA QAYTARIB OLINGAN — SHARTLARNI BUZMANG
 
-**Nima bo'lgan edi:** `ChatThumbs` ning TO'XTATUVCHISI yo'q edi.
-Ekran yopilsa ham boshlangan ish davom etardi: 4 urinish x 35 s
-+ tanaffuslar ≈ **2,5 daqiqa**, ikkitasi parallel. Foydalanuvchi
-chatdan chiqib video ochganda bu so'rovlar hamon tarmoqni yeb
-turardi — sekin ulanishda ijro qotib qolardi.
+Avvalgi urinish (`chat_thumbs.dart`, commit `6671626` da olib
+tashlangan) **ishlamadi va video ijrosini sekinlashtirdi**.
+`ChatThumbs` ning to'xtatuvchisi yo'q edi: ekran yopilsa ham ish
+davom etardi — 4 urinish x 35 s + tanaffuslar ≈ **2,5 daqiqa**,
+ikkitasi parallel. Foydalanuvchi chatdan chiqib video ochganda
+bu so'rovlar hamon tarmoqni yeb turardi va sekin ulanishda ijro
+qotardi.
 
-**Dastlabki (qaytarilgan) variantda bu chegaralangan edi:** 3
-urinishdan keyin kalit "yiqildi" deb belgilanib, boshqa hech
-qachon so'ralmasdi. "Taslim bo'lmasin" degan tuzatish aynan shu
-chegarani olib tashlagan va cheksiz fon yukiga aylantirgan.
+O'shanda yozilgan TO'RTTA SHART hozir bajarilgan — **ularni
+buzmang:**
 
-**Qayta urinmoqchi bo'lsangiz — SHARTLAR:**
+| shart | qayerda bajarilgan |
+|---|---|
+| 1. Ekran yopilganda ish to'xtasin | `ChatVideoThumb` **singleton EMAS**: uni ekran yaratadi va `dispose()` qiladi. `_disposed` har `await` dan keyin tekshiriladi. |
+| 2. Video ijro etilayotganda umuman ishlamasin | `VideoGate.busy` — har urinishdan oldin. Pleyer va media oynasi `initState`/`dispose` da `enter()`/`leave()` chaqiradi (`lib/services/video_gate.dart`). |
+| 3. Urinishlar soni VA vaqti chegaralangan | 2 urinish (10 s va 15 s, orasida 2 s) = bitta kadrga eng ko'pi ~27 s. Bir vaqtda 1 ta. Ekran uchun jami **8 ta tarmoq urinishi** (`_sessionBudget`), keyin TO'XTAYDI. Yiqilgan kalit shu ekran ochiq turganda qayta sinalmaydi. |
+| 4. Sekin tarmoqda sinalsin | Shu sabab takror urinish yo'q darajada kam — sekin tarmoqda takror faqat zarar. |
 
-1. Ekran yopilganda ish **to'xtashi** shart (`dispose` da bekor
-   qilinadigan belgi, har urinishdan oldin tekshiriladi).
-2. Video ijro etilayotganda kadr yasash **umuman ishlamasin**.
-3. Urinishlar soni va umumiy vaqti chegaralangan bo'lsin.
-4. Avval SEKIN tarmoqda (~10 KB/s) sinalsin — tez internetda bu
-   muammo ko'rinmaydi.
+**Shuni ham buzmang:** kadr ro'yxat qurilayotgan kadrda
+so'ralmaydi — `_VideoThumb` uni `addPostFrameCallback` ichida
+so'raydi va puffak faqat XOTIRADAN o'qiydi (`peek`). Diskdan
+sinxron o'qish (`secureLoad`, FFI + shifr) ham birinchi `await`
+dan KEYIN bajariladi.
 
 **Yadrodagi kadr xotirasi (`THUMB_MEMO`) BIR NECHTA yozuv saqlaydi.**
 Ilgari u bitta edi va izohda "bitta yetarli, qatorlar birin-ketin
-so'raydi" deb yozilgandi. Yozishmada esa bir vaqtda IKKITA kadr
-yasaladi — ikkinchisi birinchisini o'chirib yuborardi, kadr
-ajratuvchi manzilni qayta ochganda (u har doim ikki marta ochadi)
-bo'lak topilmay qaytadan yasalardi va sekin tarmoqda video kadrsiz
-qolardi. Amalda nechta so'ralsa ham FAQAT BITTASI chiqardi.
-Regressiya testi: `kadr_xotirasi_bir_nechta_yozuvni_saqlaydi`.
+so'raydi" deb yozilgandi. Kadr ajratuvchi manzilni HAR DOIM ikki
+marta ochadi (avval metadata, keyin kadr) — parallel so'rovlarda
+ikkinchisi birinchisining bo'lagini o'chirib yuborardi va kadr
+qaytadan yasalardi. Regressiya testi:
+`kadr_xotirasi_bir_nechta_yozuvni_saqlaydi`.
 
-**Bu tartibni buzmang:** kadrni ro'yxat qurilayotganda diskdan
-sinxron o'qishga qaytsangiz 1-xato, kutdirish qulfini
-qaytarsangiz 2-xato o'sha zahoti qaytadi.
+### KADR AJRATUVCHI TASLIM BO'LMAYDI (`MainActivity.grabFrame`)
+
+Telegramdan kelgan ba'zi MP4 fayllarda `getFrameAtTime` har doim
+`null` qaytaradi — bu ilovaning xatosi EMAS: telefonning O'Z fayl
+menejeri ham o'sha fayllarda kadr ko'rsata olmaydi. Shu sabab
+ketma-ket bir necha yo'l sinaladi va birinchi natija beradigani
+olinadi:
+
+1. bo'lakning oxirgi kadri (`OPTION_CLOSEST`);
+2. bo'lakning boshi (`OPTION_CLOSEST_SYNC`, keyin `OPTION_CLOSEST`);
+3. `getFrameAtTime()` — tizim o'zi tanlagan "vakil kadr";
+4. `getFrameAtIndex(0)` (Android 9+) — izlashsiz, eng ishonchlisi.
+
+Hammasi MAHALLIY ish: tarmoq kerak emas, har biri bir necha o'n
+millisekund.
 
 ## PROFIL: XOTIRA VA TRAFIK
 
@@ -2414,26 +2426,32 @@ hali sinovda, tayyor bo'lganda panel butunlay olib tashlanadi.
 
 | raqam | qayerdan | kim ishlatadi |
 |---|---|---|
-| `versionName` (`0.0.2`) | `pubspec.yaml` | faqat **odam** ko'radi |
+| `versionName` (`0.0.1`) | `pubspec.yaml` | faqat **odam** ko'radi |
 | `versionCode` (butun son) | `pubspec.yaml` dagi `+` dan keyin | **Android** — mavjud ilova ustiga yangilash qarorini shu bo'yicha qabul qiladi |
 
 Hozir ikkalasi ham `pubspec.yaml` dan olinadi (foydalanuvchi
-talabi: `version: 0.0.2+4`). **Yangi APK chiqarganda `+` dan
-keyingi raqamni oshirishni unutmang** — aks holda telefondagi
-ilova ustiga yangisi tushmaydi.
+talabi: `version: 0.0.1+1`, ya'ni versionName `0.0.1`,
+versionCode `1`). **Yangi APK chiqarganda `+` dan keyingi raqamni
+oshirishni unutmang** — aks holda telefondagi ilova ustiga
+yangisi tushmaydi.
 
 Tarix: 265-build'gacha `versionCode = github.run_number` edi
 (telefonlarga 265 gacha raqamlar o'rnatilgan), keyin u pubspec'ga
 o'tkazilib 1 ga tushib ketdi. Ya'ni **telefonda eski ilova
-tursa**, 4 kabi kichik raqam downgrade bo'ladi va rad etiladi.
+tursa**, 1 kabi kichik raqam downgrade bo'ladi va rad etiladi.
 Toza o'rnatishda raqamning kattaligi ahamiyatsiz.
 
-### O'RNATILMASLIK SABABI HALI TOPILMAGAN
+### O'RNATILMASLIK SABABI: TELEFON XOTIRASI TO'LGAN EDI
 
-Foydalanuvchi eski ilovani **o'chirib tashlab**, toza o'rnatishga
-urinib ko'rdi — baribir "Ilova o'rnatilmadi". Ya'ni `versionCode`
-ham, imzo kaliti ham sabab EMAS (toza o'rnatishda ikkalasi ham
-tekshirilmaydi).
+**HAL QILINDI.** Foydalanuvchi: «telefon xotirasi to'lib ketibdi,
+shunga shunaqa bo'lyapti ekan».
+
+Ya'ni sabab APK'da ham, `versionCode` da ham, imzo kalitida ham
+EMAS edi. Android o'rnatish uchun joy topa olmaganda
+"Ilova o'rnatilmadi" deb, boshqa hech narsa tushuntirmasdan rad
+etadi — aynan shu bo'lgan.
+
+Quyidagi tekshiruv baribir foydali bo'ldi va saqlanadi.
 
 **APK'ning o'zida nuqson yo'q** — build-297, 298 va 300 yuklab
 olinib tekshirilgan:
@@ -2449,26 +2467,6 @@ olinib tekshirilgan:
   `extractNativeLibs=false` talabi bajarilgan;
 * ZIP butun: 92 ta yozuv, `MANIFEST.MF` da 89 ta `Name:`.
 
-**Qolgan asosiy ehtimol: ARXITEKTURA.** `admin-32` ichida faqat
-32-bit (`armeabi-v7a`) kutubxonalar bor. ARMv9 yadroli yangi
-telefonlar (Snapdragon 8 Gen 1+, Dimensity 9000+ va bir qator
-2023+ o'rta segment chiplar) AArch32 ni **umuman**
-qo'llab-quvvatlamaydi va 32-bit APK'ni sababsiz rad etadi
-(`INSTALL_FAILED_NO_MATCHING_ABIS`).
-
-**HAL QILUVCHI SINOV (hali o'tkazilmagan).** Xuddi shu
-Release'dagi `arumedia-user-64.apk` ni o'rnatib ko'rish kerak:
-
-* o'rnatilsa → telefon 64-bit, `admin` ham 64-bit qilinishi
-  kerak (matritsaga `admin-64` qo'shiladi);
-* o'rnatilmasa → sabab APK'da emas, telefonda (joy yetmasligi,
-  MIUI "Sof rejim", o'chirilgan ilovadan qolgan iz).
-
-⚠️ `admin-64` bir marta qo'shilgan edi (commit `a8d1b02`), lekin
-uning build'i (run 299) **BEKOR QILINGAN** — ya'ni u APK hech
-qachon yig'ilmagan va sinalmagan. Keyin "telefon 32-bit" degan
-TAXMIN asosida olib tashlandi. Bu taxmin hali tasdiqlanmagan.
-
 ### IMZO KALITI
 
 265-build'gacha har build **tasodifiy** debug kaliti bilan
@@ -2483,7 +2481,7 @@ o'rnatishda bu ham sabab bo'la olmaydi**.
 
 ### SERVER TOMONDAGI TUZOQ
 
-`X-App-Version` ga `pubspec.yaml` dagi to'liq yozuv (`0.0.2+4`)
+`X-App-Version` ga `pubspec.yaml` dagi to'liq yozuv (`0.0.1+1`)
 boradi va worker uni admin paneldagi **"ENG PAST VERSIYA"**
 (`app_min_version`) bilan solishtiradi
 (`worker/src/lib.rs` → `version_rank`). Versiyani

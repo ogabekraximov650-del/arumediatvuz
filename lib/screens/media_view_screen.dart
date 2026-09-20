@@ -24,6 +24,7 @@ import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
 import '../services/app_http.dart';
 import '../services/image_cache.dart';
+import '../services/video_gate.dart';
 
 class MediaViewScreen extends StatefulWidget {
   final String url;
@@ -79,7 +80,13 @@ class _MediaViewScreenState extends State<MediaViewScreen> {
   @override
   void initState() {
     super.initState();
-    if (_isVideo) _open();
+    // Yozishmadagi video SHU YERDA ijro etiladi. Kadr yasovchi
+    // shu paytda tarmoqqa chiqmasin — ijro birinchi o'rinda
+    // (`video_gate.dart` izohiga qarang).
+    if (_isVideo) {
+      VideoGate.enter();
+      _open();
+    }
   }
 
   void _startTicker(VideoPlayerController c) {
@@ -151,6 +158,7 @@ class _MediaViewScreenState extends State<MediaViewScreen> {
 
   @override
   void dispose() {
+    if (_isVideo) VideoGate.leave();
     _tick?.cancel();
     _pos.dispose();
     _playing.dispose();

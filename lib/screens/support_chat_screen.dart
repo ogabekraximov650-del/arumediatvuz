@@ -17,20 +17,18 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:dio/dio.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
+import '../services/chat_video_thumb.dart';
 import '../services/image_cache.dart';
 
 import '../services/auth_service.dart';
-import '../services/chat_send_thumb.dart';
 import '../services/screen_guard.dart';
 import '../services/storage_janitor.dart';
 import '../services/support_service.dart';
@@ -98,17 +96,11 @@ class _SupportChatScreenState extends State<SupportChatScreen>
   String _upPath = '';
   int _upMs = 0;
 
-  /// Yuborilayotgan videoning KADRI (JPEG).
+  /// Yozishmadagi videolarning kadrlari.
   ///
-  /// TALAB (foydalanuvchi): "thumbnailni yuklashni boshlashi
-  /// bilanoq ko'rinadigan qilsa bo'ladimi, huddi Telegramdagidek".
-  ///
-  /// Bo'ladi va tabiiy chiqadi: kadr MAHALLIY fayldan olinadi,
-  /// ya'ni yuklash boshlanishidan oldin tayyor bo'ladi. Uni
-  /// xotirada ushlab turib, progress aylanasining ORQASIGA
-  /// chizamiz — video hali yo'lda bo'lsa ham qaysi video ekani
-  /// ko'rinib turadi.
-  Uint8List? _upThumb;
+  /// Ekranga TEGISHLI (yagona/singleton EMAS): `dispose()` bilan
+  /// birga butun ish to'xtaydi.
+  final ChatVideoThumb _thumbs = ChatVideoThumb();
 
   // ── PASTDAN TORTIB YANGILASH ──────────────────────────────
   //
@@ -166,6 +158,13 @@ class _SupportChatScreenState extends State<SupportChatScreen>
 
   @override
   void dispose() {
+    // ── KADR YASASH SHU YERDA TO'XTAYDI ──────────────────
+    //
+    // Avvalgi urinish AYNAN shuning yo'qligidan yiqilgan edi:
+    // boshlangan so'rovlar ekran yopilgandan keyin ham davom
+    // etib, video ijrosiga qoladigan tezlikni yeb turardi
+    // (`chat_video_thumb.dart` dagi tarixga qarang).
+    _thumbs.dispose();
     // Ekran yopilsa ovoz ham to'xtaydi — aks holda u orqa fonda
     // yangrab qolardi.
     unawaited(VoicePlayer.instance.stop());
@@ -310,26 +309,21 @@ class _SupportChatScreenState extends State<SupportChatScreen>
       _upType = type;
       _upPath = file.path;
       _upMs = ms;
-      _upThumb = null;
     });
     _toBottom();
 
-    // ── KADR: MAHALLIY FAYLDAN, YUKLASHGA PARALLEL ──────────
+    // ── KADR BU YERDA YASALMAYDI ────────────────────────────
     //
-    // Kutilmaydi — puffak DARHOL chiqadi, kadr esa bir necha yuz
-    // millisekunddan keyin uning ichiga tushadi. Yuklash shu
-    // orada allaqachon ketayotgan bo'ladi.
+    // TALAB (foydalanuvchi): "serverga thumbnail yuklanmasin".
     //
-    // `Future` alohida saqlanadi: xabar yuborishdan OLDIN uning
-    // natijasi kerak bo'ladi (kadr B2'ga ham yuklanishi kerak).
-    Future<Uint8List?>? thumbWork;
-    if (type == 'video') {
-      thumbWork = ChatSendThumb.fromFile(file.path);
-      unawaited(thumbWork.then((bytes) {
-        if (!mounted || bytes == null) return;
-        setState(() => _upThumb = bytes);
-      }));
-    }
+    // Ilgari kadr shu yerda mahalliy fayldan ajratilib, video
+    // bilan birga B2'ga yuklanardi va xabarda uning nomi
+    // ketardi. Endi bunday emas: kadrni HAR BIR KO'RUVCHI o'zida
+    // yasaydi va o'zida saqlaydi
+    // (`lib/services/chat_video_thumb.dart`).
+    //
+    // Ya'ni ombor ham, xabar maydoni ham, yuklash qadami ham
+    // kerak emas — yuborish endi soddaroq va tezroq.
 
     try {
       final tok = await http
@@ -363,51 +357,6 @@ class _SupportChatScreenState extends State<SupportChatScreen>
           : res.data as Map;
       final b2Name = '${data['fileName']}';
 
-      // ── KADR HAM B2'GA ────────────────────────────────────
-      //
-      // U atigi ~15-30 KB, shu sabab progress ham, alohida
-      // ko'rsatkich ham kerak emas.
-      //
-      // Kadr yuklanmasa yuborish TO'XTAMAYDI: video kadrsiz
-      // ketadi va avvalgidek qora puffak bo'lib ko'rinadi. Kadr
-      // — qulaylik, xabarning o'zi emas.
-      var thumbName = '';
-      final thumbBytes = thumbWork == null ? null : await thumbWork;
-      if (thumbBytes != null && thumbBytes.isNotEmpty) {
-        try {
-          final tk = await http
-              .post(Uri.parse('$kApiBase/api/upload-token'))
-              .timeout(const Duration(seconds: 25));
-          if (tk.statusCode == 200) {
-            final tj = jsonDecode(tk.body) as Map<String, dynamic>;
-            final tName = 'thumb_$name.jpg';
-            final tr = await Dio().post(
-              tj['uploadUrl'] as String,
-              data: Stream.fromIterable([thumbBytes]),
-              options: Options(
-                headers: {
-                  'Authorization': tj['authorizationToken'],
-                  'X-Bz-File-Name': tName,
-                  'Content-Type': 'image/jpeg',
-                  'X-Bz-Content-Sha1': 'do_not_verify',
-                  'Content-Length': thumbBytes.length,
-                },
-                receiveDataWhenStatusError: true,
-              ),
-            );
-            if (tr.statusCode == 200) {
-              final td2 = tr.data is String
-                  ? jsonDecode(tr.data as String)
-                  : tr.data as Map;
-              thumbName = '${td2['fileName']}';
-            }
-          }
-        } catch (e) {
-          // Jim: kadrsiz davom etamiz.
-          if (kDebugMode) debugPrint('Kadr yuklanmadi: $e');
-        }
-      }
-
       // Fayl joyida — endi xabarning o'zi yuboriladi.
       final err = await _chat.send(
         // Ovozli xabarga matn qo'shilmaydi: yozayotgan matn
@@ -416,7 +365,6 @@ class _SupportChatScreenState extends State<SupportChatScreen>
         mediaFile: b2Name,
         mediaType: type,
         mediaMs: ms,
-        mediaThumb: thumbName,
       );
       if (!mounted) return;
       if (err != null) {
@@ -436,7 +384,6 @@ class _SupportChatScreenState extends State<SupportChatScreen>
           _upType = '';
           _upPath = '';
           _upMs = 0;
-          _upThumb = null;
         });
       }
     }
@@ -839,7 +786,6 @@ class _SupportChatScreenState extends State<SupportChatScreen>
             path: _upPath,
             progress: _upProgress,
             ms: _upMs,
-            thumb: _upThumb,
           );
         }
         final m = items[i];
@@ -864,6 +810,7 @@ class _SupportChatScreenState extends State<SupportChatScreen>
         final lastOfGroup =
             next == null || next.fromAdmin != m.fromAdmin;
         return _Bubble(
+          thumbs: _thumbs,
           message: m,
           mine: mine,
           avatarUrl: mine ? '' : widget.photoUrl,
@@ -1149,6 +1096,9 @@ class _Bubble extends StatelessWidget {
   final VoidCallback? onTap;
   final VoidCallback onOpenMedia;
 
+  /// Videoning boshidagi kadrni yasovchi (ekranga tegishli).
+  final ChatVideoThumb thumbs;
+
   /// Shu xabar hozir tanlanganmi.
   final bool selected;
 
@@ -1159,6 +1109,7 @@ class _Bubble extends StatelessWidget {
     required this.message,
     required this.mine,
     required this.onOpenMedia,
+    required this.thumbs,
     this.avatarUrl = '',
     this.avatarName = '',
     this.showAvatar = false,
@@ -1336,28 +1287,17 @@ class _Bubble extends StatelessWidget {
                   child: Stack(
                     fit: StackFit.expand,
                     children: [
-                      // ── VIDEONING KADRI ──────────────────
+                      // ── VIDEONING BOSHIDAGI KADRI ────────
                       //
-                      // Uni YUBORUVCHI yasagan va video bilan
-                      // birga yuklagan (`chat_send_thumb.dart`),
-                      // shu sabab bu yerda hech narsa
-                      // hisoblanmaydi — oddiy rasm, xuddi
-                      // yozishmadagi rasm xabarlari kabi
-                      // keshlanadi.
+                      // Serverdan KELMAYDI (foydalanuvchi
+                      // talabi: "serverga thumbnail
+                      // yuklanmasin") — uni shu telefonning
+                      // o'zi yasaydi va o'zida saqlaydi
+                      // (`chat_video_thumb.dart`).
                       //
-                      // Eski xabarlarda kadr yo'q — o'shanda
-                      // avvalgidek qora fon qoladi.
-                      if (m.thumbUrl.isNotEmpty)
-                        CachedNetworkImage(
-                          cacheManager: AppImageCache.manager,
-                          imageUrl: m.thumbUrl,
-                          fit: BoxFit.cover,
-                          memCacheWidth: 700,
-                          // Kelguncha yoki kelmasa — bo'sh joy:
-                          // pastda play belgisi baribir turadi.
-                          placeholder: (_, __) => const SizedBox.shrink(),
-                          errorWidget: (_, __, ___) => const SizedBox.shrink(),
-                        ),
+                      // Kadr tayyor bo'lmasa — bo'sh joy: pastda
+                      // play belgisi baribir turadi.
+                      _VideoThumb(thumbs: thumbs, url: m.mediaUrl),
                       Center(
                         child: Container(
                           width: 52,
@@ -1406,6 +1346,71 @@ class _Bubble extends StatelessWidget {
 }
 
 /// Biriktirish tugmasi — yuklash ketayotganda AYLANA progress.
+/// VIDEONING BOSHIDAGI KADRI (puffak ichida).
+///
+/// ── NEGA ALOHIDA VIDJET ─────────────────────────────────────
+///
+/// Kadr tayyor bo'lganda FAQAT SHU puffak qaytadan chiziladi —
+/// butun ro'yxat emas. Uzun yozishmada bu sezilarli farq:
+/// aks holda har bir tayyor kadr o'nlab qatorni qayta
+/// qurdirardi.
+///
+/// Hech qanday hisob-kitob bu yerda bo'lmaydi: vidjet faqat
+/// XOTIRADAN o'qiydi (`peek`), yasash esa fon'da ketadi.
+class _VideoThumb extends StatefulWidget {
+  final ChatVideoThumb thumbs;
+  final String url;
+
+  const _VideoThumb({required this.thumbs, required this.url});
+
+  @override
+  State<_VideoThumb> createState() => _VideoThumbState();
+}
+
+class _VideoThumbState extends State<_VideoThumb> {
+  @override
+  void initState() {
+    super.initState();
+    widget.thumbs.addListener(_onThumb);
+    // Ro'yxat qurilayotgan kadrda tarmoqqa chiqmaymiz: so'rov
+    // birinchi kadrdan KEYIN yuboriladi, ya'ni surish silliq
+    // qoladi.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) widget.thumbs.request(widget.url);
+    });
+  }
+
+  @override
+  void didUpdateWidget(covariant _VideoThumb old) {
+    super.didUpdateWidget(old);
+    // Ro'yxat qatorlarni qayta ishlatadi — manzil almashsa
+    // yangisi so'raladi.
+    if (old.url != widget.url) widget.thumbs.request(widget.url);
+  }
+
+  @override
+  void dispose() {
+    widget.thumbs.removeListener(_onThumb);
+    super.dispose();
+  }
+
+  void _onThumb() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bytes = widget.thumbs.peek(widget.url);
+    if (bytes == null) return const SizedBox.shrink();
+    return Image.memory(
+      bytes,
+      fit: BoxFit.cover,
+      // Kadr almashganda puffak bir lahza oqarib ketmasin.
+      gaplessPlayback: true,
+    );
+  }
+}
+
 class _AttachButton extends StatelessWidget {
   final bool uploading;
   final double progress;
@@ -1753,20 +1758,11 @@ class _UploadingBubble extends StatelessWidget {
   final double progress;
   final int ms;
 
-  /// Videoning kadri — mahalliy fayldan olingan JPEG.
-  ///
-  /// Yuklash boshlanishi bilan (bir necha yuz millisekunddan
-  /// keyin) tayyor bo'ladi va aylananing ORQASIDA turadi, ya'ni
-  /// video hali yo'lda bo'lsa ham qaysi video ekani ko'rinadi —
-  /// xuddi Telegramdagidek.
-  final Uint8List? thumb;
-
   const _UploadingBubble({
     required this.type,
     required this.path,
     required this.progress,
     required this.ms,
-    this.thumb,
   });
 
   @override
@@ -1833,12 +1829,6 @@ class _UploadingBubble extends StatelessWidget {
                               color: Colors.black.withValues(alpha: 0.35),
                             ),
                           ),
-                          if (thumb != null)
-                            Image.memory(thumb!,
-                                fit: BoxFit.cover, gaplessPlayback: true),
-                          // Rasm ustidan xiralashtirish: aylana
-                          // yorqin kadrda ham ko'rinib tursin.
-                          if (thumb != null) Container(color: Colors.black38),
                           Center(child: _Ring(progress: p)),
                         ],
                       ),

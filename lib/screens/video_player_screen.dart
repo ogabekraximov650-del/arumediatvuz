@@ -114,6 +114,7 @@ import 'package:http/http.dart' as http;
 // u endi YUKLAB OLISH tugmasiga xizmat qiladi (va yuklab olingan
 // videoni oflayn ko'rsatadi), ijro oqimiga aralashmaydi.
 import 'package:video_player/video_player.dart';
+import '../services/video_gate.dart';
 import '../services/image_cache.dart';
 
 import '../services/app_settings.dart';
@@ -387,6 +388,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
   @override
   void initState() {
     super.initState();
+    // Kadr yasovchilar SHU PAYTDA tarmoqqa chiqmasin: ijro
+    // birinchi o'rinda (`video_gate.dart` izohiga qarang).
+    VideoGate.enter();
     // Pleyer sozlamalari (intro avtomatik o'tkazilsinmi) —
     // diskdan, tarmoqsiz.
     AppSettings.instance.load();
@@ -523,6 +527,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
 
   @override
   void dispose() {
+    VideoGate.leave();
     BillingService.instance.removeListener(_onBillingChanged);
     // `late final` — Izohlar oynasi umuman ochilmagan bo'lsa
     // nazoratchi yaratilmagan ham bo'ladi.

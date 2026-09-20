@@ -4456,9 +4456,9 @@ fn find_moov(reader: &ThumbReader) -> Option<Vec<u8>> {
 ///
 /// Ilgari bu yerda ATIGI BITTA yozuv turardi va izohda "bitta
 /// yetarli — ro'yxat qatorlari birin-ketin so'raydi" deb yozilgan
-/// edi. Bu TAXMIN tomosha tarixi uchun to'g'ri (qatorlar sirg'alab
-/// o'tadi), lekin YOZISHMA uchun NOTO'G'RI: u yerda bir vaqtda
-/// IKKITA kadr yasaladi (`chat_thumbs.dart` -> `_maxParallel`).
+/// edi. Bu TAXMIN faqat BITTA kadr yasalayotganda to'g'ri. Tomosha
+/// tarixi esa ikkitasini parallel yasaydi
+/// (`watch_history.dart` -> `_maxParallelThumbs`).
 ///
 /// Natijada shunday bo'lardi:
 ///

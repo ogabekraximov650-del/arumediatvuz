@@ -55,22 +55,16 @@ class MainActivity : FlutterActivity() {
                     val url = call.argument<String>("url") ?: ""
                     val maxWidth = call.argument<Int>("maxWidth") ?: 640
                     val quality = call.argument<Int>("quality") ?: 72
-                    // ── QAYSI KADR ────────────────────────────
+                    // Manzilda HAR DOIM bitta kadrlik bo'lak turadi
+                    // (Rust yadrosining "/thumb" yo'li). Ya'ni
+                    // "qaysi kadr" degan savol yo'q — bo'lakda
+                    // bittagina kadr bor.
                     //
-                    // -1 (odatdagi) — manzilda BITTA KADRLIK bo'lak
-                    // turibdi va uning OXIRGI kadri kerak. Tomosha
-                    // tarixi shu yo'ldan ishlaydi.
-                    //
-                    // 0 va katta — manzilda TO'LIQ video turibdi va
-                    // aynan shu millisekunddagi kalit kadr kerak.
-                    // Yozishmaga video YUBORILAYOTGANDA shu yo'l
-                    // ishlatiladi (`chat_send_thumb.dart` izohi).
-                    val atMs = (call.argument<Int>("atMs") ?: -1).toLong()
                     // Dekodlash bir necha yuz millisekund olishi
                     // mumkin — UI oqimida bajarilmaydi, aks holda
                     // ro'yxat sirg'alayotganda ilova qotib qolardi.
                     Thread {
-                        val bytes = grabFrame(url, maxWidth, quality, atMs)
+                        val bytes = grabFrame(url, maxWidth, quality)
                         runOnUiThread { result.success(bytes) }
                     }.start()
                 }
@@ -222,24 +216,33 @@ class MainActivity : FlutterActivity() {
     ///
     /// Kadr olinmasa `null` — bu XATO EMAS, oddiy zaxira yo'l:
     /// ilova o'shanda posterni ko'rsatadi.
-    private fun grabFrame(
-        url: String,
-        maxWidth: Int,
-        quality: Int,
-        atMs: Long = -1L
-    ): ByteArray? {
+    /// Bitta urinish: kadr chiqmasa yoki dekoder xato tashlasa —
+    /// `null`. Xato YUTILADI: bu zaxira yo'llarning biri, xolos,
+    /// va keyingisi baribir sinaladi.
+    private fun tryFrame(
+        r: MediaMetadataRetriever,
+        timeUs: Long,
+        option: Int
+    ): Bitmap? = try {
+        r.getFrameAtTime(timeUs, option)
+    } catch (e: Throwable) {
+        null
+    }
+
+    private fun grabFrame(url: String, maxWidth: Int, quality: Int): ByteArray? {
         if (url.isEmpty()) return null
         val retriever = MediaMetadataRetriever()
         try {
-            // ── MANZIL IKKI XIL BO'LISHI MUMKIN ───────────────
+            // ── MANZIL ODATDA MAHALLIY SERVERNIKI ─────────────
             //
-            // Tarmoq manzili (mahalliy kesh-server yoki worker) —
-            // sarlavhalar bilan ochiladi.
+            // Ikkala chaqiruvchi ham (tomosha tarixi va
+            // yozishmadagi video) Rust yadrosining "/thumb"
+            // yo'lini beradi — ya'ni `http://127.0.0.1:...`.
             //
-            // MAHALLIY FAYL — galereyadan tanlangan video. U uchun
-            // ALOHIDA chaqiruv kerak: `setDataSource(url, headers)`
-            // manzil (URI) kutadi va oddiy fayl yo'li berilsa xato
-            // beradi.
+            // Fayl yo'li ham qabul qilinadi: `setDataSource` ning
+            // bunday holat uchun ALOHIDA chaqiruvi bor —
+            // sarlavhali variant manzil (URI) kutadi va oddiy
+            // fayl yo'li berilsa xato beradi.
             if (url.startsWith("http://") || url.startsWith("https://")) {
                 retriever.setDataSource(url, HashMap<String, String>())
             } else {
@@ -252,38 +255,71 @@ class MainActivity : FlutterActivity() {
                 .extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
                 ?.toLongOrNull() ?: 0L
 
+            // ── BITTA URINISH YETARLI EMAS ───────────────────
+            //
+            // TOPILGAN XATO (foydalanuvchi: "support chatda video
+            // thumbnail ko'rsatish umuman ishlamayapti", 5-rasm).
+            //
+            // Telegramdan kelgan ba'zi MP4 fayllarda
+            // `getFrameAtTime` HAR DOIM `null` qaytaradi — bu
+            // bizning xatomiz emas: TELEFONNING O'Z fayl
+            // menejeri ham aynan o'sha fayllarda kadr ko'rsata
+            // olmaydi. Sabab odatda kalit kadrlarning joylashuvi
+            // yoki tahrir ro'yxati (edit list) bo'ladi.
+            //
+            // Shu sabab endi bitta emas, BIR NECHTA yo'l ketma-ket
+            // sinaladi va BIRINCHI natija beradigani olinadi.
+            // Hammasi MAHALLIY ish — tarmoq kerak emas, har bir
+            // urinish bir necha o'n millisekund.
             var bmp: Bitmap? = null
-            if (atMs >= 0) {
-                // TO'LIQ video: aynan shu lahzadagi kalit kadr.
-                // Video so'ralgan lahzadan qisqa bo'lsa — oxiriga
-                // yaqin joy olinadi.
-                val want = if (durationMs > 1 && atMs >= durationMs) {
-                    durationMs - 1
-                } else {
-                    atMs
-                }
-                bmp = retriever.getFrameAtTime(
-                    want * 1000,
-                    MediaMetadataRetriever.OPTION_CLOSEST_SYNC
-                )
-            } else if (durationMs > 1) {
-                // Oxiridan 1 ms berida: bu AYNAN oxirgi kadrning
-                // ichiga tushadi (kadr kamida bir necha o'nlab
-                // millisekund ko'rsatiladi), davomiylikdan
-                // tashqariga chiqmaydi.
-                bmp = retriever.getFrameAtTime(
+
+            // 1) OXIRGI KADR. Bo'lakda bitta kadr bo'lgani uchun
+            //    bu aynan o'sha kadr. Tomosha tarixida bo'lak
+            //    to'xtagan joydan olinadi, yozishmada esa
+            //    videoning BOSHIDAN — ikkovida ham "bo'lakdagi
+            //    yagona kadr" degani.
+            if (durationMs > 1) {
+                bmp = tryFrame(
+                    retriever,
                     (durationMs - 1) * 1000,
                     MediaMetadataRetriever.OPTION_CLOSEST
                 )
             }
-            // Zaxira: dekoder so'ralgan kadrni ocholmasa — eng
-            // birinchi kalit kadr. Bo'sh joydan yaxshi.
+
+            // 2) BO'LAKNING BOSHI. Davomiylik o'qilmasa yoki
+            //    yuqoridagi chiqmasa — eng ishonchli joy shu.
             if (bmp == null) {
-                bmp = retriever.getFrameAtTime(
-                    0,
-                    MediaMetadataRetriever.OPTION_CLOSEST_SYNC
-                )
+                bmp = tryFrame(retriever, 0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
             }
+            if (bmp == null) {
+                bmp = tryFrame(retriever, 0, MediaMetadataRetriever.OPTION_CLOSEST)
+            }
+
+            // 3) "Vakil kadr": tizim o'zi mos kadrni tanlaydi.
+            //    Manfiy vaqt AYNAN shuni bildiradi.
+            if (bmp == null) {
+                bmp = try {
+                    retriever.getFrameAtTime()
+                } catch (e: Throwable) {
+                    null
+                }
+            }
+
+            // 4) VAQT BO'YICHA EMAS, RAQAM BO'YICHA (Android 9+).
+            //
+            //    Eng ishonchli yo'l: dekoder hech qanday izlashsiz
+            //    (seek) birinchi kadrni ochadi. Yuqoridagilar
+            //    yiqilgan fayllarda odatda AYNAN shu ishlaydi —
+            //    chunki muammo kadrning o'zida emas, unga
+            //    "sakrab borish"da bo'ladi.
+            if (bmp == null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                bmp = try {
+                    retriever.getFrameAtIndex(0)
+                } catch (e: Throwable) {
+                    null
+                }
+            }
+
             if (bmp == null) return null
 
             var frame: Bitmap = bmp
