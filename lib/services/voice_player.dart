@@ -29,11 +29,44 @@
 // Ijrochi YAGONA (singleton): boshqa xabar bosilsa oldingisi
 // o'zi to'xtaydi. Ikkita ovoz bir vaqtda yangrasa suhbatni
 // tinglab bo'lmasdi.
+//
+// ═══════════════════════════════════════════════════════════════
+//  IKKINCHI TOPILGAN XATO — MANZILDA TOKEN YO'Q EDI
+// ═══════════════════════════════════════════════════════════════
+//
+// Foydalanuvchi: "support chatdagi ovozli xabar ishlamayapti".
+//
+// SABAB. Yo'llar yopilgach (`needs_app_check` — worker endi
+// `/api/media/` ni ham tekshiradi) manzilga ruxsat kerak bo'ldi.
+// Video va rasm uchun bu allaqachon qo'yilgan edi, OVOZ esa
+// e'tibordan chetda qolgan.
+//
+// Nega aynan shunday bo'ldi: `_p.setUrl(...)` manzilni Dart'ga
+// EMAS, TIZIMGA (Android'da ExoPlayer) beradi. Ya'ni so'rov
+// `package:http` dan o'tmaydi va `AppHttpClient` unga
+// `X-App-Sig` sarlavhasini qo'sha olmaydi — xuddi
+// `VideoPlayerController.networkUrl` dagi kabi. Worker esa
+// sarlavhasiz so'rovga 403 qaytaradi.
+//
+// Tashqaridan bu "tugma bosiladi-yu hech narsa bo'lmaydi" bo'lib
+// ko'rinardi, chunki `setUrl` ning xatosi pastda jimgina
+// yutilardi.
+//
+// YECHIM. Manzil `nativeMediaUrl()` dan o'tkaziladi — u
+// `?t=<muddat>.<hex HMAC>` tokenini qo'yadi (`app_http.dart`
+// izohiga qarang). Token AYNAN shu faylga bog'langan va 6 soat
+// yashaydi.
+//
+// MUHIM: token IJRO BOSHLANGANDA olinadi, xabar ro'yxatda
+// chizilganda emas. Uzoq ochiq turgan yozishmada eski token
+// muddati tugagan bo'lardi.
 
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:just_audio/just_audio.dart';
+
+import 'app_http.dart';
 
 class VoicePlayer extends ChangeNotifier {
   VoicePlayer._() {
@@ -95,7 +128,9 @@ class VoicePlayer extends ChangeNotifier {
     notifyListeners();
     try {
       await _p.stop();
-      await _p.setUrl(url);
+      // Manzilni TIZIM ochadi, ilova emas — ruxsat shu sabab
+      // manzilning O'ZIDA keladi (fayl boshidagi izohga qarang).
+      await _p.setUrl(nativeMediaUrl(url));
       // Ochilayotganda boshqa xabar bosilgan bo'lsa — bunisi
       // keraksiz.
       if (_id != id) return;
@@ -103,7 +138,11 @@ class VoicePlayer extends ChangeNotifier {
       notifyListeners();
       // `play()` KUTILMAYDI: u ijro TUGAGUNCHA tugamaydi.
       unawaited(_p.play());
-    } catch (_) {
+    } catch (e) {
+      // Xato JIM YUTILMAYDI: aynan shu `catch` tufayli manzildagi
+      // token yo'qligi (403) "tugma ishlamayapti" bo'lib
+      // ko'rinardi va sababi ko'rinmasdi.
+      if (kDebugMode) debugPrint('VoicePlayer: ochilmadi — $e');
       if (_id == id) {
         _id = null;
         _opening = false;
