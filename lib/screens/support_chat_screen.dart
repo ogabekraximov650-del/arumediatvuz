@@ -28,6 +28,7 @@ import 'package:record/record.dart';
 import '../services/image_cache.dart';
 
 import '../services/auth_service.dart';
+import '../services/chat_thumbs.dart';
 import '../services/screen_guard.dart';
 import '../services/storage_janitor.dart';
 import '../services/support_service.dart';
@@ -1249,24 +1250,7 @@ class _Bubble extends StatelessWidget {
           constraints: const BoxConstraints(maxHeight: 240, minWidth: 150),
           color: Colors.black.withValues(alpha: 0.35),
           child: m.isVideo
-              ? SizedBox(
-                  height: 150,
-                  width: 220,
-                  child: Center(
-                    child: Container(
-                      width: 52,
-                      height: 52,
-                      decoration: BoxDecoration(
-                        color: Colors.black.withValues(alpha: 0.55),
-                        shape: BoxShape.circle,
-                        border: Border.all(
-                            color: Colors.white.withValues(alpha: 0.3)),
-                      ),
-                      child: const Icon(Icons.play_arrow_rounded,
-                          size: 32, color: Colors.white),
-                    ),
-                  ),
-                )
+              ? _VideoThumb(url: m.mediaUrl)
               : CachedNetworkImage(
                   cacheManager: AppImageCache.manager,
                   imageUrl: m.mediaUrl,
@@ -1412,6 +1396,103 @@ class _AttachButton extends StatelessWidget {
         child: const Icon(Icons.attach_file_rounded,
             size: 20, color: Colors.white70),
       ),
+    );
+  }
+}
+
+
+// ══════════════════════════════════════════════════════════════
+//  YOZISHMADAGI VIDEONING KADRI
+// ══════════════════════════════════════════════════════════════
+//
+// TALAB (foydalanuvchi): "support chatda yuborilgan videoga
+// thumbnail qo'ysa bo'ladimi, huddi tomosha tarixidagidek — faqat
+// boshidagi kadrni o'zi avtomatik qirqib oladi va thumbnailni
+// diskka saqlaydi".
+//
+// Ilgari bu yerda shunchaki QORA to'rtburchak va play belgisi
+// turardi — qaysi video ekanini ochmasdan bilib bo'lmasdi.
+//
+// Kadr `ChatThumbs` dan keladi (o'sha fayl boshidagi izohga
+// qarang): Rust yadrosi faylning faqat bir necha yuz kilobaytini
+// olib bitta kadrlik MP4 yasaydi, Android undan JPEG chiqaradi,
+// natija esa diskda SHIFRLANGAN holda saqlanadi.
+//
+// ── NEGA `StatefulWidget` ────────────────────────────────────
+//
+// Kadrni so'rash — YON TA'SIR (tarmoq, disk). Uni `build` ichida
+// qilish yaramaydi: `build` bir necha marta chaqirilishi mumkin.
+// Shu sabab so'rov `initState` da, bir marta.
+//
+// Play belgisi kadr bor-yo'qligidan QAT'I NAZAR ko'rinadi — bu
+// videoligini bildiruvchi yagona belgi.
+
+class _VideoThumb extends StatefulWidget {
+  final String url;
+
+  const _VideoThumb({required this.url});
+
+  @override
+  State<_VideoThumb> createState() => _VideoThumbState();
+}
+
+class _VideoThumbState extends State<_VideoThumb> {
+  @override
+  void initState() {
+    super.initState();
+    // Kutilmaydi: kadr tayyor bo'lishi bilan `ChatThumbs` o'zi
+    // xabar beradi va pastdagi `AnimatedBuilder` qayta chiziladi.
+    unawaited(ChatThumbs.instance.ensure(widget.url));
+  }
+
+  @override
+  void didUpdateWidget(_VideoThumb old) {
+    super.didUpdateWidget(old);
+    // Ro'yxat qatorlarni qayta ishlatadi — puffakka boshqa video
+    // tushgan bo'lsa yangisining kadri so'raladi.
+    if (old.url != widget.url) {
+      unawaited(ChatThumbs.instance.ensure(widget.url));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: ChatThumbs.instance,
+      builder: (context, _) {
+        final bytes = ChatThumbs.instance.peek(widget.url);
+        return SizedBox(
+          height: 150,
+          width: 220,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              if (bytes != null)
+                Image.memory(
+                  bytes,
+                  fit: BoxFit.cover,
+                  // Kadr almashganda puffak bir lahza bo'sh
+                  // qolmasin.
+                  gaplessPlayback: true,
+                ),
+              Center(
+                child: Container(
+                  width: 52,
+                  height: 52,
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.55),
+                    shape: BoxShape.circle,
+                    border:
+                        Border.all(color: Colors.white.withValues(alpha: 0.3)),
+                  ),
+                  child: const Icon(Icons.play_arrow_rounded,
+                      size: 32, color: Colors.white),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 }

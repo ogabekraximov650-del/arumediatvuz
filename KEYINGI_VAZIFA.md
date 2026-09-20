@@ -336,6 +336,7 @@ joydan olinishi kerak ikkala accountda ham."
 Hisobga TEGISHLI hamma narsa `<hujjatlar>/accountid_<id>` ichida:
 
 * tomosha tarixi va tarix kadrlari (`list_*`, `thumb_*`);
+* yozishmadagi videolarning kadrlari (`chatthumb_*`);
 * qayerda to'xtagani (`WatchProgress`);
 * sevimlilar, shaxsiy statistika, trafik hisobi.
 
@@ -1364,6 +1365,7 @@ uni shart emas dedi.
 | `download_queue.json` | AES-256-GCM (`read_sealed` / `write_sealed`) |
 | `w<N>.warm` belgilari | AES-256-GCM |
 | Tarix kadrlari (JPEG) | AES-256-GCM (`secureSave`, base64) |
+| Yozishma kadrlari (JPEG) | AES-256-GCM (`secureSave`, base64) |
 
 Yangi kichik fayl qo'shsangiz — `read_sealed` / `write_sealed` dan
 foydalaning, `fs::write` ni to'g'ridan-to'g'ri ishlatmang.
