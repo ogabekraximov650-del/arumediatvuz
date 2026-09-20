@@ -1461,6 +1461,23 @@ class _VideoThumbState extends State<_VideoThumb> {
       animation: ChatThumbs.instance,
       builder: (context, _) {
         final bytes = ChatThumbs.instance.peek(widget.url);
+        // ── KADR HALI YO'Q BO'LSA QAYTA SO'RAYMIZ ───────────
+        //
+        // Foydalanuvchi ekranda O'TIRGAN payt internet tiklansa,
+        // puffak o'zi to'lishi kerak. `initState` bir marta
+        // ishlaydi, shu sabab bu yerdan yana turtki beriladi.
+        //
+        // Bu ARZON: `ensure` sovish muddati o'tmagan bo'lsa
+        // darhol qaytadi va tarmoqqa umuman chiqmaydi
+        // (`chat_thumbs.dart` -> `_cooldown`).
+        //
+        // Chaqiruv `build` ning ICHIDA emas, kadrdan KEYIN:
+        // qurilish paytida yon ta'sir qilish mumkin emas.
+        if (bytes == null) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) unawaited(ChatThumbs.instance.ensure(widget.url));
+          });
+        }
         return SizedBox(
           height: 150,
           width: 220,

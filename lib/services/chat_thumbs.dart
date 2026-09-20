@@ -33,8 +33,10 @@
 //
 // Farqi ikkitagina:
 //
-//   * vaqt HAR DOIM 0 — yozishmadagi videoda "to'xtagan joy"
-//     degan tushuncha yo'q, boshidagi kadr olinadi;
+//   * vaqt — 2 SONIYA (tarixda "to'xtagan joy"). Yozishmadagi
+//     videoda to'xtagan joy degan tushuncha yo'q, eng boshidagi
+//     kadr esa ko'pincha qora bo'ladi (`_attemptMs` izohiga
+//     qarang);
 //   * kalit xabarning FAYL NOMIDAN quriladi (`chat_<vaqt>_<id>`),
 //     ya'ni bitta video uchun kadr BIR MARTA yasaladi va keyin
 //     abadiy diskdan o'qiladi.
@@ -76,10 +78,64 @@ class ChatThumbs extends ChangeNotifier {
   /// tarmoq ham, protsessor ham bo'g'ilib qolmasin.
   static const int _maxParallel = 2;
 
-  /// Bitta kadr uchun eng ko'pi shuncha marta urinib ko'riladi.
-  /// (Tarixdagi bilan bir xil sabab: kadr yasash mahalliy serverni
-  /// ko'tarishni talab qiladi va birinchi urinish oson uziladi.)
-  static const int _tries = 3;
+  // ── URINISHLAR: QAYSI LAHZADAN ────────────────────────────
+  //
+  // TOPILGAN XATO (foydalanuvchi, skrinshot bilan): uchta videodan
+  // faqat bittasida kadr chiqdi.
+  //
+  // TALAB (foydalanuvchi): "1-chi soniyada qora rang bo'lishi
+  // mumkin, shuning uchun 2-chi sonidagi kadr thumbnail qilib
+  // qo'yilgani yaxshi".
+  //
+  // Bu TO'G'RI kuzatuv: videolar ko'pincha qorong'idan ochiladi
+  // yoki birinchi kadri logotip/bo'sh bo'ladi. Shu sabab asosiy
+  // lahza — 2 SONIYA.
+  //
+  // Har urinish boshqa lahzadan so'raydi:
+  //
+  //   1-urinish — 2 s.   ASOSIY: tasvir ma'noli bo'ladi.
+  //   2-urinish — 0 ms.  ZAXIRA: video 2 soniyadan qisqa bo'lsa
+  //                      yoki 2 s dagi urinish uzilsa. Eng arzon
+  //                      yo'l — kerakli kalit kadr faylning eng
+  //                      boshida.
+  //   3-urinish — 4 s.
+  //
+  // ── NARXI HAQIDA ROSTINI AYTISH ───────────────────────────
+  //
+  // Kech lahza bir oz QIMMATROQ: Rust yadrosi oldingi kalit
+  // kadrdan so'ralgan kadrgacha bo'lgan hamma namunani o'qiydi
+  // (`build_thumb_clip`), 0 ms da esa atigi bittasini.
+  //
+  // Lekin farq KICHIK: so'rovning asosiy og'irligi `moov` atomi
+  // (0,2-0,8 MB), qo'shimcha namunalar esa P-kadrlar, ya'ni har
+  // biri bir necha kilobayt. Ma'noli rasm shunga arziydi.
+  //
+  // Video 2 soniyadan qisqa bo'lsa ham muammo yo'q: yadro
+  // so'ralgan lahzani faylning oxirgi kadriga qisqartiradi
+  // (`sample_at_ms` — `min(sample_count)`), ya'ni oxirgi kadr
+  // olinadi.
+  static const List<int> _attemptMs = [2000, 0, 4000];
+
+  /// Urinishlar orasidagi tanaffus.
+  ///
+  /// Ilgari 600 ms va 1200 ms edi — sekin tarmoq uchun juda tez:
+  /// uchala urinish ikki soniyada tugab, kadr "yasalmadi" deb
+  /// belgilanardi.
+  static const List<Duration> _pause = [
+    Duration(milliseconds: 1500),
+    Duration(seconds: 4),
+  ];
+
+  /// Yasalmagan kadr shuncha vaqtdan keyin QAYTA sinaladi.
+  ///
+  /// TOPILGAN XATO: ilgari yasalmagan kadr `_failed` ro'yxatiga
+  /// tushardi va shu seansda BOSHQA HECH QACHON so'ralmasdi.
+  /// Ya'ni internet bir lahza uzilgan bo'lsa ham, puffak ilova
+  /// yopilguncha bo'sh qolardi — aynan skrinshotdagi holat.
+  ///
+  /// Endi u shunchaki SOVIYDI: bir daqiqadan keyin (yoki ekran
+  /// qayta ochilganda, o'sha muddat o'tgan bo'lsa) yana sinaladi.
+  static const Duration _cooldown = Duration(seconds: 60);
 
   /// Xotiradagi kadrlar soni cheklangan: yozishma uzun bo'lsa ham
   /// ilova o'nlab megabaytni ushlab turmasin (har biri ~20 KB).
@@ -88,10 +144,11 @@ class ChatThumbs extends ChangeNotifier {
   final Map<String, Uint8List> _memory = {};
   final Map<String, Future<Uint8List?>> _work = {};
 
-  /// Yasab bo'lmagan kadrlar. Ularni har qator qurilganda qaytadan
-  /// so'rash — bekorga tarmoq va protsessor. Ilova qayta
-  /// ishga tushganda ro'yxat bo'shaydi, ya'ni yana sinaladi.
-  final Set<String> _failed = {};
+  /// Yasab bo'lmagan kadrlar: kalit -> qachondan keyin qayta
+  /// sinash mumkin (`_cooldown`). Bu ro'yxat har qator
+  /// qurilganda bekorga tarmoqqa chiqishni to'xtatadi, lekin
+  /// butunlay taslim ham bo'lmaydi.
+  final Map<String, DateTime> _retryAfter = {};
 
   int _running = 0;
 
@@ -135,7 +192,11 @@ class ChatThumbs extends ChangeNotifier {
 
     final ready = _memory[key];
     if (ready != null) return Future.value(ready);
-    if (_failed.contains(key)) return Future.value(null);
+    // Yaqinda urinib ko'rilgan va bo'lmagan — hali sovimagan.
+    final after = _retryAfter[key];
+    if (after != null && DateTime.now().isBefore(after)) {
+      return Future.value(null);
+    }
 
     final running = _work[key];
     if (running != null) return running;
@@ -167,11 +228,13 @@ class ChatThumbs extends ChangeNotifier {
       // Buzilgan yozuv — qaytadan yasaymiz.
     }
 
-    // 2) Yo'q — yasaymiz.
-    for (var attempt = 1; attempt <= _tries; attempt++) {
-      final data = await _grab(url);
+    // 2) Yo'q — yasaymiz. Har urinish boshqa lahzadan
+    //    (`_attemptMs` izohiga qarang).
+    for (var i = 0; i < _attemptMs.length; i++) {
+      final data = await _grab(url, _attemptMs[i]);
       if (data != null) {
         _remember(key, data);
+        _retryAfter.remove(key);
         notifyListeners();
         // Shifrlab saqlaymiz — keyingi safar tarmoqqa umuman
         // chiqilmaydi.
@@ -183,14 +246,12 @@ class ChatThumbs extends ChangeNotifier {
         }
         return data;
       }
-      if (attempt < _tries) {
-        await Future<void>.delayed(Duration(milliseconds: 600 * attempt));
-      }
+      if (i < _pause.length) await Future<void>.delayed(_pause[i]);
     }
 
-    // Uch urinish ham bo'lmadi — bu videoni shu seansda qayta
-    // so'ramaymiz.
-    _failed.add(key);
+    // Hech biri bo'lmadi — bir muddat tinch qo'yamiz va KEYIN
+    // yana sinaymiz (butunlay taslim BO'LMAYMIZ).
+    _retryAfter[key] = DateTime.now().add(_cooldown);
     return null;
   }
 
@@ -199,15 +260,14 @@ class ChatThumbs extends ChangeNotifier {
   /// Navbat AYNAN shu yerda: urinishlar orasidagi tanaffusda navbat
   /// BAND QILINMAYDI — aks holda bitta muvaffaqiyatsiz kadr qolgan
   /// puffaklarni ushlab turardi.
-  Future<Uint8List?> _grab(String url) async {
+  Future<Uint8List?> _grab(String url, int atMs) async {
     while (_running >= _maxParallel) {
       await Future<void>.delayed(const Duration(milliseconds: 120));
     }
     _running++;
     try {
-      // `ms: 0` — yozishmadagi videoda "to'xtagan joy" yo'q, eng
-      // boshidagi kalit kadr olinadi.
-      final uri = await VideoCacheServer.instance.thumbUri(url, 0);
+      // Qaysi lahza — `_attemptMs` izohiga qarang (asosiysi 2 s).
+      final uri = await VideoCacheServer.instance.thumbUri(url, atMs);
       final data = await _channel.invokeMethod<Uint8List>('grab', {
         'url': uri.toString(),
         // Puffak eni 220 px atrofida — 640 px yetarlidan ham ortiq,
@@ -215,12 +275,18 @@ class ChatThumbs extends ChangeNotifier {
         // ko'rinadi.
         'maxWidth': 640,
         'quality': 72,
-      }).timeout(const Duration(seconds: 25));
+        // 25 -> 35 soniya: skrinshotdagi tarmoq 6,3 KB/s edi, ya'ni
+        // 25 soniyada atigi ~160 KB ulguradi — `moov` atomi
+        // (0,2-0,8 MB) uchun yetmaydi va urinish kadr kelmasdan
+        // uzilardi.
+      }).timeout(const Duration(seconds: 35));
       if (data == null || data.isEmpty) return null;
       return data;
     } catch (e) {
       // Urinish uzildi — yuqorida yana bir marta sinaladi.
-      if (kDebugMode) debugPrint('ChatThumbs: kadr olinmadi — $e');
+      if (kDebugMode) {
+        debugPrint('ChatThumbs: kadr olinmadi (ms=$atMs) — $e');
+      }
       return null;
     } finally {
       _running--;
