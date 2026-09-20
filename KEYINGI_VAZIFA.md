@@ -769,6 +769,15 @@ Shu sabab surish paytidagi qulf endi KERAK EMAS va OLIB
 TASHLANDI — qulfsiz ham surish silliq, chunki surish paytida
 bajariladigan ish umuman qolmadi.
 
+**Yadrodagi kadr xotirasi (`THUMB_MEMO`) BIR NECHTA yozuv saqlaydi.**
+Ilgari u bitta edi va izohda "bitta yetarli, qatorlar birin-ketin
+so'raydi" deb yozilgandi. Yozishmada esa bir vaqtda IKKITA kadr
+yasaladi — ikkinchisi birinchisini o'chirib yuborardi, kadr
+ajratuvchi manzilni qayta ochganda (u har doim ikki marta ochadi)
+bo'lak topilmay qaytadan yasalardi va sekin tarmoqda video kadrsiz
+qolardi. Amalda nechta so'ralsa ham FAQAT BITTASI chiqardi.
+Regressiya testi: `kadr_xotirasi_bir_nechta_yozuvni_saqlaydi`.
+
 **Bu tartibni buzmang:** kadrni ro'yxat qurilayotganda diskdan
 sinxron o'qishga qaytsangiz 1-xato, kutdirish qulfini
 qaytarsangiz 2-xato o'sha zahoti qaytadi.

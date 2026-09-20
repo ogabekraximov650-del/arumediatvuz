@@ -2815,8 +2815,8 @@ pub extern "C" fn rust_video_cache_wipe() -> i32 {
     if let Ok(mut m) = prepares().lock() {
         m.clear();
     }
-    if let Ok(mut m) = LAST_THUMB.lock() {
-        *m = None;
+    if let Ok(mut m) = THUMB_MEMO.lock() {
+        m.clear();
     }
 
     // 3) Diskdagi hamma narsa. Papkalar avval "axlat" nomiga
@@ -4444,27 +4444,81 @@ fn find_moov(reader: &ThumbReader) -> Option<Vec<u8>> {
     None
 }
 
-/// Oxirgi yasalgan kadr — xotirada, qisqa muddatga.
+/// Yaqinda yasalgan kadrlar — xotirada, qisqa muddatga.
 ///
 /// NEGA KERAK: Android'ning kadr ajratuvchisi bitta manzilni bir
-/// necha marta ochishi mumkin (avval metadata, keyin kadrning o'zi).
-/// Saqlanmasa, har safar `moov` qaytadan yuklanardi. Bitta yozuv
-/// yetarli — ro'yxat qatorlari birin-ketin so'raydi.
-static LAST_THUMB: Mutex<Option<(String, Vec<u8>, Instant)>> = Mutex::new(None);
+/// necha marta ochadi (avval metadata uchun, keyin kadrning o'zi
+/// uchun). Saqlanmasa, HAR SAFAR `moov` qaytadan yuklanardi.
+///
+/// ═══════════════════════════════════════════════════════════════
+///  TOPILGAN XATO: BITTA YOZUV YETMAS EKAN
+/// ═══════════════════════════════════════════════════════════════
+///
+/// Ilgari bu yerda ATIGI BITTA yozuv turardi va izohda "bitta
+/// yetarli — ro'yxat qatorlari birin-ketin so'raydi" deb yozilgan
+/// edi. Bu TAXMIN tomosha tarixi uchun to'g'ri (qatorlar sirg'alab
+/// o'tadi), lekin YOZISHMA uchun NOTO'G'RI: u yerda bir vaqtda
+/// IKKITA kadr yasaladi (`chat_thumbs.dart` -> `_maxParallel`).
+///
+/// Natijada shunday bo'lardi:
+///
+///   1. A videosi uchun bo'lak yasaldi  -> yozuv = A
+///   2. B videosi uchun bo'lak yasaldi  -> yozuv = B (A O'CHDI)
+///   3. A ning kadr ajratuvchisi manzilni QAYTA ochdi -> yozuv
+///      topilmadi -> butun bo'lak qaytadan yasaladi. Sekin
+///      tarmoqda bu urinish muddati tugab, A KADRSIZ qolardi.
+///
+/// Ya'ni bir vaqtda nechta so'ralsa ham, amalda FAQAT BITTASI
+/// omadli chiqardi. Foydalanuvchining skrinshotlarida aynan
+/// shunday edi: uch-to'rt videodan har safar bittasida kadr
+/// chiqardi.
+///
+/// (Yo'ldan chiqqan taxmin: videolar buzuq deb o'ylangan edi.
+/// Foydalanuvchi ularning Telegram'da kadr bilan turganini
+/// ko'rsatib, buni RAD ETDI — fayllar butun, xato bu yerda edi.)
+///
+/// ── YECHIM ────────────────────────────────────────────────────
+///
+/// Bir nechta yozuv saqlanadi. Chegara ikki tomonlama: yozuvlar
+/// SONI ham, ularning umumiy HAJMI ham cheklangan — bo'lak
+/// odatda 50-300 KB, lekin uzun kalit kadr oralig'ida bir necha
+/// megabayt bo'lishi mumkin (`MAX_SPAN`).
+static THUMB_MEMO: Mutex<Vec<(String, Vec<u8>, Instant)>> = Mutex::new(Vec::new());
 const THUMB_MEMO_SECS: u64 = 60;
+/// Eng ko'pi shuncha yozuv (bir vaqtda yasaladiganidan ancha ko'p,
+/// chunki kadr ajratuvchi eskisiga ham qaytib kelishi mumkin).
+const THUMB_MEMO_MAX: usize = 6;
+/// Va eng ko'pi shuncha bayt — xotira bashorat qilinadigan qolsin.
+const THUMB_MEMO_BYTES: usize = 12 * 1024 * 1024;
 
 fn thumb_from_memo(tag: &str) -> Option<Vec<u8>> {
-    let guard = LAST_THUMB.lock().ok()?;
-    let (saved_tag, bytes, at) = guard.as_ref()?;
-    if saved_tag == tag && at.elapsed().as_secs() <= THUMB_MEMO_SECS {
-        return Some(bytes.clone());
+    let guard = THUMB_MEMO.lock().ok()?;
+    for (saved_tag, bytes, at) in guard.iter() {
+        if saved_tag == tag && at.elapsed().as_secs() <= THUMB_MEMO_SECS {
+            return Some(bytes.clone());
+        }
     }
     None
 }
 
 fn thumb_to_memo(tag: &str, bytes: &[u8]) {
-    if let Ok(mut guard) = LAST_THUMB.lock() {
-        *guard = Some((tag.to_string(), bytes.to_vec(), Instant::now()));
+    let Ok(mut guard) = THUMB_MEMO.lock() else {
+        return;
+    };
+    // Muddati o'tganlari va shu tagning eski nusxasi chiqib ketadi.
+    guard.retain(|(t, _, at)| {
+        t != tag && at.elapsed().as_secs() <= THUMB_MEMO_SECS
+    });
+    guard.push((tag.to_string(), bytes.to_vec(), Instant::now()));
+    // Chegaradan oshsa — ENG ESKISI olib tashlanadi (ro'yxat
+    // qo'shilish tartibida, ya'ni birinchisi eng eskisi).
+    while guard.len() > THUMB_MEMO_MAX {
+        guard.remove(0);
+    }
+    while guard.len() > 1
+        && guard.iter().map(|(_, b, _)| b.len()).sum::<usize>() > THUMB_MEMO_BYTES
+    {
+        guard.remove(0);
     }
 }
 
@@ -4504,7 +4558,7 @@ fn build_thumb_clip(
     /// Odatdagi kalit kadr oralig'i (2-10 s) bunga bemalol
     /// sig'adi; chegara faqat buzilgan yoki g'alati fayldan
     /// himoya. Yasalgan bo'lak 60 soniya XOTIRADA turadi
-    /// (`LAST_THUMB`), shu sabab uni katta qilib bo'lmaydi.
+    /// (`THUMB_MEMO`), shu sabab uni katta qilib bo'lmaydi.
     const MAX_SPAN: u64 = 8 * 1024 * 1024;
     /// Va eng ko'pi shuncha namuna (uzun kalit kadr oralig'idan
     /// himoya).
@@ -6238,6 +6292,57 @@ mod tests {
 
 
 
+
+    /// KADR XOTIRASI: BIR NECHTA YOZUV SAQLANADI.
+    ///
+    /// TOPILGAN XATO shu yerda edi: xotirada ATIGI BITTA yozuv
+    /// turardi. Yozishmada bir vaqtda ikkita kadr yasaladi, ya'ni
+    /// ikkinchisi birinchisini o'chirib yuborardi. Kadr
+    /// ajratuvchi manzilni qayta ochganda (u HAR DOIM shunday
+    /// qiladi: avval metadata, keyin kadr) yozuv topilmay, butun
+    /// bo'lak qaytadan yasalardi — sekin tarmoqda esa urinish
+    /// muddati tugab, video KADRSIZ qolardi.
+    ///
+    /// Bu test aynan o'sha holatni tekshiradi: eski (bitta
+    /// yozuvli) tuzilma bilan u YIQILADI.
+    #[test]
+    fn kadr_xotirasi_bir_nechta_yozuvni_saqlaydi() {
+        if let Ok(mut g) = THUMB_MEMO.lock() {
+            g.clear();
+        }
+
+        thumb_to_memo("video_a|2000", b"AAA");
+        thumb_to_memo("video_b|2000", b"BBB");
+
+        // IKKOVI ham joyida turishi kerak — ikkinchisi birinchisini
+        // o'chirib yubormaydi.
+        assert_eq!(thumb_from_memo("video_a|2000").as_deref(), Some(&b"AAA"[..]));
+        assert_eq!(thumb_from_memo("video_b|2000").as_deref(), Some(&b"BBB"[..]));
+
+        // Bir xil tag qayta yozilsa — nusxa ko'paymaydi, yangisi turadi.
+        thumb_to_memo("video_a|2000", b"AAA2");
+        assert_eq!(thumb_from_memo("video_a|2000").as_deref(), Some(&b"AAA2"[..]));
+        if let Ok(g) = THUMB_MEMO.lock() {
+            assert_eq!(g.iter().filter(|(t, _, _)| t == "video_a|2000").count(), 1);
+        }
+
+        // Chegaradan oshganda eng ESKISI chiqib ketadi.
+        for i in 0..THUMB_MEMO_MAX {
+            thumb_to_memo(&format!("yangi_{i}|0"), b"X");
+        }
+        if let Ok(g) = THUMB_MEMO.lock() {
+            assert!(g.len() <= THUMB_MEMO_MAX, "chegara ushlanmadi: {}", g.len());
+        }
+        assert!(
+            thumb_from_memo("video_a|2000").is_none(),
+            "eng eski yozuv chiqib ketishi kerak edi"
+        );
+
+        // Boshqa testlarga xalaqit qilmasin.
+        if let Ok(mut g) = THUMB_MEMO.lock() {
+            g.clear();
+        }
+    }
 
     /// ISITISH MANZILI: video manzilidan to'g'ri yasalishi.
     #[test]
