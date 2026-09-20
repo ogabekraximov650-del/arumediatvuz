@@ -63,6 +63,7 @@ import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
+import 'app_http.dart';
 import 'rust_bridge.dart';
 import 'video_cache_server.dart';
 
@@ -99,6 +100,7 @@ class ChatThumbs extends ChangeNotifier {
   //                      yo'l — kerakli kalit kadr faylning eng
   //                      boshida.
   //   3-urinish — 4 s.
+  //   4-urinish — TO'G'RIDAN-TO'G'RI (pastdagi izohga qarang).
   //
   // ── NARXI HAQIDA ROSTINI AYTISH ───────────────────────────
   //
@@ -114,7 +116,42 @@ class ChatThumbs extends ChangeNotifier {
   // so'ralgan lahzani faylning oxirgi kadriga qisqartiradi
   // (`sample_at_ms` — `min(sample_count)`), ya'ni oxirgi kadr
   // olinadi.
-  static const List<int> _attemptMs = [2000, 0, 4000];
+  static const List<int> _attemptMs = [2000, 0, 4000, _direct];
+
+  // ── OXIRGI URINISH: TO'G'RIDAN-TO'G'RI VIDEODAN ───────────
+  //
+  // TOPILGAN NARSA (foydalanuvchi ikkita skrinshot bilan):
+  // yozishmada kadr chiqmagan videolarning AYNAN o'zlari
+  // TELEGRAM'ning fayl tanlash oynasida ham kadrsiz turibdi
+  // (qizil "kino tasmasi" belgisi bilan). Kadr chiqqan bittasi
+  // esa ikkovida ham chiqqan.
+  //
+  // Ya'ni bu videolarni Android'ning O'ZI ham qiynalib
+  // ochyapti — muammo faqat bizning quvurimizda emas.
+  //
+  // Lekin bitta ehtimol bizning tomonimizda qoladi: yadro
+  // yasagan BITTA KADRLIK MP4 ba'zi kodlash turlari uchun
+  // dekoderga yoqmasligi mumkin (`stsd` ko'chiriladi, lekin
+  // ayrim fayllarda dekoder sozlamalari oqimning ICHIDA
+  // bo'ladi). Asl faylda esa hammasi joyida.
+  //
+  // Shu sabab OXIRGI urinish yasalgan bo'lakni umuman
+  // ishlatmaydi: manzil sifatida ASL video beriladi va
+  // Android'ning kadr ajratuvchisi undan 2-soniyadagi kalit
+  // kadrni o'zi oladi — xuddi galereyaning o'zi qilganidek.
+  //
+  // ── NARXI ─────────────────────────────────────────────────
+  //
+  // Bu yo'l mahalliy kesh-serverdan (`/v`) O'TMAYDI — u
+  // oldindan 10 MB yuklab qo'yadi. Manzil to'g'ridan-to'g'ri
+  // worker'ga boradi va Android faqat o'ziga keragini
+  // (`moov` + bitta kalit kadr) oraliq so'rovlar bilan oladi.
+  //
+  // Manzilni TIZIM ochgani uchun unga `?t=` tokeni kerak
+  // (`nativeMediaUrl` izohiga qarang).
+  //
+  // Bu FAQAT yuqoridagi uchtasi ham bo'lmagandagina ishlaydi.
+  static const int _direct = -1;
 
   /// Urinishlar orasidagi tanaffus.
   ///
@@ -123,6 +160,7 @@ class ChatThumbs extends ChangeNotifier {
   /// belgilanardi.
   static const List<Duration> _pause = [
     Duration(milliseconds: 1500),
+    Duration(seconds: 4),
     Duration(seconds: 4),
   ];
 
@@ -267,9 +305,19 @@ class ChatThumbs extends ChangeNotifier {
     _running++;
     try {
       // Qaysi lahza — `_attemptMs` izohiga qarang (asosiysi 2 s).
-      final uri = await VideoCacheServer.instance.thumbUri(url, atMs);
+      //
+      // Oxirgi urinishda yadroning bo'lagi emas, ASL video
+      // beriladi va kerakli lahza kadr ajratuvchining o'ziga
+      // aytiladi (`_direct` izohiga qarang).
+      final direct = atMs == _direct;
+      final String target = direct
+          ? nativeMediaUrl(url)
+          : (await VideoCacheServer.instance.thumbUri(url, atMs)).toString();
       final data = await _channel.invokeMethod<Uint8List>('grab', {
-        'url': uri.toString(),
+        'url': target,
+        // -1 — manzilda bitta kadrlik bo'lak, oxirgi kadri
+        // olinadi. Aks holda aynan shu lahzadagi kalit kadr.
+        'atMs': direct ? 2000 : -1,
         // Puffak eni 220 px atrofida — 640 px yetarlidan ham ortiq,
         // lekin ekran zichligi yuqori telefonlarda rasm mayin
         // ko'rinadi.
