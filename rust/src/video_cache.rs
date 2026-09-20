@@ -4485,11 +4485,19 @@ fn find_moov(reader: &ThumbReader) -> Option<Vec<u8>> {
 /// megabayt bo'lishi mumkin (`MAX_SPAN`).
 static THUMB_MEMO: Mutex<Vec<(String, Vec<u8>, Instant)>> = Mutex::new(Vec::new());
 const THUMB_MEMO_SECS: u64 = 60;
-/// Eng ko'pi shuncha yozuv (bir vaqtda yasaladiganidan ancha ko'p,
-/// chunki kadr ajratuvchi eskisiga ham qaytib kelishi mumkin).
-const THUMB_MEMO_MAX: usize = 6;
-/// Va eng ko'pi shuncha bayt — xotira bashorat qilinadigan qolsin.
-const THUMB_MEMO_BYTES: usize = 12 * 1024 * 1024;
+/// Eng ko'pi shuncha yozuv.
+///
+/// Bir vaqtda ikkita kadr yasaladi (`_maxParallelThumbs`), uchinchi
+/// joy esa kadr ajratuvchi eskisiga qaytib kelgan holat uchun.
+/// Bundan ko'pi kerak emas: bu xotira ARZON emas — telefonda
+/// turadi va video ijrosi bilan bitta joyni bo'lishadi.
+const THUMB_MEMO_MAX: usize = 3;
+/// Va eng ko'pi shuncha bayt.
+///
+/// Bo'lak odatda 50-300 KB; 3 MB uchta odatdagi bo'lakka bemalol
+/// yetadi. Ilgari bu yerda 12 MB turardi — arzon telefonda bu
+/// sezilarli va ijroga xalaqit berishi mumkin edi.
+const THUMB_MEMO_BYTES: usize = 3 * 1024 * 1024;
 
 fn thumb_from_memo(tag: &str) -> Option<Vec<u8>> {
     let guard = THUMB_MEMO.lock().ok()?;

@@ -336,7 +336,6 @@ joydan olinishi kerak ikkala accountda ham."
 Hisobga TEGISHLI hamma narsa `<hujjatlar>/accountid_<id>` ichida:
 
 * tomosha tarixi va tarix kadrlari (`list_*`, `thumb_*`);
-* yozishmadagi videolarning kadrlari (`chatthumb_*`);
 * qayerda to'xtagani (`WatchProgress`);
 * sevimlilar, shaxsiy statistika, trafik hisobi.
 
@@ -768,6 +767,32 @@ kutish.
 Shu sabab surish paytidagi qulf endi KERAK EMAS va OLIB
 TASHLANDI — qulfsiz ham surish silliq, chunki surish paytida
 bajariladigan ish umuman qolmadi.
+
+### YOZISHMADAGI VIDEO KADRI — QAYTARIB OLINDI
+
+Yozishmadagi videoga kadr qo'yish sinab ko'rildi va **orqaga
+qaytarildi**. Sabab kadrning chiqmagani emas — u VIDEO IJROSINI
+sekinlashtirdi.
+
+**Nima bo'lgan edi:** `ChatThumbs` ning TO'XTATUVCHISI yo'q edi.
+Ekran yopilsa ham boshlangan ish davom etardi: 4 urinish x 35 s
++ tanaffuslar ≈ **2,5 daqiqa**, ikkitasi parallel. Foydalanuvchi
+chatdan chiqib video ochganda bu so'rovlar hamon tarmoqni yeb
+turardi — sekin ulanishda ijro qotib qolardi.
+
+**Dastlabki (qaytarilgan) variantda bu chegaralangan edi:** 3
+urinishdan keyin kalit "yiqildi" deb belgilanib, boshqa hech
+qachon so'ralmasdi. "Taslim bo'lmasin" degan tuzatish aynan shu
+chegarani olib tashlagan va cheksiz fon yukiga aylantirgan.
+
+**Qayta urinmoqchi bo'lsangiz — SHARTLAR:**
+
+1. Ekran yopilganda ish **to'xtashi** shart (`dispose` da bekor
+   qilinadigan belgi, har urinishdan oldin tekshiriladi).
+2. Video ijro etilayotganda kadr yasash **umuman ishlamasin**.
+3. Urinishlar soni va umumiy vaqti chegaralangan bo'lsin.
+4. Avval SEKIN tarmoqda (~10 KB/s) sinalsin — tez internetda bu
+   muammo ko'rinmaydi.
 
 **Yadrodagi kadr xotirasi (`THUMB_MEMO`) BIR NECHTA yozuv saqlaydi.**
 Ilgari u bitta edi va izohda "bitta yetarli, qatorlar birin-ketin
@@ -1374,7 +1399,6 @@ uni shart emas dedi.
 | `download_queue.json` | AES-256-GCM (`read_sealed` / `write_sealed`) |
 | `w<N>.warm` belgilari | AES-256-GCM |
 | Tarix kadrlari (JPEG) | AES-256-GCM (`secureSave`, base64) |
-| Yozishma kadrlari (JPEG) | AES-256-GCM (`secureSave`, base64) |
 
 Yangi kichik fayl qo'shsangiz — `read_sealed` / `write_sealed` dan
 foydalaning, `fs::write` ni to'g'ridan-to'g'ri ishlatmang.

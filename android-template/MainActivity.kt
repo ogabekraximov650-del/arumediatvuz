@@ -55,23 +55,11 @@ class MainActivity : FlutterActivity() {
                     val url = call.argument<String>("url") ?: ""
                     val maxWidth = call.argument<Int>("maxWidth") ?: 640
                     val quality = call.argument<Int>("quality") ?: 72
-                    // ── QAYSI KADR ────────────────────────────
-                    //
-                    // -1 (odatdagi holat) — manzilda BITTA KADRLIK
-                    // bo'lak turibdi, uning OXIRGI kadri olinadi.
-                    // Tomosha tarixi shu yo'ldan ishlaydi.
-                    //
-                    // 0 yoki undan katta — manzilda TO'LIQ video
-                    // turibdi va aynan shu millisekunddagi kalit
-                    // kadr kerak. Yozishmadagi videoning ZAXIRA
-                    // yo'li shunday ishlaydi (`chat_thumbs.dart`
-                    // dagi "TO'G'RIDAN-TO'G'RI" izohiga qarang).
-                    val atMs = (call.argument<Int>("atMs") ?: -1).toLong()
                     // Dekodlash bir necha yuz millisekund olishi
                     // mumkin — UI oqimida bajarilmaydi, aks holda
                     // ro'yxat sirg'alayotganda ilova qotib qolardi.
                     Thread {
-                        val bytes = grabFrame(url, maxWidth, quality, atMs)
+                        val bytes = grabFrame(url, maxWidth, quality)
                         runOnUiThread { result.success(bytes) }
                     }.start()
                 }
@@ -223,12 +211,7 @@ class MainActivity : FlutterActivity() {
     ///
     /// Kadr olinmasa `null` — bu XATO EMAS, oddiy zaxira yo'l:
     /// ilova o'shanda posterni ko'rsatadi.
-    private fun grabFrame(
-        url: String,
-        maxWidth: Int,
-        quality: Int,
-        atMs: Long = -1L
-    ): ByteArray? {
+    private fun grabFrame(url: String, maxWidth: Int, quality: Int): ByteArray? {
         if (url.isEmpty()) return null
         val retriever = MediaMetadataRetriever()
         try {
@@ -240,32 +223,18 @@ class MainActivity : FlutterActivity() {
                 .extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
                 ?.toLongOrNull() ?: 0L
 
+            // Oxiridan 1 ms berida: bu AYNAN oxirgi kadrning ichiga
+            // tushadi (kadr kamida bir necha o'nlab millisekund
+            // ko'rsatiladi), davomiylikdan tashqariga chiqmaydi.
             var bmp: Bitmap? = null
-            if (atMs >= 0) {
-                // TO'LIQ video: aniq lahzadagi kalit kadr.
-                // Davomiylikdan tashqariga chiqmaymiz.
-                val want = if (durationMs > 1 && atMs >= durationMs) {
-                    durationMs - 1
-                } else {
-                    atMs
-                }
-                bmp = retriever.getFrameAtTime(
-                    want * 1000,
-                    MediaMetadataRetriever.OPTION_CLOSEST_SYNC
-                )
-            } else if (durationMs > 1) {
-                // Oxiridan 1 ms berida: bu AYNAN oxirgi kadrning
-                // ichiga tushadi (kadr kamida bir necha o'nlab
-                // millisekund ko'rsatiladi), davomiylikdan
-                // tashqariga chiqmaydi.
+            if (durationMs > 1) {
                 bmp = retriever.getFrameAtTime(
                     (durationMs - 1) * 1000,
                     MediaMetadataRetriever.OPTION_CLOSEST
                 )
             }
-            // Zaxira: dekoder so'ralgan kadrni ocholmasa — eng
-            // birinchi kalit kadr. Rasm boshqacharoq bo'ladi, lekin
-            // bo'sh joydan yaxshi.
+            // Zaxira: dekoder oxirgi kadrni ocholmasa — kalit kadr.
+            // Rasm bir oz eskiroq bo'ladi, lekin bo'sh joydan yaxshi.
             if (bmp == null) {
                 bmp = retriever.getFrameAtTime(
                     0,
