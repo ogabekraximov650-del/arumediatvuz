@@ -407,38 +407,84 @@ jobs:
       # bitta toza APK beradi.
       - name: Build APK (Release — ${{ matrix.abi }})
         run: |
-          # ── NEGA `--build-number` (TUZATILGAN XATO) ──────────
+          # ═════════════════════════════════════════════════════
+          #  ASL SABAB: "Ilova o'rnatilmadi" (TUZATILDI)
+          # ═════════════════════════════════════════════════════
           #
-          # TOPILGAN XATO (foydalanuvchi: "yangi versiyani
-          # o'rnatmoqchi bo'lganimda ilova yangilanmayapti").
+          # Foydalanuvchi: "ilova o'rnatilmayabdi, versiyani ham
+          # ko'tarib ko'rdim foydasi bo'lmadi".
           #
-          # `pubspec.yaml` da `version: 0.0.9+9` turardi va u
-          # HECH QACHON o'zgarmasdi. Android esa APK'ni
-          # `versionCode` bo'yicha taqqoslaydi: yangi APK'niki
-          # eskisidan KATTA bo'lmasa, o'rnatish "yangilanish"
-          # deb qabul qilinmaydi va tizim shunchaki rad etadi.
+          # NEGA versiyani ko'tarish YORDAM BERMAGAN. Android
+          # ikkita BOSHQA-BOSHQA raqamni biladi:
           #
-          # Endi `versionCode` = build raqami. U har build'da
-          # o'sadi, ya'ni har yangi APK eskisining ustiga
-          # bemalol o'rnatiladi.
+          #   * `versionName` — KO'RINADIGAN yozuv ("0.0.1").
+          #     Android unga UMUMAN qaramaydi, u faqat odam
+          #     o'qishi uchun;
+          #   * `versionCode`  — BUTUN SON. O'rnatish/yangilash
+          #     qarori FAQAT shu raqam bo'yicha qabul qilinadi.
+          #     Yangi APK'niki eskisidan KICHIK bo'lsa, tizim
+          #     o'rnatishni RAD ETADI va MIUI'da hech qanday
+          #     tushuntirishsiz "Ilova o'rnatilmadi" chiqaradi.
           #
-          # Ko'rinadigan versiya (`0.0.9`) `pubspec.yaml` dan
-          # olinadi va o'zgarmaydi — uni faqat qo'lda oshirasiz.
-          # Versiya TO'LIQ `pubspec.yaml` dan olinadi (foydalanuvchi
-          # talabi: aniq `0.0.1+1`). Ilgari build raqami sifatida
-          # `github.run_number` ishlatilardi; endi u ham pubspec'dan
-          # (`+` dan keyingi qism), ya'ni ko'rinadigan versiya ham,
-          # versionCode ham aynan pubspec aytganidek bo'ladi.
+          # NIMA BO'LGAN EDI. 265-build'gacha `versionCode` =
+          # `github.run_number` edi, ya'ni telefonga 265 gacha
+          # bo'lgan raqamlar o'rnatilgan. Keyin u `pubspec.yaml`
+          # dagi `+1` ga almashtirildi — ya'ni 265 dan 1 GA
+          # TUSHIB KETDI. Bu Android uchun DOWNGRADE.
+          #
+          # `0.0.1` ni `0.0.2` qilish esa faqat `versionName` ni
+          # o'zgartiradi (`versionCode` 1 -> 2), ya'ni baribir
+          # 265 dan kichik — shu sabab foyda bermagan.
+          #
+          # YECHIM: ikkala raqam AJRATILADI.
+          #   * KO'RINADIGAN versiya — `pubspec.yaml` dan
+          #     (foydalanuvchi talabi: aniq `0.0.1+1`);
+          #   * `versionCode` — `VERSION_CODE_BASE + run_number`.
+          #     U HAR BUILD'DA O'SADI va eski 265 dan HAR DOIM
+          #     katta, ya'ni yangi APK eskisining ustiga
+          #     bemalol o'rnatiladi.
+          #
+          # Bazani 1000 qilish eski eng katta raqamdan (300)
+          # xavfsiz oshib ketadi va kelajakda ham o'sishda
+          # davom etadi.
+          VERSION_CODE_BASE=1000
+
           FULL=$(grep '^version:' pubspec.yaml | sed 's/version: *//')
           BUILD_NAME=$(echo "$FULL" | cut -d+ -f1)
-          BUILD_NUMBER=$(echo "$FULL" | cut -d+ -f2)
-          APP_VERSION="${BUILD_NAME}+${BUILD_NUMBER}"
-          echo "versiya: $APP_VERSION  (admin: ${{ matrix.admin }})"
+          PUBSPEC_BUILD=$(echo "$FULL" | cut -d+ -f2)
+
+          # Serverga (`X-App-Version`) va admin panelidagi "eng
+          # past versiya" tekshiruviga AYNAN pubspec'dagi yozuv
+          # boradi — u yerda taqqoslash `0.0.1+1` ko'rinishida
+          # ishlaydi, `versionCode` bilan aloqasi yo'q.
+          APP_VERSION="${BUILD_NAME}+${PUBSPEC_BUILD}"
+
+          VERSION_CODE=$(( VERSION_CODE_BASE + ${{ github.run_number }} ))
+
+          echo "ko'rinadigan versiya : $APP_VERSION"
+          echo "versionCode          : $VERSION_CODE"
+          echo "admin paneli         : ${{ matrix.admin }}"
+
+          # ── HIMOYA: versionCode hech qachon pasaymasin ────────
+          #
+          # 300 — eski sxema bo'yicha chiqarilgan ENG KATTA
+          # raqam. Kimdir bazani tasodifan kamaytirsa, build
+          # ATAYLAB yiqiladi — jimgina o'rnatilmaydigan APK
+          # chiqarishdan yaxshiroq.
+          LAST_OLD_CODE=300
+          if [ "$VERSION_CODE" -le "$LAST_OLD_CODE" ]; then
+            echo "❌ XATO: versionCode=$VERSION_CODE, eski APK'larniki $LAST_OLD_CODE gacha."
+            echo "   Bunday APK telefonga o'rnatilmaydi (downgrade)."
+            exit 1
+          fi
+
+          echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
+          echo "APP_VERSION=$APP_VERSION" >> "$GITHUB_ENV"
 
           flutter build apk --release \
             --target-platform ${{ matrix.platform }} \
             --build-name "$BUILD_NAME" \
-            --build-number "$BUILD_NUMBER" \
+            --build-number "$VERSION_CODE" \
             --dart-define=ADMIN_BUILD=${{ matrix.admin }} \
             --dart-define=APP_VERSION="$APP_VERSION"
 
@@ -616,6 +662,33 @@ jobs:
           APK="build/app/outputs/flutter-apk/app-release.apk"
           AAPT=$(ls "$ANDROID_HOME"/build-tools/*/aapt2 | sort -V | tail -1)
           "$AAPT" dump badging "$APK" | grep -E "^(package|sdkVersion|targetSdkVersion|native-code)" || true
+
+          # ── TAYYOR APK'DAGI `versionCode` TEKSHIRUVI ─────────
+          #
+          # "Ilova o'rnatilmadi" xatosining ASL SABABI aynan shu
+          # raqam edi (qarang: "Build APK" qadami). Shu sabab u
+          # endi TAYYOR FAYLDAN o'qib tekshiriladi — build
+          # buyrug'iga to'g'ri raqam berilgani YETARLI emas,
+          # APK ichiga ham tushgani isbotlanishi kerak.
+          CODE=$("$AAPT" dump badging "$APK" \
+            | grep -m1 "^package:" \
+            | sed "s/.*versionCode='\([0-9]*\)'.*/\1/")
+          NAME=$("$AAPT" dump badging "$APK" \
+            | grep -m1 "^package:" \
+            | sed "s/.*versionName='\([^']*\)'.*/\1/")
+          echo "versionCode = $CODE (ko'rinadigan versiya: $NAME)"
+
+          if [ "$CODE" != "$VERSION_CODE" ]; then
+            echo "❌ XATO: versionCode $VERSION_CODE bo'lishi kerak edi, APK'da: $CODE"
+            exit 1
+          fi
+          if [ "$CODE" -le 300 ]; then
+            echo "❌ XATO: versionCode=$CODE — eski APK'larnikidan kichik."
+            echo "   Telefon bunday APK'ni 'Ilova o'rnatilmadi' deb rad etadi."
+            exit 1
+          fi
+          echo "✅ versionCode eski APK'lardan katta — o'rnatishga to'sqinlik yo'q"
+
           echo "── Ichidagi kutubxonalar ──"
           ABIS=$(unzip -l "$APK" | grep "lib/" | awk '{print $4}' | cut -d/ -f2 | sort -u)
           echo "$ABIS"
@@ -886,8 +959,18 @@ jobs:
 
             Foydalanuvchi APK'sida admin paneli kodi umuman yo'q.
 
-            Versiya: ${{ github.run_number }}
+            Versiya: ${{ env.APP_VERSION }} (versionCode ${{ env.VERSION_CODE }})
             Commit: ${{ github.sha }}
+
+            ---
+
+            **"Ilova o'rnatilmadi" chiqsa.** 265-build'dan oldingi
+            APK'lar BOSHQA kalit bilan imzolangan edi. Android
+            boshqa kalitli APK'ni eskisining ustiga o'rnatishga
+            ruxsat bermaydi. Shunday holatda telefondagi eski
+            ARUmediaTV ni AVVAL O'CHIRING, keyin shu APK'ni
+            o'rnating (bir martalik ish — bundan keyingi
+            build'lar ustiga bemalol tushadi).
           prerelease: true
           files: ${{ steps.rename.outputs.out }}
 

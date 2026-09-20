@@ -2408,6 +2408,56 @@ uchun `users_db.id` bo'yicha yangi jadval (masalan
 bo'ladi. **Admin panel himoyasi ataylab qo'shilmagan** — ilova
 hali sinovda, tayyor bo'lganda panel butunlay olib tashlanadi.
 
+## APK VERSIYASI: IKKI RAQAM, IKKI XIL VAZIFA (2026-09, TOPILGAN XATO)
+
+Foydalanuvchi: "ilova o'rnatilmayabdi, versiyani ham ko'tarib
+ko'rdim foydasi bo'lmadi".
+
+**Sabab.** Android ikkita boshqa-boshqa raqamni biladi:
+
+| raqam | qayerdan | kim ishlatadi |
+|---|---|---|
+| `versionName` (`0.0.1`) | `pubspec.yaml` | faqat **odam** ko'radi |
+| `versionCode` (butun son) | `--build-number` | **Android** o'rnatish qarorini shu bo'yicha qabul qiladi |
+
+265-build'gacha `versionCode = github.run_number` edi — ya'ni
+telefonlarga **265 gacha** raqamlar o'rnatilgan. Keyin u
+`pubspec.yaml` dagi `+1` ga almashtirildi va **265 dan 1 ga tushib
+ketdi**. Android uchun bu *downgrade*, u o'rnatishni rad etadi va
+MIUI hech qanday tushuntirishsiz "Ilova o'rnatilmadi" deydi.
+
+`0.0.1` ni `0.0.2` qilish faqat `versionName` ni o'zgartiradi
+(`versionCode` 1 → 2) — baribir 265 dan kichik, shu sabab foyda
+bermagan.
+
+**Hozirgi qoida (`build-flutter-apk.yml` → "Build APK"):**
+
+- ko'rinadigan versiya — `pubspec.yaml` dan (`0.0.1+1`), u ham
+  serverga `X-App-Version` bo'lib boradi (admin paneldagi "eng past
+  versiya" tekshiruvi aynan shu yozuv bilan ishlaydi);
+- `versionCode = VERSION_CODE_BASE (1000) + github.run_number` —
+  har build'da o'sadi va eski 300 dan **har doim** katta.
+
+**`VERSION_CODE_BASE` ni HECH QACHON kamaytirmang.** Ikkita
+tekshiruv buni qo'riqlaydi va build ataylab yiqiladi: biri build'dan
+oldin, ikkinchisi tayyor APK'dan `aapt2 dump badging` bilan o'qib.
+
+`pubspec.yaml` dagi versiyani xohlagancha o'zgartirsa bo'ladi — u
+o'rnatishga umuman ta'sir qilmaydi.
+
+### IMZO KALITI — ALOHIDA SABAB
+
+265-build'gacha har build **tasodifiy** debug kaliti bilan
+imzolanardi (`$HOME/.android/debug.keystore` toza runner'da hech
+qachon topilmasdi). Endi kalit repoda: `ci/release.keystore`
+(SHA256 `8F:47:32:E1:...`), Secrets bo'lsa undan olinadi.
+
+Android boshqa kalitli APK'ni eskisining ustiga qo'ymaydi
+(`INSTALL_FAILED_UPDATE_INCOMPATIBLE`). Shu sabab telefonda
+**265-build'dan oldingi** ilova tursa, uni avval **o'chirish**
+kerak — bu bir martalik ish, keyingi build'lar ustiga bemalol
+tushadi.
+
 ## ILOVA BELGISI (ARU logotipi)
 
 Qora plita, undan **ARU** harflari o'yib olingan. Barcha fayllar va
