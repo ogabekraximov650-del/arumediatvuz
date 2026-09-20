@@ -2408,55 +2408,89 @@ uchun `users_db.id` bo'yicha yangi jadval (masalan
 bo'ladi. **Admin panel himoyasi ataylab qo'shilmagan** — ilova
 hali sinovda, tayyor bo'lganda panel butunlay olib tashlanadi.
 
-## APK VERSIYASI: IKKI RAQAM, IKKI XIL VAZIFA (2026-09, TOPILGAN XATO)
+## APK VERSIYASI VA "ILOVA O'RNATILMADI" (2026-09)
 
-Foydalanuvchi: "ilova o'rnatilmayabdi, versiyani ham ko'tarib
-ko'rdim foydasi bo'lmadi".
-
-**Sabab.** Android ikkita boshqa-boshqa raqamni biladi:
+### Ikkita raqam — ikkita boshqa vazifa
 
 | raqam | qayerdan | kim ishlatadi |
 |---|---|---|
-| `versionName` (`0.0.1`) | `pubspec.yaml` | faqat **odam** ko'radi |
-| `versionCode` (butun son) | `--build-number` | **Android** o'rnatish qarorini shu bo'yicha qabul qiladi |
+| `versionName` (`0.0.2`) | `pubspec.yaml` | faqat **odam** ko'radi |
+| `versionCode` (butun son) | `pubspec.yaml` dagi `+` dan keyin | **Android** — mavjud ilova ustiga yangilash qarorini shu bo'yicha qabul qiladi |
 
-265-build'gacha `versionCode = github.run_number` edi — ya'ni
-telefonlarga **265 gacha** raqamlar o'rnatilgan. Keyin u
-`pubspec.yaml` dagi `+1` ga almashtirildi va **265 dan 1 ga tushib
-ketdi**. Android uchun bu *downgrade*, u o'rnatishni rad etadi va
-MIUI hech qanday tushuntirishsiz "Ilova o'rnatilmadi" deydi.
+Hozir ikkalasi ham `pubspec.yaml` dan olinadi (foydalanuvchi
+talabi: `version: 0.0.2+4`). **Yangi APK chiqarganda `+` dan
+keyingi raqamni oshirishni unutmang** — aks holda telefondagi
+ilova ustiga yangisi tushmaydi.
 
-`0.0.1` ni `0.0.2` qilish faqat `versionName` ni o'zgartiradi
-(`versionCode` 1 → 2) — baribir 265 dan kichik, shu sabab foyda
-bermagan.
+Tarix: 265-build'gacha `versionCode = github.run_number` edi
+(telefonlarga 265 gacha raqamlar o'rnatilgan), keyin u pubspec'ga
+o'tkazilib 1 ga tushib ketdi. Ya'ni **telefonda eski ilova
+tursa**, 4 kabi kichik raqam downgrade bo'ladi va rad etiladi.
+Toza o'rnatishda raqamning kattaligi ahamiyatsiz.
 
-**Hozirgi qoida (`build-flutter-apk.yml` → "Build APK"):**
+### O'RNATILMASLIK SABABI HALI TOPILMAGAN
 
-- ko'rinadigan versiya — `pubspec.yaml` dan (`0.0.1+1`), u ham
-  serverga `X-App-Version` bo'lib boradi (admin paneldagi "eng past
-  versiya" tekshiruvi aynan shu yozuv bilan ishlaydi);
-- `versionCode = VERSION_CODE_BASE (1000) + github.run_number` —
-  har build'da o'sadi va eski 300 dan **har doim** katta.
+Foydalanuvchi eski ilovani **o'chirib tashlab**, toza o'rnatishga
+urinib ko'rdi — baribir "Ilova o'rnatilmadi". Ya'ni `versionCode`
+ham, imzo kaliti ham sabab EMAS (toza o'rnatishda ikkalasi ham
+tekshirilmaydi).
 
-**`VERSION_CODE_BASE` ni HECH QACHON kamaytirmang.** Ikkita
-tekshiruv buni qo'riqlaydi va build ataylab yiqiladi: biri build'dan
-oldin, ikkinchisi tayyor APK'dan `aapt2 dump badging` bilan o'qib.
+**APK'ning o'zida nuqson yo'q** — build-297, 298 va 300 yuklab
+olinib tekshirilgan:
 
-`pubspec.yaml` dagi versiyani xohlagancha o'zgartirsa bo'ladi — u
-o'rnatishga umuman ta'sir qilmaydi.
+* imzo sertifikati uchchalasida bir xil (`CN=AniRaxUz`),
+  v1 + v2 + v3 imzo sxemalari joyida, APK Signing Block butun;
+* `AndroidManifest.xml` 297 va 298 da **bayt-bayt bir xil**
+  (SHA-256 mos), 300 da faqat versiya raqami farq qiladi;
+* `minSdkVersion=24`, `targetSdkVersion=36`, paket
+  `uz.arumediatv.soft`;
+* `lib/` da faqat `armeabi-v7a`, `.so` fayllar **siqilmagan**
+  (`method=0`) va **4096 ga tekislangan** — ya'ni
+  `extractNativeLibs=false` talabi bajarilgan;
+* ZIP butun: 92 ta yozuv, `MANIFEST.MF` da 89 ta `Name:`.
 
-### IMZO KALITI — ALOHIDA SABAB
+**Qolgan asosiy ehtimol: ARXITEKTURA.** `admin-32` ichida faqat
+32-bit (`armeabi-v7a`) kutubxonalar bor. ARMv9 yadroli yangi
+telefonlar (Snapdragon 8 Gen 1+, Dimensity 9000+ va bir qator
+2023+ o'rta segment chiplar) AArch32 ni **umuman**
+qo'llab-quvvatlamaydi va 32-bit APK'ni sababsiz rad etadi
+(`INSTALL_FAILED_NO_MATCHING_ABIS`).
+
+**HAL QILUVCHI SINOV (hali o'tkazilmagan).** Xuddi shu
+Release'dagi `arumedia-user-64.apk` ni o'rnatib ko'rish kerak:
+
+* o'rnatilsa → telefon 64-bit, `admin` ham 64-bit qilinishi
+  kerak (matritsaga `admin-64` qo'shiladi);
+* o'rnatilmasa → sabab APK'da emas, telefonda (joy yetmasligi,
+  MIUI "Sof rejim", o'chirilgan ilovadan qolgan iz).
+
+⚠️ `admin-64` bir marta qo'shilgan edi (commit `a8d1b02`), lekin
+uning build'i (run 299) **BEKOR QILINGAN** — ya'ni u APK hech
+qachon yig'ilmagan va sinalmagan. Keyin "telefon 32-bit" degan
+TAXMIN asosida olib tashlandi. Bu taxmin hali tasdiqlanmagan.
+
+### IMZO KALITI
 
 265-build'gacha har build **tasodifiy** debug kaliti bilan
 imzolanardi (`$HOME/.android/debug.keystore` toza runner'da hech
 qachon topilmasdi). Endi kalit repoda: `ci/release.keystore`
-(SHA256 `8F:47:32:E1:...`), Secrets bo'lsa undan olinadi.
+(`CN=AniRaxUz`, SHA-256 `8F:47:32:E1:B6:01:D6:34:...`), Secrets
+qo'yilgan bo'lsa undan olinadi.
 
-Android boshqa kalitli APK'ni eskisining ustiga qo'ymaydi
-(`INSTALL_FAILED_UPDATE_INCOMPATIBLE`). Shu sabab telefonda
-**265-build'dan oldingi** ilova tursa, uni avval **o'chirish**
-kerak — bu bir martalik ish, keyingi build'lar ustiga bemalol
-tushadi.
+Boshqa kalitli APK eskisining ustiga tushmaydi
+(`INSTALL_FAILED_UPDATE_INCOMPATIBLE`) — lekin **toza
+o'rnatishda bu ham sabab bo'la olmaydi**.
+
+### SERVER TOMONDAGI TUZOQ
+
+`X-App-Version` ga `pubspec.yaml` dagi to'liq yozuv (`0.0.2+4`)
+boradi va worker uni admin paneldagi **"ENG PAST VERSIYA"**
+(`app_min_version`) bilan solishtiradi
+(`worker/src/lib.rs` → `version_rank`). Versiyani
+**pasaytirganda** panelda turgan chegarani ham pasaytirish kerak,
+aks holda ilova o'rnatiladi-yu, har so'rov `426` bilan rad
+etiladi. Diqqat: `version_rank` da build raqami `clamp(0, 999)` —
+999 dan katta build raqami taqqoslashda farq qilmaydi.
 
 ## ILOVA BELGISI (ARU logotipi)
 

@@ -407,79 +407,56 @@ jobs:
       # bitta toza APK beradi.
       - name: Build APK (Release — ${{ matrix.abi }})
         run: |
-          # ═════════════════════════════════════════════════════
-          #  ASL SABAB: "Ilova o'rnatilmadi" (TUZATILDI)
-          # ═════════════════════════════════════════════════════
+          # ── VERSIYA TO'LIQ `pubspec.yaml` DAN ────────────────
           #
-          # Foydalanuvchi: "ilova o'rnatilmayabdi, versiyani ham
-          # ko'tarib ko'rdim foydasi bo'lmadi".
+          # TALAB (foydalanuvchi): "version name'ni 0.0.2 qilib
+          # qo'y, version code'ni esa 4 qil".
           #
-          # NEGA versiyani ko'tarish YORDAM BERMAGAN. Android
-          # ikkita BOSHQA-BOSHQA raqamni biladi:
+          # Ya'ni ikkala raqam ham `pubspec.yaml` dagi
+          # `version: 0.0.2+4` dan olinadi:
+          #   * `0.0.2` -> `versionName` (ko'rinadigan yozuv);
+          #   * `4`     -> `versionCode` (Android o'rnatish
+          #                qarorini shu bo'yicha qabul qiladi).
           #
-          #   * `versionName` — KO'RINADIGAN yozuv ("0.0.1").
-          #     Android unga UMUMAN qaramaydi, u faqat odam
-          #     o'qishi uchun;
-          #   * `versionCode`  — BUTUN SON. O'rnatish/yangilash
-          #     qarori FAQAT shu raqam bo'yicha qabul qilinadi.
-          #     Yangi APK'niki eskisidan KICHIK bo'lsa, tizim
-          #     o'rnatishni RAD ETADI va MIUI'da hech qanday
-          #     tushuntirishsiz "Ilova o'rnatilmadi" chiqaradi.
+          # ⚠️ BILIB QO'YISH KERAK. 265-build'gacha `versionCode`
+          # `github.run_number` edi, ya'ni telefonlarga 265 gacha
+          # raqamlar o'rnatilgan. 4 esa undan KICHIK — agar
+          # telefonda o'sha davrdagi ilova TURGAN bo'lsa, Android
+          # buni downgrade deb rad etadi va MIUI hech qanday
+          # tushuntirishsiz "Ilova o'rnatilmadi" deydi.
           #
-          # NIMA BO'LGAN EDI. 265-build'gacha `versionCode` =
-          # `github.run_number` edi, ya'ni telefonga 265 gacha
-          # bo'lgan raqamlar o'rnatilgan. Keyin u `pubspec.yaml`
-          # dagi `+1` ga almashtirildi — ya'ni 265 dan 1 GA
-          # TUSHIB KETDI. Bu Android uchun DOWNGRADE.
+          # TOZA o'rnatishda (eski ilova butunlay o'chirilgan)
+          # `versionCode` ning kattaligi ahamiyatsiz — 4 bemalol
+          # o'rnatiladi.
           #
-          # `0.0.1` ni `0.0.2` qilish esa faqat `versionName` ni
-          # o'zgartiradi (`versionCode` 1 -> 2), ya'ni baribir
-          # 265 dan kichik — shu sabab foyda bermagan.
-          #
-          # YECHIM: ikkala raqam AJRATILADI.
-          #   * KO'RINADIGAN versiya — `pubspec.yaml` dan
-          #     (foydalanuvchi talabi: aniq `0.0.1+1`);
-          #   * `versionCode` — `VERSION_CODE_BASE + run_number`.
-          #     U HAR BUILD'DA O'SADI va eski 265 dan HAR DOIM
-          #     katta, ya'ni yangi APK eskisining ustiga
-          #     bemalol o'rnatiladi.
-          #
-          # Bazani 1000 qilish eski eng katta raqamdan (300)
-          # xavfsiz oshib ketadi va kelajakda ham o'sishda
-          # davom etadi.
-          VERSION_CODE_BASE=1000
-
+          # Keyingi APK chiqarganda `pubspec.yaml` dagi `+4` ni
+          # OSHIRISHNI unutmang, aks holda telefondagi ilova
+          # ustiga yangisi tushmaydi.
           FULL=$(grep '^version:' pubspec.yaml | sed 's/version: *//')
           BUILD_NAME=$(echo "$FULL" | cut -d+ -f1)
-          PUBSPEC_BUILD=$(echo "$FULL" | cut -d+ -f2)
+          VERSION_CODE=$(echo "$FULL" | cut -d+ -f2)
 
           # Serverga (`X-App-Version`) va admin panelidagi "eng
-          # past versiya" tekshiruviga AYNAN pubspec'dagi yozuv
-          # boradi — u yerda taqqoslash `0.0.1+1` ko'rinishida
-          # ishlaydi, `versionCode` bilan aloqasi yo'q.
-          APP_VERSION="${BUILD_NAME}+${PUBSPEC_BUILD}"
+          # past versiya" tekshiruviga AYNAN shu yozuv boradi.
+          APP_VERSION="${BUILD_NAME}+${VERSION_CODE}"
 
-          VERSION_CODE=$(( VERSION_CODE_BASE + ${{ github.run_number }} ))
+          # Raqam ekaniga ishonch: `pubspec.yaml` xato tahrirlansa
+          # build bu yerda yiqilsin, tushunarsiz Gradle xatosi
+          # bilan emas.
+          case "$VERSION_CODE" in
+            ''|*[!0-9]*)
+              echo "❌ XATO: pubspec.yaml dagi '+' dan keyingi qism butun son emas: '$VERSION_CODE'"
+              exit 1 ;;
+          esac
 
-          echo "ko'rinadigan versiya : $APP_VERSION"
-          echo "versionCode          : $VERSION_CODE"
-          echo "admin paneli         : ${{ matrix.admin }}"
-
-          # ── HIMOYA: versionCode hech qachon pasaymasin ────────
-          #
-          # 300 — eski sxema bo'yicha chiqarilgan ENG KATTA
-          # raqam. Kimdir bazani tasodifan kamaytirsa, build
-          # ATAYLAB yiqiladi — jimgina o'rnatilmaydigan APK
-          # chiqarishdan yaxshiroq.
-          LAST_OLD_CODE=300
-          if [ "$VERSION_CODE" -le "$LAST_OLD_CODE" ]; then
-            echo "❌ XATO: versionCode=$VERSION_CODE, eski APK'larniki $LAST_OLD_CODE gacha."
-            echo "   Bunday APK telefonga o'rnatilmaydi (downgrade)."
-            exit 1
-          fi
+          echo "versionName (ko'rinadigan) : $BUILD_NAME"
+          echo "versionCode                : $VERSION_CODE"
+          echo "serverga boradigan versiya : $APP_VERSION"
+          echo "admin paneli               : ${{ matrix.admin }}"
 
           echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
           echo "APP_VERSION=$APP_VERSION" >> "$GITHUB_ENV"
+          echo "BUILD_NAME_EXPECTED=$BUILD_NAME" >> "$GITHUB_ENV"
 
           flutter build apk --release \
             --target-platform ${{ matrix.platform }} \
@@ -665,11 +642,9 @@ jobs:
 
           # ── TAYYOR APK'DAGI `versionCode` TEKSHIRUVI ─────────
           #
-          # "Ilova o'rnatilmadi" xatosining ASL SABABI aynan shu
-          # raqam edi (qarang: "Build APK" qadami). Shu sabab u
-          # endi TAYYOR FAYLDAN o'qib tekshiriladi — build
-          # buyrug'iga to'g'ri raqam berilgani YETARLI emas,
-          # APK ichiga ham tushgani isbotlanishi kerak.
+          # `pubspec.yaml` da yozilgan raqamlar TAYYOR FAYLGA
+          # ham tushganini tasdiqlaymiz — build buyrug'iga
+          # to'g'ri raqam berilgani YETARLI emas.
           CODE=$("$AAPT" dump badging "$APK" \
             | grep -m1 "^package:" \
             | sed "s/.*versionCode='\([0-9]*\)'.*/\1/")
@@ -682,12 +657,11 @@ jobs:
             echo "❌ XATO: versionCode $VERSION_CODE bo'lishi kerak edi, APK'da: $CODE"
             exit 1
           fi
-          if [ "$CODE" -le 300 ]; then
-            echo "❌ XATO: versionCode=$CODE — eski APK'larnikidan kichik."
-            echo "   Telefon bunday APK'ni 'Ilova o'rnatilmadi' deb rad etadi."
+          if [ "$NAME" != "$BUILD_NAME_EXPECTED" ] && [ -n "$BUILD_NAME_EXPECTED" ]; then
+            echo "❌ XATO: versionName $BUILD_NAME_EXPECTED bo'lishi kerak edi, APK'da: $NAME"
             exit 1
           fi
-          echo "✅ versionCode eski APK'lardan katta — o'rnatishga to'sqinlik yo'q"
+          echo "✅ versiya raqamlari pubspec.yaml bilan mos"
 
           echo "── Ichidagi kutubxonalar ──"
           ABIS=$(unzip -l "$APK" | grep "lib/" | awk '{print $4}' | cut -d/ -f2 | sort -u)
@@ -964,13 +938,15 @@ jobs:
 
             ---
 
-            **"Ilova o'rnatilmadi" chiqsa.** 265-build'dan oldingi
-            APK'lar BOSHQA kalit bilan imzolangan edi. Android
-            boshqa kalitli APK'ni eskisining ustiga o'rnatishga
-            ruxsat bermaydi. Shunday holatda telefondagi eski
-            ARUmediaTV ni AVVAL O'CHIRING, keyin shu APK'ni
-            o'rnating (bir martalik ish — bundan keyingi
-            build'lar ustiga bemalol tushadi).
+            **"Ilova o'rnatilmadi" chiqsa:**
+
+            1. Telefondagi eski ARUmediaTV ni butunlay o'chiring
+               (MIUI'da "Ikkinchi makon"/"Ikki ilova" ichidagisini
+               ham) va qaytadan urinib ko'ring.
+            2. Baribir chiqsa — `arumedia-user-64.apk` ni
+               o'rnatib ko'ring. AGAR U O'RNATILSA, telefoningiz
+               32-bit ilovalarni qo'llab-quvvatlamaydi va
+               `-32` APK shu sabab rad etilyapti.
           prerelease: true
           files: ${{ steps.rename.outputs.out }}
 
