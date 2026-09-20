@@ -2189,12 +2189,84 @@ ko'rsatadi va ularni qayerdan o'zgartirishni aytadi.
 |---|---|
 | `users_db` | `id` = **oxirgi id + 1** (anime/epizod bilan bir xil tartib), `telegram_id` UNIQUE |
 | `login_tokens` | bir martalik 16 xonali token, 5 daqiqa yashaydi |
-| `sessions_db` | sessiya jurnali: hisob + **qaysi API** (`api_base`) + **qaysi qurilma** (`device`, `platform`, `app_version`) |
+| `sessions_db` | sessiya jurnali: hisob + **qaysi qurilma** (`device`, `platform`, `app_version`). `session_token` ustunida tokenning **SHA-256 xeshi** turadi, tokenning o'zi EMAS |
 | `app_config` | webhook siri va manzili |
 
 `init_db` ning yuqori qismida `ALTER TABLE ... ADD COLUMN` bor va u
 ustun mavjud bo'lganda xato beradi — shu sabab kirish jadvallari
 **alohida** `turso_batch` chaqiruvida yuboriladi.
+
+### SESSIYA TOKENI BAZADA OCHIQ SAQLANMAYDI
+
+**TOPILGAN XAVF:** `sessions_db.session_token` da tokenning O'ZI
+turardi. Baza oqib ketsa (yoki `TURSO_TOKEN` qo'lga tushsa)
+hujumchi barcha faol sessiyalarni o'sha zahoti egallardi.
+
+Endi bazada faqat **SHA-256 xeshi** saqlanadi (`token_hash`).
+Ilova xom tokenni yuboradi, worker xeshlab solishtiradi.
+
+* Tuz (salt) YO'Q va kerak emas: token 64 bayt tasodifiy
+  ma'lumot, lug'at hujumi unga ta'sir qilmaydi.
+* **Eski sessiyalar uzilmaydi:** `session_user` avval xesh bilan
+  qaraydi, topilmasa ochiq token bilan qaraydi va qatorni o'sha
+  zahoti xeshga o'tkazadi. Migratsiya o'z-o'zidan bo'ladi.
+* `login_tokens.session_token` — **ataylab xom** qoladi: u ilovaga
+  tokenni bir marta yetkazish kanali. Qator 5 daqiqa yashaydi
+  (`LOGIN_CLAIM_TTL_MS`), ya'ni ochiq ko'rinish oynasi shu bilan
+  cheklangan.
+
+**Bu yerni buzmang:** yangi joyda `session_token` bo'yicha qidirsangiz
+qiymatni `token_hash()` dan o'tkazing, aks holda so'rov jim ishlamay
+qoladi.
+
+### YOZISHMANI KUZATISH: VERSIYA BO'YICHA (200 QATOR EMAS, 1 QATOR)
+
+`chat_threads.chat_ver` — suhbatda **biror narsa** o'zgarganda
+bittaga oshadigan son. Uzoq kutish (`/api/chat/wait?ver=N`) aynan
+shu bitta sonni asosiy kalit bo'yicha o'qiydi.
+
+**Nega:** ilgari har tekshiruvda oxirgi **200 xabar** o'qilib
+(`CHAT_LIMIT`), ulardan 4 ta son hisoblanardi. Bitta kutish
+so'rovi = 16 tekshiruv = ~3 200 qator. Chat ochiq bitta odam
+sekundiga **~168 qator** o'qirdi — hech narsa bo'lmasa ham. Bu
+Turso kvotasining asosiy yeyuvchisi edi va bekor turgan
+foydalanuvchilar soniga proportsional o'sardi.
+
+Versiya **oshiriladigan** joylar (hammasi shu ro'yxatda bo'lishi shart):
+
+| Joy | Nima bo'ladi |
+|---|---|
+| xabar yuborish (2 ta upsert) | `INSERT` da `chat_ver=1`, `DO UPDATE` da `+1` |
+| "o'qildi" belgisi | `+1`, lekin **faqat** `unread_* <> 0` bo'lsa |
+| `refresh_thread` (o'chirishdan keyin) | `+1` |
+
+**ENG MUHIM TUZOQ:** "o'qildi" dagi `<> 0` shartini olib tashlamang.
+Usiz har ochilish versiyani oshiradi → ilova o'zgarish deb biladi →
+qayta yuklaydi → yana "o'qildi" → **cheksiz aylanish**.
+
+**Eski APK'lar uzilmaydi:** `ver` yubormagan mijozga eski (200
+qatorli) yo'l o'z holicha ishlaydi.
+
+Ustun mavjud bazaga **alohida** `ALTER TABLE` bilan qo'shiladi va
+natijasi ataylab e'tiborsiz qoldiriladi — u umumiy `turso_batch`
+ichida bo'lsa, "ustun bor" xatosi `DB_READY` ni o'rnatmay qo'yardi
+va butun DDL har so'rovda qaytadan ketardi.
+
+### EMOJI VA YARIM SHAFFOF MATN
+
+Foydalanuvchi yozgan matn ko'p joyda `Colors.white.withValues(alpha: X)`
+bilan chiziladi. `TextStyle.color` dan bo'yoq (Paint) yasaladi va
+**rangli** emoji glifi ham o'sha alpha bilan chiziladi — natijada
+emoji qora fon ichidan ko'rinib, **qoramtir** bo'lib qoladi
+(alpha 0.55 da ayniqsa yaqqol).
+
+Yechim — `lib/widgets/emoji_text.dart`: matn harf/emoji bo'laklariga
+ajratiladi, emojidan alpha olib tashlanadi, harflar esa o'z xiraligini
+saqlaydi. Bo'linish `characters` paketi bilan (grapheme cluster
+bo'yicha) — aks holda `👨‍👩‍👧` yoki `👍🏽` o'rtasidan kesilardi.
+
+**Qoida:** foydalanuvchi yozgan matnni alpha bilan chizsangiz
+`Text` emas, `EmojiText` ishlating.
 
 ### 4 TA QURILMA CHEGARASI
 

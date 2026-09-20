@@ -31,6 +31,8 @@
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
+
+import '../widgets/emoji_text.dart';
 import '../services/image_cache.dart';
 
 import '../services/format.dart';
@@ -501,7 +503,9 @@ class _Section extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 6),
-          Text(
+          // Shikoyat matni ham foydalanuvchi yozgani — emoji
+          // bo'lishi mumkin (`emoji_text.dart` izohiga qarang).
+          EmojiText(
             body,
             style: TextStyle(
               color: Colors.white.withValues(alpha: 0.82),

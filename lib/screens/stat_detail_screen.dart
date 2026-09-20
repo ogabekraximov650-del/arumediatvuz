@@ -32,6 +32,8 @@
 
 import 'package:flutter/material.dart';
 
+import '../widgets/emoji_text.dart';
+
 import '../services/comments_service.dart';
 import '../services/user_stats.dart';
 import '../services/watch_history.dart';
@@ -351,7 +353,9 @@ class _CommentRowState extends State<_CommentRow> {
                       ),
                     ),
                     const SizedBox(height: 5),
-                    Text(
+                    // Emoji alpha tufayli qoramtir bo'lmasin
+                    // (`emoji_text.dart` izohiga qarang).
+                    EmojiText(
                       body,
                       maxLines: 4,
                       overflow: TextOverflow.ellipsis,
@@ -479,7 +483,7 @@ class _ReplyRow extends StatelessWidget {
                   ],
                 ),
                 const SizedBox(height: 2),
-                Text(
+                EmojiText(
                   reply.body,
                   style: TextStyle(
                     color: Colors.white.withValues(alpha: 0.78),

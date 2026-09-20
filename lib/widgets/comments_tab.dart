@@ -22,6 +22,8 @@ import 'dart:async';
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
+
+import 'emoji_text.dart';
 import '../services/image_cache.dart';
 
 import '../services/auth_service.dart';
@@ -813,7 +815,10 @@ class _CommentRow extends StatelessWidget {
                 ],
               ),
               const SizedBox(height: 3),
-              Text(
+              // `EmojiText` — oddiy `Text` ning o'rnida: matn xira
+              // qoladi (alpha o'z joyida), EMOJI esa to'liq rangda
+              // chiqadi. Sababi `emoji_text.dart` boshida.
+              EmojiText(
                 c.deleted ? 'Izoh o\'chirilgan' : c.body,
                 style: TextStyle(
                   color: c.deleted
@@ -1075,7 +1080,7 @@ class _ReportSheetState extends State<_ReportSheet> {
                       ),
                     ),
                     const SizedBox(height: 3),
-                    Text(
+                    EmojiText(
                       widget.comment.body,
                       maxLines: 3,
                       overflow: TextOverflow.ellipsis,

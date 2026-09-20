@@ -291,6 +291,22 @@ class ChatController extends ChangeNotifier {
   /// Diskdagi kalit. Admin ko'rinishida — o'sha odamniki.
   String get _diskKey => 'chat_${userId ?? 0}';
 
+  /// Suhbat versiyasining diskdagi kaliti.
+  String get _verKey => 'chatver_${userId ?? 0}';
+
+  // ── SUHBAT VERSIYASI ────────────────────────────────────────
+  //
+  // Serverdagi `chat_threads.chat_ver` — suhbatda BIROR NARSA
+  // o'zgarganda bittaga oshadigan son. Uzoq kutish AYNAN shuni
+  // kuzatadi (`/api/chat/wait?ver=...`), ilgari esa har tekshiruvda
+  // 200 ta xabar qatori o'qilardi.
+  //
+  // DISKDA ham saqlanadi: ilova qayta ochilganda xabarlar bilan
+  // birga versiya ham tiklanadi, ya'ni hech narsa o'zgarmagan
+  // bo'lsa BIRINCHI kutish ham darhol qaytmaydi — bekorga so'rov
+  // ketmaydi.
+  int _ver = 0;
+
   /// Diskdagi nusxani DARHOL ko'rsatadi (tarmoq kutilmaydi).
   ///
   /// TALAB (foydalanuvchi): "hullas hammasi diskda tursin, tezroq
@@ -303,6 +319,7 @@ class ChatController extends ChangeNotifier {
     _items
       ..clear()
       ..addAll(rows.map(ChatMessage.fromJson));
+    _ver = (DiskCache.readOne(_verKey)?['v'] as num?)?.toInt() ?? 0;
     _loaded = true;
     notifyListeners();
   }
@@ -374,7 +391,11 @@ class ChatController extends ChangeNotifier {
         continue;
       }
       try {
-        final uri = Uri.parse('$_base/wait?since=$_lastAt&seen=$_seenCount'
+        // `ver` — ASOSIY belgi (server bitta qator o'qiydi).
+        // Qolgan sonlar ESKI serverlar uchun qoldirilgan: yangi
+        // worker `ver` ni ko'rsa ularga qaramaydi.
+        final uri = Uri.parse('$_base/wait?ver=$_ver'
+            '&since=$_lastAt&seen=$_seenCount'
             '&count=$_liveCount&oldest=$_oldestAt'
             '${userId != null ? '&user_id=$userId' : ''}');
         final r = await http
@@ -384,8 +405,16 @@ class ChatController extends ChangeNotifier {
         if (!_watching) return;
         if (r.statusCode == 200) {
           final j = jsonDecode(r.body) as Map<String, dynamic>;
+          // Versiya YUKLASHDAN OLDIN olinadi, lekin KEYIN yoziladi:
+          // yuklash davomida yana o'zgarish bo'lsa, keyingi kutish
+          // uni darhol sezadi (o'zgarish yo'qolib qolmaydi).
+          final ver = (j['ver'] as num?)?.toInt();
           if (j['new'] == true) {
             await load(force: true);
+          }
+          if (ver != null && ver != _ver) {
+            _ver = ver;
+            DiskCache.write(_verKey, [{'v': ver}]);
           }
           // Javob darhol qaytsa ham (yangi xabar bor edi),
           // keyingi kutish shu zahoti boshlanadi.
@@ -725,6 +754,11 @@ class ChatThreadsController extends ChangeNotifier {
   }
 
   static const String _diskKey = 'chat_threads';
+  static const String _verKey = 'chat_threads_ver';
+
+  /// Ro'yxatning umumiy versiyasi (`ChatController._ver` izohiga
+  /// qarang). Diskda ham saqlanadi.
+  int _ver = 0;
 
   // ── UZOQ KUTISH ───────────────────────────────────────────
   //
@@ -753,16 +787,25 @@ class ChatThreadsController extends ChangeNotifier {
         continue;
       }
       try {
+        // `ver` — suhbatlar ro'yxatining umumiy versiyasi (server
+        // tomonda `SUM(chat_ver) + COUNT(*)`). Ilgari bu yerda
+        // faqat `since` yuborilardi va server har tekshiruvda
+        // butun ro'yxatni sanardi.
         final r = await http
-            .get(Uri.parse('$_base/wait?all=1&since=$_lastAt'),
+            .get(Uri.parse('$_base/wait?all=1&ver=$_ver&since=$_lastAt'),
                 headers: _headers())
             .timeout(const Duration(seconds: 35));
         if (!_watching) return;
         if (r.statusCode == 200) {
           final j = jsonDecode(r.body) as Map<String, dynamic>;
+          final ver = (j['ver'] as num?)?.toInt();
           if (j['new'] == true) {
             await load(force: true);
             await UnreadBadge.instance.refresh();
+          }
+          if (ver != null && ver != _ver) {
+            _ver = ver;
+            DiskCache.write(_verKey, [{'v': ver}]);
           }
           continue;
         }
@@ -788,6 +831,7 @@ class ChatThreadsController extends ChangeNotifier {
     _items
       ..clear()
       ..addAll(rows.map(ChatThread.fromJson));
+    _ver = (DiskCache.readOne(_verKey)?['v'] as num?)?.toInt() ?? 0;
     _loaded = true;
     notifyListeners();
   }

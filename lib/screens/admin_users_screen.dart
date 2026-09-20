@@ -37,6 +37,8 @@ import 'dart:async';
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
+
+import '../widgets/emoji_text.dart';
 import 'package:flutter/services.dart';
 import '../services/image_cache.dart';
 
@@ -1694,7 +1696,11 @@ class _ThreadRow extends StatelessWidget {
                             ),
                           ),
                         Expanded(
-                          child: Text(
+                          // Emoji xira bo'lib ketmasin
+                          // (`emoji_text.dart` izohiga qarang):
+                          // o'qilgan suhbatda alpha 0.55 — emoji
+                          // aynan shu yerda eng qoramtir ko'rinardi.
+                          child: EmojiText(
                             t.lastBody,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,

@@ -883,7 +883,15 @@ async fn init_db(env: &Env) -> bool {
             -- Foydalanuvchi o'qimagan (admin yozgan) xabarlar soni.
             unread_user INTEGER DEFAULT 0,
             -- Admin o'qimagan (foydalanuvchi yozgan) xabarlar soni.
-            unread_admin INTEGER DEFAULT 0
+            unread_admin INTEGER DEFAULT 0,
+            -- ── SUHBAT VERSIYASI ────────────────────────────
+            --
+            -- Suhbatda BIROR NARSA o'zgarganda (xabar qo'shildi,
+            -- o'qildi deb belgilandi, o'chirildi) shu son bittaga
+            -- oshadi. Ilova uzoq kutishda AYNAN shu bitta sonni
+            -- so'raydi (`chat_wait`) — ilgari har tekshiruvda 200
+            -- ta xabar qatori o'qilardi.
+            chat_ver INTEGER DEFAULT 0
         )", vec![]),
         ("CREATE INDEX IF NOT EXISTS idx_chat_threads_at
             ON chat_threads(last_at DESC)", vec![]),
@@ -1116,6 +1124,30 @@ async fn init_db(env: &Env) -> bool {
         ("INSERT OR IGNORE INTO app_config (cfg_key,cfg_value)
           VALUES ('views_sync_v7','1')", vec![]),
     ]).await.is_ok();
+
+    // ── YANGI USTUN: `chat_threads.chat_ver` ──────────────────
+    //
+    // Yuqoridagi `CREATE TABLE` faqat YANGI bazada ishlaydi —
+    // jadval allaqachon bor bo'lsa u hech narsa qilmaydi. Shu
+    // sabab mavjud baza uchun ALOHIDA `ALTER`.
+    //
+    // ── NEGA UMUMIY PAKETDA EMAS ──────────────────────────────
+    //
+    // Ustun ALLAQACHON qo'shilgan bo'lsa `ADD COLUMN` xato
+    // qaytaradi. Agar bu buyruq yuqoridagi paket ichida bo'lsa,
+    // `turso_batch` butun paketni "yiqildi" deb belgilardi,
+    // `ok` esa `false` bo'lib qolardi — va o'shanda `DB_READY`
+    // hech qachon qo'yilmay, BUTUN DDL to'plami HAR BIR so'rovda
+    // qaytadan yuborilardi (aynan yuqoridagi izoh ogohlantirgan
+    // falokat).
+    //
+    // Shu sabab u alohida yuboriladi va natijasi ATAYLAB
+    // e'tiborsiz qoldiriladi: "ustun bor" degan xato — bu normal
+    // holat, xato emas.
+    let _ = turso_exec(env,
+        "ALTER TABLE chat_threads ADD COLUMN chat_ver INTEGER DEFAULT 0",
+        vec![]).await;
+
     ok
 }
 
@@ -3971,7 +4003,11 @@ async fn create_session(
                      ?,?,?,?,?,?,?)",
             vec![
                 TursoArg::int(user_id),
-                TursoArg::text(&token), TursoArg::text(&device),
+                // Bazaga tokenning XESHI yoziladi, o'zi EMAS
+                // (`token_hash` izohiga qarang). Ilovaga esa pastda
+                // xom token qaytariladi — u faqat shu yerda va
+                // `login_tokens` dagi bir martalik qatorda ko'rinadi.
+                TursoArg::text(&token_hash(&token)), TursoArg::text(&device),
                 TursoArg::text(&platform), TursoArg::text(&app_version),
                 TursoArg::int(now), TursoArg::int(now),
             ],
@@ -4011,6 +4047,54 @@ async fn create_session(
     Err(Error::RustError("Sessiya ochib bo'lmadi".into()))
 }
 
+// ═══════════════════════════════════════════════════════════════
+//  SESSIYA TOKENI BAZADA OCHIQ SAQLANMAYDI
+// ═══════════════════════════════════════════════════════════════
+//
+// TOPILGAN XAVF: `sessions_db.session_token` da tokenning O'ZI
+// turardi. Baza bir marta oqib ketsa (yoki `TURSO_TOKEN` qo'lga
+// tushsa) hujumchi BARCHA faol sessiyalarni o'sha zahoti
+// egallardi — hech narsani buzish, parol tiklash kerak emas,
+// token tayyor holda yotadi.
+//
+// ── YECHIM: FAQAT XESH ─────────────────────────────────────
+//
+// Endi bazada tokenning SHA-256 xeshi saqlanadi. Ilova xom
+// tokenni yuboradi, worker uni xeshlab SOLISHTIRADI. Xesh
+// o'g'irlansa u bilan hech narsa qilib bo'lmaydi: xeshdan
+// tokenni qaytarib hisoblab bo'lmaydi.
+//
+// Aynan shu mantiq APK imzosi uchun allaqachon ishlatilgan
+// (`app_gate` izohi): "xesh — ochiq ma'lumot, u hech narsani
+// isbotlamaydi". Sessiya tokeni esa aksincha — u SIR, va sirni
+// bazada ochiq saqlash kerak emas.
+//
+// ── NEGA TUZ (SALT) YO'Q ───────────────────────────────────
+//
+// Tuz parollar uchun kerak: odam tanlagan parol qisqa va taxmin
+// qilinadi, shu sabab lug'at bo'yicha hujumga uchraydi. Bu token
+// esa 64 bayt TASODIFIY ma'lumot (`random_hex(32)` ikki marta) —
+// uni lug'at bilan ham, kuch bilan ham topib bo'lmaydi. Tuz
+// faqat har so'rovga qo'shimcha ish qo'shardi.
+//
+// ── ESKI SESSIYALAR UZILMAYDI ──────────────────────────────
+//
+// Bazada allaqachon OCHIQ tokenlar yotadi. Ularni shunchaki
+// tashlab yuborish barcha foydalanuvchini ilovadan chiqarib
+// yuborardi. Shu sabab `session_user` avval xesh bilan qaraydi,
+// topilmasa ESKI (ochiq) ko'rinishda qaraydi va topilgan qatorni
+// o'sha zahoti xeshga O'TKAZIB QO'YADI. Ya'ni migratsiya
+// foydalanuvchi sezmasdan, o'zi bo'ladi.
+//
+// Yangi sessiyalar uchun qo'shimcha so'rov YO'Q: xesh birinchi
+// urinishda topiladi.
+fn token_hash(token: &str) -> String {
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    h.update(token.as_bytes());
+    hex_of(&h.finalize())
+}
+
 /// Sessiya tokeni bo'yicha foydalanuvchini topadi va "oxirgi
 /// ko'rilgan" vaqtini yangilaydi (4 ta qurilma tartibi shunga
 /// qarab hisoblanadi).
@@ -4038,15 +4122,41 @@ async fn session_user(env: &Env, token: &str) -> Result<Option<Value>> {
     // odamning belgisi har doim 24 soatlik oyna ichida qoladi.
     // Sinxronlash paketi ham shu vaqtni yangilaydi (u yerda bu
     // bepul — o'sha quvurning ichida ketadi).
+    // Bazada tokenning O'ZI emas, XESHI yotadi (`token_hash` izohi).
+    let hashed = token_hash(token);
     let res = turso_many(env, &[
         ("SELECT u.* FROM sessions_db s JOIN users_db u ON u.id = s.user_id
-          WHERE s.session_token = ?", vec![TursoArg::text(token)]),
+          WHERE s.session_token = ?", vec![TursoArg::text(&hashed)]),
         ("UPDATE sessions_db SET last_seen_at=?
           WHERE session_token=? AND COALESCE(last_seen_at,0) < ?",
-         vec![TursoArg::int(now), TursoArg::text(token), TursoArg::int(now - SEEN_EVERY_MS)]),
+         vec![TursoArg::int(now), TursoArg::text(&hashed), TursoArg::int(now - SEEN_EVERY_MS)]),
     ]).await?;
-    let Some(first) = res.first() else { return Ok(None) };
-    let Some(u) = first_row(first) else { return Ok(None) };
+    let u = match res.first().and_then(first_row) {
+        Some(u) => u,
+        // ── ESKI (XESHLANMAGAN) SESSIYA ───────────────────────
+        //
+        // Xesh bilan topilmadi — demak bu qator xeshlashdan OLDIN
+        // yozilgan bo'lishi mumkin. Ochiq token bilan qaraymiz va
+        // topilsa qatorni DARHOL xeshga o'tkazamiz. Shu bilan
+        // migratsiya o'z-o'zidan bo'ladi va foydalanuvchi ilovadan
+        // chiqib ketmaydi.
+        //
+        // Bu qo'shimcha so'rov FAQAT eski sessiyalar uchun ketadi;
+        // xeshga o'tgach boshqa hech qachon takrorlanmaydi.
+        None => {
+            let legacy = turso_many(env, &[
+                ("SELECT u.* FROM sessions_db s JOIN users_db u ON u.id = s.user_id
+                  WHERE s.session_token = ?", vec![TursoArg::text(token)]),
+                ("UPDATE sessions_db SET session_token=?, last_seen_at=?
+                  WHERE session_token=?",
+                 vec![TursoArg::text(&hashed), TursoArg::int(now), TursoArg::text(token)]),
+            ]).await?;
+            match legacy.first().and_then(first_row) {
+                Some(u) => u,
+                None => return Ok(None),
+            }
+        }
+    };
     // ── BLOK MUDDATI TUGAGAN BO'LSA O'TKAZAMIZ ────────────
     //
     // `ban_state` muddatli blokning muddati o'tgan bo'lsa
@@ -4973,7 +5083,7 @@ async fn sync_route(mut req: Request, env: &Env) -> Result<Response> {
     if !token.is_empty() {
         stmts.push((
             "UPDATE sessions_db SET last_seen_at=? WHERE session_token=?",
-            vec![TursoArg::int(now), TursoArg::text(&token)],
+            vec![TursoArg::int(now), TursoArg::text(&token_hash(&token))],
         ));
     }
 
@@ -6180,9 +6290,19 @@ async fn chat_read(
     let other = if as_admin { 0 } else { 1 };
     let _ = turso_batch(env, &[
         (if as_admin {
-            "UPDATE chat_threads SET unread_admin=0 WHERE user_id=?"
+            // `AND ... <> 0` SHART: o'qilmagan xabar bo'lmasa qator
+            // UMUMAN tegilmaydi va versiya OSHMAYDI. Ushbu shartsiz
+            // har ochilish versiyani oshirardi, ilova o'zgarish deb
+            // bilib qayta yuklardi, bu yana "o'qildi" ni ishga
+            // tushirardi — CHEKSIZ AYLANISH. Yon foydasi: bekorga
+            // yozish ham ketmaydi.
+            "UPDATE chat_threads SET unread_admin=0,
+                    chat_ver=COALESCE(chat_ver,0)+1
+               WHERE user_id=? AND COALESCE(unread_admin,0)<>0"
          } else {
-            "UPDATE chat_threads SET unread_user=0 WHERE user_id=?"
+            "UPDATE chat_threads SET unread_user=0,
+                    chat_ver=COALESCE(chat_ver,0)+1
+               WHERE user_id=? AND COALESCE(unread_user,0)<>0"
          },
          vec![TursoArg::int(user)]),
         ("UPDATE chat_messages SET seen=1
@@ -6320,13 +6440,15 @@ async fn chat_admin_note(env: &Env, user_id: i64, body: &str) -> Result<()> {
             TursoArg::int(user_id), TursoArg::text(&text), TursoArg::int(now),
          ]),
         ("INSERT INTO chat_threads
-            (user_id,last_body,last_at,last_from_admin,unread_user,unread_admin)
-          VALUES (?,?,?,1,1,0)
+            (user_id,last_body,last_at,last_from_admin,unread_user,unread_admin,
+             chat_ver)
+          VALUES (?,?,?,1,1,0,1)
           ON CONFLICT(user_id) DO UPDATE SET
              last_body=excluded.last_body,
              last_at=excluded.last_at,
              last_from_admin=1,
-             unread_user=unread_user+1",
+             unread_user=unread_user+1,
+             chat_ver=COALESCE(chat_threads.chat_ver,0)+1",
          vec![TursoArg::int(user_id), TursoArg::text(&text), TursoArg::int(now)]),
     ]).await?;
     Ok(())
@@ -6433,14 +6555,16 @@ async fn chat_send(mut req: Request, env: &Env, origin: &str) -> Result<Response
             TursoArg::int(now),
          ]),
         ("INSERT INTO chat_threads
-            (user_id,last_body,last_at,last_from_admin,unread_user,unread_admin)
-          VALUES (?,?,?,?,?,?)
+            (user_id,last_body,last_at,last_from_admin,unread_user,unread_admin,
+             chat_ver)
+          VALUES (?,?,?,?,?,?,1)
           ON CONFLICT(user_id) DO UPDATE SET
              last_body=excluded.last_body,
              last_at=excluded.last_at,
              last_from_admin=excluded.last_from_admin,
              unread_user=unread_user+excluded.unread_user,
-             unread_admin=unread_admin+excluded.unread_admin",
+             unread_admin=unread_admin+excluded.unread_admin,
+             chat_ver=COALESCE(chat_threads.chat_ver,0)+1",
          vec![
             TursoArg::int(target), TursoArg::text(&label), TursoArg::int(now),
             TursoArg::int(if from_admin { 1 } else { 0 }),
@@ -6554,6 +6678,71 @@ async fn chat_wait(req: &Request, env: &Env) -> Result<Response> {
     let seen_before: i64 = q("seen").parse().unwrap_or(-1);
     let count_before: i64 = q("count").parse().unwrap_or(-1);
     let oldest_before: i64 = q("oldest").parse().unwrap_or(-1);
+
+    // ══════════════════════════════════════════════════════════
+    //  VERSIYA BO'YICHA KUTISH — 200 QATOR EMAS, 1 QATOR
+    // ══════════════════════════════════════════════════════════
+    //
+    // TALAB (foydalanuvchi): "harajat qancha kam bo'lsa shunchalik
+    // yaxshi".
+    //
+    // ── ILGARIGI NARX ─────────────────────────────────────────
+    //
+    // Har tekshiruvda suhbatning OXIRGI 200 XABARI o'qilardi
+    // (`LIMIT ?` = CHAT_LIMIT), undan esa atigi 4 ta son
+    // hisoblanardi. Bitta kutish so'rovi = 16 tekshiruv, ya'ni
+    // ~3 200 qator. Chat ekrani ochiq bitta odam sekundiga ~168
+    // qator o'qirdi — HECH NARSA bo'lmasa ham. Bu yuklama BEKOR
+    // turgan foydalanuvchilar soniga to'g'ri proportsional o'sardi
+    // va Turso kvotasining asosiy yeyuvchisi edi.
+    //
+    // ── ENDI ──────────────────────────────────────────────────
+    //
+    // `chat_threads.chat_ver` — suhbatda BIROR NARSA o'zgarganda
+    // (xabar qo'shildi / o'qildi / o'chirildi) bittaga oshadigan
+    // son. Tekshiruv uni ASOSIY KALIT bo'yicha bitta qatordan
+    // o'qiydi: 200 qator -> 1 qator, ya'ni ~200 barobar arzon.
+    //
+    // ── BU ANIQROQ HAM ────────────────────────────────────────
+    //
+    // Eski usul o'zgarishni 4 ta sonning TAXMINI bilan sezardi va
+    // chetki hollarda yanglishardi (masalan o'rtadagi xabar
+    // o'chirilsa son o'zgarmasligi mumkin — shu sabab `oldest` ham
+    // qo'shilgan edi). Versiya esa o'zgarishni O'TKAZIB YUBORMAYDI:
+    // u o'zgarish TURINI emas, o'zgarish BO'LGANINI sanaydi.
+    //
+    // ── ESKI ILOVALAR UZILMAYDI ───────────────────────────────
+    //
+    // Eski APK `ver` yubormaydi — unga eski (200 qatorli) yo'l
+    // o'sha holicha ishlaydi. Yangi APK `ver` yuboradi va arzon
+    // yo'ldan o'tadi.
+    let ver_before: i64 = q("ver").parse().unwrap_or(-1);
+    if ver_before >= 0 {
+        let (vsql, vargs): (&str, Vec<TursoArg>) = if watch_all {
+            // Admin butun ro'yxatni kuzatadi. `COUNT(*)` qo'shilgani
+            // MUHIM: yangi suhbat paydo bo'lganda yig'indi o'zgarmay
+            // qolishi mumkin, qatorlar soni esa albatta o'zgaradi.
+            ("SELECT COALESCE(SUM(chat_ver),0) + COUNT(*) FROM chat_threads",
+             vec![])
+        } else {
+            // Bitta qator, asosiy kalit bo'yicha — eng arzon o'qish.
+            ("SELECT COALESCE((SELECT chat_ver FROM chat_threads
+                                WHERE user_id=?),0)",
+             vec![TursoArg::int(target)])
+        };
+        for i in 0..CHAT_WAIT_TICKS {
+            if i > 0 {
+                Delay::from(core::time::Duration::from_millis(CHAT_WAIT_STEP_MS)).await;
+            }
+            let res = turso_exec(env, vsql, vargs.clone()).await?;
+            let ver = scalar(&res);
+            if ver != ver_before {
+                return ok_nostore(json!({"new": true, "ver": ver}));
+            }
+        }
+        return ok_nostore(json!({"new": false, "ver": ver_before}));
+    }
+
     let (sql, args): (&str, Vec<TursoArg>) = if watch_all {
         ("SELECT COALESCE(MAX(last_at),0), 0, COUNT(*), 0 FROM chat_threads", vec![])
     } else {
@@ -6884,7 +7073,8 @@ async fn refresh_thread(env: &Env, user: i64) {
                 unread_user = (SELECT COUNT(*) FROM chat_messages
                                 WHERE user_id=? AND from_admin=1 AND seen=0),
                 unread_admin = (SELECT COUNT(*) FROM chat_messages
-                                 WHERE user_id=? AND from_admin=0 AND seen=0)
+                                 WHERE user_id=? AND from_admin=0 AND seen=0),
+                chat_ver = COALESCE(chat_ver,0)+1
           WHERE user_id=?",
         vec![
             TursoArg::text(&label),
@@ -8834,8 +9024,11 @@ async fn auth_route(req: Request, env: &Env, origin: &str, path: &str, method: M
         (Method::Post, "/api/auth/logout") => {
             let t = bearer(&req);
             if !t.is_empty() {
-                let _ = turso_exec(env, "DELETE FROM sessions_db WHERE session_token=?",
-                    vec![TursoArg::text(&t)]).await;
+                // Xesh VA eski ochiq ko'rinish — ikkovi ham o'chiriladi:
+                // hali xeshga o'tmagan qator ham chiqib ketsin.
+                let _ = turso_exec(env,
+                    "DELETE FROM sessions_db WHERE session_token IN (?, ?)",
+                    vec![TursoArg::text(&token_hash(&t)), TursoArg::text(&t)]).await;
             }
             ok_nostore(json!({"success": true}))
         }
@@ -8856,8 +9049,14 @@ async fn auth_route(req: Request, env: &Env, origin: &str, path: &str, method: M
                 if let Some(m) = o.as_object_mut() {
                     // Sessiya tokeni javobga CHIQMAYDI — faqat "shu
                     // qurilmami?" belgisiga aylantiriladi.
+                    // Bazadagi qiymat — XESH, shu sabab solishtirishdan
+                    // oldin bearer ham xeshlanadi. Eski (xeshlanmagan)
+                    // qator uchun xom token bilan ham solishtiriladi.
+                    let th = token_hash(&t);
                     let is_current = m.get("session_token")
-                        .and_then(|v| v.as_str()).map(|s| s == t).unwrap_or(false);
+                        .and_then(|v| v.as_str())
+                        .map(|s| s == th || s == t)
+                        .unwrap_or(false);
                     m.remove("session_token");
                     m.insert("current".into(), json!(is_current));
                 }
