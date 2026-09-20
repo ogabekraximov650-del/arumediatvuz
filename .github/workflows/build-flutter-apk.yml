@@ -92,12 +92,32 @@ jobs:
           # ekranlariga boradigan yo'lni topmay, ularni APK'ga
           # umuman qo'shmaydi).
           #
-          # `user-32` va `admin-64` kerak bo'lganda shu ro'yxatga
-          # qo'shiladi.
+          # ── `admin-64` QO'SHILDI ──────────────────────────
+          #
+          # TOPILGAN MUAMMO (foydalanuvchi): `arumedia-admin-32.apk`
+          # "Ilova o'rnatilmadi" deb rad etildi. Eski ilova
+          # o'chirilgandan keyin ham o'rnatilmadi.
+          #
+          # Tekshirildi: APK'ning O'ZIDA muammo YO'Q — imzo
+          # sertifikati, AndroidManifest va ruxsatlar oldingi
+          # (muvaffaqiyatli o'rnatilgan) build bilan AYNAN bir xil.
+          #
+          # Qolgan eng ehtimolli sabab — ARXITEKTURA: bu APK
+          # ichida FAQAT `armeabi-v7a` (32-bit) kutubxonalar bor.
+          # Yangi telefonlarning bir qismi 32-bit ilovalarni
+          # umuman ishga tushira olmaydi va o'rnatishni shunday,
+          # sababsiz rad etadi.
+          #
+          # Shu sabab admin uchun ham 64-bit variant chiqariladi.
+          # `user-32` kerak bo'lganda shu ro'yxatga qo'shiladi.
           - name: admin-32
             admin: 'true'
             abi: armeabi-v7a
             platform: android-arm
+          - name: admin-64
+            admin: 'true'
+            abi: arm64-v8a
+            platform: android-arm64
           - name: user-64
             admin: 'false'
             abi: arm64-v8a
@@ -874,8 +894,13 @@ jobs:
             hajmi kichik. Telefoningiz 64-bitli bo'lsa `-64`,
             eskiroq bo'lsa `-32` ni oling.
 
+            * `arumedia-admin-64.apk` — admin paneli bilan, 64-bit (arm64-v8a)
             * `arumedia-admin-32.apk` — admin paneli bilan, 32-bit (armeabi-v7a)
             * `arumedia-user-64.apk`  — foydalanuvchi, 64-bit (arm64-v8a)
+
+            Yangi telefonlarning bir qismi 32-bit ilovalarni umuman
+            ishga tushira olmaydi va `-32` ni "Ilova o'rnatilmadi"
+            deb rad etadi — o'shanda `-64` ni oling.
 
             Foydalanuvchi APK'sida admin paneli kodi umuman yo'q.
 
