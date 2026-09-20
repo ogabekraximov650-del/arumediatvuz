@@ -5208,13 +5208,32 @@ const PAY_PROVIDERS: &[&str] = &[];
 ///
 /// O'ZGARDI (foydalanuvchi talabi): kunlik mayda tariflar
 /// (1/5/10/20 kun) OLIB TASHLANDI, o'rniga oylik tariflar.
-/// Chegirma 1 oylik narxga nisbatan hisoblanadi: 3 oy ~13%,
-/// 6 oy ~27%, 12 oy ~33%.
+///
+/// ── NARXLAR YANGILANDI (foydalanuvchi talabi) ───────────────
+///
+/// 1 oylik  — 15 000 (o'zgarmadi)
+/// 3 oylik  — 39 000 -> 42 000
+/// 6 oylik  — 66 000 -> 80 000
+/// 12 oylik — 120 000 -> 150 000
+///
+/// Chegirma 1 oylik narxga (15 000) nisbatan:
+///
+///   3 oy:  45 000 o'rniga  42 000  ->  3 000 kam  (~7%)
+///   6 oy:  90 000 o'rniga  80 000  -> 10 000 kam  (~11%)
+///  12 oy: 180 000 o'rniga 150 000  -> 30 000 kam  (~17%)
+///
+/// MUHIM: narx SOTIB OLINAYOTGAN paytda shu yerdan o'qiladi
+/// (`buy` -> `plan_price`), ilova faqat KUNNI yuboradi. Ya'ni
+/// bu ro'yxatni o'zgartirish YETARLI: ilovada ham, bazada ham
+/// boshqa hech narsaga tegish kerak emas.
+///
+/// Allaqachon olingan obunalar TEGILMAYDI — ular to'langan va
+/// muddati o'z holicha davom etadi.
 const PLANS: [(i64, i64); 4] = [
     (30, 15_000),
-    (90, 39_000),
-    (180, 66_000),
-    (365, 120_000),
+    (90, 42_000),
+    (180, 80_000),
+    (365, 150_000),
 ];
 
 fn plan_price(days: i64) -> Option<i64> {
