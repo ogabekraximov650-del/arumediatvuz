@@ -24,6 +24,7 @@
 //   - Oldindan yuklash SURILUVCHI OYNA bilan: ijro nuqtasidan keyin
 //     hamisha PREFETCH_WINDOW ta bo'lak (10 MB) tayyor turadi.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Write};
@@ -4325,25 +4326,102 @@ fn note_net_bytes(key: &str, bytes: u64) {
     }
 }
 
-/// Kadr uchun baytlarni o'qish: avval diskdan, bo'lmasa tarmoqdan.
+/// Kadr uchun baytlarni o'qish: avval xotiradagi zaxiradan, keyin
+/// diskdan, bo'lmasa tarmoqdan.
+///
+/// ═══════════════════════════════════════════════════════════════
+///  ZAXIRA BO'LAK (TOPILGAN XATO: KADR JUDA SEKIN CHIQARDI)
+/// ═══════════════════════════════════════════════════════════════
+///
+/// TOPILGAN XATO (foydalanuvchi): "thumbnail qo'yish juda juda
+/// sekin ishlayapti ... tomosha tarixidagi thumbnail qo'yish ham
+/// nimagadir sekin".
+///
+/// SABAB: har bir `read()` ALOHIDA HTTP so'rovi edi, `find_moov`
+/// esa MP4 sarlavhalarini ATIGI 16 BAYTDAN o'qiydi. Odatdagi
+/// fayl tartibi `ftyp` -> `mdat` -> `moov`, ya'ni bitta kadr
+/// uchun:
+///
+///   1. read(0, 16)            -> so'rov #1  (ftyp sarlavhasi)
+///   2. read(32, 16)           -> so'rov #2  (mdat sarlavhasi)
+///   3. read(<oxiri>, 16)      -> so'rov #3  (moov sarlavhasi)
+///   4. read(moov, ~0,5 MB)    -> so'rov #4  (moov tanasi)
+///   5. kalit kadr             -> so'rov #5
+///
+/// Beshta KETMA-KET so'rov, har biri to'liq borib-kelish vaqti
+/// (mobil tarmoqda 0,3-0,8 s) — ya'ni bitta kadr uchun 2-5
+/// soniya, hech qanday foydali ish qilmasdan. Bu tomosha
+/// tarixiga ham, yozishmaga ham BIR XIL tegadi — foydalanuvchi
+/// ikkalasining ham sekinligini aytgani shundan.
+///
+/// YECHIM: tarmoqqa chiqilganda kerakligidan KO'PROQ olinadi va
+/// xotirada saqlanadi. 16 baytlik sarlavha o'qishlari endi o'sha
+/// bo'lakdan chiqadi. Amalda so'rovlar soni 5 tadan 2 taga
+/// tushadi (ko'pincha `moov` va kalit kadr bitta bo'lakka
+/// tushib, bittaga ham).
 struct ThumbReader<'a> {
     shared: &'a Shared,
     dir: PathBuf,
     key: String,
     url: String,
     total: u64,
+    /// Oxirgi tarmoq o'qishi: (boshlanish o'rni, baytlar).
+    ///
+    /// `RefCell` yetarli: `ThumbReader` bitta so'rov ichida
+    /// yaratiladi va FAQAT o'sha oqimda ishlatiladi.
+    buf: RefCell<Option<(u64, Vec<u8>)>>,
 }
 
 impl ThumbReader<'_> {
+    /// Tarmoqqa chiqilganda eng kami shuncha bayt olinadi.
+    ///
+    /// 256 KB — `moov` ning katta qismini (odatda 0,2-0,8 MB) va
+    /// sarlavhalarni qoplaydi, lekin sekin tarmoqda ham og'ir
+    /// emas. Yozishmadagi video 2-5 MB, ya'ni bu faylning
+    /// atigi bir qismi.
+    const READAHEAD: u64 = 256 * 1024;
+
+    /// Xotirada saqlanadigan zaxiraning eng katta hajmi.
+    ///
+    /// Kalit kadr oralig'i 8 MB gacha bo'lishi mumkin — bunday
+    /// katta o'qish saqlanmaydi, aks holda arzon telefonda
+    /// xotira video ijrosidan tortib olinardi.
+    const BUF_MAX: u64 = 1024 * 1024;
+
+    /// Kerakli oraliq zaxira bo'lak ichidami.
+    fn from_buf(&self, start: u64, len: u64) -> Option<Vec<u8>> {
+        let b = self.buf.borrow();
+        let (at, data) = b.as_ref()?;
+        if start < *at {
+            return None;
+        }
+        let from = (start - *at) as usize;
+        let to = from.checked_add(len as usize)?;
+        if to > data.len() {
+            return None;
+        }
+        Some(data[from..to].to_vec())
+    }
+
     fn read(&self, start: u64, len: u64) -> Option<Vec<u8>> {
         if len == 0 || start >= self.total {
             return None;
         }
         let len = len.min(self.total - start);
+        if let Some(v) = self.from_buf(start, len) {
+            return Some(v);
+        }
         if let Some(v) = self.read_from_disk(start, len) {
             return Some(v);
         }
-        self.read_from_net(start, len)
+        // Tarmoqqa chiqyapmiz — bir yo'la ko'proq olamiz.
+        let want = len.max(Self::READAHEAD).min(self.total - start);
+        let data = self.read_from_net(start, want, len)?;
+        let out = data[..len as usize].to_vec();
+        if data.len() as u64 <= Self::BUF_MAX {
+            *self.buf.borrow_mut() = Some((start, data));
+        }
+        Some(out)
     }
 
     /// Kerakli baytlar TO'LIQ keshda bo'lsa — tarmoqqa umuman
@@ -4374,8 +4452,15 @@ impl ThumbReader<'_> {
         }
     }
 
-    fn read_from_net(&self, start: u64, len: u64) -> Option<Vec<u8>> {
-        let end = start + len - 1;
+    /// `want` bayt so'raydi, lekin KAMIDA `need` bayt kelsa
+    /// yetarli deb hisoblaydi.
+    ///
+    /// Nega shunday: zaxira uchun kerakligidan ko'proq so'raymiz
+    /// va manba undan kamroq bersa (fayl oxiriga yaqin joy,
+    /// oraliqni qisqartiradigan proksi) bu XATO emas — kerakli
+    /// qism baribir kelgan bo'lsa ish davom etadi.
+    fn read_from_net(&self, start: u64, want: u64, need: u64) -> Option<Vec<u8>> {
+        let end = start + want - 1;
         let resp = signed(self.shared.agent.get(&self.url), "GET", &self.url)
             .set("Range", &format!("bytes={start}-{end}"))
             .call()
@@ -4387,13 +4472,13 @@ impl ThumbReader<'_> {
         if resp.status() != 206 && start != 0 {
             return None;
         }
-        let mut buf = Vec::with_capacity(len as usize);
+        let mut buf = Vec::with_capacity(want as usize);
         resp.into_reader()
-            .take(len)
+            .take(want)
             .read_to_end(&mut buf)
             .ok()?;
         note_net_bytes(&self.key, buf.len() as u64);
-        if buf.len() as u64 == len {
+        if buf.len() as u64 >= need {
             Some(buf)
         } else {
             None
@@ -4678,6 +4763,7 @@ fn serve_thumb(
                 key: key.clone(),
                 url: url.to_string(),
                 total,
+                buf: RefCell::new(None),
             };
 
             // Har bir qadamda "bo'lmasa 404" — foydalanuvchi
@@ -6350,6 +6436,89 @@ mod tests {
         if let Ok(mut g) = THUMB_MEMO.lock() {
             g.clear();
         }
+    }
+
+    /// KADR UCHUN TARMOQ SO'ROVLARI SONI (regressiya testi).
+    ///
+    /// TOPILGAN XATO (foydalanuvchi): "thumbnail qo'yish juda juda
+    /// sekin ishlayapti ... tomosha tarixidagi ham sekin".
+    ///
+    /// SABAB: har bir `ThumbReader::read` alohida HTTP so'rovi edi,
+    /// `find_moov` esa MP4 sarlavhalarini ATIGI 16 BAYTDAN o'qiydi.
+    /// Bitta kadr uchun 5 ta KETMA-KET so'rov ketardi va mobil
+    /// tarmoqda har biri borib-kelish vaqtini yeb, kadr 2-5
+    /// soniyada chiqardi.
+    ///
+    /// Bu test aynan o'sha holatni o'lchaydi: uchta kichik
+    /// sarlavha o'qishi BITTA so'rovga tushishi kerak. Zaxira
+    /// bo'lak olib tashlansa — test yiqiladi (3 ta so'rov chiqadi).
+    #[test]
+    fn kadr_sarlavhalari_bitta_sorovda_keladi() {
+        let total: u64 = 4 * 1024 * 1024;
+        let (port, reqs) = start_origin(total);
+        let url = format!("http://127.0.0.1:{port}/{TEST_NAME}");
+
+        // Diskda hech narsa yo'q — hamma o'qish tarmoqqa boradi.
+        let root = std::env::temp_dir().join(format!(
+            "aru_thumbread_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let shared = Shared {
+            cache_root: root.clone(),
+            start: Instant::now(),
+            logs: Mutex::new(Vec::new()),
+            agent: ureq::AgentBuilder::new()
+                .timeout_read(Duration::from_secs(20))
+                .build(),
+            warm_agent: ureq::AgentBuilder::new().build(),
+            net_by_file: Mutex::new(HashMap::new()),
+        };
+        let reader = ThumbReader {
+            shared: &shared,
+            dir: root.join("kalit"),
+            key: "kalit".to_string(),
+            url: url.clone(),
+            total,
+            buf: RefCell::new(None),
+        };
+
+        // `find_moov` aynan shunday yuradi: `ftyp` sarlavhasi,
+        // keyin `mdat` sarlavhasi, keyin navbatdagi atom.
+        let a = reader.read(0, 16).expect("0 dan o'qilmadi");
+        let b = reader.read(32, 16).expect("32 dan o'qilmadi");
+        let c = reader.read(100_000, 16).expect("100000 dan o'qilmadi");
+
+        // Baytlar AYNAN o'z joyidan kelgan (manba tanani
+        // pozitsiyadan yasaydi) — zaxira bo'lak siljib ketmagan.
+        assert_eq!(a[0], 0, "0-bayt noto'g'ri");
+        assert_eq!(b[0], (32 % 251) as u8, "32-bayt noto'g'ri");
+        assert_eq!(c[0], (100_000 % 251) as u8, "100000-bayt noto'g'ri");
+
+        assert_eq!(
+            reqs.lock().unwrap().len(),
+            1,
+            "uchchala sarlavha o'qishi BITTA so'rovga tushishi kerak edi, \
+             so'rovlar: {:?}",
+            reqs.lock().unwrap()
+        );
+
+        // Zaxiradan TASHQARIDAGI joy — yangi so'rov (bu to'g'ri).
+        let d = reader
+            .read(total - 16, 16)
+            .expect("oxiridan o'qilmadi");
+        assert_eq!(d[0], ((total - 16) % 251) as u8, "oxirgi bayt noto'g'ri");
+        assert_eq!(
+            reqs.lock().unwrap().len(),
+            2,
+            "bo'lakdan tashqaridagi o'qish uchun aynan bitta yangi so'rov \
+             kutilgandi, so'rovlar: {:?}",
+            reqs.lock().unwrap()
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// ISITISH MANZILI: video manzilidan to'g'ri yasalishi.

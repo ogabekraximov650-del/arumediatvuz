@@ -103,12 +103,17 @@ class ChatVideoThumb extends ChangeNotifier {
   /// Kadr ajratuvchi bilan aloqa kanali (`MainActivity.kt`).
   static const MethodChannel _channel = MethodChannel('aru/thumb');
 
-  /// Bir vaqtda faqat BITTA kadr yasaladi.
+  /// Bir vaqtda nechta kadr yasaladi.
   ///
-  /// Tomosha tarixida ikkita — lekin u ekran boshqa hech narsa
-  /// qilmayotganda ishlaydi. Yozishmada esa yonida ovozli xabar,
-  /// rasm va uzoq kutish so'rovi turadi, shu sabab bitta.
-  static const int _maxParallel = 1;
+  /// Tomosha tarixidagidek ikkita. Ilgari bitta edi — lekin har
+  /// bir kadr 5 ta ketma-ket tarmoq so'rovi olardi
+  /// (`ThumbReader` dagi "ZAXIRA BO'LAK" izohiga qarang), ya'ni
+  /// bitta sekin video orqasidagi hammasini ushlab turardi.
+  /// So'rovlar 5 tadan 2 taga tushgach, ikkitasi xavfsiz.
+  ///
+  /// Yadrodagi kadr xotirasi (`THUMB_MEMO`) 3 ta yozuv saqlaydi,
+  /// ya'ni ikkita parallel ish uchun yetadi.
+  static const int _maxParallel = 2;
 
   /// Bitta kadr uchun urinishlar muddati.
   ///
@@ -128,13 +133,14 @@ class ChatVideoThumb extends ChangeNotifier {
   /// eng ko'p soni.
   ///
   /// Diqqat: bu KADR soni emas, URINISH soni. Bitta kadr eng
-  /// ko'pi ikki urinish oladi, ya'ni eng yomon holatda 4 ta
-  /// video, eng yaxshi holatda 8 tasi tarmoqdan olinadi.
+  /// ko'pi ikki urinish oladi, ya'ni eng yomon holatda 8 ta
+  /// video, eng yaxshi holatda 16 tasi tarmoqdan olinadi.
   ///
   /// NEGA CHEGARA BOR: uzun yozishmada o'nlab video bo'lishi
   /// mumkin va ularning HAMMASI uchun tarmoqqa chiqish — aynan
   /// avvalgi safargi xato. Ekranda odatda 2-3 ta video
-  /// ko'rinadi, shu sabab 8 ta urinish yetib ortadi.
+  /// ko'rinadi, lekin yuqoriga surilganda yana chiqadi — 16 ta
+  /// urinish uzun yozishmaga ham yetadi.
   ///
   /// Chegara tugagach ish TO'XTAYDI va ekran qayta ochilgandagina
   /// yangilanadi.
@@ -142,7 +148,7 @@ class ChatVideoThumb extends ChangeNotifier {
   /// Diskdan o'qish bu chegaraga KIRMAYDI — u tarmoqqa
   /// chiqmaydi va bepul, ya'ni BIR MARTA yasalgan kadr keyin
   /// har doim darhol chiqadi.
-  static const int _sessionBudget = 8;
+  static const int _sessionBudget = 16;
 
   /// Xotiradagi kadrlar soni (har biri ~20 KB).
   static const int _memoryLimit = 40;

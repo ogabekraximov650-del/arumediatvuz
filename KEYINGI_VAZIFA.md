@@ -828,6 +828,50 @@ ikkinchisi birinchisining bo'lagini o'chirib yuborardi va kadr
 qaytadan yasalardi. Regressiya testi:
 `kadr_xotirasi_bir_nechta_yozuvni_saqlaydi`.
 
+### KADR NEGA JUDA SEKIN EDI — ZAXIRA BO'LAK (2026-09)
+
+**TOPILGAN XATO (foydalanuvchi):** «thumbnail qo'yish juda juda
+sekin ishlayapti... tomosha tarixidagi thumbnail qo'yish ham
+nimagadir sekin».
+
+**Sabab:** `ThumbReader::read` ning har bir chaqiruvi ALOHIDA
+HTTP so'rovi edi, `find_moov` esa MP4 sarlavhalarini **atigi 16
+baytdan** o'qiydi. Odatdagi fayl tartibi `ftyp` → `mdat` → `moov`,
+ya'ni bitta kadr uchun:
+
+| # | o'qish | nima |
+|---|---|---|
+| 1 | `read(0, 16)` | `ftyp` sarlavhasi |
+| 2 | `read(32, 16)` | `mdat` sarlavhasi |
+| 3 | `read(<oxiri>, 16)` | `moov` sarlavhasi |
+| 4 | `read(moov, ~0,5 MB)` | `moov` tanasi |
+| 5 | kalit kadr | kadr baytlari |
+
+**Beshta ketma-ket so'rov**, har biri to'liq borib-kelish vaqti
+(mobil tarmoqda 0,3-0,8 s) → bitta kadr 2-5 soniya. Bu tomosha
+tarixiga ham, yozishmaga ham BIR XIL tegadi — shu sabab
+foydalanuvchi ikkalasining sekinligini aytgan.
+
+**Yechim:** `ThumbReader` da **zaxira bo'lak**. Tarmoqqa
+chiqilganda kerakligidan ko'proq (`READAHEAD` = 256 KB) olinadi
+va xotirada saqlanadi; kichik sarlavha o'qishlari o'sha
+bo'lakdan chiqadi. So'rovlar 5 tadan **2 taga** tushadi
+(ko'pincha `moov` va kalit kadr bitta bo'lakka tushib, bittaga
+ham).
+
+Katta o'qish (kalit kadr oralig'i 8 MB gacha) saqlanmaydi —
+`BUF_MAX` = 1 MB, aks holda arzon telefonda xotira video
+ijrosidan tortib olinardi.
+
+**Regressiya testi:** `kadr_sarlavhalari_bitta_sorovda_keladi` —
+uchta kichik o'qish bitta so'rovga tushishini o'lchaydi. Zaxira
+olib tashlansa test yiqiladi.
+
+Shundan keyin yozishmadagi `_maxParallel` 1 dan **2** ga
+ko'tarildi (tomosha tarixidagidek) va `_sessionBudget` 8 dan
+**16** ga: har bir kadr arzonlashgach, bitta sekin video
+orqasidagilarni ushlab turmaydi.
+
 ### KADR AJRATUVCHI TASLIM BO'LMAYDI (`MainActivity.grabFrame`)
 
 Telegramdan kelgan ba'zi MP4 fayllarda `getFrameAtTime` har doim
