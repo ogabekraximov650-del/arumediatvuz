@@ -119,6 +119,7 @@ import '../services/image_cache.dart';
 
 import '../services/app_settings.dart';
 import '../services/billing_service.dart';
+import '../services/call_sounds.dart';
 import '../services/comments_service.dart';
 import '../services/download_manager.dart';
 import '../services/app_http.dart';
@@ -398,6 +399,18 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // Tartib (foydalanuvchi talabi): Ma'lumot | Qismlar | Bo'limlar,
     // va ochilganda MA'LUMOT oynasi turadi.
     _tabCtrl = TabController(length: 4, vsync: this);
+
+    // ── BILDIRISHNOMA KELGANDA OVOZ PASAYADI ──────────────────
+    //
+    // TALAB (foydalanuvchi): "agar pleyerda o'tirgan bo'lsa 5
+    // soniyaga video ovozi pasayib bildirishnoma ovozi eshitilishi
+    // kerak".
+    //
+    // NEGA SHU YERDA: bildirishnoma xizmati pleyerni bilmaydi va
+    // bilmasligi ham kerak. Shu sabab BOG'LANISHNI pleyerning o'zi
+    // qo'yadi — ekran ochiq bo'lsa ovoz pasayadi, yopiq bo'lsa
+    // umuman hech narsa bo'lmaydi.
+    CallSounds.instance.onDuck = _duckVolume;
     _tabPages = PageController();
 
     // Holat serverdan bir marta yangilanadi: odam boshqa
@@ -525,8 +538,28 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
         onExpanded: _setCommentsExpanded,
       );
 
+  /// Video ovozini vaqtincha pasaytiradi (yoki qaytaradi).
+  ///
+  /// To'liq o'chirilmaydi, atigi 15% ga tushiriladi: bildirishnoma
+  /// eshitilsin, lekin suhbat yoki musiqa ham butunlay uzilib
+  /// qolmasin.
+  void _duckVolume(bool on) {
+    final c = _controller;
+    if (c == null || !c.value.isInitialized) return;
+    try {
+      c.setVolume(on ? 0.15 : 1.0);
+    } catch (e) {
+      debugPrint('VideoPlayer._duckVolume: $e');
+    }
+  }
+
   @override
   void dispose() {
+    // Bog'lanish olib tashlanadi — aks holda bildirishnoma
+    // yopilgan ekranning pleyeriga murojaat qilardi.
+    if (CallSounds.instance.onDuck == _duckVolume) {
+      CallSounds.instance.onDuck = null;
+    }
     VideoGate.leave();
     BillingService.instance.removeListener(_onBillingChanged);
     // `late final` — Izohlar oynasi umuman ochilmagan bo'lsa

@@ -21,6 +21,8 @@ import 'dart:io';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+// Xabardan nusxa olish uchun (`Clipboard`).
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
@@ -31,10 +33,14 @@ import '../services/image_cache.dart';
 import '../services/auth_service.dart';
 import '../services/screen_guard.dart';
 import '../services/storage_janitor.dart';
+import '../services/app_notifier.dart';
+import '../services/call_service.dart';
+import '../services/realtime_service.dart';
 import '../services/support_service.dart';
 import '../services/voice_player.dart';
 import '../theme/app_background.dart';
 import '../widgets/glass.dart';
+import 'call_screen.dart';
 import 'media_view_screen.dart';
 import 'public_profile_screen.dart';
 
@@ -67,6 +73,13 @@ class _SupportChatScreenState extends State<SupportChatScreen>
     with ScreenGuarded<SupportChatScreen> {
   late final ChatController _chat = ChatController(userId: widget.userId);
   final _input = TextEditingController();
+
+  /// Yozish maydonining fokusi.
+  ///
+  /// NEGA KERAK: javob yozish yoki tahrirlash menyudan
+  /// boshlanadi — o'shanda klaviatura O'ZI ochilishi kerak,
+  /// aks holda odam yana maydonga bosishga majbur bo'lardi.
+  final _focus = FocusNode();
   final _scroll = ScrollController();
   bool _sending = false;
 
@@ -145,6 +158,21 @@ class _SupportChatScreenState extends State<SupportChatScreen>
   Timer? _recTimer;
   String? _recPath;
 
+  // ── JAVOB VA TAHRIRLASH ───────────────────────────────────
+  //
+  // Ikkovi ham yozish panelining USTIDA kichik tasma ko'rsatadi.
+  // Bir vaqtda faqat bittasi bo'ladi: tahrirlash boshlanganda
+  // javob bekor qilinadi va aksincha.
+  ChatMessage? _replyTo;
+  ChatMessage? _editing;
+
+  // ── "XABAR YOZMOQDA" ──────────────────────────────────────
+  //
+  // Har harfda emas: xabar 3 soniyada bir martadan ko'p
+  // yuborilmaydi. Aks holda tez yozadigan odam bir daqiqada
+  // yuzlab xabar yuborardi.
+  DateTime _typingSentAt = DateTime.fromMillisecondsSinceEpoch(0);
+
   @override
   void initState() {
     super.initState();
@@ -154,6 +182,56 @@ class _SupportChatScreenState extends State<SupportChatScreen>
     _chat.load().then((_) => _toBottom(jump: true));
     // Suhbat OCHIQ turgandagina yangi xabarlar so'raladi.
     _chat.startPolling();
+
+    // ── REAL VAQTDAGI ULANISH ─────────────────────────────
+    //
+    // Undan uch narsa keladi: suhbatdoshning onlayn holati,
+    // "yozmoqda" belgisi va qo'ng'iroq signallari.
+    //
+    // Uzoq kutish (`startPolling`) o'chirilmadi — u ishonchli
+    // zaxira bo'lib qoladi (`realtime_service.dart` izohi).
+    _rt.addListener(_onRt);
+    unawaited(_rt.connect(threadUser: widget.userId));
+    _call.listen();
+    _call.addListener(_onRt);
+    _call.onEnded = _onCallEnded;
+    // Bildirishnoma xizmati bilsin: shu suhbat ochiq, ya'ni
+    // unga kelgan xabar uchun banner CHIQMASIN.
+    AppNotifier.instance.chatOpened(widget.userId);
+  }
+
+  final _rt = RealtimeService.instance;
+  final _call = CallService.instance;
+
+  /// Ulanishdan yoki qo'ng'iroqdan yangilik keldi — sarlavha va
+  /// yuqoridagi tasma qayta chiziladi.
+  void _onRt() {
+    if (mounted) setState(() {});
+  }
+
+  /// Qo'ng'iroq tugadi.
+  ///
+  /// NEGA YOZISHMAGA YOZILMAYDI: qo'ng'iroq yozuvi ikkala tomonda
+  /// bir xil ko'rinishi kerak, ya'ni uni SERVER qo'yishi kerak.
+  /// Ilovadan yozilsa ikki tomonda ikki xil yozuv paydo bo'lardi
+  /// (yoki umuman bittasida chiqmasdi). Hozircha shunchaki
+  /// xabar beriladi.
+  void _onCallEnded(CallEnding how, Duration length) {
+    if (!mounted) return;
+    final text = switch (how) {
+      CallEnding.declined => 'Qo\'ng\'iroq rad etildi',
+      CallEnding.missed => 'Javob berilmadi',
+      CallEnding.cancelled => 'Qo\'ng\'iroq bekor qilindi',
+      CallEnding.failed => 'Qo\'ng\'iroq ulanmadi',
+      CallEnding.finished => 'Suhbat tugadi (${_hhmmss(length)})',
+    };
+    _snack(text);
+  }
+
+  static String _hhmmss(Duration d) {
+    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final sec = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+    return d.inHours > 0 ? '${d.inHours}:$m:$sec' : '$m:$sec';
   }
 
   @override
@@ -170,10 +248,26 @@ class _SupportChatScreenState extends State<SupportChatScreen>
     unawaited(VoicePlayer.instance.stop());
     _recTimer?.cancel();
     unawaited(_rec.dispose());
+    _rt.removeListener(_onRt);
+    _call.removeListener(_onRt);
+    // ── ULANISH QO'NG'IROQ PAYTIDA UZILMAYDI ─────────────
+    //
+    // Chat yopilsa ham suhbat davom etishi mumkin (odam
+    // qo'ng'iroq paytida chatdan chiqib ketdi). Ulanish
+    // uzilsa signal almashinuvi to'xtab, qo'ng'iroq o'lardi.
+    if (!_call.busy) {
+      _call.onEnded = null;
+    }
+    // Ulanish UZILMAYDI: u endi butun ilovaga tegishli
+    // (`AppNotifier`), ya'ni chat yopilgach ham xabar va
+    // qo'ng'iroq yetib boraveradi. Faqat "qaysi suhbat ochiq"
+    // belgisi olinadi.
+    AppNotifier.instance.chatClosed();
     _chat.removeListener(_onData);
     _chat.stopPolling();
     _chat.dispose();
     _input.dispose();
+    _focus.dispose();
     _scroll.dispose();
     // Ekran yopildi — profil sahifasidagi nuqta yangilansin.
     UnreadBadge.instance.refresh();
@@ -248,8 +342,38 @@ class _SupportChatScreenState extends State<SupportChatScreen>
   ///
   /// Server ham shunday tekshiradi (admin bo'lmasa 403), ya'ni
   /// o'zgartirilgan ilova bilan ham o'chirib bo'lmaydi.
-  bool get _canDelete =>
-      AuthService.instance.user?.isAdmin == true && widget.userId != null;
+  /// Tanlab o'chirish rejimi umuman ochilsinmi.
+  ///
+  /// Endi FAQAT ADMIN emas: foydalanuvchi ham o'z xabarlarini
+  /// tanlab o'chira oladi (foydalanuvchi talabi bo'yicha qoida
+  /// o'zgardi). Ro'yxatdagi hamma xabar emas, faqat o'zi
+  /// o'chira oladigani tanlanadi.
+  bool get _canDelete => true;
+
+  /// Shu xabarni o'chira olamanmi.
+  ///
+  ///   admin        → suhbatdagi hamma xabarni;
+  ///   foydalanuvchi → faqat O'ZI yozganini.
+  ///
+  /// Haqiqiy to'siq serverda (`chat_may_delete`); bu yerdagisi
+  /// shunchaki menyuni to'g'ri ko'rsatadi.
+  bool _canDeleteMsg(ChatMessage m) {
+    if (m.pending) return false;
+    if (AuthService.instance.user?.isAdmin == true) return true;
+    return !m.fromAdmin;
+  }
+
+  /// Shu xabarni TAHRIRLAY olamanmi.
+  ///
+  /// TALAB (foydalanuvchi): "admin foydalanuvchi xabrini faqat
+  /// o'chirishi mumkin undan ko'pi emas". Ya'ni MATNGA faqat uni
+  /// yozgan odam tegadi — admin ham, foydalanuvchi ham.
+  bool _canEditMsg(ChatMessage m) {
+    if (m.pending) return false;
+    // Ovozli xabarning matni yo'q — tahrirlaydigan narsa ham yo'q.
+    if (m.isVoice) return false;
+    return _chat.isAdminView ? m.fromAdmin : !m.fromAdmin;
+  }
 
   /// Rasm yoki video tanlab, B2'ga yuklaydi va xabar qilib
   /// yuboradi.
@@ -395,6 +519,8 @@ class _SupportChatScreenState extends State<SupportChatScreen>
 
   /// Mikrofon bosildi — yozib olish boshlanadi.
   Future<void> _startRecording() async {
+    // Suhbatdosh sarlavhada "Ovozli xabar yozmoqda" deb ko'rsin.
+    _rt.sendTyping(kind: 'voice');
     if (_recording || _uploading) return;
     // Ruxsatni paketning o'zi so'raydi. Berilmasa — sababi
     // aytiladi, jim qolinmaydi.
@@ -445,6 +571,8 @@ class _SupportChatScreenState extends State<SupportChatScreen>
   /// faylni o'chirib tashlaydi.
   Future<void> _stopRecording({required bool send}) async {
     if (!_recording) return;
+    // Yozish tugadi — belgi darhol so'nsin.
+    _rt.sendTyping(kind: 'voice', on: false);
     _recTimer?.cancel();
     _recTimer = null;
     final len = _recLen;
@@ -502,6 +630,7 @@ class _SupportChatScreenState extends State<SupportChatScreen>
   /// (Server ham shunday: o'chirish so'rovi admin bo'lmasa 403
   /// qaytaradi — ya'ni o'zgartirilgan ilova ham o'chira olmaydi.)
   void _toggleSelect(ChatMessage m) {
+    if (!_canDeleteMsg(m)) return;
     if (!_canDelete) return;
     setState(() {
       if (!_selected.remove(m.id)) _selected.add(m.id);
@@ -513,7 +642,11 @@ class _SupportChatScreenState extends State<SupportChatScreen>
   void _selectAll() => setState(() {
         _selected
           ..clear()
-          ..addAll(_chat.items.map((m) => m.id));
+          // Faqat O'CHIRA OLADIGANLARI: aks holda "hammasini
+          // tanlash" serverga o'chirib bo'lmaydigan raqamlarni
+          // yuborardi va "hech narsa o'chmadi" degan taassurot
+          // qoldirardi.
+          ..addAll(_chat.items.where(_canDeleteMsg).map((m) => m.id));
       });
 
   /// ADMIN: TANLANGAN xabarlarni butunlay o'chiradi.
@@ -585,7 +718,19 @@ class _SupportChatScreenState extends State<SupportChatScreen>
     final text = _input.text.trim();
     if (text.isEmpty) return;
     setState(() => _sending = true);
-    final err = await _chat.send(text);
+
+    // ── TAHRIRLASH REJIMI ─────────────────────────────────
+    //
+    // Yozish paneli ikki ish qiladi: yangi xabar yuborish va
+    // eskisini tahrirlash. Tugma bir xil, natija boshqacha.
+    final editing = _editing;
+    final String? err;
+    if (editing != null) {
+      err = await _chat.editMessage(editing.id, text);
+    } else {
+      err = await _chat.send(text, replyTo: _replyTo?.id ?? '');
+    }
+
     if (!mounted) return;
     setState(() => _sending = false);
     if (err != null) {
@@ -593,8 +738,255 @@ class _SupportChatScreenState extends State<SupportChatScreen>
       return;
     }
     _input.clear();
+    // "Yozmoqda" belgisi darhol so'nsin — xabar allaqachon ketdi.
+    _rt.sendTyping(on: false);
+    setState(() {
+      _replyTo = null;
+      _editing = null;
+    });
+    if (editing == null) _toBottom();
+  }
+
+  /// Matn o'zgardi — suhbatdoshga "yozmoqda" deb bildiramiz.
+  ///
+  /// Har harfda emas: 3 soniyada bir martadan ko'p yuborilmaydi
+  /// (`_typingSentAt` izohiga qarang).
+  void _onInputChanged() {
     setState(() {});
-    _toBottom();
+    if (_input.text.trim().isEmpty) return;
+    final now = DateTime.now();
+    if (now.difference(_typingSentAt).inSeconds < 3) return;
+    _typingSentAt = now;
+    _rt.sendTyping();
+  }
+
+  /// Javob yozishni boshlaydi.
+  void _startReply(ChatMessage m) {
+    setState(() {
+      _replyTo = m;
+      _editing = null;
+    });
+    _focus.requestFocus();
+  }
+
+  /// Tahrirlashni boshlaydi — matn yozish paneliga tushadi.
+  void _startEdit(ChatMessage m) {
+    setState(() {
+      _editing = m;
+      _replyTo = null;
+    });
+    _input.text = m.body;
+    _input.selection =
+        TextSelection.collapsed(offset: _input.text.length);
+    _focus.requestFocus();
+  }
+
+  // ═════════════════════════════════════════════════════════
+  //  XABAR MENYUSI
+  // ═════════════════════════════════════════════════════════
+  //
+  // TALAB (foydalanuvchi, screenshotlar bilan): xabar ustiga
+  // uzoq bosilganda menyu chiqsin. Bandlar:
+  //
+  //   Javob yozish · Nusxa olish · Qadash · Tahrirlash · O'chirish
+  //
+  // "Tarjima qilish" va "Uzatish" ATAYLAB YO'Q — foydalanuvchi
+  // ularni olib tashlashni so'radi. Uzatish bu chatda ma'noga
+  // ham ega emas: suhbat faqat admin bilan, ya'ni uzatadigan
+  // joy yo'q.
+  //
+  // O'z xabarining ustida qo'shimcha qator: o'qilgan-o'qilmagani
+  // va QACHON o'qilgani.
+  Future<void> _showMessageMenu(ChatMessage m, bool mine) async {
+    final canEdit = _canEditMsg(m);
+    final canDelete = _canDeleteMsg(m);
+
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF1C1A19),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (sheet) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 8),
+            // Tortish uchun kichik chiziqcha.
+            Container(
+              width: 36,
+              height: 4,
+              decoration: BoxDecoration(
+                color: Colors.white24,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            const SizedBox(height: 12),
+
+            // ── O'QILGANLIK HOLATI ────────────────────────────
+            //
+            // TALAB: "o'qigan deb 2026/01/01/12:34 deb chiqishi
+            // kerak".
+            if (mine && !m.pending)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 0, 20, 10),
+                child: Row(
+                  children: [
+                    Icon(
+                      m.seen ? Icons.done_all_rounded : Icons.done_rounded,
+                      size: 18,
+                      color: m.seen ? AppColors.accent : Colors.white54,
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      m.seen ? 'o\'qigan' : 'yuborilgan',
+                      style: const TextStyle(
+                          color: Colors.white70, fontSize: 13.5),
+                    ),
+                    if (m.seen && m.seenAt > 0) ...[
+                      const SizedBox(width: 10),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 9, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.08),
+                          borderRadius: BorderRadius.circular(7),
+                        ),
+                        child: Text(
+                          _stamp(m.seenAt),
+                          style: const TextStyle(
+                              color: Colors.white70, fontSize: 12.5),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+
+            _menuItem(sheet, Icons.reply_rounded, 'Javob yozish',
+                () => _startReply(m)),
+            if (m.body.isNotEmpty)
+              _menuItem(sheet, Icons.copy_rounded, 'Nusxa olish', () {
+                Clipboard.setData(ClipboardData(text: m.body));
+                _snack('Nusxa olindi');
+              }),
+            _menuItem(
+              sheet,
+              m.pinned
+                  ? Icons.push_pin_outlined
+                  : Icons.push_pin_rounded,
+              m.pinned ? 'Qadoqni yechish' : 'Qadash',
+              () => unawaited(_pin(m)),
+            ),
+            if (canEdit)
+              _menuItem(sheet, Icons.edit_outlined, 'Tahrirlash',
+                  () => _startEdit(m)),
+            if (canDelete)
+              _menuItem(
+                sheet,
+                Icons.delete_outline_rounded,
+                'O\'chirish',
+                () => unawaited(_deleteOne(m)),
+                danger: true,
+              ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Menyuning bitta bandi.
+  ///
+  /// Amal menyu YOPILGANDAN keyin bajariladi: `setState` yopilib
+  /// turgan oyna ustida chaqirilsa Flutter ogohlantirish beradi
+  /// va klaviatura ham noto'g'ri joyda ochilardi.
+  Widget _menuItem(
+    BuildContext sheet,
+    IconData icon,
+    String label,
+    VoidCallback action, {
+    bool danger = false,
+  }) {
+    final color = danger ? Colors.red.shade300 : Colors.white;
+    return ListTile(
+      dense: true,
+      leading: Icon(icon, color: color, size: 22),
+      title: Text(label, style: TextStyle(color: color, fontSize: 15.5)),
+      onTap: () {
+        Navigator.of(sheet).pop();
+        action();
+      },
+    );
+  }
+
+  /// `2026/01/01/12:34` — foydalanuvchi so'ragan ko'rinish.
+  static String _stamp(int ms) {
+    final d = DateTime.fromMillisecondsSinceEpoch(ms);
+    String two(int v) => v.toString().padLeft(2, '0');
+    return '${d.year}/${two(d.month)}/${two(d.day)}/'
+        '${two(d.hour)}:${two(d.minute)}';
+  }
+
+  /// Raqami bo'yicha xabarni topadi (yo'q bo'lsa `null`).
+  ChatMessage? _byId(String id) {
+    for (final m in _chat.items) {
+      if (m.id == id) return m;
+    }
+    return null;
+  }
+
+  /// Javob blokiga bosilganda asl xabarga sakraydi.
+  ///
+  /// ── NEGA TAXMINIY ─────────────────────────────────────────
+  ///
+  /// Ro'yxat xabarlari TURLI BALANDLIKDA (rasm, uzun matn, ovoz),
+  /// shu sabab aniq o'rinni oldindan hisoblab bo'lmaydi.
+  /// `ScrollController` esa faqat piksel biladi.
+  ///
+  /// Shu sabab o'rtacha balandlikka ko'paytirilgan taxminiy joyga
+  /// suriladi — amalda xabar ekranga tushadi, ba'zan biroz
+  /// yuqoriroq yoki pastroq. Aniq sakrash uchun butun ro'yxatni
+  /// `GlobalKey` bilan o'lchash kerak bo'lardi va bu har chizishda
+  /// qimmatga tushardi.
+  void _jumpTo(String id) {
+    final at = _chat.items.indexWhere((m) => m.id == id);
+    if (at < 0 || !_scroll.hasClients) return;
+    const approx = 74.0;
+    final target = (at * approx)
+        .clamp(0.0, _scroll.position.maxScrollExtent);
+    _scroll.animateTo(
+      target,
+      duration: const Duration(milliseconds: 280),
+      curve: Curves.easeOut,
+    );
+  }
+
+  Future<void> _pin(ChatMessage m) async {
+    final err = await _chat.pinMessage(m.id, pinned: !m.pinned);
+    if (!mounted) return;
+    if (err != null) _snack(err);
+  }
+
+  /// Bitta xabarni o'chiradi (tasdiqlab).
+  Future<void> _deleteOne(ChatMessage m) async {
+    if (await _confirm('Shu xabar o\'chirilsinmi?') != true) return;
+    final err = await _chat.removeMessage(m.id);
+    if (!mounted) return;
+    if (err != null) _snack(err);
+    // Javob yoki tahrirlash o'sha xabarga tegishli bo'lsa —
+    // bekor qilinadi, aks holda tasma o'lik xabarga ishora
+    // qilib turardi.
+    if (_replyTo?.id == m.id || _editing?.id == m.id) _cancelCompose();
+  }
+
+  /// Javob yoki tahrirlashni bekor qiladi.
+  void _cancelCompose() {
+    setState(() {
+      if (_editing != null) _input.clear();
+      _replyTo = null;
+      _editing = null;
+    });
   }
 
   @override
@@ -614,6 +1006,14 @@ class _SupportChatScreenState extends State<SupportChatScreen>
           top: false,
           child: Column(
             children: [
+              // ── SARLAVHA OSTIDAGI TASMALAR ──────────────────
+              //
+              // Tartib MUHIM: qo'ng'iroq eng tepada turadi,
+              // chunki u eng shoshilinch narsa. Qadalgan xabar
+              // undan pastda.
+              if (_call.busy) _callBar(),
+              if (_chat.pinnedMessage != null)
+                _pinnedBar(_chat.pinnedMessage!),
               Expanded(
                 child: AnimatedBuilder(
                   animation: _chat,
@@ -697,17 +1097,167 @@ class _SupportChatScreenState extends State<SupportChatScreen>
                 const SizedBox(width: 10),
               ],
               Expanded(
-                child: Text(
-                  widget.title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(color: Colors.white, fontSize: 17),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      widget.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style:
+                          const TextStyle(color: Colors.white, fontSize: 17),
+                    ),
+                    // ── HOLAT QATORI ─────────────────────────
+                    //
+                    // TALAB (foydalanuvchi): "profildagi 'yaqinda
+                    // onlayn edi' degan joyida Onlayn / Xabar
+                    // yozmoqda / Ovozli xabar yozmoqda /
+                    // Yubormoqda degan yozuvlar chiqib tursin".
+                    //
+                    // Nima qilayotgani holatdan USTUN turadi va
+                    // urg'uli rangda chiqadi — Telegram ham
+                    // shunday qiladi.
+                    Text(
+                      _rt.statusLine,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _rt.activity != PeerActivity.none ||
+                                _rt.presence.online
+                            ? AppColors.accent
+                            : Colors.white.withValues(alpha: 0.55),
+                        fontSize: 12.5,
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ],
           ),
+          actions: [
+            // ── QO'NG'IROQ TUGMASI ───────────────────────────
+            //
+            // Telegramdagidek sarlavhaning o'ng chetida.
+            // Qo'ng'iroq ketayotgan bo'lsa bosish YANGISINI
+            // boshlamaydi — mavjud oynani ochadi.
+            IconButton(
+              tooltip: 'Qo\'ng\'iroq qilish',
+              icon: const Icon(Icons.call_rounded),
+              onPressed: _onCallPressed,
+            ),
+            const SizedBox(width: 4),
+          ],
         );
   }
+
+  /// Qo'ng'iroq tugmasi bosildi.
+  Future<void> _onCallPressed() async {
+    if (_call.busy) {
+      await openCallScreen(context);
+      return;
+    }
+    final err = await _call.start(
+      name: widget.title,
+      avatar: widget.photoUrl,
+    );
+    if (!mounted) return;
+    if (err != null) {
+      _snack(err);
+      return;
+    }
+    await openCallScreen(context);
+  }
+
+  /// Qo'ng'iroq ketayotganda chat ustidagi yashil tasma.
+  ///
+  /// TALAB (foydalanuvchi, screenshot bilan): suhbat davom
+  /// etayotganda chatga qaytsa ham tepada "CHAQIRUVGA QAYTISH"
+  /// tasmasi turishi kerak.
+  Widget _callBar() => Material(
+        color: const Color(0xFF1E8E5A),
+        child: InkWell(
+          onTap: () => openCallScreen(context),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 11),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Expanded(
+                  child: Text(
+                    'CHAQIRUVGA QAYTISH',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 14.5,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: 0.4,
+                    ),
+                  ),
+                ),
+                // Tasmadagi mikrofon — oynani ochmasdan turib
+                // o'chirish/yoqish uchun.
+                Padding(
+                  padding: const EdgeInsets.only(right: 14),
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: _call.toggleMic,
+                    child: Icon(
+                      _call.micOn ? Icons.mic : Icons.mic_off,
+                      color: Colors.white,
+                      size: 21,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+
+  /// Qadalgan xabar — sarlavha ostidagi tor tasma.
+  Widget _pinnedBar(ChatMessage m) => Material(
+        color: Colors.white.withValues(alpha: 0.06),
+        child: InkWell(
+          onTap: () => _jumpTo(m.id),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 6, 8),
+            child: Row(
+              children: [
+                Icon(Icons.push_pin_rounded,
+                    size: 16, color: AppColors.accent),
+                const SizedBox(width: 9),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        'Qadalgan xabar',
+                        style: TextStyle(
+                            color: AppColors.accent, fontSize: 11.5),
+                      ),
+                      Text(
+                        m.body.isEmpty ? 'Biriktirma' : m.body,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                            color: Colors.white70, fontSize: 13),
+                      ),
+                    ],
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'Qadoqni yechish',
+                  icon: const Icon(Icons.close_rounded,
+                      size: 18, color: Colors.white54),
+                  onPressed: () => unawaited(_pin(m)),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
 
   Widget _body() {
     if (_chat.isLoading) {
@@ -824,12 +1374,24 @@ class _SupportChatScreenState extends State<SupportChatScreen>
                           PublicProfileScreen(userId: widget.userId!),
                     ),
                   ),
-          // Admin uzoq bosib TANLAYDI, keyin qolganlarini oddiy
-          // bosib qo'shadi. Foydalanuvchida ikkovi ham ishlamaydi.
-          onLongPress: _canDelete ? () => _toggleSelect(m) : null,
+          // ── UZOQ BOSISH ───────────────────────────────────
+          //
+          // Tanlash rejimi OCHIQ bo'lsa — tanlaydi (ketma-ket
+          // xabarlarni tez belgilash uchun). Aks holda MENYU
+          // ochiladi: foydalanuvchi aynan shuni so'ragan.
+          onLongPress: () {
+            if (_selecting) {
+              _toggleSelect(m);
+            } else {
+              unawaited(_showMessageMenu(m, mine));
+            }
+          },
           onTap: _selecting ? () => _toggleSelect(m) : null,
           selected: _selected.contains(m.id),
           selecting: _selecting,
+          // Javob berilgan xabarni ro'yxatdan topamiz.
+          replySource: m.replyTo.isEmpty ? null : _byId(m.replyTo),
+          onReplyTap: m.replyTo.isEmpty ? null : () => _jumpTo(m.replyTo),
           onOpenMedia: () => Navigator.of(context).push(
             MaterialPageRoute<void>(
               builder: (_) => MediaViewScreen(
@@ -865,9 +1427,79 @@ class _SupportChatScreenState extends State<SupportChatScreen>
       //
       // Shu sabab bu yerda klaviaturaga umuman tegilmaydi.
       padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
-      // Ovoz yozilayotganda qator butunlay boshqacha: vaqt,
-      // bekor qilish va yuborish.
-      child: _recording ? _recordingRow() : _composerRow(),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // ── JAVOB / TAHRIRLASH TASMASI ────────────────────
+          //
+          // Yozish qatorining USTIDA turadi va nima qilinayotgani
+          // ko'rinib turadi. Ovoz yozilayotganda ko'rsatilmaydi —
+          // o'sha paytda qator butunlay boshqacha.
+          if (!_recording && (_replyTo != null || _editing != null))
+            _composeHint(),
+          // Ovoz yozilayotganda qator butunlay boshqacha: vaqt,
+          // bekor qilish va yuborish.
+          _recording ? _recordingRow() : _composerRow(),
+        ],
+      ),
+    );
+  }
+
+  /// Javob yoki tahrirlash tasmasi.
+  Widget _composeHint() {
+    final editing = _editing;
+    final reply = _replyTo;
+    final title = editing != null ? 'Tahrirlash' : 'Javob';
+    final text = editing?.body ??
+        (reply == null
+            ? ''
+            : (reply.body.isNotEmpty ? reply.body : 'Biriktirma'));
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        children: [
+          Icon(
+            editing != null ? Icons.edit_outlined : Icons.reply_rounded,
+            size: 19,
+            color: AppColors.accent,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Container(
+              padding: const EdgeInsets.only(left: 9),
+              decoration: BoxDecoration(
+                border: Border(
+                  left: BorderSide(color: AppColors.accent, width: 2.5),
+                ),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    title,
+                    style:
+                        TextStyle(color: AppColors.accent, fontSize: 11.5),
+                  ),
+                  Text(
+                    text,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        color: Colors.white70, fontSize: 13),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          IconButton(
+            tooltip: 'Bekor qilish',
+            icon: const Icon(Icons.close_rounded,
+                size: 19, color: Colors.white54),
+            onPressed: _cancelCompose,
+          ),
+        ],
+      ),
     );
   }
 
@@ -964,7 +1596,8 @@ class _SupportChatScreenState extends State<SupportChatScreen>
                       fontSize: 14),
                   border: InputBorder.none,
                 ),
-                onChanged: (_) => setState(() {}),
+                focusNode: _focus,
+                onChanged: (_) => _onInputChanged(),
               ),
             ),
           ),
@@ -1105,6 +1738,16 @@ class _Bubble extends StatelessWidget {
   /// Umuman tanlash rejimi ochiqmi (bitta bo'lsa ham).
   final bool selecting;
 
+  /// Javob berilgan xabar (topilmasa `null`).
+  ///
+  /// Matnning NUSXASI saqlanmaydi: asl xabar tahrirlansa nusxa
+  /// eskirib qolardi. Shu sabab ekran uni har safar ro'yxatdan
+  /// qidirib topadi.
+  final ChatMessage? replySource;
+
+  /// Javob blokiga bosilganda asl xabarga sakrash.
+  final VoidCallback? onReplyTap;
+
   const _Bubble({
     required this.message,
     required this.mine,
@@ -1118,7 +1761,22 @@ class _Bubble extends StatelessWidget {
     this.onTap,
     this.selected = false,
     this.selecting = false,
+    this.replySource,
+    this.onReplyTap,
   });
+
+  /// Javob blokidagi qisqa matn.
+  ///
+  /// Matnsiz (faqat rasm yoki ovoz) xabarga javob yozilgan
+  /// bo'lsa, matn o'rniga turi yoziladi — aks holda blok bo'sh
+  /// ko'rinardi.
+  static String _preview(ChatMessage m) {
+    if (m.body.isNotEmpty) return m.body;
+    if (m.isVoice) return 'Ovozli xabar';
+    if (m.isVideo) return 'Video';
+    if (m.hasMedia) return 'Rasm';
+    return '';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1189,6 +1847,14 @@ class _Bubble extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.end,
                   mainAxisSize: MainAxisSize.min,
                   children: [
+                    // ── JAVOB ───────────────────────────────────
+                    //
+                    // TALAB (foydalanuvchi, screenshot bilan):
+                    // "javob yozganda shunaqa ko'rinishda bo'lishi
+                    // kerak" — pufak ICHIDA, matndan yuqorida,
+                    // chap chetida vertikal chiziq, ustida kim
+                    // yozgani, ostida o'sha xabar matni.
+                    if (m.replyTo.isNotEmpty) _replyBlock(context),
                     if (m.hasMedia) _media(context),
                     if (m.body.isNotEmpty)
                       Padding(
@@ -1217,6 +1883,23 @@ class _Bubble extends StatelessWidget {
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
+                          // ── TAHRIRLANGAN ──────────────────────
+                          //
+                          // TALAB (foydalanuvchi): "tahrirlangan
+                          // xabarning PASTKI QISMIDA (tagida emas)
+                          // 'tahrirlangan' deb qo'yishi kerak" —
+                          // ya'ni pufak ichida, vaqtning yonida.
+                          if (m.isEdited) ...[
+                            Text(
+                              'tahrirlangan',
+                              style: TextStyle(
+                                color: Colors.white.withValues(alpha: 0.55),
+                                fontSize: 10.5,
+                                fontStyle: FontStyle.italic,
+                              ),
+                            ),
+                            const SizedBox(width: 5),
+                          ],
                           Text(
                             chatTime(m.createdAt),
                             style: TextStyle(
@@ -1248,6 +1931,68 @@ class _Bubble extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  /// Javob bloki — pufak ichida, matndan yuqorida.
+  ///
+  /// Asl xabar o'chirilgan bo'lsa blok baribir chiziladi, faqat
+  /// "xabar o'chirilgan" deb. Telegram ham shunday qiladi: javob
+  /// nimaga yozilganini bilmay qolishdan ko'ra, o'chirilganini
+  /// bilish yaxshiroq.
+  Widget _replyBlock(BuildContext context) {
+    final src = replySource;
+    final gone = src == null;
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+          message.isViewable ? 9 : 0, 0, message.isViewable ? 9 : 0, 6),
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: gone ? null : onReplyTap,
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.fromLTRB(8, 5, 8, 6),
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.18),
+            borderRadius: BorderRadius.circular(7),
+            border: Border(
+              left: BorderSide(
+                color: Colors.white.withValues(alpha: 0.75),
+                width: 3,
+              ),
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                gone
+                    ? 'Xabar'
+                    : (src.fromAdmin == message.fromAdmin ? 'Siz' : avatarName),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.95),
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 1),
+              Text(
+                gone ? 'xabar o\'chirilgan' : _preview(src),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.72),
+                  fontSize: 12.5,
+                  fontStyle: gone ? FontStyle.italic : FontStyle.normal,
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

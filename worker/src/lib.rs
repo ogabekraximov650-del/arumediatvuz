@@ -6734,10 +6734,33 @@ async fn chat_send(mut req: Request, env: &Env, origin: &str) -> Result<Response
     // Xabarning O'ZI ham yuboriladi, faqat "yangilik bor" degan
     // ishora emas: shu bilan ilova qo'shimcha so'rov qilmaydi va
     // bildirishnoma banneri darhol chiqadi.
+    // ── KIM YOZDI ─────────────────────────────────────────────
+    //
+    // TOPILGAN KAMCHILIK: adminning bannerida "Yangi xabar" deb
+    // turardi, lekin KIM yozgani ko'rinmasdi — admin uchun esa
+    // aynan shu eng kerakli ma'lumot (suhbat ko'p).
+    //
+    // Yuboruvchining ismi va rasmi shu sabab xabar bilan birga
+    // ketadi. Qo'shimcha so'rov kerak emas: ikkovi ham
+    // `session_user` allaqachon olib kelgan qatorda turibdi.
+    let sender_first = u["first_name"].as_str().unwrap_or("").trim();
+    let sender_last = u["last_name"].as_str().unwrap_or("").trim();
+    let sender_name = if sender_last.is_empty() {
+        sender_first.to_string()
+    } else {
+        format!("{sender_first} {sender_last}")
+    };
+    let sender_avatar = match u["avatar_file"].as_str().unwrap_or("") {
+        "" => String::new(),
+        f => format!("{origin}/api/media/{f}"),
+    };
+
     rt_notify(env, target, json!({
         "t": "chat",
         "action": "new",
         "user_id": target,
+        "from_name": sender_name.trim(),
+        "from_avatar": sender_avatar,
         "message": {
             "id": id,
             "from_admin": from_admin,
