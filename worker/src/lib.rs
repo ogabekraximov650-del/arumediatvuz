@@ -32,6 +32,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use worker::*;
 
+// ── REAL VAQT: ONLAYN HOLAT VA QO'NG'IROQ ─────────────────────
+//
+// Alohida faylda, chunki u BOSHQA TURDAGI kod: bu yerdagi hamma
+// narsa qisqa HTTP so'rovi, u yerdagisi esa soatlab ochiq turgan
+// ulanish (Durable Object). Ikkovini aralashtirish faylni ham,
+// fikrni ham chalkashtirardi.
+mod realtime;
+
 // ── CORS + JSON yordamchi ──────────────────────────────────────
 
 fn set_cors(resp: &mut Response) {
@@ -916,6 +924,27 @@ async fn init_db(env: &Env) -> bool {
             -- rasmni oladi. Telegram ham aynan shunday qiladi.
             media_thumb TEXT DEFAULT '',
             seen INTEGER DEFAULT 0,
+            -- ── QACHON O'QILGANI ────────────────────────────
+            --
+            -- TALAB (foydalanuvchi): menyuda o'qilgan belgisi
+            -- yonida AYNAN sana va vaqt tursin (2026/01/01/12:34).
+            -- `seen` faqat ha yoki yo'q deydi, vaqtni aytmaydi.
+            seen_at INTEGER DEFAULT 0,
+            -- ── JAVOB ───────────────────────────────────────
+            --
+            -- Qaysi xabarga javob yozilgani. Bo'sh — oddiy xabar.
+            -- Asl xabar o'chirilsa bu yerda ID qolaveradi va
+            -- ilova xabar o'chirilgan deb ko'rsatadi — Telegram
+            -- ham shunday qiladi.
+            reply_to TEXT DEFAULT '',
+            -- ── TAHRIRLANGAN ────────────────────────────────
+            --
+            -- 0 — tegilmagan. Aks holda oxirgi tahrir vaqti.
+            -- Ilova xabar pufagi ICHIDA, vaqt yonida
+            -- tahrirlangan deb ko'rsatadi.
+            edited_at INTEGER DEFAULT 0,
+            -- Qadalgan xabar (chat tepasida turadi).
+            pinned INTEGER DEFAULT 0,
             created_at INTEGER
         )", vec![]),
         // Suhbat AYNAN shu tartibda so'raladi.
@@ -1161,6 +1190,20 @@ async fn init_db(env: &Env) -> bool {
     let _ = turso_exec(env,
         "ALTER TABLE chat_messages ADD COLUMN media_thumb TEXT DEFAULT ''",
         vec![]).await;
+
+    // ── YOZISHMANING YANGI USTUNLARI ──────────────────────────
+    //
+    // Hammasi yuqoridagi qoida bo'yicha: ALOHIDA yuboriladi va
+    // natijasi e'tiborsiz qoldiriladi. "Ustun allaqachon bor"
+    // degan xato — kutilgan holat.
+    for sql in [
+        "ALTER TABLE chat_messages ADD COLUMN seen_at INTEGER DEFAULT 0",
+        "ALTER TABLE chat_messages ADD COLUMN reply_to TEXT DEFAULT ''",
+        "ALTER TABLE chat_messages ADD COLUMN edited_at INTEGER DEFAULT 0",
+        "ALTER TABLE chat_messages ADD COLUMN pinned INTEGER DEFAULT 0",
+    ] {
+        let _ = turso_exec(env, sql, vec![]).await;
+    }
 
     ok
 }
@@ -3550,7 +3593,7 @@ fn now_ms() -> i64 {
 
 /// Kriptografik tasodifiy hex satr (`crypto.randomUUID` asosida —
 /// Workers muhitida har doim mavjud).
-fn random_hex(len: usize) -> String {
+pub(crate) fn random_hex(len: usize) -> String {
     use worker::wasm_bindgen::{JsCast, JsValue};
 
     let mut out = String::new();
@@ -6280,6 +6323,17 @@ fn chat_msg_public(origin: &str, r: &Value) -> Value {
         },
         // Suhbatdosh o'qiganmi: ilovada bitta yoki ikkita belgi.
         "seen": r["seen"].as_i64().unwrap_or(0) != 0,
+        // QACHON o'qilgani — menyudagi "o'qigan 2026/01/01/12:34".
+        // 0 bo'lsa ilova vaqtni umuman ko'rsatmaydi.
+        "seen_at": r["seen_at"].as_i64().unwrap_or(0),
+        // Javob berilgan xabarning raqami (bo'sh — oddiy xabar).
+        // Asl xabarning MATNI bu yerda YO'Q: ilovada butun
+        // suhbat allaqachon turadi, ya'ni matnni o'zi topadi va
+        // bir xil matn ikki marta tashilmaydi.
+        "reply_to": r["reply_to"].as_str().unwrap_or(""),
+        // Tahrirlangan bo'lsa — oxirgi tahrir vaqti, aks holda 0.
+        "edited_at": r["edited_at"].as_i64().unwrap_or(0),
+        "pinned": r["pinned"].as_i64().unwrap_or(0) != 0,
         "created_at": r["created_at"].as_i64().unwrap_or(0),
     })
 }
@@ -6299,19 +6353,34 @@ fn chat_msg_public(origin: &str, r: &Value) -> Value {
 async fn chat_read(
     env: &Env, origin: &str, user: i64, as_admin: bool, since: i64,
 ) -> Result<Response> {
+    // ── NEGA `created_at` EMAS, `updated_at` ──────────────────
+    //
+    // TOPILGAN MASALA: `since` faqat YARATILGAN vaqtga qarardi.
+    // Xabar tahrirlanganda yaratilish vaqti o'zgarmaydi — ya'ni
+    // tahrirlangan matn ilovaga HECH QACHON yetib bormasdi.
+    //
+    // Yechim: taqqoslash uchun "oxirgi tegilgan vaqt" ishlatiladi
+    // — tahrirlangan bo'lsa tahrir vaqti, aks holda yaratilish
+    // vaqti. Tartib esa o'sha-o'sha `created_at` bo'yicha qoladi,
+    // aks holda tahrirlangan xabar suhbatning oxiriga sakrab
+    // chiqib ketardi.
+    const CHAT_COLS: &str = "id, from_admin, body, media_file, media_type, \
+         media_ms, media_thumb, seen, seen_at, reply_to, edited_at, pinned, \
+         created_at";
     let res = if since > 0 {
         turso_exec(env,
-            "SELECT id, from_admin, body, media_file, media_type, media_ms, seen, created_at
-               FROM chat_messages
-              WHERE user_id = ? AND created_at > ?
-              ORDER BY created_at DESC LIMIT ?",
+            &format!(
+                "SELECT {CHAT_COLS} FROM chat_messages
+                  WHERE user_id = ?
+                    AND MAX(created_at, COALESCE(edited_at,0)) > ?
+                  ORDER BY created_at DESC LIMIT ?"),
             vec![TursoArg::int(user), TursoArg::int(since),
                  TursoArg::int(CHAT_LIMIT)]).await?
     } else {
         turso_exec(env,
-            "SELECT id, from_admin, body, media_file, media_type, media_ms, seen, created_at
-               FROM chat_messages
-              WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
+            &format!(
+                "SELECT {CHAT_COLS} FROM chat_messages
+                  WHERE user_id = ? ORDER BY created_at DESC LIMIT ?"),
             vec![TursoArg::int(user), TursoArg::int(CHAT_LIMIT)]).await?
     };
     let cols = res["cols"].as_array().cloned().unwrap_or_default();
@@ -6348,9 +6417,12 @@ async fn chat_read(
                WHERE user_id=? AND COALESCE(unread_user,0)<>0"
          },
          vec![TursoArg::int(user)]),
-        ("UPDATE chat_messages SET seen=1
+        // `seen_at` AYNAN shu yerda, `seen` bilan bir vaqtda
+        // yoziladi: ikkovi bir-biridan ajralib qolmasin.
+        ("UPDATE chat_messages SET seen=1, seen_at=?
            WHERE user_id=? AND from_admin=? AND seen=0",
-         vec![TursoArg::int(user), TursoArg::int(other)]),
+         vec![TursoArg::int(now_ms()), TursoArg::int(user),
+              TursoArg::int(other)]),
     ]).await;
 
     // ── ESKI XABARLARNING BELGISI ─────────────────────────
@@ -6382,12 +6454,19 @@ async fn chat_read(
     // bittasi ikkalasiga yetadi.
     let mine = if as_admin { 1 } else { 0 };
     let ids_res = turso_exec(env,
-        "SELECT id, from_admin, seen FROM chat_messages
+        "SELECT id, from_admin, seen, seen_at FROM chat_messages
           WHERE user_id=? ORDER BY created_at DESC LIMIT ?",
         vec![TursoArg::int(user), TursoArg::int(CHAT_LIMIT)]).await?;
     let id_cols = ids_res["cols"].as_array().cloned().unwrap_or_default();
     let id_rows = ids_res["rows"].as_array().cloned().unwrap_or_default();
-    let mut seen_ids: Vec<String> = Vec::new();
+    // ── NEGA RO'YXAT EMAS, JUFTLIKLAR ─────────────────────
+    //
+    // Ilgari bu faqat raqamlar ro'yxati edi ("shular o'qilgan").
+    // Endi menyuda "o'qigan 2026/01/01/12:34" ko'rsatilishi
+    // kerak, ya'ni QACHON o'qilgani ham kerak. Shu sabab har
+    // biri `[id, vaqt]` juftligi bo'lib qaytadi — bu ro'yxatdan
+    // atigi bir necha bayt katta.
+    let mut seen_ids: Vec<Value> = Vec::new();
     let mut all_ids: Vec<String> = Vec::new();
     for r in &id_rows {
         let o = row_to_obj(&id_cols, r.as_array().unwrap_or(&vec![]));
@@ -6398,7 +6477,7 @@ async fn chat_read(
         if o["from_admin"].as_i64().unwrap_or(0) == mine
             && o["seen"].as_i64().unwrap_or(0) == 1
         {
-            seen_ids.push(id.clone());
+            seen_ids.push(json!([id.clone(), o["seen_at"].as_i64().unwrap_or(0)]));
         }
         all_ids.push(id);
     }
@@ -6534,6 +6613,14 @@ async fn chat_send(mut req: Request, env: &Env, origin: &str) -> Result<Response
     // Videoning kadri — YUBORUVCHI yasagan kichik JPEG. Faqat
     // fayl NOMI keladi (yo'l emas), xuddi `media_file` kabi.
     let media_thumb = bare_name(b["media_thumb"].as_str().unwrap_or("")).trim().to_string();
+    // ── JAVOB ─────────────────────────────────────────────────
+    //
+    // Qaysi xabarga javob yozilyapti. Haqiqiyligi pastda, xabar
+    // yozilishidan OLDIN tekshiriladi: begona suhbatning xabariga
+    // "javob" yozib bo'lmaydi, aks holda ilova o'sha suhbatdan
+    // matn tortib ko'rsatishga urinardi.
+    let reply_to: String = b["reply_to"].as_str().unwrap_or("")
+        .trim().chars().take(64).collect();
     // Nomi bor-u turi yo'q (yoki aksincha) — yaroqsiz juftlik.
     let has_media = !media_file.is_empty() && !media_type.is_empty();
     if body.is_empty() && !has_media {
@@ -6567,6 +6654,18 @@ async fn chat_send(mut req: Request, env: &Env, origin: &str) -> Result<Response
     // sinov ma'nosini yo'qotardi.
     let from_admin = admin && target != me;
 
+    // Javob berilayotgan xabar AYNAN shu suhbatdami. Emas bo'lsa
+    // ishora shunchaki tashlab yuboriladi — so'rov xato bilan
+    // qaytarilmaydi, chunki xabarning o'zi yaroqli.
+    let reply_to = if reply_to.is_empty() {
+        String::new()
+    } else {
+        let res = turso_exec(env,
+            "SELECT 1 FROM chat_messages WHERE id=? AND user_id=?",
+            vec![TursoArg::text(&reply_to), TursoArg::int(target)]).await?;
+        if first_row(&res).is_some() { reply_to } else { String::new() }
+    };
+
     let now = now_ms();
     let id = format!("m{}", random_hex(12));
 
@@ -6590,8 +6689,8 @@ async fn chat_send(mut req: Request, env: &Env, origin: &str) -> Result<Response
     turso_batch(env, &[
         ("INSERT INTO chat_messages
             (id,user_id,from_admin,body,media_file,media_type,media_ms,
-             media_thumb,created_at)
-          VALUES (?,?,?,?,?,?,?,?,?)",
+             media_thumb,reply_to,created_at)
+          VALUES (?,?,?,?,?,?,?,?,?,?)",
          vec![
             TursoArg::text(&id), TursoArg::int(target),
             TursoArg::int(if from_admin { 1 } else { 0 }),
@@ -6605,6 +6704,7 @@ async fn chat_send(mut req: Request, env: &Env, origin: &str) -> Result<Response
             } else {
                 ""
             }),
+            TursoArg::text(&reply_to),
             TursoArg::int(now),
          ]),
         ("INSERT INTO chat_threads
@@ -6625,6 +6725,30 @@ async fn chat_send(mut req: Request, env: &Env, origin: &str) -> Result<Response
          ]),
     ]).await?;
 
+    // ── DARHOL YETKAZISH ──────────────────────────────────────
+    //
+    // Uzoq kutish (`chat_wait`) o'z joyida qoladi — u ishonchli
+    // zaxira. Lekin ulanish ochiq bo'lsa, xabar uni kutmasdan,
+    // shu zahoti yetib boradi (~50 ms).
+    //
+    // Xabarning O'ZI ham yuboriladi, faqat "yangilik bor" degan
+    // ishora emas: shu bilan ilova qo'shimcha so'rov qilmaydi va
+    // bildirishnoma banneri darhol chiqadi.
+    rt_notify(env, target, json!({
+        "t": "chat",
+        "action": "new",
+        "user_id": target,
+        "message": {
+            "id": id,
+            "from_admin": from_admin,
+            "body": body,
+            "media_type": if has_media { media_type } else { "" },
+            "media_ms": if has_media { media_ms } else { 0 },
+            "reply_to": reply_to,
+            "created_at": now,
+        },
+    })).await;
+
     created(json!({
         "id": id,
         "from_admin": from_admin,
@@ -6643,6 +6767,10 @@ async fn chat_send(mut req: Request, env: &Env, origin: &str) -> Result<Response
             String::new()
         },
         "seen": false,
+        "seen_at": 0,
+        "reply_to": reply_to,
+        "edited_at": 0,
+        "pinned": false,
         "created_at": now,
     }))
 }
@@ -6923,22 +7051,62 @@ async fn chat_one(
     chat_read(env, origin, user, true, since).await
 }
 
-// ── ADMIN O'CHIRA OLADI ───────────────────────────────────────
+// ── KIM NIMANI O'CHIRA OLADI ──────────────────────────────────
 //
-// TALAB (foydalanuvchi): "admin panelda kelgan xabarni va chatni
-// butunlay o'chirib tashlashi mumkin bo'lsin".
+// TALAB (foydalanuvchi): "foydalanuvchi faqat o'zi yozgan xabarni
+// tahrirlashi va o'chirishi mumkin; admin esa foydalanuvchi
+// xabarini FAQAT o'chirishi mumkin, undan ko'pi emas".
+//
+//   ┌──────────────┬──────────────┬────────────┬───────────┐
+//   │ Kim          │ Kimning      │ Tahrirlash │ O'chirish │
+//   ├──────────────┼──────────────┼────────────┼───────────┤
+//   │ foydalanuvchi│ o'zining     │     ha     │    ha     │
+//   │ foydalanuvchi│ adminning    │    yo'q    │   yo'q    │
+//   │ admin        │ o'zining     │     ha     │    ha     │
+//   │ admin        │ foydalanuvchi│    yo'q    │    ha     │
+//   └──────────────┴──────────────┴────────────┴───────────┘
+//
+// Ya'ni MATNGA faqat uni yozgan odam tegadi. Bu shunchaki
+// qulaylik emas — boshqaning gapini almashtirib qo'yish
+// yozishmaning o'zini ishonchsiz qilib qo'yardi.
+//
+// Tekshiruv SHU YERDA, serverda. Ilovadagi menyu shunchaki
+// bandni yashiradi; o'zgartirilgan ilova bilan kelgan so'rovni
+// aynan mana bu shart to'xtatadi.
 //
 // Bu yerda "belgilash" emas, HAQIQIY o'chirish: yozishma izohdan
-// farqli o'laroq hech narsani ushlab turmaydi va admin uni
-// butunlay yo'q qilishni so'ragan.
+// farqli o'laroq hech narsani ushlab turmaydi.
+
+/// Berilgan xabar shu odam O'CHIRA oladigan xabarmi.
+///
+/// `None` — yo'q (yoki xabar umuman topilmadi).
+/// `Some(owner)` — ha; `owner` — suhbat egasining raqami.
+async fn chat_may_delete(env: &Env, u: &Value, id: &str) -> Result<Option<i64>> {
+    let res = turso_exec(env,
+        "SELECT user_id, from_admin FROM chat_messages WHERE id=?",
+        vec![TursoArg::text(id)]).await?;
+    let Some(r) = first_row(&res) else { return Ok(None) };
+    let owner = r["user_id"].as_i64().unwrap_or(0);
+    let from_admin = r["from_admin"].as_i64().unwrap_or(0) != 0;
+    let me = u["id"].as_i64().unwrap_or(0);
+    let ok = if is_admin(u) {
+        // Admin suhbatdagi HAR QANDAY xabarni o'chira oladi.
+        true
+    } else {
+        // Foydalanuvchi: faqat O'Z suhbatidagi O'Z xabari.
+        owner == me && !from_admin
+    };
+    Ok(if ok { Some(owner) } else { None })
+}
 
 /// DELETE /api/chat/message/:id — bitta xabar.
 async fn chat_del_message(req: &Request, env: &Env, id: &str) -> Result<Response> {
     let Some(u) = session_user(env, &bearer(req)).await? else {
         return json_resp(&json!({"error": "unauthorized"}), 401);
     };
-    if !is_admin(&u) {
-        return json_resp(&json!({"error": "forbidden"}), 403);
+    match chat_may_delete(env, &u, id).await? {
+        Some(_) => {}
+        None => return json_resp(&json!({"error": "forbidden"}), 403),
     }
     // ── B2'DAGI FAYL HAM O'CHADI ─────────────────────────
     //
@@ -6972,6 +7140,9 @@ async fn chat_del_message(req: &Request, env: &Env, id: &str) -> Result<Response
     // mumkin — u qayta hisoblanadi. Hech narsa qolmasa suhbatning
     // o'zi ham olib tashlanadi.
     refresh_thread(env, owner).await;
+    rt_notify(env, owner, json!({
+        "t": "chat", "action": "delete", "user_id": owner, "ids": [id],
+    })).await;
     ok_nostore(json!({"ok": true}))
 }
 
@@ -6988,15 +7159,24 @@ async fn chat_del_message(req: &Request, env: &Env, id: &str) -> Result<Response
 /// Bu yerda esa hammasi BITTA so'rovda va BITTA paketda
 /// o'chiriladi.
 ///
-/// FAQAT ADMIN — foydalanuvchi o'z xabarini ham o'chira olmaydi
-/// (foydalanuvchi talabi).
+/// RUXSAT: `chat_may_delete` dagi jadval bilan AYNAN bir xil —
+/// admin hammasini, foydalanuvchi esa faqat O'Z xabarlarini.
+///
+/// Bu yerda tekshiruv har bir raqam uchun alohida emas, BUYRUQNING
+/// O'ZIGA qo'shiladi (`AND user_id=? AND from_admin=0`). Ya'ni
+/// ro'yxatga begona raqam qo'shib yuborilsa, u shunchaki hech
+/// qanday qatorga tushmaydi — qolganlari esa o'chaveradi.
 async fn chat_del_many(mut req: Request, env: &Env) -> Result<Response> {
     let Some(u) = session_user(env, &bearer(&req)).await? else {
         return json_resp(&json!({"error": "unauthorized"}), 401);
     };
-    if !is_admin(&u) {
-        return json_resp(&json!({"error": "forbidden"}), 403);
-    }
+    let me = u["id"].as_i64().unwrap_or(0);
+    // Adminga qo'shimcha shart yo'q; foydalanuvchiga — bor.
+    let (scope, scope_args): (&str, Vec<TursoArg>) = if is_admin(&u) {
+        ("", vec![])
+    } else {
+        (" AND user_id=? AND from_admin=0", vec![TursoArg::int(me)])
+    };
     let b: Value = req.json().await.unwrap_or(json!({}));
     let ids: Vec<String> = b["ids"]
         .as_array()
@@ -7015,12 +7195,17 @@ async fn chat_del_many(mut req: Request, env: &Env) -> Result<Response> {
 
     // `IN (?,?,...)` — o'rin egalari soni ro'yxat uzunligicha.
     let holes = vec!["?"; ids.len()].join(",");
-    let args: Vec<TursoArg> = ids.iter().map(|i| TursoArg::text(i)).collect();
+    let args: Vec<TursoArg> = ids
+        .iter()
+        .map(|i| TursoArg::text(i))
+        .chain(scope_args.iter().cloned())
+        .collect();
 
     // Qaysi suhbatlarga tegdi — o'chirishdan OLDIN bilib olamiz,
     // keyin ularning oxirgi xabari qayta hisoblanadi.
     let owners_res = turso_exec(env,
-        &format!("SELECT DISTINCT user_id FROM chat_messages WHERE id IN ({holes})"),
+        &format!("SELECT DISTINCT user_id FROM chat_messages
+                   WHERE id IN ({holes}){scope}"),
         args.clone()).await?;
     let owners: Vec<i64> = owners_res["rows"]
         .as_array()
@@ -7036,7 +7221,7 @@ async fn chat_del_many(mut req: Request, env: &Env) -> Result<Response> {
     // B2'dagi fayllar ham o'chiriladi (yuqoridagi izohga qarang).
     let files_res = turso_exec(env,
         &format!("SELECT media_file, media_thumb FROM chat_messages
-                   WHERE id IN ({holes})"),
+                   WHERE id IN ({holes}){scope}"),
         args.clone()).await?;
     // Qatordagi HAR IKKI ustun olinadi: faylning o'zi va kadri.
     let files: Vec<String> = files_res["rows"]
@@ -7053,7 +7238,7 @@ async fn chat_del_many(mut req: Request, env: &Env) -> Result<Response> {
         .unwrap_or_default();
 
     turso_exec(env,
-        &format!("DELETE FROM chat_messages WHERE id IN ({holes})"),
+        &format!("DELETE FROM chat_messages WHERE id IN ({holes}){scope}"),
         args).await?;
 
     for f in files {
@@ -7062,8 +7247,357 @@ async fn chat_del_many(mut req: Request, env: &Env) -> Result<Response> {
 
     for o in owners {
         refresh_thread(env, o).await;
+        rt_notify(env, o, json!({
+            "t": "chat", "action": "delete", "user_id": o, "ids": ids,
+        })).await;
     }
     ok_nostore(json!({"ok": true, "count": ids.len()}))
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  REAL VAQTDAGI ULANISH (WebSocket)
+// ═══════════════════════════════════════════════════════════════
+//
+// Ilova shu manzilga ulanadi va undan keyin:
+//   * suhbatdoshning onlayn/oflayn holatini oladi;
+//   * "xabar yozmoqda" / "ovozli xabar yozmoqda" ni oladi;
+//   * qo'ng'iroq signallarini almashadi;
+//   * yangi xabar kelganda DARHOL xabardor bo'ladi (uzoq
+//     kutishni kutmasdan).
+//
+// Ulanishning O'ZI `realtime.rs` dagi Durable Object'da. Bu yerda
+// faqat IKKI ish bajariladi: kimligini tekshirish va so'rovni
+// kerakli suhbatning DO'siga uzatish.
+//
+// ── NEGA TOKEN URL'DA EMAS ────────────────────────────────────
+//
+// WebSocket manzilini brauzer va proksilar jurnalga yozishi
+// mumkin. Shu sabab sessiya tokeni har doimgidek `Authorization`
+// sarlavhasida keladi — Dart'ning `WebSocket.connect` usuli
+// sarlavha berishga ruxsat beradi.
+
+/// So'rovdagi butun sonli parametr.
+fn query_i64(req: &Request, key: &str) -> Option<i64> {
+    req.url().ok().and_then(|u| {
+        u.query_pairs()
+            .find(|(k, _)| k == key)
+            .and_then(|(_, v)| v.parse::<i64>().ok())
+    })
+}
+
+/// Suhbatning Durable Object'ini oladi.
+///
+/// Nom — suhbat EGASINING raqami. Ya'ni foydalanuvchi ham, uning
+/// suhbatini ochgan admin ham AYNAN BIR XIL obyektga tushadi —
+/// aks holda ular bir-birini ko'rmasdi.
+fn presence_stub(env: &Env, thread_user: i64) -> Result<durable::Stub> {
+    env.durable_object("PRESENCE")?
+        .id_from_name(&format!("u{thread_user}"))?
+        .get_stub()
+}
+
+/// GET /api/rt[?user_id=N] — WebSocket ulanishi.
+async fn rt_socket(req: Request, env: &Env, origin: &str) -> Result<Response> {
+    let Some(u) = session_user(env, &bearer(&req)).await? else {
+        return json_resp(&json!({"error": "unauthorized"}), 401);
+    };
+    let me = u["id"].as_i64().unwrap_or(0);
+    let admin = is_admin(&u);
+
+    // Qaysi suhbat: admin boshqa odamnikini ocha oladi, oddiy
+    // foydalanuvchi esa HAR DOIM faqat o'zinikini. Bu tekshiruv
+    // shu yerda — ilovadagi ekran emas, aynan shu qator begona
+    // yozishmani himoya qiladi.
+    let thread = match query_i64(&req, "user_id") {
+        Some(t) if admin && t > 0 => t,
+        _ => me,
+    };
+
+    // ── KIMLIGI SARLAVHADA, LEKIN ONALTILIK KO'RINISHDA ───────
+    //
+    // TOPILGAN XAVF: ism emoji yoki kirill harflari bo'lishi
+    // mumkin (ilova buni ataylab qo'llaydi — `characters` paketi
+    // izohiga qarang). HTTP sarlavhasi esa faqat ASCII qabul
+    // qiladi va bunday qiymat ulanishni butunlay yiqitardi.
+    //
+    // Shu sabab kimligi JSON bo'lib yig'iladi va onaltilik
+    // ko'rinishda uzatiladi — bu har qanday matn uchun xavfsiz.
+    let first = u["first_name"].as_str().unwrap_or("").trim();
+    let last = u["last_name"].as_str().unwrap_or("").trim();
+    let name = if last.is_empty() {
+        first.to_string()
+    } else {
+        format!("{first} {last}")
+    };
+    let who = json!({
+        "name": name.trim(),
+        "username": u["username"].as_str().unwrap_or(""),
+        // Profil rasmi — bazada FAYL NOMI turadi, to'liq manzil
+        // esa shu yerda quriladi (loyihadagi umumiy qoida).
+        "avatar": match u["avatar_file"].as_str().unwrap_or("") {
+            "" => String::new(),
+            f => format!("{}/api/media/{f}", origin),
+        },
+    });
+    let who_hex = hex_of(who.to_string().as_bytes());
+
+    let mut h = Headers::new();
+    // Ushbu sarlavhasiz Durable Object ulanishni ochmaydi.
+    h.set("Upgrade", "websocket")?;
+    h.set("X-Rt-Admin", if admin { "1" } else { "0" })?;
+    h.set("X-Rt-Uid", &thread.to_string())?;
+    h.set("X-Rt-Who", &who_hex)?;
+
+    let inner = Request::new_with_init(
+        "https://presence.internal/ws",
+        RequestInit::new().with_method(Method::Get).with_headers(h),
+    )?;
+    presence_stub(env, thread)?.fetch_with_request(inner).await
+}
+
+/// Suhbatning ochiq turgan ulanishlariga xabar itaradi.
+///
+/// NEGA `let _ =`: itarish — QULAYLIK, kafolat emas. Hech kim
+/// ulanmagan bo'lsa yoki DO javob bermasa, xabar baribir bazada
+/// turadi va ilova uni uzoq kutish (`chat_wait`) orqali oladi.
+/// Ya'ni bu yerdagi nosozlik xabarni YO'QOTMAYDI.
+async fn rt_notify(env: &Env, thread_user: i64, payload: Value) {
+    let Ok(stub) = presence_stub(env, thread_user) else { return };
+    let Ok(req) = Request::new_with_init(
+        "https://presence.internal/notify",
+        RequestInit::new()
+            .with_method(Method::Post)
+            .with_body(Some(payload.to_string().into())),
+    ) else {
+        return;
+    };
+    let _ = stub.fetch_with_request(req).await;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  QO'NG'IROQ UCHUN KALITLAR (TURN)
+// ═══════════════════════════════════════════════════════════════
+//
+// ── TURN NIMA UCHUN KERAK ─────────────────────────────────────
+//
+// WebRTC ikki telefonni TO'G'RIDAN-TO'G'RI ulashga urinadi. Uy
+// Wi-Fi'sida bu odatda ishlaydi. Mobil operatorlarda esa ko'pincha
+// ishlamaydi: abonentlar bitta umumiy IP ortida o'tiradi (CGNAT)
+// va tashqaridan ularga "kirib" bo'lmaydi.
+//
+// TURN — shunday hollarda oqimni O'ZI orqali o'tkazadigan
+// ko'prik. Usiz qo'ng'iroqlarning taxminan 10-20% i "ulanmoqda"
+// da qotib qolardi.
+//
+// ── NEGA KALIT ILOVAGA BERILMAYDI ─────────────────────────────
+//
+// TURN kalitining DOIMIY tokeni worker ichida qoladi. Ilovaga esa
+// har safar QISQA MUDDATLI hisob ma'lumoti beriladi.
+//
+// Sabab oddiy: APK'ni ochib o'qish oson. Doimiy token ichiga
+// solinganda uni topgan har kim sizning TURN'ingizdan tekinga
+// foydalanardi — va trafik puli sizga tushardi.
+
+/// Qisqa muddatli TURN hisob ma'lumotining umri.
+///
+/// Ikki soat: eng uzun qo'ng'iroqdan ham uzoq, lekin o'g'irlansa
+/// ham tezda kuchini yo'qotadigan darajada qisqa.
+const TURN_TTL_SEC: i64 = 2 * 3600;
+
+/// GET /api/call/ice — WebRTC uchun STUN/TURN ro'yxati.
+///
+/// Javob ATAYLAB keshlanmaydi: har bir odam O'Z hisob ma'lumotini
+/// olishi kerak.
+async fn call_ice(req: &Request, env: &Env) -> Result<Response> {
+    if session_user(env, &bearer(req)).await?.is_none() {
+        return json_resp(&json!({"error": "unauthorized"}), 401);
+    }
+
+    // Kalit qo'yilmagan bo'lsa qo'ng'iroq baribir ishlashi kerak —
+    // faqat murakkab tarmoqlarda ulanmaydi. Shu sabab bu yerda
+    // xato emas, ochiq STUN ro'yxati qaytadi.
+    let (Ok(key_id), Ok(token)) = (
+        env.secret("TURN_KEY_ID").map(|v| v.to_string()),
+        env.secret("TURN_KEY_API_TOKEN").map(|v| v.to_string()),
+    ) else {
+        return ok_nostore(json!({
+            "iceServers": [{"urls": "stun:stun.cloudflare.com:3478"}],
+            "turn": false,
+        }));
+    };
+
+    let h = Headers::new();
+    h.set("Content-Type", "application/json")?;
+    h.set("Authorization", &format!("Bearer {token}"))?;
+    let out = Request::new_with_init(
+        &format!(
+            "https://rtc.live.cloudflare.com/v1/turn/keys/{key_id}\
+             /credentials/generate-ice-servers"
+        ),
+        RequestInit::new()
+            .with_method(Method::Post)
+            .with_headers(h)
+            .with_body(Some(json!({"ttl": TURN_TTL_SEC}).to_string().into())),
+    )?;
+
+    let mut r = Fetch::Request(out).send().await?;
+    if r.status_code() >= 300 {
+        // Cloudflare javob bermadi — qo'ng'iroq butunlay
+        // to'xtamasin, STUN bilan urinib ko'riladi.
+        return ok_nostore(json!({
+            "iceServers": [{"urls": "stun:stun.cloudflare.com:3478"}],
+            "turn": false,
+        }));
+    }
+    let d: Value = r.json().await.unwrap_or(json!({}));
+    ok_nostore(json!({
+        // Javobning shakli WebRTC kutgani bilan AYNAN bir xil —
+        // ilova uni o'zgartirmasdan `RTCPeerConnection` ga beradi.
+        "iceServers": d["iceServers"].clone(),
+        "turn": true,
+        "ttl": TURN_TTL_SEC,
+    }))
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  XABARNI TAHRIRLASH
+// ═══════════════════════════════════════════════════════════════
+//
+// TALAB (foydalanuvchi): "foydalanuvchi faqat o'zi yozgan xabarni
+// tahrirlashi mumkin" va "tahrirlangan xabarning pastki qismida
+// (tagida emas) 'tahrirlangan' deb qo'yishi kerak".
+//
+// Ikkinchisi — ilovaning ishi; bu yerdan faqat `edited_at` vaqti
+// beriladi. Nol bo'lmasa — tahrirlangan.
+//
+// ── NEGA FAQAT MATN ───────────────────────────────────────────
+//
+// Rasm, video va ovozli xabarning O'ZI tahrirlanmaydi: fayl
+// allaqachon B2'da va uni almashtirish eski faylni yetim
+// qoldirardi. Telegram ham media xabarning faqat izohini
+// o'zgartiradi — bu yerda ham shunday: `body` almashadi, fayl
+// joyida qoladi.
+
+/// POST /api/chat/message/:id/edit — `{"body": "yangi matn"}`
+async fn chat_edit_message(
+    mut req: Request, env: &Env, id: &str,
+) -> Result<Response> {
+    let Some(u) = session_user(env, &bearer(&req)).await? else {
+        return json_resp(&json!({"error": "unauthorized"}), 401);
+    };
+    if u["is_banned"].as_i64().unwrap_or(0) != 0 {
+        return json_resp(&json!({"error": "Sizga yozish taqiqlangan"}), 403);
+    }
+    let me = u["id"].as_i64().unwrap_or(0);
+    let admin = is_admin(&u);
+
+    let b: Value = req.json().await.unwrap_or(json!({}));
+    let body: String = b["body"].as_str().unwrap_or("").trim()
+        .chars().take(CHAT_MAX).collect();
+
+    // Xabarni topamiz va MATNGA tegish huquqini tekshiramiz.
+    let res = turso_exec(env,
+        "SELECT user_id, from_admin, media_type FROM chat_messages WHERE id=?",
+        vec![TursoArg::text(id)]).await?;
+    let Some(r) = first_row(&res) else {
+        return json_resp(&json!({"error": "Xabar topilmadi"}), 404);
+    };
+    let owner = r["user_id"].as_i64().unwrap_or(0);
+    let from_admin = r["from_admin"].as_i64().unwrap_or(0) != 0;
+    let has_media = !r["media_type"].as_str().unwrap_or("").is_empty();
+
+    // ── MATN FAQAT O'ZINIKI ───────────────────────────────────
+    //
+    // "Xabarni kim yozgan" ikki narsadan chiqadi: suhbat kimniki
+    // (`user_id`) va admindan kelganmi (`from_admin`).
+    //
+    //   admin  + from_admin=1  → adminning xabari
+    //   owner  + from_admin=0  → foydalanuvchining xabari
+    //
+    // Admin o'z xabarini tahrirlaydi, foydalanuvchi — o'zinikini.
+    // Bir-birinikiga IKKALASI ham tegmaydi.
+    let mine = if admin && from_admin { true } else { !from_admin && owner == me };
+    if !mine {
+        return json_resp(&json!({"error": "forbidden"}), 403);
+    }
+    // Matnsiz xabar faqat media bo'lsa ma'noli. Oddiy matnli
+    // xabarni bo'shatish — aslida o'chirish, lekin u boshqa yo'l.
+    if body.is_empty() && !has_media {
+        return json_resp(&json!({"error": "Xabar bo'sh"}), 400);
+    }
+
+    let now = now_ms();
+    turso_batch(env, &[
+        ("UPDATE chat_messages SET body=?, edited_at=? WHERE id=?",
+         vec![TursoArg::text(&body), TursoArg::int(now), TursoArg::text(id)]),
+        // Suhbat versiyasi oshadi — ilova o'zgarishni sezadi va
+        // yangi matnni oladi (`chat_wait` izohiga qarang).
+        ("UPDATE chat_threads SET chat_ver=COALESCE(chat_ver,0)+1
+           WHERE user_id=?", vec![TursoArg::int(owner)]),
+    ]).await?;
+
+    // Ro'yxatdagi "oxirgi xabar" matni ham eskirgan bo'lishi
+    // mumkin — o'sha qator qayta yig'iladi.
+    refresh_thread(env, owner).await;
+    rt_notify(env, owner, json!({
+        "t": "chat", "action": "edit", "user_id": owner,
+        "id": id, "body": body, "edited_at": now,
+    })).await;
+    ok_nostore(json!({"ok": true, "id": id, "body": body, "edited_at": now}))
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  XABARNI QADASH
+// ═══════════════════════════════════════════════════════════════
+//
+// Qadalgan xabar suhbat tepasida turadi. Bir suhbatda BITTA
+// qadalgan xabar bo'ladi: yangisi qadalganda eskisi o'zi
+// yechiladi. Telegram ko'p qadashga ruxsat beradi, lekin bu
+// yerda suhbat bitta odam bilan — ro'yxat ortiqcha murakkablik.
+//
+// RUXSAT: suhbatning EGASI ham, admin ham qada oladi — qadash
+// matnni o'zgartirmaydi, ya'ni yuqoridagi "matn faqat o'ziniki"
+// qoidasiga tegmaydi.
+
+/// POST /api/chat/message/:id/pin — `{"pinned": true|false}`
+async fn chat_pin_message(
+    mut req: Request, env: &Env, id: &str,
+) -> Result<Response> {
+    let Some(u) = session_user(env, &bearer(&req)).await? else {
+        return json_resp(&json!({"error": "unauthorized"}), 401);
+    };
+    let me = u["id"].as_i64().unwrap_or(0);
+    let b: Value = req.json().await.unwrap_or(json!({}));
+    let pinned = b["pinned"].as_bool().unwrap_or(true);
+
+    let res = turso_exec(env,
+        "SELECT user_id FROM chat_messages WHERE id=?",
+        vec![TursoArg::text(id)]).await?;
+    let Some(r) = first_row(&res) else {
+        return json_resp(&json!({"error": "Xabar topilmadi"}), 404);
+    };
+    let owner = r["user_id"].as_i64().unwrap_or(0);
+    if !is_admin(&u) && owner != me {
+        return json_resp(&json!({"error": "forbidden"}), 403);
+    }
+
+    turso_batch(env, &[
+        // Avval SHU SUHBATDAGI hamma qadoq yechiladi...
+        ("UPDATE chat_messages SET pinned=0 WHERE user_id=? AND pinned<>0",
+         vec![TursoArg::int(owner)]),
+        // ...keyin kerakli bittasi qadaladi. Yechish so'ralgan
+        // bo'lsa bu buyruq hech narsa qilmaydi.
+        ("UPDATE chat_messages SET pinned=? WHERE id=?",
+         vec![TursoArg::int(if pinned { 1 } else { 0 }), TursoArg::text(id)]),
+        ("UPDATE chat_threads SET chat_ver=COALESCE(chat_ver,0)+1
+           WHERE user_id=?", vec![TursoArg::int(owner)]),
+    ]).await?;
+
+    rt_notify(env, owner, json!({
+        "t": "chat", "action": "pin", "user_id": owner,
+        "id": id, "pinned": pinned,
+    })).await;
+    ok_nostore(json!({"ok": true, "id": id, "pinned": pinned}))
 }
 
 /// DELETE /api/chat/thread/:user_id — butun yozishma.
@@ -9578,6 +10112,10 @@ async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
         // Yozishma HAR BIR ODAM uchun boshqacha va u katalogga
         // umuman aloqasi yo'q — keshni kuydirmaydi.
         || path.starts_with("/api/chat")
+        // WebSocket ulanishi — keshga umuman aloqasi yo'q.
+        || path == "/api/rt"
+        // Qo'ng'iroq uchun kalitlar ham shunday.
+        || path.starts_with("/api/call/")
         // Admin amallari katalogga aloqasi yo'q — keshni
         // kuydirmaydi.
         || path.starts_with("/api/admin/")
@@ -9717,6 +10255,19 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
         return billing_webhook(req, &env).await;
     }
 
+    // ── REAL VAQTDAGI ULANISH ─────────────────────────────────
+    //
+    // Onlayn holat, "yozmoqda", qo'ng'iroq va xabarni darhol
+    // yetkazish — hammasi shu bitta ulanish orqali.
+    if path == "/api/rt" {
+        return rt_socket(req, &env, &origin).await;
+    }
+
+    // ── QO'NG'IROQ UCHUN KALITLAR ─────────────────────────────
+    if path == "/api/call/ice" && method == Method::Get {
+        return call_ice(&req, &env).await;
+    }
+
     // ── ADMIN BILAN YOZISHMA ──────────────────────────────────
     if path == "/api/chat" {
         if method == Method::Get {
@@ -9750,9 +10301,18 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
             }
         }
     }
-    if method == Method::Delete {
-        if let Some(mid) = path.strip_prefix("/api/chat/message/") {
-            return chat_del_message(&req, &env, mid).await;
+    if let Some(rest) = path.strip_prefix("/api/chat/message/") {
+        if method == Method::Delete {
+            return chat_del_message(&req, &env, rest).await;
+        }
+        if method == Method::Post {
+            // `.../<id>/edit` va `.../<id>/pin`.
+            if let Some(mid) = rest.strip_suffix("/edit") {
+                return chat_edit_message(req, &env, mid).await;
+            }
+            if let Some(mid) = rest.strip_suffix("/pin") {
+                return chat_pin_message(req, &env, mid).await;
+            }
         }
     }
 

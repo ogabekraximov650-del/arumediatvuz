@@ -91,6 +91,27 @@ dependencies:
   # paket. Android'da u ham ExoPlayer ustida ishlaydi, ya'ni
   # dvigatel o'sha-o'sha; lekin audio uchun to'g'ri yo'l bilan.
   just_audio: ^0.10.6
+  # ── REAL VAQTDAGI AUDIO QO'NG'IROQ ──────────────────────────
+  #
+  # WebRTC — Telegram, WhatsApp va Discord qo'ng'iroqlari ostida
+  # turgan o'sha texnologiya. `flutter_webrtc` uning Flutter uchun
+  # rasmiy ko'prigi: Android'da Google'ning libwebrtc kutubxonasi
+  # ustida ishlaydi, ya'ni exo va aks-sado bostirish (echo
+  # cancellation), shovqin filtri, paket yo'qolishini tiklash —
+  # hammasi tayyor holda keladi.
+  #
+  # NEGA TAYYOR PAKET: bu ro'yxatdagilarni noldan yozish yillik
+  # ish. Ovoz sifati aynan shu qismlarga bog'liq.
+  flutter_webrtc: ^0.12.5
+  # Qo'ng'iroq paytida ekran o'chib qolmasligi uchun.
+  wakelock_plus: ^1.2.8
+  # Ilova fonda turganda kelgan qo'ng'iroq va xabarni telefonning
+  # O'Z bildirishnomasi bilan ko'rsatish uchun.
+  #
+  # NEGA KERAK: ilova ichidagi banner faqat ilova ochiq bo'lganda
+  # ko'rinadi. Odam boshqa ilovaga o'tib ketgan bo'lsa, xabar
+  # borligini faqat tizim bildirishnomasi ayta oladi.
+  flutter_local_notifications: ^18.0.1
 
 dev_dependencies:
   flutter_test:
@@ -105,3 +126,14 @@ flutter:
     # ishlatiladi: ochilish ekrani va bosh sahifa sarlavhasi.
     # Manba: branding/aru-mark.png
     - assets/aru-mark.png
+    # ── QO'NG'IROQ VA BILDIRISHNOMA OVOZLARI ──────────────
+    #
+    # Hammasi `ci/gen_sounds.py` bilan NOLDAN yasalgan (sinus
+    # to'lqin + yumshoq harmonika), ya'ni mualliflik huquqi
+    # jihatidan toza. Ohangni o'zgartirish kerak bo'lsa o'sha
+    # faylni tahrirlab qayta ishga tushiring.
+    - assets/sounds/incoming_call.wav
+    - assets/sounds/outgoing_call.wav
+    - assets/sounds/message.wav
+    - assets/sounds/call_connected.wav
+    - assets/sounds/call_ended.wav

@@ -85,6 +85,23 @@ jobs:
           # ham berilishi shart (`build-flutter-apk.yml`), aks holda
           # ilovaning hamma so'rovi 403 oladi.
           put APP_SIGN_SECRET "${{ secrets.APP_SIGN_SECRET }}"
+          # ── QO'NG'IROQ ────────────────────────────────────
+          #
+          # Cloudflare Realtime'ning TURN kaliti. Worker u bilan
+          # ilovaga QISQA MUDDATLI hisob ma'lumoti yasab beradi;
+          # doimiy token hech qachon APK ichiga tushmaydi.
+          #
+          # Qo'yilmasa qo'ng'iroq baribir ishlaydi, lekin murakkab
+          # mobil tarmoqlarda ulanmasligi mumkin (`call_ice`
+          # izohiga qarang).
+          put TURN_KEY_ID "${{ secrets.TURN_KEY_ID }}"
+          put TURN_KEY_API_TOKEN "${{ secrets.TURN_KEY_API_TOKEN }}"
+          # Serverless SFU — KO'P ODAMLI qo'ng'iroq uchun. Hozir
+          # kod uni ishlatmaydi (admin bilan suhbat ikki kishilik
+          # va to'g'ridan-to'g'ri ulanadi), lekin sir joyida
+          # tursin: guruh qo'shilganda faqat kod yoziladi.
+          put REALTIME_SFU_APP_ID "${{ secrets.REALTIME_SFU_APP_ID }}"
+          put REALTIME_SFU_APP_TOKEN "${{ secrets.REALTIME_SFU_APP_TOKEN }}"
 
       - name: Deploy to Cloudflare Workers
         working-directory: worker
