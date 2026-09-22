@@ -67,26 +67,6 @@ class ChatMessage {
   /// tursin va admin o'qiganidan keyingina ✓✓ ikkita bo'lsin".
   final bool seen;
 
-  /// QACHON o'qilgani (ms). 0 — hali o'qilmagan.
-  ///
-  /// TALAB (foydalanuvchi): menyuda o'qilgan belgisi yonida AYNAN
-  /// `2026/01/01/12:34` ko'rinishida chiqsin.
-  final int seenAt;
-
-  /// Javob berilgan xabarning raqami (bo'sh — oddiy xabar).
-  ///
-  /// Asl xabarning MATNI bu yerda saqlanmaydi: butun suhbat
-  /// allaqachon ro'yxatda turadi, ya'ni matnni raqam bo'yicha
-  /// topish mumkin. Nusxa saqlash asl xabar tahrirlanganda
-  /// eskirib qolardi.
-  final String replyTo;
-
-  /// Tahrirlangan vaqti (ms). 0 — tegilmagan.
-  final int editedAt;
-
-  /// Suhbat tepasiga qadalganmi.
-  final bool pinned;
-
   const ChatMessage({
     required this.id,
     required this.fromAdmin,
@@ -97,45 +77,18 @@ class ChatMessage {
     this.mediaMs = 0,
     this.pending = false,
     this.seen = false,
-    this.seenAt = 0,
-    this.replyTo = '',
-    this.editedAt = 0,
-    this.pinned = false,
   });
 
-  /// Bitta-ikkita maydonni almashtirib, YANGI nusxa qaytaradi.
-  ///
-  /// NEGA KERAK: sinf o'zgarmas (`@immutable`), lekin xabar
-  /// hayoti davomida bir necha marta yangilanadi — o'qildi,
-  /// tahrirlandi, qadaldi. Har biri uchun alohida usul yozish
-  /// (`markSeen` kabi) tez orada takrorga aylanardi.
-  ChatMessage copyWith({
-    String? body,
-    bool? seen,
-    int? seenAt,
-    int? editedAt,
-    bool? pinned,
-    bool? pending,
-  }) =>
-      ChatMessage(
+  ChatMessage markSeen() => ChatMessage(
         id: id,
         fromAdmin: fromAdmin,
-        body: body ?? this.body,
+        body: body,
         createdAt: createdAt,
         mediaUrl: mediaUrl,
         mediaType: mediaType,
         mediaMs: mediaMs,
-        pending: pending ?? this.pending,
-        seen: seen ?? this.seen,
-        seenAt: seenAt ?? this.seenAt,
-        replyTo: replyTo,
-        editedAt: editedAt ?? this.editedAt,
-        pinned: pinned ?? this.pinned,
+        seen: true,
       );
-
-  /// O'qildi deb belgilaydi. `at` — qachon (0 bo'lsa tegilmaydi).
-  ChatMessage markSeen({int at = 0}) =>
-      copyWith(seen: true, seenAt: at > 0 ? at : seenAt, pending: false);
 
   bool get hasMedia => mediaUrl.isNotEmpty && mediaType.isNotEmpty;
   bool get isVideo => mediaType == 'video';
@@ -154,10 +107,6 @@ class ChatMessage {
         mediaType: '${j['media_type'] ?? ''}',
         mediaMs: ((j['media_ms'] as num?) ?? 0).toInt(),
         seen: j['seen'] == true,
-        seenAt: ((j['seen_at'] as num?) ?? 0).toInt(),
-        replyTo: '${j['reply_to'] ?? ''}',
-        editedAt: ((j['edited_at'] as num?) ?? 0).toInt(),
-        pinned: j['pinned'] == true,
       );
 
   Map<String, dynamic> toJson() => {
@@ -169,15 +118,7 @@ class ChatMessage {
         'media_type': mediaType,
         'media_ms': mediaMs,
         'seen': seen,
-        'seen_at': seenAt,
-        'reply_to': replyTo,
-        'edited_at': editedAt,
-        'pinned': pinned,
       };
-
-  /// Tahrirlanganmi — pufak ichida "tahrirlangan" yozuvi shunga
-  /// qarab chiqadi.
-  bool get isEdited => editedAt > 0;
 }
 
 /// Admin ro'yxatidagi bitta suhbat.
@@ -402,23 +343,7 @@ class ChatController extends ChangeNotifier {
   bool _watching = false;
 
   /// Oxirgi ko'rilgan xabar vaqti — kutish shundan boshlanadi.
-  /// Serverga "shundan keyingisini ber" deb aytiladigan vaqt.
-  ///
-  /// NEGA oxirgi xabarning vaqti EMAS: xabar TAHRIRLANGANDA
-  /// yaratilish vaqti o'zgarmaydi. Oxirgi xabarga qarab turilsa,
-  /// eski xabarning yangi matni hech qachon kelmasdi.
-  ///
-  /// Shu sabab ro'yxatdagi ENG KATTA "tegilgan vaqt" olinadi —
-  /// server ham aynan shunga qarab taqqoslaydi.
-  int get _lastAt {
-    var max = 0;
-    for (final m in _items) {
-      if (m.pending) continue;
-      if (m.createdAt > max) max = m.createdAt;
-      if (m.editedAt > max) max = m.editedAt;
-    }
-    return max;
-  }
+  int get _lastAt => _items.isEmpty ? 0 : _items.last.createdAt;
 
   /// Nechta xabar o'qilgan. Server shu son o'zgarganda ham
   /// javob qaytaradi — ✓ dan ✓✓ ga o'tish shu orqali ko'rinadi.
@@ -546,25 +471,13 @@ class ChatController extends ChangeNotifier {
         // `since` bilan faqat YANGI xabarlar keladi, "o'qildi"
         // belgisi esa ESKI xabarlarga qo'yiladi. Server shu
         // sabab o'qilganlarning RAQAMLARINI ham yuboradi.
-        // Endi bu shunchaki raqamlar ro'yxati emas, `[raqam, vaqt]`
-        // juftliklari: menyuda "o'qigan 2026/01/01/12:34" deb
-        // ko'rsatish uchun QACHON o'qilgani ham kerak.
-        final seenAt = <String, int>{};
-        for (final e in (j['seen_ids'] as List?) ?? const []) {
-          if (e is List && e.length >= 2) {
-            seenAt['${e[0]}'] = ((e[1] as num?) ?? 0).toInt();
-          } else {
-            // Eski server (vaqtsiz) bilan ham ishlayversin.
-            seenAt['$e'] = 0;
-          }
-        }
-        if (seenAt.isNotEmpty) {
+        final seenIds =
+            ((j['seen_ids'] as List?) ?? []).map((e) => '$e').toSet();
+        if (seenIds.isNotEmpty) {
           for (var i = 0; i < _items.length; i++) {
             final m = _items[i];
-            final at = seenAt[m.id];
-            if (at == null) continue;
-            if (!m.seen || (at > 0 && m.seenAt != at)) {
-              _items[i] = m.markSeen(at: at);
+            if (!m.seen && seenIds.contains(m.id)) {
+              _items[i] = m.markSeen();
             }
           }
         }
@@ -597,41 +510,14 @@ class ChatController extends ChangeNotifier {
           // Qo'shimcha xabarlar — oxiriga qo'shiladi.
           // Takrorlanmasin: sekin tarmoqda bitta javob ikki
           // marta kelishi mumkin.
-          // ── TAHRIRLANGANLARI ALMASHTIRILADI ──────────────
-          //
-          // Javobda ikki xil xabar bo'lishi mumkin: mutlaqo
-          // yangisi va ALLAQACHON ro'yxatda turgani (u
-          // tahrirlangani uchun qaytadan kelgan).
-          //
-          // Ilgari ikkinchisi shunchaki tashlab yuborilardi va
-          // ekranda eski matn qolaverardi.
-          final index = <String, int>{};
-          for (var i = 0; i < _items.length; i++) {
-            index[_items[i].id] = i;
-          }
-          final fresh = <ChatMessage>[];
-          var changed = false;
-          for (final m in rows) {
-            final at = index[m.id];
-            if (at == null) {
-              fresh.add(m);
-            } else if (_items[at].body != m.body ||
-                _items[at].editedAt != m.editedAt ||
-                _items[at].pinned != m.pinned) {
-              // Xabarning o'zi o'zgargan — almashtiramiz. "O'qildi"
-              // belgisi esa yuqorida alohida hal bo'ladi, shu
-              // sabab bu yerda serverdan kelgani ustun turadi.
-              _items[at] = m;
-              changed = true;
-            }
-          }
+          final have = _items.map((m) => m.id).toSet();
+          final fresh = rows.where((m) => !have.contains(m.id)).toList();
           if (fresh.isNotEmpty) {
             // Yuborayotgan paytda qo'yilgan vaqtinchalik nusxa
             // bo'lsa — u serverdan kelgani bilan almashadi.
             _items.removeWhere((m) => m.pending);
             _items.addAll(fresh);
           }
-          if (changed) removed = true;
           // Diskdagi nusxa yangi xabar kelganda HAM, xabar
           // o'chirilganda HAM qayta yoziladi — aks holda ilova
           // keyingi safar ochilganda o'chirilgan xabar diskdan
@@ -680,81 +566,6 @@ class ChatController extends ChangeNotifier {
     return null;
   }
 
-  /// Xabar matnini o'zgartiradi.
-  ///
-  /// RUXSAT serverda tekshiriladi: matnga faqat uni YOZGAN odam
-  /// tegadi. Bu yerdagi tekshiruv (`canEdit`) shunchaki menyuni
-  /// yashiradi — haqiqiy to'siq worker'da.
-  ///
-  /// Ekranda matn DARHOL almashadi: server javobini kutib turish
-  /// "bosdim, lekin hech narsa bo'lmadi" degan taassurot
-  /// qoldirardi. Xato qaytsa eski matn joyiga qaytariladi.
-  Future<String?> editMessage(String id, String body) async {
-    final text = body.trim();
-    if (text.isEmpty) return 'Xabar bo\'sh';
-    final at = _items.indexWhere((m) => m.id == id);
-    if (at < 0) return 'Xabar topilmadi';
-    final before = _items[at];
-    if (before.body == text) return null;
-
-    _items[at] = before.copyWith(
-      body: text,
-      editedAt: DateTime.now().millisecondsSinceEpoch,
-    );
-    notifyListeners();
-
-    final err = await _post('$_base/message/$id/edit', {'body': text});
-    if (err != null) {
-      // Qaytarib qo'yamiz — ro'yxat shu orada o'zgargan bo'lishi
-      // mumkin, shu sabab raqam bo'yicha qaytadan qidiriladi.
-      final now = _items.indexWhere((m) => m.id == id);
-      if (now >= 0) _items[now] = before;
-      notifyListeners();
-    } else {
-      _saveDisk();
-    }
-    return err;
-  }
-
-  /// Xabarni suhbat tepasiga qadaydi yoki qadoqni yechadi.
-  ///
-  /// Bir suhbatda BITTA qadalgan xabar bo'ladi — yangisi
-  /// qadalganda eskisi o'zi yechiladi (server ham shunday
-  /// qiladi, bu yerda esa ekran darhol to'g'ri ko'rinsin).
-  Future<String?> pinMessage(String id, {bool pinned = true}) async {
-    for (var i = 0; i < _items.length; i++) {
-      final want = pinned && _items[i].id == id;
-      if (_items[i].pinned != want) _items[i] = _items[i].copyWith(pinned: want);
-    }
-    notifyListeners();
-    final err = await _post('$_base/message/$id/pin', {'pinned': pinned});
-    if (err == null) _saveDisk();
-    return err;
-  }
-
-  /// Qadalgan xabar (yo'q bo'lsa `null`).
-  ChatMessage? get pinnedMessage {
-    for (final m in _items) {
-      if (m.pinned) return m;
-    }
-    return null;
-  }
-
-  /// Oddiy `POST` — xato matnini qaytaradi (`null` — muvaffaqiyat).
-  Future<String?> _post(String url, Map<String, dynamic> body) async {
-    try {
-      final r = await http
-          .post(Uri.parse(url),
-              headers: _headers(json: true), body: jsonEncode(body))
-          .timeout(const Duration(seconds: 20));
-      if (r.statusCode == 200 || r.statusCode == 201) return null;
-      final j = jsonDecode(r.body);
-      return '${(j is Map ? j['error'] : null) ?? 'Bajarilmadi'}';
-    } catch (_) {
-      return 'Internet yo\'q';
-    }
-  }
-
   /// ADMIN: TANLANGAN xabarlarni birdaniga o'chiradi.
   ///
   /// TALAB (foydalanuvchi): "xabarni bittalab emas, ustiga bosib
@@ -780,13 +591,11 @@ class ChatController extends ChangeNotifier {
   ///
   /// `mediaFile` — B2'ga allaqachon yuklangan faylning NOMI,
   /// `mediaType` esa `image` yoki `video`.
-  /// `replyTo` — javob berilayotgan xabarning raqami.
   Future<String?> send(
     String body, {
     String mediaFile = '',
     String mediaType = '',
     int mediaMs = 0,
-    String replyTo = '',
   }) async {
     final text = body.trim();
     if (text.isEmpty && mediaFile.isEmpty) return null;
@@ -810,7 +619,6 @@ class ChatController extends ChangeNotifier {
         body: text,
         createdAt: DateTime.now().millisecondsSinceEpoch,
         pending: true,
-        replyTo: replyTo,
       ));
       _loaded = true;
       notifyListeners();
@@ -827,7 +635,6 @@ class ChatController extends ChangeNotifier {
               if (mediaFile.isNotEmpty) 'media_file': mediaFile,
               if (mediaType.isNotEmpty) 'media_type': mediaType,
               if (mediaMs > 0) 'media_ms': mediaMs,
-              if (replyTo.isNotEmpty) 'reply_to': replyTo,
             }),
           )
           .timeout(const Duration(seconds: 20));

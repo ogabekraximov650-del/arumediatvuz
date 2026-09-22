@@ -205,58 +205,6 @@ jobs:
             echo "✅ RECORD_AUDIO ruxsati allaqachon bor"
           fi
 
-      # ── QO'NG'IROQ UCHUN RUXSATLAR (WebRTC) ──────────────────
-      #
-      # `flutter_webrtc` o'z manifestida ularning ko'pini
-      # e'lon qiladi, lekin hammasini emas va paket almashsa
-      # yo'qolib ketishi mumkin. Shu sabab bu yerda ochiq
-      # qo'shiladi — takrorlansa manifest birlashtirgichi
-      # dublikatni o'zi olib tashlaydi.
-      #
-      # MODIFY_AUDIO_SETTINGS — karnay/quloqchin rejimini
-      #     almashtirish uchun (qo'ng'iroq oynasidagi "Karnay").
-      # BLUETOOTH_CONNECT — simsiz quloqchinga ulanish
-      #     (Android 12+ da alohida ruxsat).
-      # POST_NOTIFICATIONS — Android 13+ da bildirishnoma
-      #     ko'rsatish uchun shart.
-      # WAKE_LOCK — suhbat paytida ekran/protsessor uxlamasin.
-      - name: Qo'ng'iroq va bildirishnoma ruxsatlarini qo'shish
-        run: |
-          MANIFEST="android/app/src/main/AndroidManifest.xml"
-          for P in MODIFY_AUDIO_SETTINGS BLUETOOTH_CONNECT \
-                   POST_NOTIFICATIONS WAKE_LOCK; do
-            if ! grep -q "android.permission.$P" "$MANIFEST"; then
-              sed -i "/<manifest /a\    <uses-permission android:name=\"android.permission.$P\" />" "$MANIFEST"
-              echo "✅ $P qo'shildi"
-            else
-              echo "✅ $P allaqachon bor"
-            fi
-          done
-
-      # ── QO'NG'IROQ PAKETLARI UCHUN GRADLE SOZLAMALARI ────────
-      #
-      # `flutter_webrtc` va `flutter_local_notifications` uchta
-      # narsani talab qiladi va UCHALASISIZ HAM build yiqiladi:
-      #
-      #   compileSdk 36 — paketlar olib keladigan androidx
-      #       kutubxonalari API 36 ga qarshi yig'ilishni talab
-      #       qiladi (xato: `checkDebugAarMetadata`);
-      #   minSdk 23     — `flutter_webrtc` ning eng past chegarasi;
-      #   desugaring    — `flutter_local_notifications` talabi.
-      #
-      # Hammasi mahalliy yig'ishda SINALGAN: shu ikki skriptsiz
-      # `flutter build apk` aynan yuqoridagi uch xato bilan
-      # to'xtaydi.
-      #
-      # NEGA SKRIPT (sed emas): Flutter 3.29 dan beri shablon
-      # Kotlin DSL (`build.gradle.kts`) yaratadi va eski `sed`
-      # qoidalari unga umuman tegmay o'tib ketadi — ya'ni
-      # jimgina hech narsa qilmaydi.
-      - name: Gradle'ni qo'ng'iroq paketlariga moslash
-        run: |
-          python3 ci/android_gradle_fix.py
-          python3 ci/android_root_gradle_fix.py
-
       # Video kesh-server (lib/services/video_cache_server.dart) ilova
       # ichida mahalliy http://127.0.0.1 manzilda ishlaydi. Android
       # targetSdk 28+ da standart holatda BARCHA shifrlanmagan (cleartext)
@@ -438,24 +386,14 @@ jobs:
           echo "✅ Kadr ajratuvchi joylashtirildi (paket: $PKG)"
           grep -n "aru/thumb" "$MA"
 
-      # ── DIQQAT: 36, 35 EMAS ──────────────────────────────────
-      #
-      # TOPILGAN XATO: bu yerda 35 turardi. Qo'ng'iroq paketlari
-      # qo'shilgach androidx kutubxonalari API 36 talab qila
-      # boshladi va build `checkDebugAarMetadata` da yiqildi.
-      #
-      # Yuqoridagi "Gradle'ni qo'ng'iroq paketlariga moslash"
-      # qadami ham 36 qo'yadi. Ikkovi AYNAN BIR XIL bo'lishi
-      # shart: bu qadam keyinroq ishlaydi va farq bo'lsa
-      # avvalgisining ishini bekor qilardi.
       - name: Kotlin va compileSdk versiyalarini eng yangisiga moslash
         run: |
           if [ -f "android/build.gradle" ]; then
             sed -i "s/ext.kotlin_version = '[0-9.]*'/ext.kotlin_version = '1.9.24'/" android/build.gradle || true
           fi
           if [ -f "android/app/build.gradle" ]; then
-            sed -i "s/compileSdkVersion flutter.compileSdkVersion/compileSdkVersion 36/" android/app/build.gradle || true
-            sed -i "s/compileSdk = flutter.compileSdkVersion/compileSdk = 36/" android/app/build.gradle || true
+            sed -i "s/compileSdkVersion flutter.compileSdkVersion/compileSdkVersion 35/" android/app/build.gradle || true
+            sed -i "s/compileSdk = flutter.compileSdkVersion/compileSdk = 35/" android/app/build.gradle || true
           fi
           echo "✅ Gradle sozlamalari yangilandi"
 

@@ -12,14 +12,12 @@ import 'services/auth_service.dart';
 import 'services/billing_service.dart';
 import 'services/net_meter.dart';
 import 'services/offline_library.dart';
-import 'services/app_notifier.dart';
 import 'services/rust_bridge.dart';
 import 'services/storage_janitor.dart';
 import 'services/sync_queue.dart';
 import 'services/traffic_service.dart';
 import 'services/video_cache_server.dart';
 import 'services/watch_history.dart';
-import 'widgets/app_notice.dart';
 
 // ── HAMMA SO'ROV SANALADI ───────────────────────────────────────
 //
@@ -198,17 +196,6 @@ Future<void> _main() async {
   // shu sabab eski qoldiqlar ochilishda tozalanadi.
   unawaited(StorageJanitor.sweep());
 
-  // ── XABAR VA QO'NG'IROQ BILDIRISHNOMALARI ───────────────────
-  //
-  // Serverga doimiy ulanishni ochadi va kelgan voqeani ilova
-  // ustidagi bannerga (yoki ilova fonda bo'lsa telefonning o'z
-  // bildirishnomasiga) aylantiradi.
-  //
-  // NEGA SHU YERDA: banner foydalanuvchi ilovaning QAYSI
-  // ekranida bo'lishidan qat'i nazar chiqishi kerak (foydalanuvchi
-  // talabi), ya'ni uni birorta ekranga bog'lab bo'lmaydi.
-  unawaited(AppNotifier.instance.start());
-
   runApp(const FulutterApp());
 }
 
@@ -219,10 +206,6 @@ class FulutterApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'ARUmediaTV',
-      // Banner shu kalit orqali `Overlay` ga yetib boradi —
-      // `BuildContext` ni qo'lda uzatib yurish shart emas
-      // (`app_notice.dart` izohiga qarang).
-      navigatorKey: appNavigatorKey,
       debugShowCheckedModeBanner: false,
       // ── MAVZU HAM O'SHA PALITRADAN ─────────────────────────
       //

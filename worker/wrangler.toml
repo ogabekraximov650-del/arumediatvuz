@@ -7,41 +7,35 @@ workers_dev = true
 command = "cargo install -q worker-build && worker-build --release"
 
 # ══════════════════════════════════════════════════════════════
-#  DURABLE OBJECT — ONLAYN HOLAT VA QO'NG'IROQ
+#  ESKI DURABLE OBJECT'NI TOZA OLIB TASHLASH
 # ══════════════════════════════════════════════════════════════
 #
-# Oddiy Worker qisqa HTTP so'rovi uchun: u tugaydi va unutiladi.
-# Onlayn holat va qo'ng'iroq esa DOIMIY ulanishni talab qiladi —
-# buni faqat Durable Object bera oladi.
+# Bir muddat `PresenceHub` nomli Durable Object bor edi (onlayn
+# holat va qo'ng'iroq uchun). U KODDAN OLIB TASHLANDI, lekin
+# Cloudflare hisobida sinf ro'yxatda qolgan.
 #
-# Kodi: `src/realtime.rs`.
-[[durable_objects.bindings]]
-name = "PRESENCE"
-class_name = "PresenceHub"
-
-# ── NEGA `new_sqlite_classes` ─────────────────────────────────
+# BU BLOKNI O'CHIRMANG. Usiz keyingi `wrangler deploy` xato
+# bilan to'xtaydi: kod sinfni endi eksport qilmaydi, Cloudflare
+# esa uni hali ham kutadi.
 #
-# Workers'ning BEPUL rejasida faqat SQLite asosidagi Durable
-# Object yaratish mumkin. Eski (`new_classes`) turi pullik reja
-# talab qiladi va bu yerda kerak emas: ombordan atigi ikki qiymat
-# saqlanadi (kim qachon oflayn bo'lgani).
+# `deleted_classes` aynan shu holat uchun: Cloudflare sinfni va
+# uning omborini o'zi tozalaydi. Migratsiya BIR MARTA
+# qo'llaniladi, keyin bu blok shunchaki tarix bo'lib qoladi.
+#
+# Tartib MUHIM: `v1` allaqachon qo'llangan, shu sabab u ham
+# ro'yxatda turishi kerak — wrangler zanjirni boshidan
+# tekshiradi.
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["PresenceHub"]
 
+[[migrations]]
+tag = "v2"
+deleted_classes = ["PresenceHub"]
+
 [env.production]
 name = "arumediatv"
 workers_dev = true
-
-# ── NEGA TAKRORLANADI ─────────────────────────────────────────
-#
-# `wrangler` da `[env.*]` bo'limi yuqoridagi bog'lamalarni O'ZIGA
-# OLMAYDI — har bir muhit o'zinikini to'liq sanashi shart. Shu
-# sabab bu qatorlar yuqoridagining nusxasi; birini o'zgartirsangiz
-# ikkinchisini ham o'zgartiring.
-[[env.production.durable_objects.bindings]]
-name = "PRESENCE"
-class_name = "PresenceHub"
 
 # Secrets (GitHub Actions orqali o'rnatiladi):
 # wrangler secret put TURSO_URL --env production
@@ -52,10 +46,6 @@ class_name = "PresenceHub"
 # wrangler secret put TEZCHECK_TOKEN --env production
 # wrangler secret put TEZCHECK_DESK --env production
 # wrangler secret put TEZCHECK_WEBHOOK_SECRET --env production
-# wrangler secret put TURN_KEY_ID --env production
-# wrangler secret put TURN_KEY_API_TOKEN --env production
-# wrangler secret put REALTIME_SFU_APP_ID --env production
-# wrangler secret put REALTIME_SFU_APP_TOKEN --env production
 #
 # TEZCHECK_TOKEN  — hisob tokeni (`aps_...`). MAXFIY: tezcheck.uz
 #                   faqat uning SHA-256 xeshini saqlaydi, ya'ni
@@ -67,12 +57,5 @@ class_name = "PresenceHub"
 #                   (503) va pul faqat "Tekshirish" tugmasi bilan
 #                   hisobga olinadi.
 #
-# TURN_KEY_ID / TURN_KEY_API_TOKEN — Cloudflare Realtime'ning
-#                   TURN kaliti. Token bilan worker QISQA MUDDATLI
-#                   (2 soatlik) hisob ma'lumoti yasaydi va AYNAN
-#                   o'shani ilovaga beradi.
-# REALTIME_SFU_APP_ID / REALTIME_SFU_APP_TOKEN — Serverless SFU
-#                   ilovasining raqami va maxfiy tokeni.
-#
-# Hammasi FAQAT worker ichida ishlatiladi va ilovaga hech
+# Uchalasi ham FAQAT worker ichida ishlatiladi va ilovaga hech
 # qachon chiqmaydi.
