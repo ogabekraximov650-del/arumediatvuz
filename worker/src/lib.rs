@@ -5388,17 +5388,54 @@ async fn desk_diagnosis(env: &Env) -> Option<String> {
         ));
     };
     let state = d["state"].as_str().unwrap_or("?");
+    // ── MAYDON YO'Q BO'LSA "?" — "false" EMAS ────────────────
+    //
+    // TOPILGAN XATO: ekranda `rejim=?` chiqdi, ya'ni sayt javobida
+    // `mode` maydoni umuman yo'q. `accepts_payments` ham yo'q
+    // bo'lishi mumkin edi, lekin u `false` deb ko'rsatilardi va
+    // "usullarni yoqing" degan noto'g'ri maslahat chiqardi.
     let mode = d["mode"].as_str().unwrap_or("?");
-    let accepts = d["accepts_payments"].as_bool().unwrap_or(false);
+    let accepts = d["accepts_payments"].as_bool();
+    let accepts_txt = accepts.map(|b| b.to_string()).unwrap_or_else(|| "?".into());
+
+    // ── KASSADA HAQIQATDA QAYSI USULLAR BOR ─────────────────
+    //
+    // `POST /payment-methods` platforma va kassa qoidalari
+    // qo'llangandan KEYINGI ro'yxatni beradi. Kabinetda "yoniq"
+    // ko'rinsa-yu, bu yerda bo'sh bo'lsa — muammo tezcheck
+    // tomonida (provayder ulanmagan, shartnoma tasdiqlanmagan).
+    let methods = match tezcheck(env, "/payment-methods", json!({})).await {
+        Ok((c, r)) if (200..300).contains(&c) => match r["data"].as_array() {
+            Some(a) if a.is_empty() => "usullar=BO'SH".to_string(),
+            Some(a) => format!(
+                "usullar={}",
+                a.iter()
+                    .map(|m| format!(
+                        "{}({}-{} so'm)",
+                        m["provider_code"].as_str().unwrap_or("?"),
+                        m["min_amount_minor"].as_i64().unwrap_or(0) / 100,
+                        m["max_amount_minor"].as_i64().unwrap_or(0) / 100,
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            None => "usullar=?".to_string(),
+        },
+        Ok((c, r)) => format!("usullar: {c} {}", tezcheck_why(&r)),
+        Err(_) => "usullar=?".to_string(),
+    };
+
     let hint = match state {
         "draft" => "kassa hali faollashtirilmagan (draft) — kabinetda sozlashni oxiriga yetkazing",
         "paused" => "kassa to'xtatib qo'yilgan (paused) — kabinetda qayta yoqing",
         "suspended" => "kassa tezcheck tomonidan to'xtatilgan (suspended) — qo'llab-quvvatlashga yozing",
         "archived" => "kassa arxivlangan (archived) — faol kassaning kodini qo'ying",
-        _ if !accepts => "kassada to'lov qabul qilish yoqilmagan — kabinetda Click/Payme usullarini yoqing",
-        _ => "kassa faol ko'rinadi",
+        _ if methods == "usullar=BO'SH" => "kassada birorta ham ishlaydigan to'lov usuli yo'q — tezcheck qo'llab-quvvatlashiga yozing",
+        _ => "sabab tezcheck tomonida — request_id bilan qo'llab-quvvatlashga yozing",
     };
-    Some(format!("Kassa: holat={state}, rejim={mode}, to'lov qabul qiladi={accepts} — {hint}"))
+    Some(format!(
+        "Kassa: holat={state}, rejim={mode}, to'lov qabul qiladi={accepts_txt}, {methods} — {hint}"
+    ))
 }
 
 /// Obuna tugash vaqti (ms). Obunasi yo'q bo'lsa 0.
@@ -5453,6 +5490,10 @@ async fn billing_create(mut req: Request, env: &Env) -> Result<Response> {
     // Yangi API muvaffaqiyatni HOLAT KODI bilan bildiradi (201).
     if !(200..300).contains(&code) {
         let mut why = tezcheck_why(&resp);
+        // Qo'llab-quvvatlash xatoni aynan shu raqam bilan topadi.
+        if let Some(rid) = resp["error"]["request_id"].as_str() {
+            why = format!("{why} (request_id: {rid})");
+        }
         // 409 — kassa hozir to'lov qabul qilmayapti. Sababi
         // kodda emas, tezcheck kabinetida: `desk_diagnosis`
         // aynan nima qilish kerakligini aytadi.
