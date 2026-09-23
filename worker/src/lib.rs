@@ -9829,6 +9829,22 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
     if path == "/api/billing/webhook" && (method == Method::Get || method == Method::Head) {
         return ok_nostore(json!({"ok": true}));
     }
+    // ── ILDIZ MANZIL HAM WEBHOOK ─────────────────────────────────
+    //
+    // TALAB (foydalanuvchi): tezcheck kabinetida faqat
+    // `https://arumediatv.uzcom.workers.dev` manzili qo'shildi.
+    // Ildizda boshqa hech narsa yo'q (ilgari 404 edi), shu sabab
+    // bu yerga kelgan POST aynan o'sha `billing_webhook` ga
+    // uzatiladi — imzo va tezcheck API orqali qayta tekshirish
+    // xuddi o'sha.
+    if path == "/" {
+        if method == Method::Post {
+            return billing_webhook(req, &env).await;
+        }
+        if method == Method::Get || method == Method::Head {
+            return ok_nostore(json!({"ok": true}));
+        }
+    }
 
     // ── ADMIN BILAN YOZISHMA ──────────────────────────────────
     if path == "/api/chat" {
