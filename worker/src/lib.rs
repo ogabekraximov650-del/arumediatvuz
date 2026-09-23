@@ -5318,6 +5318,13 @@ fn tezcheck_why(resp: &Value) -> String {
 /// bildiradi (muvaffaqiyat — 2xx). Ilgarigi `ok: true` maydoni
 /// yo'q.
 async fn tezcheck(env: &Env, path: &str, body: Value) -> Result<(u16, Value)> {
+    tezcheck_req(env, path, body, true).await
+}
+
+/// `tezcheck` ning o'zi, faqat kassa sarlavhasini yubormaslik
+/// mumkin: `POST /cash-desks` hujjatga ko'ra AYNAN shusiz
+/// chaqiriladi (u kassa kodini bilish uchun mo'ljallangan).
+async fn tezcheck_req(env: &Env, path: &str, body: Value, with_desk: bool) -> Result<(u16, Value)> {
     // `wrangler secret put` ba'zan oxiriga qator tashlashni ham
     // qo'shib yuboradi. O'sha ko'rinmas belgi tufayli sayt
     // "Invalid api key" deb javob berardi — shuning uchun
@@ -5334,7 +5341,9 @@ async fn tezcheck(env: &Env, path: &str, body: Value) -> Result<(u16, Value)> {
     h.set("Content-Type", "application/json")?;
     h.set("Accept", "application/json")?;
     h.set("Authorization", &format!("Bearer {token}"))?;
-    h.set("X-Cash-Desk-Code", &desk)?;
+    if with_desk {
+        h.set("X-Cash-Desk-Code", &desk)?;
+    }
     let req = Request::new_with_init(
         &format!("{TEZCHECK_API}{path}"),
         RequestInit::new()
@@ -5345,6 +5354,51 @@ async fn tezcheck(env: &Env, path: &str, body: Value) -> Result<(u16, Value)> {
     let mut r = Fetch::Request(req).send().await?;
     let status = r.status_code();
     Ok((status, r.json().await.unwrap_or(json!({}))))
+}
+
+/// Kassa nega to'lov qabul qilmayotganini aniqlaydi.
+///
+/// ── TOPILGAN MUAMMO: `resource.state_invalid` ────────────────
+///
+/// `POST /bills` 409 `resource.state_invalid` qaytarsa, ekranda
+/// faqat "Joriy holatda bu amalga ruxsat berilmaydi" chiqardi —
+/// nima qilish kerakligi noma'lum edi. Hujjatga ko'ra bu hisob
+/// yaratishda KASSA holati bilan bog'liq: kassa `draft`,
+/// `paused`, `suspended` yoki `archived` bo'lsa (yoki unda
+/// birorta to'lov usuli yoqilmagan bo'lsa) `accepts_payments`
+/// `false` bo'ladi va hisob yaratilmaydi.
+///
+/// Shu sabab xatodan keyin `POST /cash-desks` so'raladi va
+/// BIZNING kassamiz (`TEZCHECK_DESK`) holati matnga qo'shiladi.
+/// Bu kod bilan tuzatib bo'lmaydigan narsa — kassani tezcheck.uz
+/// kabinetida faollashtirish kerak — lekin endi ekranning o'zi
+/// aynan shuni aytadi.
+async fn desk_diagnosis(env: &Env) -> Option<String> {
+    let desk = env.secret("TEZCHECK_DESK").ok()?.to_string().trim().to_string();
+    let (code, resp) = tezcheck_req(env, "/cash-desks", json!({}), false).await.ok()?;
+    if !(200..300).contains(&code) {
+        return None;
+    }
+    let list = resp["data"].as_array()?;
+    let Some(d) = list.iter().find(|d| d["code"].as_str() == Some(desk.as_str())) else {
+        return Some(format!(
+            "TEZCHECK_DESK bu tokenga tegishli kassalar orasida yo'q \
+             (tokenga {} ta kassa ko'rinadi) — kassa kodini tekshiring",
+            list.len()
+        ));
+    };
+    let state = d["state"].as_str().unwrap_or("?");
+    let mode = d["mode"].as_str().unwrap_or("?");
+    let accepts = d["accepts_payments"].as_bool().unwrap_or(false);
+    let hint = match state {
+        "draft" => "kassa hali faollashtirilmagan (draft) — kabinetda sozlashni oxiriga yetkazing",
+        "paused" => "kassa to'xtatib qo'yilgan (paused) — kabinetda qayta yoqing",
+        "suspended" => "kassa tezcheck tomonidan to'xtatilgan (suspended) — qo'llab-quvvatlashga yozing",
+        "archived" => "kassa arxivlangan (archived) — faol kassaning kodini qo'ying",
+        _ if !accepts => "kassada to'lov qabul qilish yoqilmagan — kabinetda Click/Payme usullarini yoqing",
+        _ => "kassa faol ko'rinadi",
+    };
+    Some(format!("Kassa: holat={state}, rejim={mode}, to'lov qabul qiladi={accepts} — {hint}"))
 }
 
 /// Obuna tugash vaqti (ms). Obunasi yo'q bo'lsa 0.
@@ -5398,8 +5452,17 @@ async fn billing_create(mut req: Request, env: &Env) -> Result<Response> {
     let (code, resp) = tezcheck(env, "/bills", body).await?;
     // Yangi API muvaffaqiyatni HOLAT KODI bilan bildiradi (201).
     if !(200..300).contains(&code) {
+        let mut why = tezcheck_why(&resp);
+        // 409 — kassa hozir to'lov qabul qilmayapti. Sababi
+        // kodda emas, tezcheck kabinetida: `desk_diagnosis`
+        // aynan nima qilish kerakligini aytadi.
+        if code == 409 {
+            if let Some(d) = desk_diagnosis(env).await {
+                why = format!("{why}. {d}");
+            }
+        }
         return json_resp(&json!({
-            "error": format!("To'lov yaratilmadi: {}", tezcheck_why(&resp))
+            "error": format!("To'lov yaratilmadi: {why}")
         }), 502);
     }
     let order_id = resp["data"]["bill"]["id"].as_str().unwrap_or("").to_string();
