@@ -9779,6 +9779,15 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
     if path == "/api/billing/webhook" && method == Method::Post {
         return billing_webhook(req, &env).await;
     }
+    // ── MANZIL TEKSHIRUVI UCHUN 200 ─────────────────────────────
+    //
+    // TOPILGAN MUAMMO: tezcheck kabinetida bu manzilni qo'shib
+    // bo'lmasdi. GET/HEAD ga 404 qaytardik, ya'ni tashqaridan
+    // manzil "yo'q" bo'lib ko'rinardi. Endi oddiy 200: bu yo'l
+    // hech narsa o'qimaydi va yozmaydi.
+    if path == "/api/billing/webhook" && (method == Method::Get || method == Method::Head) {
+        return ok_nostore(json!({"ok": true}));
+    }
 
     // ── ADMIN BILAN YOZISHMA ──────────────────────────────────
     if path == "/api/chat" {
