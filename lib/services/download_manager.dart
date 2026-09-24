@@ -61,6 +61,14 @@ class VideoCacheStat {
   /// davom etadi.
   final bool retrying;
 
+  /// NAVBATDA turibdi — hali boshlanmagan (`downloading` ham `true`).
+  ///
+  /// TALAB (foydalanuvchi): "bir vaqtda eng ko'pi 3 ta sifat
+  /// yuklansin, qolganlari navbatda tursin". Navbat Rust yadrosida
+  /// (`pick_task`), bu yerda faqat ekranda "navbatda" deb
+  /// ko'rsatish uchun.
+  final bool queued;
+
   // ── TEZLIK (bayt/soniya) VA FAOL OQIMLAR SONI ──────────────────
   //
   // NEGA KERAK: "yuklab olish sekinlashdi" degan gapni tekshirib
@@ -79,6 +87,7 @@ class VideoCacheStat {
     this.downloaded = 0,
     this.downloading = false,
     this.retrying = false,
+    this.queued = false,
     this.speed = 0,
     this.streams = 0,
   });
@@ -109,12 +118,14 @@ class VideoCacheStat {
       other.downloaded == downloaded &&
       other.downloading == downloading &&
       other.retrying == retrying &&
+      other.queued == queued &&
       other.speed == speed &&
       other.streams == streams;
 
   @override
   int get hashCode =>
-      Object.hash(total, downloaded, downloading, retrying, speed, streams);
+      Object.hash(
+          total, downloaded, downloading, retrying, queued, speed, streams);
 }
 
 class DownloadManager extends ChangeNotifier {
@@ -284,6 +295,7 @@ class DownloadManager extends ChangeNotifier {
         downloaded: (v['downloaded'] as num?)?.toInt() ?? 0,
         downloading: v['downloading'] == true,
         retrying: v['retrying'] == true,
+        queued: v['queued'] == true,
         speed: (v['speed'] as num?)?.toInt() ?? 0,
         streams: (v['streams'] as num?)?.toInt() ?? 0,
       );

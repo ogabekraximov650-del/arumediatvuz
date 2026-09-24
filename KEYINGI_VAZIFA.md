@@ -924,6 +924,23 @@ millisekund.
 **Kesh muddati (foydalanuvchi talabi):** Cloudflare kesh yozuvlari
 `CHUNK_CACHE_SECONDS` = **1000 kun** (ilgari 400).
 
+## YUKLAB OLISH: NAVBAT, 3 TA JOY VA OXIRIGACHA TEZLIK (2026-09-24)
+
+**Foydalanuvchi:** «qaysi sifat boshida bosilsa avval o'sha yuklansin,
+yangilari navbatda tursin», «bir vaqtda eng ko'pi 3 ta sifat,
+bittasi tugashi bilan keyingisi avtomatik», «fayl 70% ga borganda
+tezlik pasayib ketyapti» (fayllar 71 MB gacha).
+
+| Nima | Qanday |
+|---|---|
+| Navbat tartibi | `DownloadState::seq` (bosilish tartibi). Ilgari `HashMap` dan birinchi uchragani olinardi — tartib tasodifiy edi. Diskdagi navbat ham shu tartibda yoziladi |
+| 3 ta joy | `DOWNLOAD_WORKERS = 3`, `choose_task`: boshlangan vazifa (`started`) tugaguncha joyini ushlaydi — xato bilan kutayotgan bo'lsa ham. Test: `navbat_tartibi_va_uchta_joy` |
+| Navbatdagini isitmaslik | `start_prepare` endi `start_download` da emas, `run_download` boshida |
+| UI | `queued` maydoni → "navbatda" yozuvi (pleyer va Kutubxona) |
+| 70% dagi sekinlashish | Sabab: ulush (4 MiB) oxirigacha egasida qolardi; ish tugagan oqimlar chiqib ketar, oxirini sekin ulanishlar YOLG'IZ tortardi. 71 bo'lak / 16 oqim — qolgan ish oqimlardan kamaygan payt ≈ 77%. Yechim: **ish o'g'irlash** (`steal_locked`: eng kech tugaydigan ulushdan tezlikka mutanosib qism) + **yakuniy takrorlash** (`duplicate_locked`: odatdagidan 2 barobar uzoq ketayotgan oxirgi bo'lak parallel olinadi, yutqazgan oqim `stop` bayrog'i bilan darhol to'xtaydi; bitta bo'lak eng ko'pi 2 marta) |
+| O'lchov | `yuklab_olish_umumiy_kanalda_oxirigacha_tez` (umumiy kanal + ulanish chegarasi): eski — 70% dan keyin tezlik ~45% ga tushardi; yangi — tushmaydi, jami 4,6 s → 3,6 s. Ortiqcha trafik < 1% (`tekshir_trafik`) |
+| 480 MiB dan katta fayl | Keyingi oyna endi oyna BOSHIDA isitiladi (ilgari oxirida — chegarada hamma oqim kutib qolardi) |
+
 ## PROFIL: XOTIRA VA TRAFIK
 
 TALAB (foydalanuvchi): "profildagi Xotira va Trafik

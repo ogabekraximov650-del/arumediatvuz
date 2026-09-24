@@ -6614,7 +6614,7 @@ class _QualityRow extends StatelessWidget {
         // Tezlik FAQAT yuklash ketayotganda ko'rsatiladi —
         // foydalanuvchi "sekinlashdimi yoki yo'q"ni shu raqamdan
         // ko'radi (ilgari ekranda faqat foiz bor edi).
-        final speed = st.downloading ? st.speedLabel : '';
+        final speed = st.downloading && !st.queued ? st.speedLabel : '';
         return Padding(
           padding: const EdgeInsets.fromLTRB(12, 0, 8, 10),
           child: Row(
@@ -6647,10 +6647,26 @@ class _QualityRow extends StatelessWidget {
                                 fontWeight: FontWeight.w600)),
                       ],
                     ),
-                    if (speed.isNotEmpty || st.retrying) ...[
+                    if (speed.isNotEmpty || st.retrying || st.queued) ...[
                       const SizedBox(height: 3),
                       Row(
                         children: [
+                          // Bir vaqtda 3 ta sifat yuklanadi, qolgani
+                          // bosilish tartibida kutadi.
+                          if (st.queued)
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: Colors.white.withValues(alpha: 0.12),
+                                borderRadius: BorderRadius.circular(5),
+                              ),
+                              child: const Text('navbatda',
+                                  style: TextStyle(
+                                      color: Colors.white70,
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w700)),
+                            ),
                           if (speed.isNotEmpty)
                             Container(
                               padding: const EdgeInsets.symmetric(

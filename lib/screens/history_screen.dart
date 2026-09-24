@@ -820,9 +820,11 @@ class _DownloadRow extends StatelessWidget {
                     if (!item.complete) ...[
                       Builder(builder: (context) {
                         final st = DownloadManager.instance.statOf(item.url);
-                        final label = st.retrying
-                            ? 'qayta ulanmoqda...'
-                            : st.speedLabel;
+                        final label = st.queued
+                            ? 'navbatda'
+                            : st.retrying
+                                ? 'qayta ulanmoqda...'
+                                : st.speedLabel;
                         if (label.isEmpty) return const SizedBox.shrink();
                         return Text(
                           label,
@@ -1276,7 +1278,15 @@ class _QualityRow extends StatelessWidget {
                 ),
               ),
               const Spacer(),
-              if (st.retrying)
+              if (st.queued)
+                Text(
+                  'navbatda',
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.5),
+                    fontSize: 11,
+                  ),
+                )
+              else if (st.retrying)
                 Text(
                   'qayta ulanmoqda...',
                   style: TextStyle(

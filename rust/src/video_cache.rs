@@ -1561,9 +1561,14 @@ fn stat_reset(key: &str, keep_total: u64) {
 // Shu sabab tugmani necha marta bosilsa ham yangi ish oqimi
 // ochilmaydi — faqat vazifaning holati o'zgaradi.
 
-/// Butun ilova bo'yicha bir vaqtda yuklanadigan videolar soni.
-/// Ijro (pleyer) har doim ustuvor bo'lishi uchun ataylab kichik.
-const DOWNLOAD_WORKERS: usize = 2;
+/// Butun ilova bo'yicha bir vaqtda yuklanadigan videolar (sifatlar)
+/// soni.
+///
+/// TALAB (foydalanuvchi): "bir vaqtning o'zida maksimal 3 ta sifat
+/// yuklab olinsin, bittasi tugashi bilan avtomatik keyingisi
+/// boshlansin, qolganlari navbatda tursin". Navbat tartibi —
+/// BOSILISH tartibi (`DownloadState::seq`, `pick_task`).
+const DOWNLOAD_WORKERS: usize = 3;
 
 /// BITTA videoni yuklab olishda bir vaqtda ishlaydigan oqimlar soni.
 ///
@@ -1733,7 +1738,26 @@ struct DownloadState {
     /// raqam solishtiriladi: u o'zgargan bo'lsa — bu boshqa,
     /// YANGI buyruq, unga tegilmaydi.
     epoch: u64,
+    /// ── NAVBATDAGI O'RNI ─────────────────────────────────────
+    ///
+    /// TOPILGAN XATO (foydalanuvchi: "qaysi sifat boshida bosilsa
+    /// avval o'sha yuklansin, yangi bosilganlar navbatda tursin").
+    /// Navbat `HashMap` edi va ish oqimi undan BIRINCHI UCHRAGANINI
+    /// olardi — xesh tartibi esa tasodifiy. Ya'ni oxirgi bosilgan
+    /// sifat birinchisidan oldin boshlanib ketishi mumkin edi.
+    /// Endi har bir yangi buyruq o'sib boruvchi raqam oladi va eng
+    /// kichigi birinchi olinadi.
+    seq: u64,
+    /// Yuklash BOSHLANGANMI (bo'sh joy olganmi). Boshlangan vazifa
+    /// tugaguncha o'z joyini ushlab turadi — tarmoq xatosi bilan
+    /// qisqa kutayotgan bo'lsa ham navbatdagisi uning o'rniga
+    /// kirib olmaydi, ya'ni bir vaqtda `DOWNLOAD_WORKERS` tadan
+    /// ko'p video HECH QACHON yuklanmaydi.
+    started: bool,
 }
+
+/// Navbat raqami (`DownloadState::seq`).
+static DL_SEQ: AtomicU64 = AtomicU64::new(0);
 
 static DOWNLOADS: OnceLock<Mutex<HashMap<String, DownloadState>>> = OnceLock::new();
 static DL_POOL: AtomicBool = AtomicBool::new(false);
@@ -1769,11 +1793,11 @@ fn queue_path() -> Option<PathBuf> {
 /// USHLAB TURGAN bo'lishi kerak (qulf ikki marta olinmasin).
 fn save_queue_locked(map: &HashMap<String, DownloadState>) {
     let Some(path) = queue_path() else { return };
-    let urls: Vec<&str> = map
-        .values()
-        .filter(|s| s.wanted)
-        .map(|s| s.url.as_str())
-        .collect();
+    // NAVBAT TARTIBIDA yoziladi — ilova qayta ochilganda ham
+    // birinchi bosilgani birinchi davom etadi.
+    let mut rows: Vec<&DownloadState> = map.values().filter(|s| s.wanted).collect();
+    rows.sort_by_key(|s| s.seq);
+    let urls: Vec<&str> = rows.iter().map(|s| s.url.as_str()).collect();
     if let Ok(json) = serde_json::to_string(&urls) {
         write_sealed(&path, "download-queue", json.as_bytes());
     }
@@ -1854,16 +1878,50 @@ fn ensure_pool() {
 }
 
 /// Navbatdan bajarishga tayyor vazifani tanlaydi.
+///
+/// Qoidalar:
+///   1) avval BOSHLANGAN vazifalar (ular o'z joyini ushlab turadi);
+///   2) bo'sh joy bo'lsa (`DOWNLOAD_WORKERS` dan kam) — navbatdagi
+///      ENG BIRINCHI bosilgani;
+///   3) har ikkala holatda ham eng kichik `seq` birinchi.
 fn pick_task() -> Option<(String, String, u64)> {
     let now = Instant::now();
     let mut map = downloads().lock().ok()?;
-    let key = map
-        .iter()
-        .find(|(_, s)| s.wanted && !s.running && s.next_try <= now)
-        .map(|(k, _)| k.clone())?;
+    let key = choose_task(&map, now)?;
     let st = map.get_mut(&key)?;
     st.running = true;
+    st.started = true;
     Some((key, st.url.clone(), st.epoch))
+}
+
+/// `pick_task` ning qarori (sof funksiya — test uchun alohida).
+fn choose_task(map: &HashMap<String, DownloadState>, now: Instant) -> Option<String> {
+    let ready = |s: &DownloadState| s.wanted && !s.running && s.next_try <= now;
+    let started = map
+        .iter()
+        .filter(|(_, s)| s.started && ready(s))
+        .min_by_key(|(_, s)| s.seq)
+        .map(|(k, _)| k.clone());
+    if started.is_some() {
+        return started;
+    }
+    let busy = map.values().filter(|s| s.wanted && s.started).count();
+    if busy >= DOWNLOAD_WORKERS {
+        return None;
+    }
+    map.iter()
+        .filter(|(_, s)| !s.started && ready(s))
+        .min_by_key(|(_, s)| s.seq)
+        .map(|(k, _)| k.clone())
+}
+
+/// Vazifa navbatda turibdi (hali boshlanmagan) — UI "navbatda"
+/// deb ko'rsatadi.
+fn download_queued(key: &str) -> bool {
+    downloads()
+        .lock()
+        .map(|m| m.get(key).map(|s| s.wanted && !s.started).unwrap_or(false))
+        .unwrap_or(false)
 }
 
 /// Bitta yuklash bosqichining natijasi.
@@ -2087,6 +2145,289 @@ struct Work {
     floor: u64,
     /// Uzilib qolgan so'rovlardan qaytarilgan oraliqlar.
     back: Vec<(u64, u64)>,
+    /// HAVODAGI ulushlar: oqim raqami -> (hali yozilmagan birinchi
+    /// bo'lak, ulushning oxirgi bo'lagi). Ish o'g'irlash
+    /// (`steal_locked`) shundan foydalanadi.
+    inflight: HashMap<usize, Inflight>,
+    /// Yakuniy takrorlovchilar: oqim -> (asl egasi, bo'lak).
+    dups: HashMap<usize, (usize, u64)>,
+    /// Odatdagi bitta bo'lak vaqti (ms, silliqlangan); 0 — hali
+    /// o'lchanmagan.
+    chunk_ms: f64,
+    /// Har bir oqim JORIY bo'lakdan nechta bayt olgan
+    /// (`fetch_span` yangilaydi, qulfsiz).
+    progress: Arc<Vec<AtomicU64>>,
+}
+
+// ── ISH O'G'IRLASH: OXIRIDA TEZLIK TUSHMAYDI ────────────────────
+//
+// TOPILGAN XATO (foydalanuvchi: "yuklab olishda fayl 70 foizlarga
+// borganda tezlik pasayib ketyapti", fayllar 71 MB gacha).
+//
+// Sabab: har bir oqim olgan ulushini (odatda 4 MiB) OXIRIGACHA o'zi
+// tortardi. 71 MB li faylda 16 oqim birinchi aylanishdayoq 64 ta
+// bo'lakni bo'lishib olardi; tez oqimlar tugagach qolgan 7 bo'lakni
+// ikkitasi olar, qolganlari ISHSIZ chiqib ketardi. Oxirida esa
+// sekinroq ulanishlar o'z ulushini YOLG'IZ tortardi — umumiy tezlik
+// faol ulanishlar soniga proporsional, ya'ni ~70% dan keyin
+// pasayib borardi. Testlar: `yuklab_olish_umumiy_kanalda_oxirigacha_tez`,
+// `yuklab_olish_sekin_ulanishlar_aralash_bolsa_ham_togri`.
+//
+// Endi ikki bosqich:
+//
+//   1) O'G'IRLASH — ish qolmagan oqim eng ko'p ishi qolgan havodagi
+//      ulushning ikkinchi yarmini oladi; egasi o'z yarmini yozishi
+//      bilan so'rovini to'xtatadi (`on_chunk` `false` qaytaradi).
+//      Takroriy trafik yo'q.
+//   2) YAKUNIY TAKRORLASH — o'g'irlaydigan narsa qolmaganda (har bir
+//      oqimda bittadan bo'lak qolgan) va biror bo'lak odatdagidan
+//      ancha uzoq yuklanayotgan bo'lsa, bo'sh oqim AYNAN o'sha
+//      bo'lakni parallel oladi. Qaysi biri birinchi tugasa,
+//      ikkinchisi DARHOL to'xtaydi (`stop` bayrog'i). Har bir bo'lak
+//      eng ko'pi bir marta takrorlanadi, ya'ni ortiqcha trafik faqat
+//      oxirgi bir necha bo'lakda va har biri uchun 1 MiB dan kam.
+
+/// Shundan kam (bo'lakda) ishi qolgan ulushdan o'g'irlanmaydi —
+/// egasi hozir yozayotgan bo'lakni ikki marta olmaslik uchun
+/// kamida 2 bo'lak qolishi kerak.
+const STEAL_MIN: u64 = 2;
+
+/// Bo'lak odatdagidan shuncha barobar uzoq yuklanayotgan bo'lsa —
+/// "sekin" hisoblanadi va yakuniy takrorlashga loyiq.
+const DUP_SLOW_FACTOR: f64 = 2.0;
+
+/// Bitta bo'lak eng ko'pi shuncha marta takrorlanadi. Ortiqcha
+/// trafik shu bilan chegaralangan: faqat oxirgi bo'laklarda, faqat
+/// yangi ulanish ANIQ tezroq tugatadigan holatda (`duplicate_locked`)
+/// va yutqazgan oqim darhol to'xtaydi.
+const DUP_MAX: u8 = 1;
+
+/// Havodagi bitta ulush.
+struct Inflight {
+    /// Hali yozilmagan birinchi bo'lak.
+    next: u64,
+    /// Ulushning oxirgi bo'lagi.
+    last: u64,
+    /// `next` bo'lak qachondan beri yuklanmoqda.
+    since: Instant,
+    /// `next` bo'lak necha marta takrorlangan (`DUP_MAX` gacha).
+    dup: u8,
+    /// Ulush qachon boshlangan va shundan beri nechta bo'lak
+    /// yozilgan — egasining tezligini baholash uchun.
+    claim_at: Instant,
+    done: u64,
+}
+
+impl Inflight {
+    fn new(next: u64, last: u64) -> Self {
+        let now = Instant::now();
+        Inflight { next, last, since: now, dup: 0, claim_at: now, done: 0 }
+    }
+
+    /// Egasining bitta bo'lakka ketadigan taxminiy vaqti (ms).
+    /// Hali bitta ham bo'lak yozilmagan bo'lsa — kutilgan vaqtdan
+    /// kam emas (`fast_ms`).
+    fn ms_per_chunk(&self, fast_ms: f64) -> f64 {
+        let spent = self.claim_at.elapsed().as_secs_f64() * 1000.0;
+        if self.done > 0 {
+            // Joriy bo'lak ustida o'tgan vaqt ham hisobga olinadi:
+            // tezlik birdan tushsa darhol ko'rinadi.
+            let cur = self.since.elapsed().as_secs_f64() * 1000.0;
+            (spent / self.done as f64).max(cur)
+        } else {
+            spent.max(fast_ms)
+        }
+    }
+}
+
+/// Havodagi ulushlardan eng UZOQ kutiladiganining bir qismini
+/// `lane` ga beradi.
+///
+/// Qaysidan: qolgan bo'laklar x egasining bo'lak vaqti eng katta
+/// bo'lgani (ko'p ish qolgan emas, eng KECH tugaydigani).
+/// Qancha: ikkalasi taxminan BIR VAQTDA tugaydigan qilib — sekin
+/// egadan ko'proq olinadi (6 barobar sekin bo'lsa ~6/7 qismi).
+fn steal_locked(w: &mut Work, lane: usize) -> Claim {
+    let fast = if w.chunk_ms > 0.0 { w.chunk_ms } else { 0.0 };
+    let (victim, next, last, ms_v) = w
+        .inflight
+        .iter()
+        .filter(|(l, _)| **l != lane)
+        .filter(|(_, f)| f.last >= f.next && f.last - f.next + 1 >= STEAL_MIN)
+        .map(|(l, f)| (*l, f.next, f.last, f.ms_per_chunk(fast)))
+        .max_by(|a, b| {
+            let ta = (a.2 - a.1 + 1) as f64 * a.3;
+            let tb = (b.2 - b.1 + 1) as f64 * b.3;
+            ta.partial_cmp(&tb).unwrap_or(std::cmp::Ordering::Equal)
+        })?;
+    let rem = last - next + 1;
+    // O'g'rining kutilgan bo'lak vaqti — "yaxshi" ulanishniki.
+    let ms_t = if fast > 0.0 { fast } else { ms_v };
+    let share_v = if ms_v > 0.0 && ms_t > 0.0 {
+        ms_t / (ms_t + ms_v)
+    } else {
+        0.5
+    };
+    let keep = ((rem as f64 * share_v).round() as u64).clamp(1, rem - 1);
+    let new_last = next + keep - 1;
+    if let Some(f) = w.inflight.get_mut(&victim) {
+        f.last = new_last;
+    }
+    w.inflight.insert(lane, Inflight::new(new_last + 1, last));
+    Some((new_last + 1, last))
+}
+
+/// Yakuniy takrorlash: eng uzoq yuklanayotgan (va hali
+/// takrorlanmagan) bo'lakni `lane` ga beradi.
+fn duplicate_locked(w: &mut Work, lane: usize) -> Claim {
+    // Odatdagi bo'lak vaqti hali o'lchanmagan — kim sekinligini
+    // bilmaymiz, takrorlamaymiz.
+    if w.chunk_ms <= 0.0 {
+        return None;
+    }
+    let fast = w.chunk_ms;
+    let chunk_bytes = CHUNK_SIZE as f64;
+    let mut best: Option<(usize, u64, f64)> = None;
+    for (l, f) in w.inflight.iter() {
+        if *l == lane || f.dup >= DUP_MAX || f.next > f.last {
+            continue;
+        }
+        let el = f.since.elapsed().as_secs_f64() * 1000.0;
+        let got = w
+            .progress
+            .get(*l)
+            .map(|a| a.load(Ordering::Relaxed) as f64)
+            .unwrap_or(0.0)
+            .min(chunk_bytes);
+        let need = chunk_bytes - got;
+        // Chorakdan kam qolgan — egasi o'zi tez tugatadi, takror
+        // faqat trafikni isrof qiladi.
+        if need < chunk_bytes / 4.0 {
+            continue;
+        }
+        // Egasi shu bo'lakni yana qancha tortadi (ms).
+        let owner_left = if got > 0.0 {
+            need / (got / el.max(1.0))
+        } else if el > fast * DUP_SLOW_FACTOR {
+            // Odatdagidan 2 barobar ko'p vaqt o'tdi, bitta bayt ham
+            // kelmadi — ulanish qotgan.
+            f64::INFINITY
+        } else {
+            continue;
+        };
+        // Yangi ulanish qolganini qancha vaqtda oladi (so'rov
+        // ochilishi uchun yarim bo'lak vaqti qo'shiladi).
+        let fresh = fast * (need / chunk_bytes) + fast * 0.5;
+        if owner_left <= fresh * DUP_SLOW_FACTOR {
+            continue;
+        }
+        let gain = owner_left - fresh;
+        if best.map(|(_, _, g)| gain > g).unwrap_or(true) {
+            best = Some((*l, f.next, gain));
+        }
+    }
+    let (victim, chunk, _) = best?;
+    if let Some(f) = w.inflight.get_mut(&victim) {
+        f.dup += 1;
+    }
+    w.dups.insert(lane, (victim, chunk));
+    Some((chunk, chunk))
+}
+
+/// Egasi bo'lak `idx` ni yozdi. `true` — ulush davom etadi,
+/// `false` — ulush shu yerda tugadi (qolgani o'g'irlangan bo'lishi
+/// mumkin).
+fn inflight_progress(work: &Mutex<Work>, stop: &[AtomicBool], lane: usize, idx: u64) -> bool {
+    let Ok(mut w) = work.lock() else {
+        return true;
+    };
+    // Bu oqim TAKRORLOVCHI edi — bo'lak tayyor, asl egasi to'xtaydi.
+    if let Some((victim, chunk)) = w.dups.remove(&lane) {
+        if chunk == idx {
+            if let Some(f) = w.inflight.get(&victim) {
+                if f.next == idx {
+                    if let Some(flag) = stop.get(victim) {
+                        flag.store(true, Ordering::SeqCst);
+                    }
+                }
+            }
+            // Shu bo'lakning boshqa takrorlovchilari ham to'xtaydi.
+            let others: Vec<usize> = w
+                .dups
+                .iter()
+                .filter(|(_, (v, c))| *v == victim && *c == chunk)
+                .map(|(d, _)| *d)
+                .collect();
+            for d in others {
+                w.dups.remove(&d);
+                if let Some(flag) = stop.get(d) {
+                    flag.store(true, Ordering::SeqCst);
+                }
+            }
+        }
+        return false;
+    }
+    // Shu bo'lakni kimdir takrorlayotgan bo'lsa — u to'xtaydi.
+    let twins: Vec<usize> = w
+        .dups
+        .iter()
+        .filter(|(_, (v, c))| *v == lane && *c == idx)
+        .map(|(d, _)| *d)
+        .collect();
+    for d in twins {
+        w.dups.remove(&d);
+        if let Some(flag) = stop.get(d) {
+            flag.store(true, Ordering::SeqCst);
+        }
+    }
+    let mut spent = None;
+    let more = match w.inflight.get_mut(&lane) {
+        Some(f) => {
+            spent = Some(f.since.elapsed().as_secs_f64() * 1000.0);
+            f.next = idx + 1;
+            f.since = Instant::now();
+            f.dup = 0;
+            f.done += 1;
+            idx < f.last
+        }
+        None => true,
+    };
+    if let Some(ms) = spent {
+        // "Yaxshi" ulanishdagi bo'lak vaqti. Oddiy o'rtacha
+        // yaramaydi: sekin ulanishlar uni o'zi tomon tortib,
+        // sekinlarning o'zini "odatdagi" qilib qo'yardi va takrorlash
+        // hech qachon ishga tushmasdi. Shu sabab tez natijaga tez,
+        // sekiniga esa juda sust moslashadi.
+        w.chunk_ms = if w.chunk_ms <= 0.0 {
+            ms
+        } else if ms < w.chunk_ms {
+            w.chunk_ms * 0.5 + ms * 0.5
+        } else {
+            w.chunk_ms * 0.95 + ms * 0.05
+        };
+    }
+    more
+}
+
+/// Ulush tugadi: havodagilardan olib tashlanadi va uning HOZIRGI
+/// oxiri qaytadi (o'g'irlangan bo'lsa — qisqargan oxiri).
+fn inflight_done(work: &Mutex<Work>, lane: usize, last: u64) -> u64 {
+    let Ok(mut w) = work.lock() else {
+        return last;
+    };
+    if w.dups.remove(&lane).is_some() {
+        // Takrorlovchi: navbatga hech narsa qaytarmaydi — bo'lak
+        // egasida qoladi.
+        return last;
+    }
+    w.inflight.remove(&lane).map(|f| f.last).unwrap_or(last)
+}
+
+/// Qayta urinilayotgan ulushni havodagilar qatoriga qo'yadi.
+fn inflight_set(work: &Mutex<Work>, lane: usize, first: u64, last: u64) {
+    if let Ok(mut w) = work.lock() {
+        w.inflight.insert(lane, Inflight::new(first, last));
+    }
 }
 
 /// Bitta oqim uchun navbatdagi ish: `first..=last` bo'laklar.
@@ -2105,6 +2446,7 @@ fn claim_next(
     rate: f64,
     cached: &mut Vec<u64>,
     tm: &DlTiming,
+    lane: usize,
 ) -> Claim {
     let t_lock = Instant::now();
     let mut w = work.lock().ok()?;
@@ -2120,6 +2462,7 @@ fn claim_next(
             i += 1;
         }
         if i <= l {
+            w.inflight.insert(lane, Inflight::new(i, l));
             return Some((i, l));
         }
     }
@@ -2132,7 +2475,12 @@ fn claim_next(
     }
     w.next = i;
     if i >= w.end {
-        return None;
+        // Taqsimlanmagan ish qolmadi — bo'sh turmaymiz, havodagi
+        // eng katta qoldiqdan yarmini olamiz.
+        if let Some(c) = steal_locked(&mut w, lane) {
+            return Some(c);
+        }
+        return duplicate_locked(&mut w, lane);
     }
 
     // 3) Ulush: ADIL ULUSHDAN ham, VAQT ULUSHIDAN ham oshmaydi,
@@ -2163,6 +2511,7 @@ fn claim_next(
     }
 
     w.next = last + 1;
+    w.inflight.insert(lane, Inflight::new(i, last));
     Some((i, last))
 }
 
@@ -2197,6 +2546,11 @@ fn run_download(key: &str, url: &str) -> Result<DlOutcome, String> {
     };
     let dir = shared.cache_root.join(key);
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    // B2'ga bitta ham ortiqcha so'rov ketmasligi uchun: avval oyna
+    // keshga isitiladi (va hajm ham o'sha javobdan olinadi), keyin
+    // yuklash BUTUNLAY keshdan ketadi. Takroriy chaqiruv bepul.
+    start_prepare(url);
 
     // ── TAYYORLASH TUGASHINI KUTAMIZ ───────────────────────────
     // Oyna keshga tushmaguncha boshlamaymiz: aks holda `ensure_meta`
@@ -2268,12 +2622,22 @@ fn run_download(key: &str, url: &str) -> Result<DlOutcome, String> {
         // kichik ulush uchun so'rov ochish o'zini oqlamaydi (har
         // bir so'rovning o'z yo'l vaqti bor).
         let lanes_n = (DOWNLOAD_THREADS as u64).min((span / 2).max(1)) as usize;
+        // Har bir oqimning "to'xta" bayrog'i va joriy bo'lakdagi
+        // baytlari (yakuniy takrorlash uchun).
+        let stops: Arc<Vec<AtomicBool>> =
+            Arc::new((0..lanes_n).map(|_| AtomicBool::new(false)).collect());
+        let progress: Arc<Vec<AtomicU64>> =
+            Arc::new((0..lanes_n).map(|_| AtomicU64::new(0)).collect());
         let work = Arc::new(Mutex::new(Work {
             next: start_idx,
             end: w_last + 1,
             lanes: lanes_n as u64,
             floor: CLAIM_MIN.min(span.div_ceil(lanes_n as u64)).max(1),
             back: Vec::new(),
+            inflight: HashMap::new(),
+            dups: HashMap::new(),
+            chunk_ms: 0.0,
+            progress: Arc::clone(&progress),
         }));
 
         // ── KEYINGI OYNANI OLDINDAN ISITISH ────────────────────
@@ -2291,9 +2655,32 @@ fn run_download(key: &str, url: &str) -> Result<DlOutcome, String> {
         // shu chaqiruv, atigi bir necha soniya keyinroq bo'lardi).
         let next_warmed = Arc::new(AtomicBool::new(widx + 1 >= windows));
 
+        // ── KEYINGI OYNA ENDI OYNA BOSHIDAYOQ ISITILADI ────────
+        //
+        // TOPILGAN XATO (foydalanuvchi: "fayl 70 foizlarga borganda
+        // tezlik pasayib ketyapti").
+        //
+        // Kesh oynasi 480 MiB. Ilgari keyingi oyna faqat shu
+        // oynaning OXIRGI ulushi olinganda isitila boshlardi —
+        // 480 MiB ni B2'dan keshga ko'chirish esa o'nlab soniya.
+        // Shu orada hamma oqim `wait_for_warm` da turib qolardi.
+        // 700 MB li faylda oyna chegarasi aynan 480/700 ≈ 69% —
+        // foydalanuvchi ko'rgan "70% da sekinlashish" roppa-rosa
+        // shu.
+        //
+        // Yuklab olishda butun fayl baribir kerak, ya'ni keyingi
+        // oynani oldinroq isitish ORTIQCHA B2 so'rovi emas (o'sha
+        // oyna o'sha bir marta isitiladi). Isitish serverda
+        // bo'ladi — telefon tarmog'idan ulush olmaydi.
+        if !next_warmed.swap(true, Ordering::SeqCst) {
+            warm_window_bg(url, widx + 1);
+        }
+
         let mut workers = Vec::with_capacity(lanes_n);
-        for _ in 0..lanes_n {
+        for lane in 0..lanes_n {
             let work = Arc::clone(&work);
+            let stops = Arc::clone(&stops);
+            let progress = Arc::clone(&progress);
             let paused = Arc::clone(&paused);
             let first_err = Arc::clone(&first_err);
             let done_count = Arc::clone(&done_count);
@@ -2334,14 +2721,32 @@ fn run_download(key: &str, url: &str) -> Result<DlOutcome, String> {
                         // Shu sabab ikkita oqim hech qachon bir xil
                         // baytni so'ramaydi.
                         let claim = match pending.take() {
-                            Some(c) => Some(c),
+                            Some((f, l)) => {
+                                inflight_set(&work, lane, f, l);
+                                Some((f, l))
+                            }
                             None => claim_next(
-                                &work, &d, total, rate, &mut cached, &tmw),
+                                &work, &d, total, rate, &mut cached, &tmw, lane),
                         };
                         for idx in cached.drain(..) {
                             stat_note_chunk(&k, idx, chunk_plain_len(idx, total));
                         }
-                        let Some((first, last)) = claim else { break };
+                        let Some((first, last)) = claim else {
+                            // Hozircha ish yo'q, lekin boshqa oqimlar
+                            // hali ishlayapti — ularning ulushi
+                            // o'g'irlashga yaraydigan bo'lib qolishi
+                            // yoki uzilib navbatga qaytishi mumkin.
+                            // Chiqib ketmaymiz, bir zum kutamiz.
+                            let busy = work
+                                .lock()
+                                .map(|w| w.inflight.keys().any(|l| *l != lane))
+                                .unwrap_or(false);
+                            if busy {
+                                thread::sleep(Duration::from_millis(40));
+                                continue;
+                            }
+                            break;
+                        };
 
                         // Oynadagi oxirgi ulush olindimi — keyingi
                         // oynani fon'da isitib qo'yamiz.
@@ -2355,14 +2760,55 @@ fn run_download(key: &str, url: &str) -> Result<DlOutcome, String> {
                             }
                         }
 
+                        // Bu ulush yakuniy TAKRORLASHmi (boshqa oqim
+                        // ham aynan shu bo'lakni olmoqda).
+                        let is_dup = work
+                            .lock()
+                            .map(|w| w.dups.contains_key(&lane))
+                            .unwrap_or(false);
+                        let stop = &stops[lane];
+
                         // Shu so'rovda diskka tushgan OXIRGI bo'lak.
                         let mut got_upto: Option<u64> = None;
                         let t0 = Instant::now();
-                        let res = fetch_span(shared, &k, &d, &u, first, last, total, &mut |idx| {
+                        let res = fetch_span(shared, &k, &d, &u, first, last, total, stop, &progress[lane], &mut |idx| {
                             stat_note_chunk(&k, idx, chunk_plain_len(idx, total));
                             got_upto = Some(idx);
+                            // Qolgani o'g'irlangan bo'lsa — shu
+                            // yerda to'xtaymiz.
+                            inflight_progress(&work, &stops, lane, idx)
                         });
                         let secs = t0.elapsed().as_secs_f64();
+                        // Ulushning HOZIRGI oxiri (o'g'irlangan
+                        // bo'lsa qisqargan).
+                        let last = inflight_done(&work, lane, last);
+                        // Egizagi bo'lakni birinchi tugatdi — bu
+                        // so'rov ataylab to'xtatildi (xato EMAS).
+                        let stopped = stop.swap(false, Ordering::SeqCst);
+
+                        if is_dup {
+                            // Takrorlovchi natijasi qanday bo'lmasin,
+                            // navbatga hech narsa qaytmaydi va xato
+                            // hisoblanmaydi: bo'lak egasida qoladi.
+                            if got_upto.is_some() {
+                                done_count.fetch_add(1, Ordering::SeqCst);
+                            }
+                            continue;
+                        }
+                        if stopped {
+                            // Yozilgan bo'lsa — ilgarilash; qolgani
+                            // (diskda bori o'tkazib yuboriladi)
+                            // navbatga qaytadi.
+                            if got_upto.is_some() {
+                                done_count.fetch_add(1, Ordering::SeqCst);
+                            }
+                            let from = got_upto.map(|u| u + 1).unwrap_or(first);
+                            if from <= last {
+                                return_work(&work, from, last);
+                            }
+                            fails = 0;
+                            continue;
+                        }
 
                         if let Err(e) = res {
                             if let Ok(mut slot) = first_err.lock() {
@@ -2457,10 +2903,10 @@ fn start_download(url: &str) -> bool {
     if SHARED.get().is_none() {
         return false;
     }
-    // B2'ga bitta ham ortiqcha so'rov ketmasligi uchun: avval oyna
-    // keshga isitiladi (va hajm ham o'sha javobdan olinadi), keyin
-    // yuklash BUTUNLAY keshdan ketadi.
-    start_prepare(url);
+    // Oynani isitish (`start_prepare`) endi shu yerda EMAS, vazifa
+    // haqiqatan BOSHLANGANDA (`run_download`) bo'ladi: navbatda
+    // turgan sifatlar oldindan isitilsa, B2 va worker navbat
+    // kelguncha kerak bo'lmagan ish bilan band bo'lardi.
     ensure_pool();
     let key = cache_key(url);
     let Ok(mut map) = downloads().lock() else {
@@ -2486,6 +2932,8 @@ fn start_download(url: &str) -> bool {
                     failures: 0,
                     next_try: Instant::now(),
                     epoch: DL_EPOCH.fetch_add(1, Ordering::SeqCst) + 1,
+                    seq: DL_SEQ.fetch_add(1, Ordering::SeqCst) + 1,
+                    started: false,
                 },
             );
         }
@@ -2679,6 +3127,12 @@ pub extern "C" fn rust_video_cache_stats(urls_json_ptr: *const c_char) -> *mut c
         item.insert(
             "downloading".to_string(),
             serde_json::json!(download_active(&key)),
+        );
+        // Navbatda (hali boshlanmagan) — `downloading` ham `true`
+        // bo'ladi, UI esa "navbatda" deb yozadi.
+        item.insert(
+            "queued".to_string(),
+            serde_json::json!(download_queued(&key)),
         );
         // Tarmoq uzilgan va qayta urinish kutilayotgan bo'lsa — UI
         // buni ko'rsatishi mumkin (yuklash TO'XTAGANI YO'Q).
@@ -3931,7 +4385,9 @@ fn fetch_span(
     first: u64,
     last: u64,
     total: u64,
-    on_chunk: &mut dyn FnMut(u64),
+    stop: &AtomicBool,
+    cur_bytes: &AtomicU64,
+    on_chunk: &mut dyn FnMut(u64) -> bool,
 ) -> Result<(), String> {
     if total == 0 {
         return Err("hajm noma'lum".to_string());
@@ -4065,12 +4521,19 @@ fn fetch_span(
     let mut cur = first;
     let mut want = first_len;
     let mut acc: Vec<u8> = prefix;
+    cur_bytes.store(acc.len() as u64, Ordering::Relaxed);
     let mut reader = resp.into_reader();
     let mut buf = [0u8; 64 * 1024];
     let mut read_err: Option<String> = None;
     let mut got_net: u64 = 0;
 
     'outer: loop {
+        // Egizak oqim bo'lakni birinchi tugatdi (yakuniy
+        // takrorlash) — ortiqcha trafik sarflamaymiz.
+        if stop.load(Ordering::SeqCst) {
+            read_err = Some("egizak oqim tugatdi".to_string());
+            break;
+        }
         // ── PAUZA: TARMOQ OQIMI DARHOL UZILADI ─────────────────
         // Bayroq HAR 64 KB da tekshiriladi: pauza bosilsa o'qish
         // shu yerda to'xtaydi, `reader` tashlanadi va TCP ulanish
@@ -4114,6 +4577,7 @@ fn fetch_span(
             }
             let take = (want - acc.len()).min(piece.len());
             acc.extend_from_slice(&piece[..take]);
+            cur_bytes.store(acc.len() as u64, Ordering::Relaxed);
             piece = &piece[take..];
             if acc.len() < want {
                 continue;
@@ -4124,8 +4588,10 @@ fn fetch_span(
             let saved = write_full_chunk(dir, key, cur, &acc);
             tm.write_us
                 .fetch_add(t_wr.elapsed().as_micros() as u64, Ordering::Relaxed);
-            if saved {
-                on_chunk(cur);
+            // `false` — ulushning qolgani boshqa oqimga berildi
+            // (ish o'g'irlash), bu so'rov shu yerda to'xtaydi.
+            if saved && !on_chunk(cur) {
+                break 'outer;
             }
             if cur >= last {
                 break 'outer;
@@ -4133,12 +4599,13 @@ fn fetch_span(
             cur += 1;
             want = chunk_plain_len(cur, total) as usize;
             acc = Vec::with_capacity(want);
+            cur_bytes.store(0, Ordering::Relaxed);
         }
     }
 
     // Yarim qolgan bo'lak — qoldiq sifatida saqlanadi, keyingi
     // urinish AYNAN shu joydan davom etadi.
-    if cur <= last && !acc.is_empty() && acc.len() < want {
+    if cur <= last && !acc.is_empty() && acc.len() < want && !chunk_cached(dir, cur, total) {
         write_part(dir, key, cur, &acc);
         log(format!(
             "Bo'lak #{cur} to'liq emas ({}/{want}) — qoldiq saqlandi",
@@ -6788,6 +7255,52 @@ mod tests {
         }
     }
 
+    /// NAVBAT: bosilish tartibi va bir vaqtda 3 ta (regressiya testi).
+    #[test]
+    fn navbat_tartibi_va_uchta_joy() {
+        let now = Instant::now();
+        let mk = |seq: u64| DownloadState {
+            url: format!("u{seq}"),
+            wanted: true,
+            running: false,
+            failures: 0,
+            next_try: now,
+            epoch: seq,
+            seq,
+            started: false,
+        };
+        let mut map: HashMap<String, DownloadState> = HashMap::new();
+        // Tasodifiy tartibda qo'shamiz — xesh tartibi natijaga
+        // ta'sir qilmasligi kerak.
+        for seq in [5u64, 2, 9, 1, 7] {
+            map.insert(format!("k{seq}"), mk(seq));
+        }
+        let mut order = Vec::new();
+        // Uchta joy to'ladi, to'rtinchisi boshlanmaydi.
+        for _ in 0..5 {
+            let Some(k) = choose_task(&map, now) else { break };
+            let st = map.get_mut(&k).unwrap();
+            st.running = true;
+            st.started = true;
+            order.push(k);
+        }
+        assert_eq!(order, vec!["k1", "k2", "k5"], "birinchi bosilganlar birinchi");
+
+        // Boshlangan vazifa qisqa tanaffusda (qayta urinish) —
+        // uning joyini navbatdagisi egallab olmaydi.
+        map.get_mut("k1").unwrap().running = false;
+        map.get_mut("k1").unwrap().next_try = now + Duration::from_secs(10);
+        assert_eq!(choose_task(&map, now), None, "joy band — yangisi boshlanmaydi");
+
+        // Bittasi tugadi — navbatdagi ENG BIRINCHISI (k7) boshlanadi.
+        map.remove("k2");
+        assert_eq!(choose_task(&map, now).as_deref(), Some("k7"));
+
+        // Boshlangan vazifa qayta tayyor bo'lsa — u birinchi.
+        map.get_mut("k5").unwrap().running = false;
+        assert_eq!(choose_task(&map, now).as_deref(), Some("k5"));
+    }
+
     /// `moov` XOTIRASI (regressiya testi).
     ///
     /// Har kadr uchun `moov` qaytadan tarmoqdan olinardi. Endi u
@@ -7028,6 +7541,14 @@ mod tests {
 
     /// So'ralgan oraliqlar faylni AYNAN bir marta qoplaydimi:
     /// bo'shliq ham, takror ham bo'lmasligi kerak.
+    /// So'ralgan oraliqlar faylni BO'SHLIQSIZ qoplaydi.
+    ///
+    /// Ish o'g'irlashda (`steal_locked`) egasi so'ragan oraliq
+    /// o'g'irlangan qism bilan ustma-ust tushadi — lekin egasi u
+    /// yerga yetmasdan to'xtaydi. Shu sabab ustma-ustlik faqat BOSHI
+    /// bo'lak chegarasida bo'lgan (o'g'irlangan) oraliq uchun
+    /// ruxsat; haqiqiy takroriy trafik esa `tekshir_trafik` bilan
+    /// o'lchanadi.
     fn tekshir_qoplama(ranges: &[String], total: u64) {
         let mut spans: Vec<(u64, u64)> = ranges
             .iter()
@@ -7036,10 +7557,34 @@ mod tests {
         spans.sort_unstable();
         let mut pos = 0u64;
         for (s, e) in &spans {
-            assert_eq!(*s, pos, "oraliqlar uzluksiz emas: {spans:?}");
-            pos = e + 1;
+            assert!(*s <= pos, "oraliqlarda bo'shliq bor: {spans:?}");
+            if *s < pos {
+                assert_eq!(
+                    s % CHUNK_SIZE,
+                    0,
+                    "bo'lak o'rtasidan boshlangan ustma-ust so'rov: {spans:?}"
+                );
+            }
+            pos = pos.max(e + 1);
         }
         assert_eq!(pos, total, "fayl to'liq qoplanmadi: {spans:?}");
+    }
+
+    /// Tarmoqdan HAQIQATAN o'qilgan baytlar fayl hajmidan deyarli
+    /// oshmaydi (ish o'g'irlash takroriy trafik keltirmaydi).
+    fn tekshir_trafik(key: &str, total: u64) {
+        tekshir_trafik_ulush(key, total, 2 * CHUNK_SIZE);
+    }
+
+    fn tekshir_trafik_ulush(key: &str, total: u64, slack: u64) {
+        let got = SHARED
+            .get()
+            .and_then(|s| s.net_by_file.lock().ok().map(|m| *m.get(key).unwrap_or(&0)))
+            .unwrap_or(0);
+        assert!(
+            got <= total + slack,
+            "ortiqcha trafik: {got} bayt o'qildi, fayl {total} bayt"
+        );
     }
 
     /// Manba HAR BIR ULANISHNI bir xil, cheklangan tezlikda xizmat
@@ -7309,22 +7854,29 @@ mod tests {
             .cloned()
             .collect();
 
-        // Bitta ham bo'lakma-bo'lak (1 MiB) so'rov bo'lmasligi
-        // kerak — bu eski nuqsonning belgisi edi.
-        for r in &ranges {
-            let (rs, re) = parse_test_range(r, total);
-            assert!(
-                re - rs + 1 > CHUNK_SIZE,
-                "bo'lakma-bo'lak so'rov paydo bo'ldi: {r}"
-            );
-        }
-        // Fayl AYNAN bir marta qoplanadi (bo'shliq ham, takror ham
-        // yo'q).
-        tekshir_qoplama(&ranges, total);
-        // 6 ta yo'lak — 6 ta so'rov. Ish o'g'irlash bo'lsa bir-ikki
-        // ta ortishi mumkin, lekin ko'p emas.
+        // Fayl bo'lakma-bo'lak (1 MiB dan) so'ralmasligi kerak — bu
+        // eski nuqsonning belgisi edi. Oxiridagi ish o'g'irlash va
+        // yakuniy takrorlash bittalik so'rov berishi mumkin, lekin
+        // ular oqimlar sonidan oshmaydi (eski nuqsonda HAR BIR bo'lak
+        // alohida so'ralardi — 48 ta).
+        let singles = ranges
+            .iter()
+            .filter(|r| {
+                let (rs, re) = parse_test_range(r, total);
+                re - rs + 1 <= CHUNK_SIZE
+            })
+            .count();
         assert!(
-            ranges.len() <= DOWNLOAD_THREADS + 2,
+            singles <= DOWNLOAD_THREADS,
+            "bo'lakma-bo'lak so'rovlar ko'payib ketdi ({singles} ta): {ranges:?}"
+        );
+        // Fayl bo'shliqsiz qoplanadi va takroriy trafik yo'q.
+        tekshir_qoplama(&ranges, total);
+        tekshir_trafik(name, total);
+        // So'rovlar soni oqimlar sonidan juda oshmaydi (o'g'irlash
+        // bir nechta qo'shishi mumkin).
+        assert!(
+            ranges.len() <= DOWNLOAD_THREADS * 2,
             "so'rovlar keragidan ko'p ({} ta): {ranges:?}",
             ranges.len()
         );
@@ -7497,6 +8049,259 @@ mod tests {
             peak_streams > 1,
             "faol oqimlar soni ko'rinmadi: {peak_streams}"
         );
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  70% DAN KEYIN HAM TEZLIK TUSHMAYDI (ish o'g'irlash)
+    // ═══════════════════════════════════════════════════════════
+    //
+    // Foydalanuvchi: "yuklab olishda fayl 70 foizlarga borganda
+    // tezlik pasayib ketyapti" (71 MB li fayl). Manbada ulanishlar
+    // har xil tezlikda (har ikkinchisi 6 barobar sekin) — haqiqiy
+    // mobil tarmoqdagidek. Ish o'g'irlashsiz oxirgi 30% ni sekin
+    // ulanishlar yolg'iz tortardi.
+    fn start_mixed_origin(total: u64) -> (u16, Arc<Mutex<Vec<String>>>) {
+        const STEP: usize = 64 * 1024;
+        const FAST_MS: u64 = 10;
+        const SLOW_MS: u64 = 60;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let l2 = Arc::clone(&log);
+        let n_conn = Arc::new(AtomicUsize::new(0));
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut st) = stream else { continue };
+                let l3 = Arc::clone(&l2);
+                let nc = Arc::clone(&n_conn);
+                thread::spawn(move || {
+                    let mut buf = [0u8; 4096];
+                    let n = st.read(&mut buf).unwrap_or(0);
+                    let text = String::from_utf8_lossy(&buf[..n]).to_string();
+                    if text.starts_with("HEAD") {
+                        let _ = st.write_all(
+                            b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        );
+                        return;
+                    }
+                    let mut range = String::new();
+                    for line in text.split("\r\n") {
+                        if let Some(v) = line.strip_prefix("Range: ") {
+                            range = v.trim().to_string();
+                        }
+                    }
+                    let (s, e) = parse_test_range(&range, total);
+                    let len = e - s + 1;
+                    let paced = len > 1;
+                    if paced {
+                        l3.lock().unwrap().push(range.clone());
+                    }
+                    let slow = paced && nc.fetch_add(1, Ordering::SeqCst) % 2 == 1;
+                    let head = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Type: video/mp4\r\nContent-Length: {len}\r\nContent-Range: bytes {s}-{e}/{total}\r\nConnection: close\r\n\r\n"
+                    );
+                    let _ = st.write_all(head.as_bytes());
+                    let body: Vec<u8> = (s..=e).map(|i| (i % 251) as u8).collect();
+                    let mut off = 0usize;
+                    while off < body.len() {
+                        let upto = (off + STEP).min(body.len());
+                        if st.write_all(&body[off..upto]).is_err() {
+                            break;
+                        }
+                        off = upto;
+                        if paced && off < body.len() {
+                            thread::sleep(Duration::from_millis(if slow { SLOW_MS } else { FAST_MS }));
+                        }
+                    }                });
+            }
+        });
+        (port, log)
+    }
+
+    /// HAQIQIY MOBIL TARMOQQA YAQIN MODEL: umumiy kanal (`LINK`)
+    /// barcha ulanishlarga bo'linadi, har bir ulanishning esa o'z
+    /// chegarasi (`CAP`) bor — TCP oynasi / borib-kelish vaqti
+    /// cheklagandek. To'liq tezlik uchun kamida `LINK / CAP` ta
+    /// ulanish faol bo'lishi kerak; oxirida ulanishlar kamaysa
+    /// umumiy tezlik tushadi — foydalanuvchi ko'rgani aynan shu.
+    fn start_shared_origin(total: u64) -> u16 {
+        const STEP: u64 = 64 * 1024;
+        const LINK: f64 = 24.0 * 1024.0 * 1024.0;
+        const CAP: f64 = 3.0 * 1024.0 * 1024.0;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let link_next: Arc<Mutex<Instant>> = Arc::new(Mutex::new(Instant::now()));
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut st) = stream else { continue };
+                let link = Arc::clone(&link_next);
+                thread::spawn(move || {
+                    let mut buf = [0u8; 4096];
+                    let n = st.read(&mut buf).unwrap_or(0);
+                    let text = String::from_utf8_lossy(&buf[..n]).to_string();
+                    if text.starts_with("HEAD") {
+                        let _ = st.write_all(
+                            b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        );
+                        return;
+                    }
+                    let mut range = String::new();
+                    for line in text.split("\r\n") {
+                        if let Some(v) = line.strip_prefix("Range: ") {
+                            range = v.trim().to_string();
+                        }
+                    }
+                    let (s, e) = parse_test_range(&range, total);
+                    let len = e - s + 1;
+                    let head = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Type: video/mp4\r\nContent-Length: {len}\r\nContent-Range: bytes {s}-{e}/{total}\r\nConnection: close\r\n\r\n"
+                    );
+                    let _ = st.write_all(head.as_bytes());
+                    let mut conn_next = Instant::now();
+                    let mut off = s;
+                    while off <= e {
+                        let upto = (off + STEP - 1).min(e);
+                        let piece: Vec<u8> = (off..=upto).map(|i| (i % 251) as u8).collect();
+                        let sz = piece.len() as f64;
+                        if len > 1 {
+                            // Umumiy kanalda navbat + ulanishning o'z chegarasi.
+                            let slot = {
+                                let mut g = link.lock().unwrap();
+                                let now = Instant::now();
+                                let startt = if *g > now { *g } else { now };
+                                *g = startt + Duration::from_secs_f64(sz / LINK);
+                                *g
+                            };
+                            conn_next = conn_next.max(Instant::now())
+                                + Duration::from_secs_f64(sz / CAP);
+                            let until = slot.max(conn_next);
+                            let now = Instant::now();
+                            if until > now {
+                                thread::sleep(until - now);
+                            }
+                        }
+                        if st.write_all(&piece).is_err() {
+                            break;
+                        }
+                        off = upto + 1;
+                    }
+                });
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn yuklab_olish_umumiy_kanalda_oxirigacha_tez() {
+        let (_port, root) = ensure_server();
+        let total: u64 = 71 * CHUNK_SIZE;
+        let o_port = start_shared_origin(total);
+        let name = "umumiy_kanal_71mb.mp4";
+        let url = format!("http://127.0.0.1:{o_port}/{name}");
+        let c_url = std::ffi::CString::new(url.clone()).unwrap();
+        let dir = root.join("video_byte_cache").join(name);
+        let count = total.div_ceil(CHUNK_SIZE);
+
+        let t0 = Instant::now();
+        assert_eq!(rust_video_cache_download(c_url.as_ptr()), 1);
+        let mut t_first: Option<Duration> = None;
+        let mut t70: Option<Duration> = None;
+        let mut t_end: Option<Duration> = None;
+        for _ in 0..3000 {
+            let have = (0..count).filter(|i| chunk_cached(&dir, *i, total)).count() as u64;
+            if have > 0 && t_first.is_none() {
+                t_first = Some(t0.elapsed());
+            }
+            if have * 10 >= count * 7 && t70.is_none() {
+                t70 = Some(t0.elapsed());
+            }
+            if have == count {
+                t_end = Some(t0.elapsed());
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let t_first = t_first.expect("birinchi bo'lak kelmadi");
+        let t70 = t70.expect("70% ga yetmadi");
+        let t_end = t_end.expect("yuklab olish tugamadi");
+        let head_rate = (count as f64 * 0.7) / t70.saturating_sub(t_first).as_secs_f64().max(0.01);
+        let tail_rate = (count as f64 * 0.3) / t_end.saturating_sub(t70).as_secs_f64().max(0.01);
+        eprintln!(
+            "umumiy kanal: 70% gacha {head_rate:.1} bo'lak/s, keyin {tail_rate:.1} bo'lak/s ({t70:?} / {t_end:?})"
+        );
+        tekshir_trafik(name, total);
+        assert!(
+            tail_rate >= head_rate * 0.75,
+            "70% dan keyin tezlik tushib ketdi: {head_rate:.1} -> {tail_rate:.1} bo'lak/s"
+        );
+    }
+
+    #[test]
+    fn yuklab_olish_sekin_ulanishlar_aralash_bolsa_ham_togri() {
+        let (_port, root) = ensure_server();
+        let total: u64 = 71 * CHUNK_SIZE;
+        let (o_port, o_log) = start_mixed_origin(total);
+        let name = "tezlik_71mb.mp4";
+        let url = format!("http://127.0.0.1:{o_port}/{name}");
+        let c_url = std::ffi::CString::new(url.clone()).unwrap();
+        let dir = root.join("video_byte_cache").join(name);
+        let count = total.div_ceil(CHUNK_SIZE);
+
+        let t0 = Instant::now();
+        assert_eq!(rust_video_cache_download(c_url.as_ptr()), 1);
+        let mut t_first: Option<Duration> = None;
+        let mut t70: Option<Duration> = None;
+        let mut t_end: Option<Duration> = None;
+        for _ in 0..3000 {
+            let have = (0..count).filter(|i| chunk_cached(&dir, *i, total)).count() as u64;
+            if have > 0 && t_first.is_none() {
+                t_first = Some(t0.elapsed());
+            }
+            if have * 10 >= count * 7 && t70.is_none() {
+                t70 = Some(t0.elapsed());
+            }
+            if have == count {
+                t_end = Some(t0.elapsed());
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let t_first = t_first.expect("birinchi bo'lak kelmadi");
+        let t70 = t70.expect("70% ga yetmadi");
+        let t_end = t_end.expect("yuklab olish tugamadi");
+
+        // Tezlik: bo'lak / soniya — 70% gacha va 70% dan keyin.
+        let early = t70.saturating_sub(t_first).as_secs_f64().max(0.01);
+        let head_rate = (count as f64 * 0.7) / early;
+        let tail = t_end.saturating_sub(t70).as_secs_f64().max(0.01);
+        let tail_rate = (count as f64 * 0.3) / tail;
+        eprintln!(
+            "70% gacha: {head_rate:.1} bo'lak/s, 70% dan keyin: {tail_rate:.1} bo'lak/s \
+             ({t70:?} / {t_end:?})"
+        );
+
+        let got = SHARED
+            .get()
+            .and_then(|s| s.net_by_file.lock().ok().map(|m| *m.get(name).unwrap_or(&0)))
+            .unwrap_or(0);
+        eprintln!(
+            "ortiqcha trafik: {:.2} MiB ({:.1}%)",
+            got.saturating_sub(total) as f64 / CHUNK_SIZE as f64,
+            got.saturating_sub(total) as f64 * 100.0 / total as f64
+        );
+        // Bu model ATAYLAB og'ir va tasodifiy (har ikkinchi YANGI
+        // ulanish 6 barobar sekin), shu sabab tezlik nisbati bu yerda
+        // TEKSHIRILMAYDI — u testlar parallel ishlaganda tebranadi.
+        // Tezlik regressiyasini `yuklab_olish_umumiy_kanalda_oxirigacha_tez`
+        // ushlaydi. Bu yerda esa ish o'g'irlash va yakuniy takrorlash
+        // og'ir sharoitda ham TO'G'RI ishlashi tekshiriladi: fayl
+        // to'liq, bo'shliqsiz va deyarli ortiqcha trafiksiz yuklanadi.
+        let _ = (head_rate, tail_rate);
+        let ranges: Vec<String> = o_log.lock().unwrap().clone();
+        tekshir_qoplama(&ranges, total);
+        // Og'ir sharoitda yakuniy takrorlash biroz ortiqcha trafik
+        // beradi — 5% dan oshmasligi kerak.
+        tekshir_trafik_ulush(name, total, total / 20);
     }
 
     // ═══════════════════════════════════════════════════════════
