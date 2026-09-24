@@ -36,8 +36,6 @@
 //   * IV/kalitni alohida saqlash shart emas — ular fayl nomidan
 //     har safar qayta hisoblanadi.
 
-use aes_gcm::aead::{Aead, KeyInit};
-use aes_gcm::{Aes256Gcm, Nonce};
 use hkdf::Hkdf;
 use sha2::Sha256;
 use std::os::raw::c_char;
@@ -224,12 +222,20 @@ pub fn decrypt_chunk(cipher: &[u8], key: &[u8; 16], _iv: &[u8; 16]) -> Option<Ve
 
 pub fn seal_blob(label: &str, plain: &[u8]) -> Option<Vec<u8>> {
     let key = derive_blob_key(label)?;
-    let cipher = Aes256Gcm::new((&key).into());
-    let mut nonce_bytes = [0u8; 12];
-    getrandom::getrandom(&mut nonce_bytes).ok()?;
-    let nonce = Nonce::from_slice(&nonce_bytes);
-    let mut out = nonce_bytes.to_vec();
-    out.extend_from_slice(&cipher.encrypt(nonce, plain).ok()?);
+    let cipher = blob_cipher(&key)?;
+    let mut nonce = [0u8; 12];
+    getrandom::getrandom(&mut nonce).ok()?;
+    let mut out = Vec::with_capacity(12 + plain.len() + 16);
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(plain);
+    let tag = cipher
+        .seal_in_place_separate_tag(
+            ring::aead::Nonce::assume_unique_for_key(nonce),
+            ring::aead::Aad::empty(),
+            &mut out[12..],
+        )
+        .ok()?;
+    out.extend_from_slice(tag.as_ref());
     Some(out)
 }
 
@@ -238,9 +244,27 @@ pub fn open_blob(label: &str, sealed: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     let key = derive_blob_key(label)?;
-    let cipher = Aes256Gcm::new((&key).into());
-    let nonce = Nonce::from_slice(&sealed[..12]);
-    cipher.decrypt(nonce, &sealed[12..]).ok()
+    let mut nonce = [0u8; 12];
+    nonce.copy_from_slice(&sealed[..12]);
+    let mut buf = sealed[12..].to_vec();
+    let n = blob_cipher(&key)?
+        .open_in_place(
+            ring::aead::Nonce::assume_unique_for_key(nonce),
+            ring::aead::Aad::empty(),
+            &mut buf,
+        )
+        .ok()?
+        .len();
+    buf.truncate(n);
+    Some(buf)
+}
+
+/// Kichik fayllar shifri: AES-256-GCM (`ring`). Format o'zgarmagan —
+/// `[12 bayt nonce][shifr][16 bayt teg]`, ya'ni ilgari (`aes-gcm`
+/// kutubxonasi bilan) yozilgan fayllar ham ochiladi.
+fn blob_cipher(key: &[u8; 32]) -> Option<ring::aead::LessSafeKey> {
+    let k = ring::aead::UnboundKey::new(&ring::aead::AES_256_GCM, key).ok()?;
+    Some(ring::aead::LessSafeKey::new(k))
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -249,6 +273,29 @@ pub fn open_blob(label: &str, sealed: &[u8]) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    /// Ikkilik FFI: muhrlash -> ochish -> bo'shatish.
+    #[test]
+    fn baytlar_ffi_orqali_muhrlanadi() {
+        with_key();
+        let label = std::ffi::CString::new("img:abc").unwrap();
+        let data: Vec<u8> = (0..300_000u32).map(|i| (i % 253) as u8).collect();
+        let mut n = 0usize;
+        let sealed = super::rust_seal_bytes(label.as_ptr(), data.as_ptr(), data.len(), &mut n);
+        assert!(!sealed.is_null());
+        assert_eq!(n, data.len() + 28);
+        let mut m = 0usize;
+        let opened = super::rust_open_bytes(label.as_ptr(), sealed, n, &mut m);
+        assert!(!opened.is_null());
+        let back = unsafe { std::slice::from_raw_parts(opened, m) }.to_vec();
+        assert_eq!(back, data);
+        // Ochiq (shifrlanmagan) ma'lumot — ochilmaydi.
+        let raw = super::rust_open_bytes(label.as_ptr(), data.as_ptr(), data.len(), &mut m);
+        assert!(raw.is_null());
+        super::rust_free_bytes(sealed, n);
+        super::rust_free_bytes(opened, back.len());
+    }
+
+
     /// Bo'lak shifri: hajm, ochilish va buzilishni aniqlash.
     #[test]
     fn bolak_gcm_buzilganini_aniqlaydi() {
@@ -492,6 +539,82 @@ pub extern "C" fn rust_crypto_is_enabled() -> i32 {
 // yaxshi.
 
 /// Maxfiy matnni AES-256-GCM bilan muhrlab faylga yozadi.
+// ── IKKILIK MA'LUMOT (rasmlar va boshqa fayllar) ──────────────────
+//
+// TALAB (foydalanuvchi): "diskda saqlanadigan HAMMA narsa shifrlansin".
+// `rust_secure_save` faqat MATN qabul qiladi — rasmni base64 ga
+// o'girish uni 33% kattalashtirar va sekinlashtirardi. Bu ikki
+// funksiya baytlarni to'g'ridan-to'g'ri muhrlaydi/ochadi (AES-256-GCM,
+// `seal_blob` bilan bir xil format). Natija Rust xotirasida ajratiladi
+// va chaqiruvchi uni `rust_free_bytes` bilan bo'shatadi.
+
+fn bytes_out(v: Vec<u8>, out_len: *mut usize) -> *mut u8 {
+    let boxed = v.into_boxed_slice();
+    let len = boxed.len();
+    if !out_len.is_null() {
+        unsafe { *out_len = len };
+    }
+    Box::into_raw(boxed) as *mut u8
+}
+
+/// Baytlarni muhrlaydi. Xato bo'lsa (kalit yo'q) — null.
+#[no_mangle]
+pub extern "C" fn rust_seal_bytes(
+    label_ptr: *const c_char,
+    data_ptr: *const u8,
+    len: usize,
+    out_len: *mut usize,
+) -> *mut u8 {
+    let Some(label) = (unsafe { cstr_to_str(label_ptr) }) else {
+        return std::ptr::null_mut();
+    };
+    if data_ptr.is_null() && len > 0 {
+        return std::ptr::null_mut();
+    }
+    let data: &[u8] = if len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(data_ptr, len) }
+    };
+    match seal_blob(label, data) {
+        Some(v) => bytes_out(v, out_len),
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// Muhrlangan baytlarni ochadi. Buzilgan, boshqa kalit yoki ochiq
+/// (eski) ma'lumot bo'lsa — null.
+#[no_mangle]
+pub extern "C" fn rust_open_bytes(
+    label_ptr: *const c_char,
+    data_ptr: *const u8,
+    len: usize,
+    out_len: *mut usize,
+) -> *mut u8 {
+    let Some(label) = (unsafe { cstr_to_str(label_ptr) }) else {
+        return std::ptr::null_mut();
+    };
+    if data_ptr.is_null() || len == 0 {
+        return std::ptr::null_mut();
+    }
+    let data = unsafe { std::slice::from_raw_parts(data_ptr, len) };
+    match open_blob(label, data) {
+        Some(v) => bytes_out(v, out_len),
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// `rust_seal_bytes`/`rust_open_bytes` natijasini bo'shatadi.
+#[no_mangle]
+pub extern "C" fn rust_free_bytes(ptr: *mut u8, len: usize) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
+    }
+}
+
 /// 1 — muvaffaqiyat, 0 — xato (jumladan shifrlash o'chiq bo'lsa).
 #[no_mangle]
 pub extern "C" fn rust_secure_save(

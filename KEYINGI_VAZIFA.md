@@ -971,11 +971,10 @@ AES-128-CBC bilan shifrlanardi. O'lchov (`crypto::tests::shifr_tezligi`,
 server protsessori): apparat ~1050 MB/s, dasturiy ~47 MB/s — telefonning
 kichik yadrolarida bundan bir necha barobar sekin.
 
-Tuzatish: `rust/.cargo/config.toml` — `aarch64-linux-android` uchun
-`aes_armv8` va `polyval_armv8`. AES yo'q protsessorda ishga tushishda
-avtomatik dasturiy usulga o'tiladi (`cpufeatures`). **Bu faylni
-o'chirmang** — `Cargo.toml` dagi "avtomatik foydalaniladi" degan
-eski izoh noto'g'ri edi.
+Tuzatish (keyinroq soddalashtirildi): `aes`/`cbc`/`aes-gcm` kutubxonalari
+BUTUNLAY olib tashlandi — hamma shifrlash `ring` orqali (u 64-bit da
+apparat AES'ni o'zi aniqlaydi, bayroq kerak emas). Pastdagi
+"AES-CBC → AES-128-GCM" bo'limiga qarang.
 
 ### VIDEO BO'LAKLARI: AES-CBC → AES-128-GCM (2026-09-24)
 
@@ -1001,6 +1000,32 @@ i bilan (CTR + 16 bayt teg): `[12 bayt tasodifiy nonce][shifr][teg]`.
 telefon sarlavhasi (`CLIENT_CACHE`) ham 1000 kun; 12 MiB dan katta
 faylni oraliqsiz so'raganda ham endi kesh oynasi orqali. Telegram
 avatarlari (B2 emas, `/api/avatar/`) 1 kun — rasm almashsa yangilansin.
+
+### DISKDA HAMMA NARSA SHIFRLANGAN (2026-09-24)
+
+Foydalanuvchi: «diskda saqlanadigan hamma narsa shifrlansin, faqat
+video emas».
+
+| Nima | Qanday |
+|---|---|
+| Video bo'laklari | AES-128-GCM (`crypto::encrypt_chunk`) |
+| Ro'yxat keshlari, tarix/chat kadrlari, navbat, meta | AES-256-GCM (`seal_blob`, `secureSave`) |
+| **Rasm keshi** (posterlar, avatarlar, izoh rasmlari) | Ilgari OCHIQ edi. Endi `image_cache.dart`: `_SealingLocalFs` — undan olingan HAR QANDAY fayl muhrlangan (`_SealedFile`: `openWrite`/`writeAsBytes` muhrlaydi, `readAsBytes` ochadi). Papka `files/aru_images/v2/` |
+| URL'lar ro'yxati | Ilgari ochiq sqlite. Endi `JsonCacheInfoRepository.withFile` + muhrlangan fayl `aru_images/v2.index` (kesh `.tmp` qo'shni fayl orqali yozadi — u ham muhrlangan, yorliq `.tmp` siz) |
+| Hisob egasi fayli | `secureSave` (kalit yo'q bo'lsagina ochiq — himoya o'chmasin) |
+| Sozlamalar/tokenlar | `EncryptedSharedPreferences` (avvaldan) |
+| Vaqtinchalik: yozilayotgan ovozli xabar, tanlangan rasm | Tizim plagini yozadi (shifrlab bo'lmaydi); yuborilgach O'CHIRILADI |
+
+Rust: `rust_seal_bytes`/`rust_open_bytes`/`rust_free_bytes` (ikkilik,
+base64 siz); `RustCore.sealBytes/openBytes`, `cryptoReady`. Kalit
+tayyor bo'lmasa rasm DISKKA yozilmaydi va mavjud fayllar o'chirilmaydi.
+Eski ochiq kesh (`aru_images/*`, `databases/aru_images.db*`)
+`AppImageCache.dropLegacy` da o'chadi.
+
+**Test (haqiqiy yadro bilan):**
+`cd rust && cargo build --release`, keyin
+`LD_PRELOAD=$PWD/rust/target/release/librust_core.so flutter test test/image_cache_encryption_test.dart`.
+Oddiy `flutter test` da bu testlar o'tkazib yuboriladi.
 
 ## PROFIL: XOTIRA VA TRAFIK
 

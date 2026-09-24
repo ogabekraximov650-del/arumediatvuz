@@ -9,6 +9,7 @@ import 'services/app_build.dart';
 import 'services/app_http.dart';
 import 'services/app_keys.dart';
 import 'services/auth_service.dart';
+import 'services/image_cache.dart';
 import 'services/billing_service.dart';
 import 'services/net_meter.dart';
 import 'services/offline_library.dart';
@@ -85,6 +86,10 @@ Future<void> _main() async {
   // Shifrlash kalitini Keystore'dan olib Rust'ga uzatamiz.
   // Muvaffaqiyatsiz bo'lsa ilova shifrlashsiz, avvalgidek ishlaydi.
   await AppKeys.init();
+
+  // Rasm keshi (shifrlangan) — kalit o'rnatilgandan KEYIN va
+  // birinchi rasm chizilishidan OLDIN (`image_cache.dart`).
+  await AppImageCache.init();
 
   // Mahalliy video kesh-serveri SHU YERDA ishga tushadi (avval u faqat
   // birinchi video ochilganda ishga tushardi). Shu sabab endi

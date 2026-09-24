@@ -111,6 +111,14 @@ typedef _SecureLoadDart = Pointer<Utf8> Function(Pointer<Utf8>, Pointer<Utf8>);
 typedef _SecureClearC = Int32 Function(Pointer<Utf8>);
 typedef _SecureClearDart = int Function(Pointer<Utf8>);
 
+// Ikkilik ma'lumotni muhrlash/ochish (`rust_seal_bytes` va h.k.).
+typedef _BytesC = Pointer<Uint8> Function(
+    Pointer<Utf8>, Pointer<Uint8>, Size, Pointer<Size>);
+typedef _BytesDart = Pointer<Uint8> Function(
+    Pointer<Utf8>, Pointer<Uint8>, int, Pointer<Size>);
+typedef _FreeBytesC = Void Function(Pointer<Uint8>, Size);
+typedef _FreeBytesDart = void Function(Pointer<Uint8>, int);
+
 // So'rov imzosi (`app_sign` — rust/src/lib.rs izohiga qarang).
 typedef _AppSignC = Pointer<Utf8> Function(
     Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>);
@@ -162,6 +170,9 @@ class RustCore {
   late final _CryptoGenKeyDart _cryptoGenKey;
   late final _CryptoSetKeyDart _cryptoSetKey;
   late final _SecureSaveDart _secureSave;
+  late final _BytesDart _sealBytes;
+  late final _BytesDart _openBytes;
+  late final _FreeBytesDart _freeBytes;
   late final _SecureLoadDart _secureLoad;
   late final _SecureClearDart _secureClear;
   late final _AppSignDart _appSign;
@@ -265,6 +276,10 @@ class RustCore {
         'rust_secure_load');
     _secureClear = _lib.lookupFunction<_SecureClearC, _SecureClearDart>(
         'rust_secure_clear');
+    _sealBytes = _lib.lookupFunction<_BytesC, _BytesDart>('rust_seal_bytes');
+    _openBytes = _lib.lookupFunction<_BytesC, _BytesDart>('rust_open_bytes');
+    _freeBytes =
+        _lib.lookupFunction<_FreeBytesC, _FreeBytesDart>('rust_free_bytes');
 
     final dir = await getApplicationDocumentsDirectory();
     _cacheDirPath = dir.path;
@@ -513,13 +528,24 @@ class RustCore {
     }
   }
 
+  bool _cryptoReady = false;
+
+  /// Asosiy kalit o'rnatilganmi (shifrlash ishlayaptimi).
+  ///
+  /// `false` bo'lsa shifrlangan faylni ochib bo'lmasligi "fayl
+  /// buzilgan" degani EMAS — kalit hali yo'q. Rasm keshi shunga
+  /// qarab faylni o'chirmaydi.
+  bool get cryptoReady => _cryptoReady;
+
   /// Asosiy kalitni Rust yadrosiga uzatadi. Shundan keyin barcha
   /// yozishlar shifrlangan holatda boradi.
   bool setMasterKey(String hexKey) {
     if (!_loaded || hexKey.isEmpty) return false;
     final ptr = hexKey.toNativeUtf8();
     try {
-      return _cryptoSetKey(ptr) == 1;
+      final ok = _cryptoSetKey(ptr) == 1;
+      if (ok) _cryptoReady = true;
+      return ok;
     } catch (_) {
       return false;
     } finally {
@@ -632,6 +658,46 @@ class RustCore {
     } finally {
       malloc.free(p);
       malloc.free(l);
+    }
+  }
+
+  // ── IKKILIK MA'LUMOT (rasmlar) ────────────────────────────────
+  //
+  // TALAB (foydalanuvchi): "diskda saqlanadigan HAMMA narsa
+  // shifrlansin". Rasm keshi (`image_cache.dart`) shular orqali
+  // yozadi va o'qiydi — AES-256-GCM, har bir `label` o'z kaliti.
+
+  /// Baytlarni muhrlaydi. Shifrlash tayyor bo'lmasa — `null`
+  /// (chaqiruvchi faylni OCHIQ holda yozmasligi kerak).
+  Uint8List? sealBytes(String label, Uint8List data) =>
+      _bytesCall(_sealBytes, label, data);
+
+  /// Muhrlangan baytlarni ochadi. Buzilgan yoki begona ma'lumot
+  /// bo'lsa — `null`.
+  Uint8List? openBytes(String label, Uint8List data) =>
+      _bytesCall(_openBytes, label, data);
+
+  Uint8List? _bytesCall(_BytesDart fn, String label, Uint8List data) {
+    if (!_loaded) return null;
+    final l = label.toNativeUtf8();
+    final input = malloc<Uint8>(data.isEmpty ? 1 : data.length);
+    final outLen = malloc<Size>();
+    try {
+      input.asTypedList(data.length).setAll(0, data);
+      final out = fn(l, input, data.length, outLen);
+      if (out == nullptr) return null;
+      final n = outLen.value;
+      try {
+        return Uint8List.fromList(out.asTypedList(n));
+      } finally {
+        _freeBytes(out, n);
+      }
+    } catch (_) {
+      return null;
+    } finally {
+      malloc.free(l);
+      malloc.free(input);
+      malloc.free(outLen);
     }
   }
 

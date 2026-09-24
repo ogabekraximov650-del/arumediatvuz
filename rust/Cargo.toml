@@ -13,18 +13,15 @@ serde_json = "1"
 ureq = "2"
 
 # ── Shifrlash ───────────────────────────────────────────────────────
-# ring       — video bo'laklari uchun AES-128-GCM (CTR + yaxlitlik tegi).
-#              Ilovada HTTPS (ureq/rustls) uchun allaqachon bor; 64-bit
-#              da apparat AES, 32-bit da NEON bilan ishlaydi
+# ring       — BARCHA shifrlash (AES-GCM): video bo'laklari (AES-128) va
+#              kichik fayllar — ro'yxatlar, rasmlar (AES-256). Ilovada
+#              HTTPS (ureq/rustls) uchun allaqachon bor; 64-bit da
+#              apparat AES, 32-bit da NEON bilan ishlaydi
 #              (`crypto.rs` dagi "NEGA CBC EMAS" izohi).
-# aes-gcm    — kichik fayllar (ro'yxat keshi, rasmlar) uchun
-#              AES-256-GCM. ARM64 da apparat AES `rust/.cargo/config.toml`
-#              dagi `aes_armv8` bayrog'i bilan yoqiladi.
 # hkdf+sha2  — bitta asosiy kalitdan har bir fayl uchun ALOHIDA kalit
 #              hosil qilish (kalitni qayta ishlatmaslik uchun).
 # getrandom  — kriptografik tasodifiy sonlar (asosiy kalit, nonce).
 ring = "0.17"
-aes-gcm = "0.10"
 hkdf = "0.12"
 sha2 = "0.10"
 # hmac — serverga yuboriladigan so'rov imzosi (`app_sign`).

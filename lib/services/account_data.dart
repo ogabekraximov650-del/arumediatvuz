@@ -151,6 +151,7 @@ class AccountData {
   // qo'yiladi (u hech qachon qayta ishlatilmaydi). Kirganda raqam
   // mos kelmasa papka tozalanadi.
   static const String _ownerFile = 'owner.json';
+  static const String _ownerLabel = 'account-owner';
 
   static void guardOwner(int userId, int telegramId) {
     if (userId <= 0 || telegramId <= 0) return;
@@ -159,17 +160,31 @@ class AccountData {
     // Papka ochilmagan (eski qurilma) — umumiy kesh, tegilmaydi.
     if (dir == null || dir == root) return;
     try {
-      final f = File('$dir/$_ownerFile');
-      if (f.existsSync()) {
-        final prev =
-            ((jsonDecode(f.readAsStringSync()) as Map)['tg'] as num?)?.toInt() ??
-                0;
+      // Egasi fayli SHIFRLANGAN (foydalanuvchi talabi: "diskda
+      // saqlanadigan hamma narsa shifrlansin"). Eski ilova uni ochiq
+      // JSON bilan yozgan — o'shani ham o'qiymiz, keyin shifrlangan
+      // holda qayta yoziladi.
+      final path = '$dir/$_ownerFile';
+      final f = File(path);
+      var text = RustCore.instance.secureLoad(path, _ownerLabel);
+      if (text.isEmpty && f.existsSync()) {
+        try {
+          text = f.readAsStringSync();
+        } catch (_) {}
+      }
+      if (text.isNotEmpty) {
+        final prev = ((jsonDecode(text) as Map)['tg'] as num?)?.toInt() ?? 0;
         if (prev != 0 && prev != telegramId) {
           // Papka BOSHQA odamniki — tozalanadi.
           _wipeDir(Directory(dir));
         }
       }
-      f.writeAsStringSync(jsonEncode({'tg': telegramId}));
+      final owner = jsonEncode({'tg': telegramId});
+      if (!RustCore.instance.secureSave(path, _ownerLabel, owner)) {
+        // Kalit yo'q (Keystore xatosi — ilova bu holatda shifrlashsiz
+        // ishlaydi). Himoya o'chib qolmasin: ochiq holda yoziladi.
+        f.writeAsStringSync(owner);
+      }
     } catch (e) {
       debugPrint('Papka egasi tekshirilmadi: $e');
     }
