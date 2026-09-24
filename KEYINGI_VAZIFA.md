@@ -941,6 +941,27 @@ tezlik pasayib ketyapti» (fayllar 71 MB gacha).
 | O'lchov | `yuklab_olish_umumiy_kanalda_oxirigacha_tez` (umumiy kanal + ulanish chegarasi): eski — 70% dan keyin tezlik ~45% ga tushardi; yangi — tushmaydi, jami 4,6 s → 3,6 s. Ortiqcha trafik < 1% (`tekshir_trafik`) |
 | 480 MiB dan katta fayl | Keyingi oyna endi oyna BOSHIDA isitiladi (ilgari oxirida — chegarada hamma oqim kutib qolardi) |
 
+### 98% DA TO'XTAB QOLISH (2026-09-24, skrinshot: 70,1/71,1 MB, telefon tarmog'i 0 KB/s)
+
+Yuklash SEKIN emas, TO'XTAB turardi. Sabab: bitta javob keshdan
+emas kelsa (`X-Cache: MISS`, `note_cold_window`), oyna qayta
+isitilar va HAR BIR oqim HAR BIR so'rovdan oldin `wait_for_warm` da
+90 s gacha kutardi. Qo'shimcha: bosqichda birorta bo'lak olinmasa
+keyingi urinishgacha 60 s gacha kutilardi.
+
+Tuzatish: qayta isitish uchun BITTA umumiy muddat — `REWARM_WAIT_MAX`
+= 3 s (isitish fon'da tugaydi); xatodan keyingi kutish eng ko'pi
+10 s. Test `keshdan_bitta_miss_yuklashni_toxtatib_qoymaydi`:
+31 s → 4 s.
+
+**Telegram / Cherrygram bilan solishtirish** (`FileLoadOperation`):
+Telegram 128 KB (tajribaviy/Cherrygram "o'rta": 512 KB, 8 so'rov;
+Cherrygram "ekstremal": 1 MB, 12 so'rov) qat'iy bo'laklar bilan,
+doimiy ulanishlarda, bir vaqtda N ta so'rovni havoda ushlab turadi —
+biri tugashi bilan keyingisi. Bizda: 1 MiB bo'lak, 16 oqim,
+moslashuvchan ulush + ish o'g'irlash + yakuniy takrorlash — xuddi
+shu tamoyil (havodagi so'rovlar soni oxirigacha kamaymaydi).
+
 ## PROFIL: XOTIRA VA TRAFIK
 
 TALAB (foydalanuvchi): "profildagi Xotira va Trafik

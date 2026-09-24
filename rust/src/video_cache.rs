@@ -2019,7 +2019,10 @@ fn pool_worker() {
                 } else if let Some(st) = map.get_mut(&key) {
                     st.running = false;
                     st.failures = st.failures.saturating_add(1);
-                    let wait = 2u64.saturating_pow(st.failures.min(5)).min(60);
+                    // 2 -> 4 -> 8 -> 10 s. Ilgari 60 s gacha o'sardi:
+                    // oxirgi bo'lak bir necha marta yiqilsa, yuklash
+                    // 98% da daqiqalab to'xtab turardi.
+                    let wait = 2u64.saturating_pow(st.failures.min(5)).min(10);
                     st.next_try = Instant::now() + Duration::from_secs(wait);
                     log(format!(
                         "Yuklab olish uzildi ({key}): {e} — {wait}s dan keyin davom etadi"
@@ -4038,6 +4041,9 @@ fn note_cold_window(url: &str, key: &str, byte_pos: u64) {
     if let Ok(mut m) = warm_state().lock() {
         m.remove(&tag);
     }
+    if let Ok(mut m) = rewarm_wait_until().lock() {
+        m.insert(tag.clone(), Instant::now() + REWARM_WAIT_MAX);
+    }
     log(format!(
         "Oyna #{widx} kesh chetiga chiqib ketgan (javob keshdan emas) — qayta isitilmoqda"
     ));
@@ -4279,10 +4285,38 @@ pub extern "C" fn rust_set_user_id(id: i64) {
 /// foydalanuvchi boshqa qismni bosib kutishni bekor qila oladi.
 const WARM_WAIT_MAX: Duration = Duration::from_secs(90);
 
+/// ── QAYTA ISITISHNI KUTISH CHEKLANGAN ────────────────────────
+///
+/// TOPILGAN XATO (foydalanuvchi skrinshoti: 98,59% da telefon
+/// tarmog'i 0 KB/s, ekranda tezlik asta pasayib 25 KB/s).
+///
+/// Yuklash davomida bitta javob keshdan emas kelsa
+/// (`note_cold_window`), oyna qayta isitiladi. Ilgari HAR BIR oqim
+/// HAR BIR so'rovdan oldin o'sha isitishni 90 soniyagacha kutardi —
+/// fayl deyarli tugagan bo'lsa ham yuklash to'xtab qolardi (va har
+/// oqimning kutishi alohida hisoblangani uchun bir necha marta).
+///
+/// Endi qayta isitish uchun BITTA umumiy muddat bor
+/// (`REWARM_WAIT_MAX`): undan keyin oqimlar kutmasdan davom etadi,
+/// isitish esa fon'da tugaydi. Test:
+/// `keshdan_bitta_miss_yuklashni_toxtatib_qoymaydi`.
+const REWARM_WAIT_MAX: Duration = Duration::from_secs(3);
+
+fn rewarm_wait_until() -> &'static Mutex<HashMap<String, Instant>> {
+    static M: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 fn wait_for_warm(key: &str, byte_pos: u64) {
     let widx = byte_pos / WARM_WINDOW;
     let tag = format!("{key}#w{widx}");
-    let deadline = Instant::now() + WARM_WAIT_MAX;
+    // Qayta isitish bo'lsa — umumiy (qisqa) muddat, aks holda
+    // birinchi isitish uchun odatdagi muddat.
+    let deadline = rewarm_wait_until()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&tag).copied())
+        .unwrap_or_else(|| Instant::now() + WARM_WAIT_MAX);
     let mut logged = false;
     loop {
         let state = warm_state().lock().ok().and_then(|m| m.get(&tag).map(|(s, _)| *s));
@@ -6034,6 +6068,15 @@ mod tests {
     /// qaytariladi.
     static TEST_SERVER: OnceLock<(u16, PathBuf)> = OnceLock::new();
 
+    /// VAQT o'lchaydigan yuklash testlari bir-biri bilan PARALLEL
+    /// ishlamasin: ular bitta yuklash havzasini (`DOWNLOAD_WORKERS`)
+    /// va protsessorni (shifrlash) bo'lishadi va natija mashina
+    /// yuklamasiga bog'liq bo'lib qolardi.
+    fn vaqt_testi_qulfi() -> std::sync::MutexGuard<'static, ()> {
+        static L: Mutex<()> = Mutex::new(());
+        L.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn ensure_server() -> (u16, PathBuf) {
         static LOCK: Mutex<()> = Mutex::new(());
         let _g = LOCK.lock().unwrap();
@@ -7676,6 +7719,7 @@ mod tests {
     // darhol vaqtda ko'rinadi.
     #[test]
     fn yuklab_olish_oxirigacha_parallel_ketadi() {
+        let _navbat = vaqt_testi_qulfi();
         let (_port, root) = ensure_server();
         // 32 MiB — har bir oqimga 2 tadan bo'lak (16 x 2), ya'ni
         // hammasi bir vaqtda ishlashi SHART.
@@ -7977,6 +8021,7 @@ mod tests {
 
     #[test]
     fn yuklab_olish_bitta_sekin_ulanishdan_sudralmaydi() {
+        let _navbat = vaqt_testi_qulfi();
         let (_port, root) = ensure_server();
         // 96 MiB: 12 oqimga 8 tadan bo'lak to'g'ri keladi, ya'ni
         // eski tizimda sekin ulanish 8 MiB'ni sudrardi.
@@ -8118,6 +8163,112 @@ mod tests {
         (port, log)
     }
 
+    /// Worker'ga o'xshash manba: `/api/image/<fayl>` (oraliq bilan,
+    /// `X-Cache` sarlavhasi) va `/api/warm/<fayl>` (isitish).
+    /// Faylning 90% dan keyingi BIRINCHI so'rovi `X-Cache: MISS`
+    /// bilan qaytadi (Cloudflare oynani chetga surgandek); shundan
+    /// keyingi isitish so'rovlari esa `warm_delay` kutadi (katta
+    /// faylni B2'dan qayta ko'chirish kabi).
+    fn start_worker_like_origin(total: u64, warm_delay: Duration) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let missed = Arc::new(AtomicBool::new(false));
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut st) = stream else { continue };
+                let missed = Arc::clone(&missed);
+                thread::spawn(move || {
+                    let mut buf = [0u8; 4096];
+                    let n = st.read(&mut buf).unwrap_or(0);
+                    let text = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let path = text.split_whitespace().nth(1).unwrap_or("").to_string();
+                    if text.starts_with("HEAD") {
+                        let _ = st.write_all(
+                            b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        );
+                        return;
+                    }
+                    if path.contains("/api/warm/") {
+                        if missed.load(Ordering::SeqCst) {
+                            thread::sleep(warm_delay);
+                        }
+                        let body = format!("{{\"status\":\"cached\",\"total\":{total}}}");
+                        let _ = st.write_all(
+                            format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                body.len()
+                            )
+                            .as_bytes(),
+                        );
+                        return;
+                    }
+                    let mut range = String::new();
+                    for line in text.split("\r\n") {
+                        if let Some(v) = line.strip_prefix("Range: ") {
+                            range = v.trim().to_string();
+                        }
+                    }
+                    let (s, e) = parse_test_range(&range, total);
+                    let len = e - s + 1;
+                    let cold = len > 1
+                        && s * 10 >= total * 9
+                        && !missed.swap(true, Ordering::SeqCst);
+                    let head = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Type: video/mp4\r\nContent-Length: {len}\r\nContent-Range: bytes {s}-{e}/{total}\r\nX-Cache: {}\r\nConnection: close\r\n\r\n",
+                        if cold { "MISS" } else { "HIT-WINDOW" }
+                    );
+                    let _ = st.write_all(head.as_bytes());
+                    let body: Vec<u8> = (s..=e).map(|i| (i % 251) as u8).collect();
+                    // Biroz sekin — oqimlar parallel ishlashi ko'rinsin.
+                    for part in body.chunks(256 * 1024) {
+                        if st.write_all(part).is_err() {
+                            return;
+                        }
+                        thread::sleep(Duration::from_millis(15));
+                    }
+                });
+            }
+        });
+        port
+    }
+
+    /// TOPILGAN XATO (foydalanuvchi skrinshoti: 98,59% da tarmoq
+    /// 0 KB/s, ekranda tezlik asta pasayib 25 KB/s). Bitta `MISS`
+    /// javobi oynani qayta isitishga yuborar va BARCHA oqimlar
+    /// `wait_for_warm` da 90 soniyagacha turib qolardi.
+    #[test]
+    fn keshdan_bitta_miss_yuklashni_toxtatib_qoymaydi() {
+        let _navbat = vaqt_testi_qulfi();
+        let (_port, root) = ensure_server();
+        let total: u64 = 40 * CHUNK_SIZE;
+        let o_port = start_worker_like_origin(total, Duration::from_secs(30));
+        // Eski tizimda: ~31 s (butun qayta isitish kutilardi).
+        let name = "miss_oxirida.mp4";
+        let url = format!("http://127.0.0.1:{o_port}/api/image/{name}");
+        let c_url = std::ffi::CString::new(url.clone()).unwrap();
+        let key = cache_key(&url);
+        let dir = root.join("video_byte_cache").join(&key);
+        let count = total.div_ceil(CHUNK_SIZE);
+
+        let t0 = Instant::now();
+        assert_eq!(rust_video_cache_download(c_url.as_ptr()), 1);
+        let mut done = false;
+        while t0.elapsed() < Duration::from_secs(40) {
+            if (0..count).all(|i| chunk_cached(&dir, i, total)) {
+                done = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        let took = t0.elapsed();
+        eprintln!("MISS bilan yuklash: {took:?}");
+        assert!(done, "yuklash tugamadi");
+        assert!(
+            took < Duration::from_secs(10),
+            "bitta MISS yuklashni to'xtatib qo'ydi: {took:?}"
+        );
+    }
+
     /// HAQIQIY MOBIL TARMOQQA YAQIN MODEL: umumiy kanal (`LINK`)
     /// barcha ulanishlarga bo'linadi, har bir ulanishning esa o'z
     /// chegarasi (`CAP`) bor — TCP oynasi / borib-kelish vaqti
@@ -8193,6 +8344,7 @@ mod tests {
 
     #[test]
     fn yuklab_olish_umumiy_kanalda_oxirigacha_tez() {
+        let _navbat = vaqt_testi_qulfi();
         let (_port, root) = ensure_server();
         let total: u64 = 71 * CHUNK_SIZE;
         let o_port = start_shared_origin(total);
@@ -8238,6 +8390,7 @@ mod tests {
 
     #[test]
     fn yuklab_olish_sekin_ulanishlar_aralash_bolsa_ham_togri() {
+        let _navbat = vaqt_testi_qulfi();
         let (_port, root) = ensure_server();
         let total: u64 = 71 * CHUNK_SIZE;
         let (o_port, o_log) = start_mixed_origin(total);
