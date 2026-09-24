@@ -1236,7 +1236,13 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
     // MAJBURAN qaytadan isitamiz va bir marta qayta urinamiz.
     // (B2'ga murojaat baribir faqat shu isitishda bo'ladi —
     // qoida buzilmaydi.)
-    if (ctrl == null && !_playViaLocal && !_offline) {
+    if (ctrl == null && !_playViaLocal && !_offline && _openTimedOut) {
+      // Tarmoq shunchaki sekin — isitmasdan yana bir marta ochamiz.
+      if (!mounted || myToken != _playToken) return;
+      VideoCacheServer.log('Ochilish vaqti tugadi — qayta urinilmoqda...');
+      ctrl = await _openController(source, myToken);
+    }
+    if (ctrl == null && !_playViaLocal && !_offline && !_openTimedOut) {
       if (!mounted || myToken != _playToken) return;
       VideoCacheServer.log('Kesh oynasi topilmadi — qaytadan isitilmoqda...');
       if (await _prepareAgain(url, myToken)) {
@@ -1709,8 +1715,18 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
         mixWithOthers: false,
       ),
     );
+    _openTimedOut = false;
     try {
-      await ctrl.initialize().timeout(const Duration(seconds: 25));
+      // ── 40 SONIYA (ilgari 25) ─────────────────────────────
+      //
+      // TOPILGAN XATO (foydalanuvchi: "pleyer sekin ochilyapti va
+      // ba'zida ochilmay qolyapti"). Sekin mobil tarmoqda
+      // ExoPlayer'ga birinchi kadrlarni yig'ish uchun 25 soniya
+      // yetmasdi: deyarli tayyor pleyer yopib tashlanar, keyin esa
+      // kesh oynasi MAJBURAN qaytadan isitilardi (150 soniyagacha)
+      // — video umuman ochilmay qolardi. Yozishmadagi video ham
+      // 40 soniya kutadi.
+      await ctrl.initialize().timeout(const Duration(seconds: 40));
       if (!mounted || myToken != _playToken) {
         try {
           await ctrl.dispose();
@@ -1727,12 +1743,18 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen>
       return ctrl;
     } catch (e) {
       VideoCacheServer.log('Controller ochishda xato: $e');
+      _openTimedOut = e is TimeoutException;
       try {
         await ctrl.dispose();
       } catch (_) {}
       return null;
     }
   }
+
+  /// Oxirgi ochilish XATO bilan emas, VAQT tugagani bilan
+  /// yiqildimi. Bunday holatda kesh oynasi joyida — uni qaytadan
+  /// isitish (manbadan 480 MiB) behuda va juda uzoq.
+  bool _openTimedOut = false;
 
   // Controllerdan kelgan har bir yangilanish. Bu yerda faqat
   // XATO holatini kuzatamiz — qolgan yangilanishlarni UI o'zi

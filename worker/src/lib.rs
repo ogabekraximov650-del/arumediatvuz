@@ -7524,6 +7524,8 @@ async fn admin_app_config(mut req: Request, env: &Env) -> Result<Response> {
                 }), 400);
             }
             config_put(env, "app_min_version", v).await;
+            // Shu izolyatdagi nusxa ham darhol yangilansin.
+            MIN_VERSION_CACHE.with(|c| *c.borrow_mut() = None);
         }
 
         // ── SHU ILOVAGA ISHONISH ─────────────────────────────
@@ -9388,6 +9390,43 @@ fn version_rank(v: &str) -> i64 {
     major * 1_000_000_000 + minor * 1_000_000 + patch * 1000 + build.clamp(0, 999)
 }
 
+// ── ENG PAST VERSIYA IZOLYAT XOTIRASIDA ─────────────────────
+//
+// TOPILGAN XATO (foydalanuvchi: "pleyer va yozishmadagi video
+// judayam sekin ochilyapti").
+//
+// Ilovadan kelgan HAR BIR so'rov (jumladan yadroning videoni
+// isitish, kadr va yuklab olish uchun yuboradigan o'nlab oraliq
+// so'rovlari) `app_min_version` ni Turso bazasidan o'qirdi — ya'ni
+// har bir so'rovga yana bitta tarmoq borib-kelishi qo'shilardi.
+//
+// Qiymat juda kam o'zgaradi (admin qo'lda qo'yadi), shu sabab u
+// izolyat xotirasida 60 soniya saqlanadi. Admin o'zgartirsa shu
+// izolyatdagi nusxa darhol tozalanadi, boshqalarida esa ko'pi
+// bilan bir daqiqada yangilanadi.
+const MIN_VERSION_TTL_MS: i64 = 60_000;
+
+thread_local! {
+    static MIN_VERSION_CACHE: std::cell::RefCell<Option<(i64, Option<String>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+async fn min_version_cached(env: &Env) -> Option<String> {
+    let now = now_ms();
+    let hit = MIN_VERSION_CACHE.with(|c| {
+        c.borrow()
+            .as_ref()
+            .filter(|(at, _)| now - *at < MIN_VERSION_TTL_MS)
+            .map(|(_, v)| v.clone())
+    });
+    if let Some(v) = hit {
+        return v;
+    }
+    let v = config_get(env, "app_min_version").await;
+    MIN_VERSION_CACHE.with(|c| *c.borrow_mut() = Some((now, v.clone())));
+    v
+}
+
 /// Imzo shuncha soniyadan eski bo'lsa qabul qilinmaydi.
 ///
 /// 120 soniya — telefon soati bir oz og'ishiga va sekin tarmoqqa
@@ -9597,7 +9636,7 @@ async fn app_gate(req: &Request, env: &Env, path: &str) -> Option<Response> {
     //
     // Eng past ruxsat etilgan versiya admin panelidan
     // o'rnatiladi. Qo'yilmagan bo'lsa tekshiruv yo'q.
-    let Some(min) = config_get(env, "app_min_version").await else {
+    let Some(min) = min_version_cached(env).await else {
         return None;
     };
     let min_rank = version_rank(&min);

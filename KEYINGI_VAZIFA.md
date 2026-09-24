@@ -872,6 +872,22 @@ ko'tarildi (tomosha tarixidagidek) va `_sessionBudget` 8 dan
 **16** ga: har bir kadr arzonlashgach, bitta sekin video
 orqasidagilarni ushlab turmaydi.
 
+### PLEYER SEKIN OCHILISHI VA TARIX KADRLARI (2026-09-24)
+
+**Foydalanuvchi:** «pleyer va support chatdagi video judayam sekin
+ochilyapti, ba'zida ochilmay qolyapti», «tomosha tarixidagi kadrlar
+sekin yangilanyapti va ba'zida (rasmdagidek) xato bo'lib qolyapti».
+
+| Sabab | Tuzatish |
+|---|---|
+| Har kadr uchun `moov` (0,3-2 MB) qaytadan tarmoqdan olinardi | `MOOV_MEMO` (Rust, 4 ta video / 16 MB / 30 daqiqa). Test: `moov_xotirada_saqlanadi` |
+| Ko'rish davomida har 45 s da ANIQ kadr yasalardi — kalit kadrdan to'xtagan joygacha 8 MB gacha, ijro bilan bitta kanalda | Ko'rish davomida faqat KALIT KADR (`/thumb?...&exact=0`). Aniq kadr pleyer yopilgach yasaladi (`_roughKeys`) |
+| Tarix kadrlari `VideoGate` ga bo'ysunmasdi — qism almashganda / tarixdan ochilganda pleyer bilan kanalni bo'lishardi | Aniq kadr `VideoGate.busy` paytida KUTADI |
+| Vaqtinchalik (eski nuqtadagi) rasm turgan qator haqiqiy kadrni boshqa so'ramasdi | `_Frame` `hasThumb`/`ensureThumb` bilan qayta so'raydi (yiqilsa 20 s tanaffus) |
+| Rasmdagi qotgan doira — `RefreshIndicator` + `BouncingScrollPhysics` | Tarix ro'yxatlari `Clamping` harakatida; yangilash 25 s dan oshmaydi |
+| `initialize()` 25 s da uzilar, keyin oyna MAJBURAN qayta isitilardi (150 s gacha) | 40 s; vaqt tugasa isitmasdan bir marta qayta ochiladi |
+| Worker har so'rovda `app_min_version` ni Turso'dan o'qirdi | Izolyat xotirasida 60 s (`min_version_cached`) |
+
 ### KADR AJRATUVCHI TASLIM BO'LMAYDI (`MainActivity.grabFrame`)
 
 Telegramdan kelgan ba'zi MP4 fayllarda `getFrameAtTime` har doim

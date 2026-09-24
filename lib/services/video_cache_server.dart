@@ -87,10 +87,18 @@ class VideoCacheServer {
   /// qachon tarmoqqa chiqmaydi, bu esa chiqishi mumkin — lekin
   /// atigi bir necha yuz kilobayt oladi va hech narsani diskka
   /// yozmaydi.
-  Future<Uri> thumbUri(String originalUrl, int positionMs) async {
+  ///
+  /// [exact] `false` bo'lsa — faqat eng yaqin KALIT KADR (bitta
+  /// kichik o'qish). Ko'rish davomidagi oldindan tayyorlash shuni
+  /// ishlatadi: aniq kadr uchun kalit kadrdan to'xtagan joygacha
+  /// bo'lgan oraliq (8 MB gacha) olinadi va u ijro bilan kanalni
+  /// bo'lishib, pleyerni sekinlashtirardi.
+  Future<Uri> thumbUri(String originalUrl, int positionMs,
+      {bool exact = true}) async {
     final port = await _ensureStarted().timeout(const Duration(seconds: 5));
     final u = Uri.encodeQueryComponent(originalUrl);
-    return Uri.parse('http://127.0.0.1:$port/thumb?u=$u&ms=$positionMs');
+    final tail = exact ? '' : '&exact=0';
+    return Uri.parse('http://127.0.0.1:$port/thumb?u=$u&ms=$positionMs$tail');
   }
 
   Future<int> _ensureStarted() {

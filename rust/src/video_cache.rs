@@ -507,8 +507,10 @@ fn handle_connection(mut stream: TcpStream) -> std::io::Result<()> {
             .find_map(|pair| pair.strip_prefix("ms="))
             .and_then(|v| v.parse().ok())
             .unwrap_or(0);
-        log(format!("Kadr so'raldi (#{req_id}): ms={ms}"));
-        if let Err(e) = serve_thumb(&mut stream, &original_url, ms, parsed.range_header.as_deref())
+        // `exact=0` bo'lsa faqat kalit kadr (`serve_thumb` ga qarang).
+        let exact = !query.split('&').any(|pair| pair == "exact=0");
+        log(format!("Kadr so'raldi (#{req_id}): ms={ms} exact={exact}"));
+        if let Err(e) = serve_thumb(&mut stream, &original_url, ms, exact, parsed.range_header.as_deref())
         {
             log(format!("XATO (thumb #{req_id}): {e}"));
         }
@@ -2819,6 +2821,9 @@ pub extern "C" fn rust_video_cache_wipe() -> i32 {
     if let Ok(mut m) = THUMB_MEMO.lock() {
         m.clear();
     }
+    if let Ok(mut m) = MOOV_MEMO.lock() {
+        m.clear();
+    }
 
     // 3) Diskdagi hamma narsa. Papkalar avval "axlat" nomiga
     //    ko'chiriladi: shu zahoti ko'rinmay qoladi, o'chirish esa
@@ -4584,6 +4589,57 @@ const THUMB_MEMO_MAX: usize = 3;
 /// sezilarli va ijroga xalaqit berishi mumkin edi.
 const THUMB_MEMO_BYTES: usize = 3 * 1024 * 1024;
 
+// ── `moov` JADVALI XOTIRADA SAQLANADI ─────────────────────────
+//
+// TOPILGAN XATO (foydalanuvchi: "tomosha tarixidagi kadrlar sekin
+// yangilanyapti", "pleyer sekin ochilyapti").
+//
+// Har bir kadr so'rovi `moov` ni (odatda 0,3-2 MB) QAYTADAN
+// tarmoqdan olardi — hatto o'sha videoning kadri bir daqiqa oldin
+// yasalgan bo'lsa ham. Ko'rish davomida kadr har 45 soniyada
+// oldindan tayyorlanadi, ya'ni har safar megabaytlab ortiqcha
+// trafik ijro bilan BIR KANALNI bo'lishardi va pleyer qotardi.
+//
+// `moov` video o'zgarmaguncha o'zgarmaydi — uni bir marta olib,
+// xotirada ushlab turish kifoya. Endi keyingi kadrlar uchun
+// faqat kalit kadr baytlari olinadi.
+static MOOV_MEMO: Mutex<Vec<(String, std::sync::Arc<Vec<u8>>, Instant)>> =
+    Mutex::new(Vec::new());
+/// Bir vaqtda shuncha videoning `moov` i saqlanadi.
+const MOOV_MEMO_MAX: usize = 4;
+/// Jami hajm chegarasi — arzon telefonda xotira ijrodan olinmasin.
+const MOOV_MEMO_BYTES: usize = 16 * 1024 * 1024;
+/// Shuncha vaqt ishlatilmasa chiqarib yuboriladi.
+const MOOV_MEMO_SECS: u64 = 30 * 60;
+
+fn moov_from_memo(key: &str) -> Option<std::sync::Arc<Vec<u8>>> {
+    let mut guard = MOOV_MEMO.lock().ok()?;
+    guard.retain(|(_, _, at)| at.elapsed().as_secs() <= MOOV_MEMO_SECS);
+    let pos = guard.iter().position(|(k, _, _)| k == key)?;
+    // Ishlatilgani oxiriga (eng yangi) ko'chadi.
+    let (k, bytes, _) = guard.remove(pos);
+    guard.push((k, bytes.clone(), Instant::now()));
+    Some(bytes)
+}
+
+fn moov_to_memo(key: &str, bytes: Vec<u8>) -> std::sync::Arc<Vec<u8>> {
+    let arc = std::sync::Arc::new(bytes);
+    let Ok(mut guard) = MOOV_MEMO.lock() else {
+        return arc;
+    };
+    guard.retain(|(k, _, at)| k != key && at.elapsed().as_secs() <= MOOV_MEMO_SECS);
+    guard.push((key.to_string(), arc.clone(), Instant::now()));
+    while guard.len() > MOOV_MEMO_MAX {
+        guard.remove(0);
+    }
+    while guard.len() > 1
+        && guard.iter().map(|(_, b, _)| b.len()).sum::<usize>() > MOOV_MEMO_BYTES
+    {
+        guard.remove(0);
+    }
+    arc
+}
+
 fn thumb_from_memo(tag: &str) -> Option<Vec<u8>> {
     let guard = THUMB_MEMO.lock().ok()?;
     for (saved_tag, bytes, at) in guard.iter() {
@@ -4727,6 +4783,7 @@ fn serve_thumb(
     stream: &mut TcpStream,
     url: &str,
     ms: u64,
+    exact: bool,
     range_header: Option<&str>,
 ) -> std::io::Result<()> {
     let not_found = |stream: &mut TcpStream| -> std::io::Result<()> {
@@ -4737,7 +4794,7 @@ fn serve_thumb(
         return not_found(stream);
     };
     let key = cache_key(url);
-    let tag = format!("{key}|{ms}");
+    let tag = format!("{key}|{ms}|{}", if exact { 1 } else { 0 });
 
     let body = match thumb_from_memo(&tag) {
         Some(cached) => cached,
@@ -4768,16 +4825,30 @@ fn serve_thumb(
 
             // Har bir qadamda "bo'lmasa 404" — foydalanuvchi
             // posterni ko'radi, ilova esa hech qachon yiqilmaydi.
-            let Some(moov) = find_moov(&reader) else {
-                log("Kadr: moov topilmadi".to_string());
-                return not_found(stream);
+            let moov = match moov_from_memo(&key) {
+                Some(m) => m,
+                None => {
+                    let Some(m) = find_moov(&reader) else {
+                        log("Kadr: moov topilmadi".to_string());
+                        return not_found(stream);
+                    };
+                    moov_to_memo(&key, m)
+                }
             };
             let Some(track) = crate::mp4::parse_moov(&moov) else {
                 log("Kadr: video yo'lakcha o'qilmadi".to_string());
                 return not_found(stream);
             };
-            let target = track.sample_at_ms(ms);
+            let mut target = track.sample_at_ms(ms);
             let sync = track.sync_at_or_before(target);
+            // `exact=0` — faqat KALIT KADR (bitta kichik o'qish).
+            // Ko'rish davomidagi oldindan tayyorlash shuni so'raydi:
+            // u ijro bilan bir kanalni bo'lishadi va kalit kadrdan
+            // to'xtagan joygacha bo'lgan (8 MB gacha) oraliqni
+            // olib, pleyerni sekinlashtirmasligi kerak.
+            if !exact {
+                target = sync;
+            }
             let Some(built) = build_thumb_clip(&reader, &track, sync, target) else {
                 log("Kadr: bo'lak yasalmadi".to_string());
                 return not_found(stream);
@@ -6434,6 +6505,37 @@ mod tests {
 
         // Boshqa testlarga xalaqit qilmasin.
         if let Ok(mut g) = THUMB_MEMO.lock() {
+            g.clear();
+        }
+    }
+
+    /// `moov` XOTIRASI (regressiya testi).
+    ///
+    /// Har kadr uchun `moov` qaytadan tarmoqdan olinardi. Endi u
+    /// xotirada turadi; bu test saqlash, chegarani va eng eski
+    /// yozuvning chiqib ketishini tekshiradi.
+    #[test]
+    fn moov_xotirada_saqlanadi() {
+        if let Ok(mut g) = MOOV_MEMO.lock() {
+            g.clear();
+        }
+        assert!(moov_from_memo("v1").is_none());
+        moov_to_memo("v1", vec![1, 2, 3]);
+        assert_eq!(moov_from_memo("v1").as_deref(), Some(&vec![1, 2, 3]));
+
+        // Qayta yozilsa nusxa ko'paymaydi.
+        moov_to_memo("v1", vec![4]);
+        assert_eq!(moov_from_memo("v1").as_deref(), Some(&vec![4]));
+
+        // Chegaradan oshganda eng eski (eng kam ishlatilgan) chiqadi.
+        for i in 0..MOOV_MEMO_MAX {
+            moov_to_memo(&format!("boshqa_{i}"), vec![0]);
+        }
+        assert!(moov_from_memo("v1").is_none(), "eng eski yozuv qolib ketdi");
+        if let Ok(g) = MOOV_MEMO.lock() {
+            assert!(g.len() <= MOOV_MEMO_MAX);
+        }
+        if let Ok(mut g) = MOOV_MEMO.lock() {
             g.clear();
         }
     }

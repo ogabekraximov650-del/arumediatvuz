@@ -317,15 +317,28 @@ class _HistoryListState extends State<_HistoryList>
         final h = WatchHistory.instance;
         final rows = _visible(byAnime ? h.byAnime : h.items, byAnime);
 
+        // ── YANGILASH DOIRASI QOTIB QOLMASIN ────────────────
+        //
+        // TOPILGAN XATO (foydalanuvchi rasmi): kadr ustida yarim
+        // chizilgan doira qotib qolardi. Bu `RefreshIndicator`
+        // edi: ro'yxat `BouncingScrollPhysics` bilan cho'zilganda
+        // (va ayniqsa barmoq yonga — qo'shni oynaga — og'ib
+        // ketganda) u tortish tugaganini bilmay, doirani ekranda
+        // qoldirardi. Endi ro'yxat Android'ning odatdagi
+        // (`Clamping`) harakatida — doira tortish bilan to'g'ri
+        // yopiladi. Yangilash ham 25 soniyadan oshmaydi: tarmoq
+        // osilib qolsa ham doira abadiy aylanmaydi.
         return RefreshIndicator(
           color: AppColors.accent,
           backgroundColor: AppColors.card,
-          onRefresh: () => h.load(force: true),
+          onRefresh: () => h
+              .load(force: true)
+              .timeout(const Duration(seconds: 25), onTimeout: () {}),
           child: rows.isEmpty
               ? _EmptyState(loading: h.isLoading)
               : ListView.builder(
-                  physics: const BouncingScrollPhysics(
-                      parent: AlwaysScrollableScrollPhysics()),
+                  physics: const AlwaysScrollableScrollPhysics(
+                      parent: ClampingScrollPhysics()),
                   padding: const EdgeInsets.fromLTRB(16, 4, 16, 120),
                   itemCount: rows.length,
                   itemBuilder: (context, i) {
@@ -449,12 +462,14 @@ class _DownloadsListState extends State<DownloadsList>
         return RefreshIndicator(
           color: AppColors.accent,
           backgroundColor: AppColors.card,
-          onRefresh: idx.refresh,
+          onRefresh: () => idx
+              .refresh()
+              .timeout(const Duration(seconds: 25), onTimeout: () {}),
           child: rows.isEmpty
               ? _EmptyDownloads(loading: !idx.ready)
               : ListView.builder(
-                  physics: const BouncingScrollPhysics(
-                      parent: AlwaysScrollableScrollPhysics()),
+                  physics: const AlwaysScrollableScrollPhysics(
+                      parent: ClampingScrollPhysics()),
                   padding: const EdgeInsets.fromLTRB(16, 4, 16, 120),
                   itemCount: rows.length,
                   itemBuilder: (context, i) => RepaintBoundary(
@@ -1534,8 +1549,8 @@ class _EmptyDownloads extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ListView(
-      physics: const BouncingScrollPhysics(
-          parent: AlwaysScrollableScrollPhysics()),
+      physics: const AlwaysScrollableScrollPhysics(
+          parent: ClampingScrollPhysics()),
       children: [
         const SizedBox(height: 90),
         Center(
@@ -1905,7 +1920,12 @@ class _FrameState extends State<_Frame> {
 
   void _onHistoryChanged() {
     if (!mounted) return;
-    final fresh = WatchHistory.instance.peekThumb(widget.item.thumbKey);
+    final h = WatchHistory.instance;
+    final fresh = h.peekThumb(widget.item.thumbKey);
+    // Haqiqiy kadr hali yo'q (yoki faqat vaqtinchasi bor) —
+    // yasash davom etsin. Takroriy chaqiruv arzon: ish ketayotgan
+    // yoki yaqinda yiqilgan bo'lsa hech narsa qilinmaydi.
+    if (!h.hasThumb(widget.item.thumbKey)) h.ensureThumb(widget.item);
     if (fresh == null || identical(fresh, _bytes)) return;
     setState(() => _bytes = fresh);
   }
@@ -1927,7 +1947,9 @@ class _FrameState extends State<_Frame> {
       if (mounted && !identical(ready, _bytes)) {
         setState(() => _bytes = ready);
       }
-      return;
+      // Faqat VAQTINCHA (eski nuqtadagi) rasm bo'lsa — haqiqiysini
+      // so'rashni to'xtatmaymiz, aks holda eski rasm qotib qolardi.
+      if (WatchHistory.instance.hasThumb(key)) return;
     }
     final data = await WatchHistory.instance.thumbnail(widget.item);
     // Kutish davomida qator boshqa qismga o'tgan bo'lishi mumkin.
@@ -2113,8 +2135,8 @@ class _EmptyState extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ListView(
-      physics: const BouncingScrollPhysics(
-          parent: AlwaysScrollableScrollPhysics()),
+      physics: const AlwaysScrollableScrollPhysics(
+          parent: ClampingScrollPhysics()),
       children: [
         const SizedBox(height: 90),
         Center(

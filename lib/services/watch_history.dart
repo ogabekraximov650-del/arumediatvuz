@@ -41,6 +41,7 @@ import 'auth_service.dart';
 import 'rust_bridge.dart';
 import 'sync_queue.dart';
 import 'video_cache_server.dart';
+import 'video_gate.dart';
 import 'watch_progress.dart';
 
 /// Tarixdagi bitta qism.
@@ -392,7 +393,10 @@ class WatchHistory extends ChangeNotifier {
     final now = DateTime.now();
     if (now.difference(_lastPrewarm) < _prewarmGap) return;
     _lastPrewarm = now;
-    unawaited(_prepareThumb(Map<String, dynamic>.from(p)));
+    // FAQAT KALIT KADR: aniq kadr uchun 8 MB gacha oraliq olinardi
+    // va u ijro bilan bitta kanalni bo'lishib, videoni
+    // sekinlashtirardi. Aniq kadr pleyer yopilgach yasaladi.
+    unawaited(_prepareThumb(Map<String, dynamic>.from(p), exact: false));
   }
 
   /// Haqiqatda ko'rilgan vaqt qo'shiladi.
@@ -897,6 +901,39 @@ class WatchHistory extends ChangeNotifier {
   /// ko'rinib turgandan ko'ra shu yaxshi.
   Uint8List? peekThumb(String key) => _thumbMemory[key] ?? _thumbFallback[key];
 
+  /// HAQIQIY (aniq) kadr tayyormi — vaqtinchasi hisoblanmaydi.
+  bool hasThumb(String key) =>
+      _thumbMemory.containsKey(key) && !_roughKeys.contains(key);
+
+  /// Taxminiy kadrlar: ko'rish davomida olingan KALIT KADR
+  /// (`prewarmThumb`). Ular ekranda ko'rinadi, lekin aniq kadr
+  /// so'ralganda qaytadan yasaladi.
+  final Set<String> _roughKeys = {};
+
+  /// Oxirgi muvaffaqiyatsiz urinish vaqti — qator qayta-qayta
+  /// so'rab tarmoqni band qilmasin.
+  final Map<String, DateTime> _thumbFailedAt = {};
+  static const Duration _thumbRetryAfter = Duration(seconds: 20);
+
+  /// Kadr hali yo'q (yoki faqat vaqtinchasi bor) bo'lsa — yasashni
+  /// boshlaydi.
+  ///
+  /// TOPILGAN XATO (foydalanuvchi: "tarixdagi kadrlar sekin
+  /// yangilanyapti"): qatorda VAQTINCHA (eski nuqtadagi) rasm
+  /// turgan bo'lsa, qator uni "tayyor" deb hisoblab, haqiqiy
+  /// kadrni boshqa so'ramasdi. Bitta urinish yiqilsa, eski rasm
+  /// ro'yxat qayta ochilguncha qotib qolardi.
+  void ensureThumb(HistoryItem item) {
+    final key = item.thumbKey;
+    if (hasThumb(key) || _thumbWork.containsKey(key)) return;
+    final failed = _thumbFailedAt[key];
+    if (failed != null &&
+        DateTime.now().difference(failed) < _thumbRetryAfter) {
+      return;
+    }
+    unawaited(thumbnail(item));
+  }
+
   void _rememberFallback(String key, Uint8List bytes) {
     if (_thumbFallback.length >= _thumbMemoryLimit) {
       _thumbFallback.remove(_thumbFallback.keys.first);
@@ -911,6 +948,7 @@ class WatchHistory extends ChangeNotifier {
     _thumbMemory[key] = bytes;
     // Haqiqiysi keldi — vaqtinchasi endi kerak emas.
     _thumbFallback.remove(key);
+    _thumbFailedAt.remove(key);
   }
 
   String? _thumbPath(String key) {
@@ -996,26 +1034,32 @@ class WatchHistory extends ChangeNotifier {
   /// Kadrni beradi: avval xotiradan, keyin diskdan, bo'lmasa
   /// yasaydi. Hech qanday holatda xato tashlamaydi — `null`
   /// qaytsa, ro'yxat posterni ko'rsatadi.
-  Future<Uint8List?> thumbnail(HistoryItem item) async {
+  Future<Uint8List?> thumbnail(HistoryItem item, {bool exact = true}) async {
     final key = item.thumbKey;
     // FAQAT haqiqiy kadr ishni to'xtatadi: vaqtinchasi turgan
-    // bo'lsa ham yasash davom etishi kerak.
+    // bo'lsa ham yasash davom etishi kerak. Taxminiy (kalit) kadr
+    // esa aniq kadr so'ralganda qaytadan yasaladi.
     final inMemory = _thumbMemory[key];
-    if (inMemory != null) return inMemory;
+    if (inMemory != null && (!exact || !_roughKeys.contains(key))) {
+      return inMemory;
+    }
 
     final running = _thumbWork[key];
     if (running != null) return running;
 
-    final work = _makeThumb(item, key);
+    final work = _makeThumb(item, key, exact);
     _thumbWork[key] = work;
     try {
-      return await work;
+      final data = await work;
+      if (data == null) _thumbFailedAt[key] = DateTime.now();
+      return data;
     } finally {
       _thumbWork.remove(key);
     }
   }
 
-  Future<Uint8List?> _makeThumb(HistoryItem item, String key) async {
+  Future<Uint8List?> _makeThumb(
+      HistoryItem item, String key, bool exact) async {
     final path = _thumbPath(key);
     if (path == null) return null;
 
@@ -1033,8 +1077,11 @@ class WatchHistory extends ChangeNotifier {
     // bo'ladi (`_warmThumbs`).
     await Future<void>.delayed(Duration.zero);
 
-    // 1) Diskda bormi?
-    final saved = RustCore.instance.secureLoad(path, 'thumb:$key');
+    // 1) Diskda bormi? (Taxminiy kadr diskda bo'lsa ham aniq
+    //    kadr so'ralganda qaytadan yasaladi.)
+    final saved = _roughKeys.contains(key) && exact
+        ? ''
+        : RustCore.instance.secureLoad(path, 'thumb:$key');
     if (saved.isNotEmpty) {
       try {
         final bytes = base64Decode(saved);
@@ -1059,12 +1106,12 @@ class WatchHistory extends ChangeNotifier {
       // Yangisini yasash FON'DA davom etadi — tayyor bo'lishi
       // bilan ro'yxat o'zi yangilanadi (`notifyListeners`).
       if (!_thumbBuilding.contains(key)) {
-        unawaited(_buildThumb(item, key));
+        unawaited(_buildThumb(item, key, exact));
       }
       return previous;
     }
 
-    return _buildThumb(item, key);
+    return _buildThumb(item, key, exact);
   }
 
   /// Bitta kadr uchun eng ko'pi shuncha marta urinib ko'riladi.
@@ -1078,15 +1125,24 @@ class WatchHistory extends ChangeNotifier {
   static const int _thumbTries = 3;
 
   /// Kadrni HAQIQATAN yasaydi (tarmoq yoki diskdagi bo'laklardan).
-  Future<Uint8List?> _buildThumb(HistoryItem item, String key) async {
+  Future<Uint8List?> _buildThumb(
+      HistoryItem item, String key, bool exact) async {
     final path = _thumbPath(key);
     if (path == null) return null;
     if (!_thumbBuilding.add(key)) return null;
     try {
-      for (var attempt = 1; attempt <= _thumbTries; attempt++) {
-        final data = await _grabThumb(item);
+      // Taxminiy kadr bitta urinish bilan cheklanadi — u ijro
+      // paytida ishlaydi va takror urinish kanalni band qiladi.
+      final tries = exact ? _thumbTries : 1;
+      for (var attempt = 1; attempt <= tries; attempt++) {
+        final data = await _grabThumb(item, exact);
         if (data != null) {
           _rememberThumb(key, data);
+          if (exact) {
+            _roughKeys.remove(key);
+          } else {
+            _roughKeys.add(key);
+          }
           // Ro'yxat DARHOL yangi kadrga o'tsin (kutib turmasin).
           notifyListeners();
           // Shifrlab saqlaymiz va shu videoning eski kadrlarini
@@ -1096,7 +1152,7 @@ class WatchHistory extends ChangeNotifier {
           _removeStaleThumbs(item.videoKey, key);
           return data;
         }
-        if (attempt < _thumbTries) {
+        if (attempt < tries) {
           await Future<void>.delayed(Duration(milliseconds: 600 * attempt));
         }
       }
@@ -1112,14 +1168,34 @@ class WatchHistory extends ChangeNotifier {
   /// yasalmasin. Urinishlar orasidagi tanaffusda navbat BAND
   /// QILINMAYDI — aks holda bitta muvaffaqiyatsiz kadr qolgan
   /// qatorlarni ushlab turardi.
-  Future<Uint8List?> _grabThumb(HistoryItem item) async {
+  Future<Uint8List?> _grabThumb(HistoryItem item, bool exact) async {
+    // ── VIDEO OCHIQ TURGANDA ANIQ KADR YASALMAYDI ───────────
+    //
+    // TOPILGAN XATO (foydalanuvchi: "pleyer va yozishmadagi video
+    // judayam sekin ochilyapti, ba'zida ochilmay qolyapti").
+    //
+    // Aniq kadr uchun faylning bir necha megabayti olinadi.
+    // Qism almashganda, ilova fonga chiqqanda yoki tarixdan
+    // qism ochilganda bu ish AYNAN pleyer ochilayotgan lahzada
+    // boshlanardi va ExoPlayer bilan bitta tor kanalni bo'lishardi.
+    // Yozishmadagi kadrlar allaqachon shu qoidaga bo'ysunadi
+    // (`VideoGate`) — endi tarix kadrlari ham kutadi. Pleyer
+    // yopilishi bilan kadr darhol yasaladi.
+    //
+    // Taxminiy (kalit) kadr kutmaydi: u bitta kichik o'qish va
+    // aynan ko'rish davomida olinishi kerak.
+    if (exact) {
+      while (VideoGate.busy) {
+        await Future<void>.delayed(const Duration(milliseconds: 400));
+      }
+    }
     while (_thumbRunning >= _maxParallelThumbs) {
       await Future<void>.delayed(const Duration(milliseconds: 120));
     }
     _thumbRunning++;
     try {
       final uri = await VideoCacheServer.instance
-          .thumbUri(item.videoUrl, item.positionMs);
+          .thumbUri(item.videoUrl, item.positionMs, exact: exact);
       final data = await _thumbChannel.invokeMethod<Uint8List>('grab', {
         'url': uri.toString(),
         'maxWidth': 640,
@@ -1174,11 +1250,12 @@ class WatchHistory extends ChangeNotifier {
   ///   * oflaynda ham rasm ko'rinadi: qism yuklab olinmagan
   ///     bo'lsa kadr uchun internet kerak, internet esa AYNAN
   ///     ko'rish paytida bor edi.
-  Future<void> _prepareThumb(Map<String, dynamic> row) async {
+  Future<void> _prepareThumb(Map<String, dynamic> row,
+      {bool exact = true}) async {
     try {
       final item = HistoryItem.fromJson(row);
       if (item.videoUrl.isEmpty || item.positionMs <= 0) return;
-      await thumbnail(item);
+      await thumbnail(item, exact: exact);
     } catch (_) {
       // Kadr yasalmadi — ro'yxat posterni ko'rsatadi.
     }
@@ -1188,6 +1265,7 @@ class WatchHistory extends ChangeNotifier {
   void _dropThumb(HistoryItem item) {
     _thumbMemory.remove(item.thumbKey);
     _thumbFallback.remove(item.thumbKey);
+    _roughKeys.remove(item.thumbKey);
     final dir = RustCore.instance.dataDirPath;
     if (dir == null) return;
     try {
