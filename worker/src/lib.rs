@@ -1520,6 +1520,7 @@ async fn b2_fetch_range(env: &Env, file_name: &str, start: u64, end: u64) -> Res
 /// isitadi va darhol beradi.
 async fn b2_media(
     env: &Env,
+    ctx: &Context,
     file_name: &str,
     range: Option<String>,
 ) -> Result<Response> {
@@ -1528,23 +1529,32 @@ async fn b2_media(
         return Ok(r);
     }
 
-    // 2) Yo'q — B2'dan olib keshga ko'chiramiz. `b2_warm` bir
-    //    vaqtda faqat BITTA isitish ketishini ta'minlaydi
-    //    (belgi qo'yadi), ya'ni ikki kishi bir vaqtda ochsa ham
-    //    B2'ga bitta so'rov ketadi.
+    // ── KESHDA YO'Q: MIJOZ BUTUN FAYLNI KUTMAYDI ────────────────
     //
-    //    Oyna raqami 0: yozishmadagi fayl 480 MiB'dan kichik,
-    //    ya'ni butun fayl bitta oynaga sig'adi.
-    let _ = b2_warm(env, file_name, 0, false).await;
-
-    // 3) Endi keshdan beriladi.
-    if let Some(r) = media_from_cache(file_name, range.as_deref()).await? {
-        return Ok(r);
+    // TOPILGAN XATO (foydalanuvchi: "support chatdagi video judayam
+    // sekin ochilyapti" va "videolarning hammasida thumbnail
+    // ko'rsatilmayapti").
+    //
+    // Ilgari birinchi so'rov BUTUN FAYL keshga ko'chirilguncha
+    // javobsiz turardi. Kichik (qayta kodlangan) videoda bu bir
+    // zum, telefon yoki Telegram'dan kelgan katta videoda esa
+    // o'nlab soniya. Kadr yasovchining vaqti (10-15 s) tugab
+    // qolardi — ayniqsa `moov` oxirida bo'lgan faylda, chunki u
+    // bir necha so'rov talab qiladi — va kadr umuman chiqmasdi;
+    // pleyer ham shuncha kutardi.
+    //
+    // Endi so'ralgan oraliq B2'dan DARHOL beriladi, butun fayl
+    // esa fon'da keshga ko'chiriladi (keyingi so'rovlar keshdan).
+    // Boshqa birov allaqachon ko'chirayotgan bo'lsa (belgi bor)
+    // ikkinchi marta boshlanmaydi.
+    let marker_key = Request::new(&warm_marker_url(file_name, 0), Method::Get)?;
+    if Cache::default().get(&marker_key, false).await?.is_none() {
+        let env2 = env.clone();
+        let name = file_name.to_string();
+        ctx.wait_until(async move {
+            let _ = b2_warm(&env2, &name, 0, false).await;
+        });
     }
-
-    // 4) Kesh ishlamadi (juda katta fayl yoki Cloudflare yozuvni
-    //    qabul qilmadi) — oxirgi chora: to'g'ridan B2'dan, lekin
-    //    oraliqni QISQARTIRMASDAN.
     b2_media_direct(env, file_name, range).await
 }
 
@@ -9791,7 +9801,7 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
         // Yozishmadagi rasm/video — oraliq qisqartirilmaydi
         // (`b2_media` izohiga qarang).
         if let Some(fname) = path.strip_prefix("/api/media/") {
-            return b2_media(&env, fname, range_header).await;
+            return b2_media(&env, &ctx, fname, range_header).await;
         }
         // Pleyer SHU manzildan oqim oladi (b2_play izohiga qarang).
         // Farqi: javob hech qachon sun'iy kesilmaydi va bo'laklab

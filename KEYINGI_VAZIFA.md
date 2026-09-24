@@ -888,6 +888,23 @@ sekin yangilanyapti va ba'zida (rasmdagidek) xato bo'lib qolyapti».
 | `initialize()` 25 s da uzilar, keyin oyna MAJBURAN qayta isitilardi (150 s gacha) | 40 s; vaqt tugasa isitmasdan bir marta qayta ochiladi |
 | Worker har so'rovda `app_min_version` ni Turso'dan o'qirdi | Izolyat xotirasida 60 s (`min_version_cached`) |
 
+### YOZISHMADA `moov` OXIRIDA BO'LGAN VIDEOLAR KADRSIZ EDI (2026-09-24)
+
+**Foydalanuvchi:** «support chatdagi videolarning hammasida thumbnail
+ko'rsatilmayapti, faqat men encode qilgan va moov atomi oldinga
+o'tkazilgan videolarda ko'rsatilyapti».
+
+Rust'dagi kadr yasash `moov` oxirida bo'lgan faylda ham TO'G'RI
+ishlaydi — ffmpeg bilan yasalgan ikkala fayldan (faststart va
+oddiy) baytma-bayt BIR XIL bo'lak chiqdi (`haqiqiy_fayldan_kadr`,
+qo'lda ishlatiladigan test). Muammo tarmoqda edi:
+
+| Sabab | Tuzatish |
+|---|---|
+| Worker `/api/media` keshda yo'q faylga javob berishdan OLDIN butun faylni keshga ko'chirardi — katta (telefon/Telegram) videoda o'nlab soniya; kadr yasovchining 10-15 s vaqti tugardi, pleyer ham kutardi | So'ralgan oraliq B2'dan DARHOL beriladi, butun fayl fon'da (`wait_until`) keshga ko'chiriladi (`b2_media`) |
+| Hajm uchun HEAD (worker'da doim 404) + `bytes=0-0` — ikkita ortiqcha so'rov | Hajm birinchi o'qishning `Content-Range` idan (`probe_head`) |
+| `ThumbReader` da bitta zaxira bo'lak: `moov` (oxiri) o'qilgach faylning boshi o'chib, kalit kadr uchun yana so'rov ketardi | Ikkita zaxira bo'lak, faylning boshi saqlanadi. `moov` oxirida: 2 so'rov (ilgari 5), boshida: 1. Test: `moov_oxirida_bolsa_ham_kadr_yasaladi` |
+
 ### KADR AJRATUVCHI TASLIM BO'LMAYDI (`MainActivity.grabFrame`)
 
 Telegramdan kelgan ba'zi MP4 fayllarda `getFrameAtTime` har doim

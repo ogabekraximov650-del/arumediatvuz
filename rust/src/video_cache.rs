@@ -4374,7 +4374,12 @@ struct ThumbReader<'a> {
     ///
     /// `RefCell` yetarli: `ThumbReader` bitta so'rov ichida
     /// yaratiladi va FAQAT o'sha oqimda ishlatiladi.
-    buf: RefCell<Option<(u64, Vec<u8>)>>,
+    /// Zaxira bo'laklar — eng ko'pi ikkita: faylning BOSHI va
+    /// OXIRI. `moov` oxirida bo'lgan faylda (telefon va
+    /// Telegram videolari) kalit kadr boshida, `moov` esa oxirida
+    /// turadi; bitta zaxira bo'lsa oxirini o'qish boshini o'chirib
+    /// yuborardi va kalit kadr uchun yana bitta so'rov ketardi.
+    buf: RefCell<Vec<(u64, Vec<u8>)>>,
 }
 
 impl ThumbReader<'_> {
@@ -4396,16 +4401,19 @@ impl ThumbReader<'_> {
     /// Kerakli oraliq zaxira bo'lak ichidami.
     fn from_buf(&self, start: u64, len: u64) -> Option<Vec<u8>> {
         let b = self.buf.borrow();
-        let (at, data) = b.as_ref()?;
-        if start < *at {
-            return None;
+        for (at, data) in b.iter() {
+            if start < *at {
+                continue;
+            }
+            let from = (start - *at) as usize;
+            let Some(to) = from.checked_add(len as usize) else {
+                continue;
+            };
+            if to <= data.len() {
+                return Some(data[from..to].to_vec());
+            }
         }
-        let from = (start - *at) as usize;
-        let to = from.checked_add(len as usize)?;
-        if to > data.len() {
-            return None;
-        }
-        Some(data[from..to].to_vec())
+        None
     }
 
     fn read(&self, start: u64, len: u64) -> Option<Vec<u8>> {
@@ -4424,13 +4432,25 @@ impl ThumbReader<'_> {
         let data = self.read_from_net(start, want, len)?;
         let out = data[..len as usize].to_vec();
         if data.len() as u64 <= Self::BUF_MAX {
-            *self.buf.borrow_mut() = Some((start, data));
+            self.keep(start, data);
         }
         Some(out)
     }
 
     /// Kerakli baytlar TO'LIQ keshda bo'lsa — tarmoqqa umuman
     /// chiqilmaydi (yuklab olingan qismlarda thumbnail bepul).
+    /// Zaxira bo'lakni saqlaydi (eng ko'pi ikkita, eskisi chiqadi).
+    fn keep(&self, start: u64, data: Vec<u8>) {
+        let mut b = self.buf.borrow_mut();
+        if b.len() >= 2 {
+            // Faylning BOSHI (kalit kadrlar shu yerda) iloji boricha
+            // saqlanadi — oxiridagi eski bo'lak chiqadi.
+            let drop = b.iter().position(|(at, _)| *at != 0).unwrap_or(0);
+            b.remove(drop);
+        }
+        b.push((start, data));
+    }
+
     fn read_from_disk(&self, start: u64, len: u64) -> Option<Vec<u8>> {
         let first = start / CHUNK_SIZE;
         let last = (start + len - 1) / CHUNK_SIZE;
@@ -4497,6 +4517,39 @@ impl ThumbReader<'_> {
 /// ustidan sakrab o'tiladi va uning birorta bayti ham olinmaydi.
 /// Shu sabab `moov` faylning oxirida turgan taqdirda ham (faststart
 /// qilinmagan fayllar) bu yo'l ishlaydi.
+/// Faylning boshini (`want` bayt) oladi va umumiy hajmni
+/// `Content-Range` dan o'qiydi: `(hajm, turi, baytlar)`.
+fn probe_head(shared: &Shared, url: &str, want: u64) -> Option<(u64, String, Vec<u8>)> {
+    let resp = signed(shared.agent.get(url), "GET", url)
+        .set("Range", &format!("bytes=0-{}", want.saturating_sub(1)))
+        .call()
+        .ok()?;
+    let ct = resp
+        .header("Content-Type")
+        .unwrap_or("video/mp4")
+        .to_string();
+    let total: u64 = if resp.status() == 206 {
+        resp.header("Content-Range")?
+            .rsplit('/')
+            .next()?
+            .trim()
+            .parse()
+            .ok()?
+    } else {
+        // 200 — oraliq e'tiborsiz qoldirildi, tana butun fayl.
+        resp.header("Content-Length")?.trim().parse().ok()?
+    };
+    if total == 0 {
+        return None;
+    }
+    let mut buf = Vec::with_capacity(want.min(total) as usize);
+    resp.into_reader()
+        .take(want.min(total))
+        .read_to_end(&mut buf)
+        .ok()?;
+    Some((total, ct, buf))
+}
+
 fn find_moov(reader: &ThumbReader) -> Option<Vec<u8>> {
     /// Himoya: buzilgan faylda cheksiz aylanib qolmaslik uchun.
     const MAX_BOXES: usize = 64;
@@ -4804,6 +4857,37 @@ fn serve_thumb(
 
             // Hajm: avval diskdan, bo'lmasa bitta kichik so'rov bilan.
             let mut total = meta_total_from_disk(&dir);
+            // ── HAJM BIRINCHI O'QISHNING O'ZIDAN ─────────────────
+            //
+            // TOPILGAN XATO (foydalanuvchi: "support chatdagi
+            // videolarning hammasida thumbnail ko'rsatilmayapti").
+            //
+            // Ilgari hajm alohida so'ralardi: avval HEAD (worker
+            // uni tanimaydi — har doim 404), keyin `bytes=0-0`.
+            // Ya'ni kadrning o'ziga yetguncha IKKITA ortiqcha
+            // so'rov ketardi. Endi faylning boshi (256 KB) bitta
+            // so'rovda olinadi va hajm uning `Content-Range`
+            // sarlavhasidan o'qiladi; olingan baytlar esa zaxira
+            // bo'lak bo'lib qoladi (ftyp, ko'pincha moov va kalit
+            // kadr ham shu yerda).
+            let mut head: Option<Vec<u8>> = None;
+            if total == 0 {
+                if let Some((t, ct, bytes)) = probe_head(shared, url, ThumbReader::READAHEAD) {
+                    note_net_bytes(&key, bytes.len() as u64);
+                    write_meta(
+                        &dir,
+                        &CacheMeta {
+                            total_size: t,
+                            content_type: ct,
+                            chunk_size: CHUNK_SIZE,
+                            duration_secs: 0.0,
+                            chunk_start_ms: Vec::new(),
+                        },
+                    );
+                    total = t;
+                    head = Some(bytes);
+                }
+            }
             if total == 0 {
                 total = ensure_meta(shared, &dir, url)
                     .map(|m| m.total_size)
@@ -4820,8 +4904,13 @@ fn serve_thumb(
                 key: key.clone(),
                 url: url.to_string(),
                 total,
-                buf: RefCell::new(None),
+                buf: RefCell::new(Vec::new()),
             };
+            if let Some(bytes) = head {
+                if !bytes.is_empty() && bytes.len() as u64 <= ThumbReader::BUF_MAX {
+                    reader.keep(0, bytes);
+                }
+            }
 
             // Har bir qadamda "bo'lmasa 404" — foydalanuvchi
             // posterni ko'radi, ilova esa hech qachon yiqilmaydi.
@@ -6509,6 +6598,180 @@ mod tests {
         }
     }
 
+    // ── `moov` OXIRIDA BO'LGAN FAYLDAN KADR (tashxis testi) ──
+    fn t_box(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&((body.len() + 8) as u32).to_be_bytes());
+        v.extend_from_slice(kind);
+        v.extend_from_slice(body);
+        v
+    }
+
+    fn t_moov(chunk_offsets: [u32; 2], pad: usize) -> Vec<u8> {
+        let full = |b: &[u32]| {
+            let mut v = 0u32.to_be_bytes().to_vec();
+            for x in b {
+                v.extend_from_slice(&x.to_be_bytes());
+            }
+            v
+        };
+        let mut stbl = Vec::new();
+        let mut stsd = full(&[1]);
+        stsd.extend_from_slice(&t_box(b"avc1", &[7u8; 12]));
+        stbl.extend_from_slice(&t_box(b"stsd", &stsd));
+        stbl.extend_from_slice(&t_box(b"stts", &full(&[1, 4, 512])));
+        stbl.extend_from_slice(&t_box(b"stss", &full(&[2, 1, 3])));
+        stbl.extend_from_slice(&t_box(b"stsc", &full(&[1, 1, 2, 1])));
+        stbl.extend_from_slice(&t_box(b"stsz", &full(&[0, 4, 10, 20, 30, 40])));
+        stbl.extend_from_slice(&t_box(b"stco", &full(&[2, chunk_offsets[0], chunk_offsets[1]])));
+        let mut minf = t_box(b"vmhd", &[0u8; 12]);
+        minf.extend_from_slice(&t_box(b"stbl", &stbl));
+        let mut mdia = t_box(b"hdlr", &{
+            let mut h = full(&[0]);
+            h.extend_from_slice(b"vide");
+            h
+        });
+        mdia.extend_from_slice(&t_box(b"mdhd", &full(&[0, 0, 1024, 2048, 0])));
+        mdia.extend_from_slice(&t_box(b"minf", &minf));
+        let mut tkhd = vec![0u8; 84];
+        tkhd[76..80].copy_from_slice(&(1280u32 << 16).to_be_bytes());
+        tkhd[80..84].copy_from_slice(&(720u32 << 16).to_be_bytes());
+        let mut trak = t_box(b"tkhd", &tkhd);
+        trak.extend_from_slice(&t_box(b"mdia", &mdia));
+        let mut moov = t_box(b"trak", &trak);
+        moov.extend_from_slice(&t_box(b"udta", &vec![0u8; pad]));
+        moov
+    }
+
+    fn start_file_origin(file: Vec<u8>) -> (u16, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let l2 = Arc::clone(&log);
+        let file = Arc::new(file);
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut st) = stream else { continue };
+                let l3 = Arc::clone(&l2);
+                let f = Arc::clone(&file);
+                thread::spawn(move || {
+                    let mut buf = [0u8; 4096];
+                    let n = st.read(&mut buf).unwrap_or(0);
+                    let text = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let total = f.len() as u64;
+                    let mut range = String::new();
+                    for line in text.split("\r\n") {
+                        if let Some(v) = line.strip_prefix("Range: ") {
+                            range = v.trim().to_string();
+                        }
+                    }
+                    l3.lock().unwrap().push(range.clone());
+                    let (s, e) = parse_test_range(&range, total);
+                    let head = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Type: video/mp4\r\nContent-Length: {}\r\nContent-Range: bytes {s}-{e}/{total}\r\nConnection: close\r\n\r\n",
+                        e - s + 1
+                    );
+                    let _ = st.write_all(head.as_bytes());
+                    let _ = st.write_all(&f[s as usize..=e as usize]);
+                });
+            }
+        });
+        (port, log)
+    }
+
+    fn thumb_from_file(file: Vec<u8>, ms: u64) -> (Option<Vec<u8>>, usize) {
+        let total = file.len() as u64;
+        let (port, reqs) = start_file_origin(file);
+        let url = format!("http://127.0.0.1:{port}/{TEST_NAME}");
+        let root = std::env::temp_dir().join(format!(
+            "aru_moovend_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let shared = Shared {
+            cache_root: root.clone(),
+            start: Instant::now(),
+            logs: Mutex::new(Vec::new()),
+            agent: ureq::AgentBuilder::new()
+                .timeout_read(Duration::from_secs(20))
+                .build(),
+            warm_agent: ureq::AgentBuilder::new().build(),
+            net_by_file: Mutex::new(HashMap::new()),
+        };
+        // Ishlab chiqarishdagidek: hajm birinchi o'qishdan olinadi.
+        let (probed, _, head) =
+            probe_head(&shared, &url, ThumbReader::READAHEAD).expect("bosh o'qilmadi");
+        assert_eq!(probed, total, "hajm noto'g'ri o'qildi");
+        let reader = ThumbReader {
+            shared: &shared,
+            dir: root.join("kalit"),
+            key: "kalit".to_string(),
+            url,
+            total,
+            buf: RefCell::new(Vec::new()),
+        };
+        reader.keep(0, head);
+        let out = (|| {
+            let moov = find_moov(&reader)?;
+            let track = crate::mp4::parse_moov(&moov)?;
+            let target = track.sample_at_ms(ms);
+            let sync = track.sync_at_or_before(target);
+            build_thumb_clip(&reader, &track, sync, target)
+        })();
+        let n = reqs.lock().unwrap().len();
+        (out, n)
+    }
+
+    /// Qo'lda: `AR_THUMB_FILE=... AR_THUMB_OUT=... cargo test -- --ignored haqiqiy_fayl`
+    #[test]
+    #[ignore]
+    fn haqiqiy_fayldan_kadr() {
+        let path = std::env::var("AR_THUMB_FILE").unwrap();
+        let out = std::env::var("AR_THUMB_OUT").unwrap();
+        let ms: u64 = std::env::var("AR_THUMB_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(100);
+        let file = fs::read(path).unwrap();
+        let (r, n) = thumb_from_file(file, ms);
+        eprintln!("so'rovlar: {n}");
+        fs::write(out, r.expect("kadr yasalmadi")).unwrap();
+    }
+
+    #[test]
+    fn moov_oxirida_bolsa_ham_kadr_yasaladi() {
+        let ftyp = t_box(b"ftyp", b"isomisomavc1");
+        for pad in [100usize, 600 * 1024] {
+            // moov OXIRIDA: ftyp, mdat, moov.
+            let mdat_body_at = (ftyp.len() + 8) as u32;
+            let mut mdat = vec![0u8; 400 * 1024];
+            for (i, b) in mdat.iter_mut().enumerate() {
+                *b = (i % 200) as u8;
+            }
+            let moov = t_moov([mdat_body_at, mdat_body_at + 1000], pad);
+            let mut end_file = ftyp.clone();
+            end_file.extend_from_slice(&t_box(b"mdat", &mdat));
+            end_file.extend_from_slice(&t_box(b"moov", &moov));
+            let (r, n) = thumb_from_file(end_file, 100);
+            assert!(r.is_some(), "moov oxirida (pad={pad}): kadr yasalmadi");
+            // Bosh (hajm + kalit kadr) va oxiri (moov); katta moov
+            // uchun bittasi ko'proq.
+            let limit = if pad < 200 * 1024 { 2 } else { 3 };
+            assert!(n <= limit, "moov oxirida (pad={pad}): {n} ta so'rov");
+
+            // moov BOSHIDA (faststart).
+            let moov_len = t_box(b"moov", &t_moov([0, 0], pad)).len() as u32;
+            let at = ftyp.len() as u32 + moov_len + 8;
+            let moov = t_moov([at, at + 1000], pad);
+            let mut fast = ftyp.clone();
+            fast.extend_from_slice(&t_box(b"moov", &moov));
+            fast.extend_from_slice(&t_box(b"mdat", &mdat));
+            let (r, n) = thumb_from_file(fast, 100);
+            assert!(r.is_some(), "moov boshida (pad={pad}): kadr yasalmadi");
+            let limit = if pad < 200 * 1024 { 1 } else { 3 };
+            assert!(n <= limit, "moov boshida (pad={pad}): {n} ta so'rov");
+        }
+    }
+
     /// `moov` XOTIRASI (regressiya testi).
     ///
     /// Har kadr uchun `moov` qaytadan tarmoqdan olinardi. Endi u
@@ -6584,7 +6847,7 @@ mod tests {
             key: "kalit".to_string(),
             url: url.clone(),
             total,
-            buf: RefCell::new(None),
+            buf: RefCell::new(Vec::new()),
         };
 
         // `find_moov` aynan shunday yuradi: `ftyp` sarlavhasi,
