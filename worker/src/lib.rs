@@ -15,7 +15,7 @@
 // qiymat allaqachon "http" bilan boshlansa uni o'zgartirmasdan qaytaradi.
 //
 // /api/image/:filename — B2 proxy, 450MB'lik bo'laklarga bo'lib
-// Cloudflare Cache API orqali keshlaydi (400 kunga). Bo'lak birinchi
+// Cloudflare Cache API orqali keshlaydi (1000 kunga). Bo'lak birinchi
 // so'ralganda B2'dan OQIM (quvur) orqali — xotiraga to'liq yig'ilmasdan
 // — olinib keshga yoziladi; keyingi barcha so'rovlar to'g'ridan-to'g'ri
 // keshdan xizmat qiladi va B2'ga umuman murojaat qilinmaydi. Mijoz
@@ -1361,7 +1361,7 @@ async fn b2_get_upload_url(env: &Env) -> Result<Value> {
 // "guruh" so'raydi, shu sabab kesh kalitlari barqaror va qayta
 // ishlatiladi. Oraliq birinchi so'ralganda B2'dan BIR MARTA
 // olinadi, mijozga darhol beriladi va fon'da (`wait_until`) keshga
-// yoziladi (400 kunga). Keyingi barcha so'rovlar — boshqa
+// yoziladi (1000 kunga). Keyingi barcha so'rovlar — boshqa
 // foydalanuvchilardan ham — B2'ga umuman chiqmasdan Cloudflare
 // chekkasidan xizmat qiladi.
 //
@@ -1375,7 +1375,7 @@ async fn b2_get_upload_url(env: &Env) -> Result<Value> {
 // 166 MB'lik video B2'ga ATIGI ~42 ta so'rov qiladi (bo'lakma-bo'lak
 // bo'lganda 166 ta bo'lardi). Ustiga bu so'rovlar FAQAT keshda
 // bo'lmagan oraliqlar uchun ketadi — bir marta keshga tushgach,
-// o'sha oraliq 400 kun davomida barcha foydalanuvchilarga
+// o'sha oraliq 1000 kun davomida barcha foydalanuvchilarga
 // Cloudflare chekkasidan, B2'ga umuman chiqmasdan xizmat qiladi.
 //
 // ✅ NIMA TUZATILDI (yuklab olish 0.2-0.5 MB/s da sudralardi):
@@ -1398,7 +1398,7 @@ async fn b2_get_upload_url(env: &Env) -> Result<Value> {
 
 /// Range'siz (butunlay) keshlanadigan eng katta fayl — rasmlar uchun.
 const FULL_CACHE_MAX: u64 = 12 * 1024 * 1024; // 12 MiB
-const CHUNK_CACHE_SECONDS: u64 = 400 * 24 * 60 * 60; // 400 kun
+const CHUNK_CACHE_SECONDS: u64 = 1000 * 24 * 60 * 60; // 1000 kun
 
 /// ── MIJOZ (TELEFON) KESHI ─────────────────────────────────────
 ///
@@ -1520,7 +1520,6 @@ async fn b2_fetch_range(env: &Env, file_name: &str, start: u64, end: u64) -> Res
 /// isitadi va darhol beradi.
 async fn b2_media(
     env: &Env,
-    ctx: &Context,
     file_name: &str,
     range: Option<String>,
 ) -> Result<Response> {
@@ -1529,33 +1528,32 @@ async fn b2_media(
         return Ok(r);
     }
 
-    // ── KESHDA YO'Q: MIJOZ BUTUN FAYLNI KUTMAYDI ────────────────
+    // ── FAQAT KESHDAN ───────────────────────────────────────────
     //
-    // TOPILGAN XATO (foydalanuvchi: "support chatdagi video judayam
-    // sekin ochilyapti" va "videolarning hammasida thumbnail
-    // ko'rsatilmayapti").
+    // TALAB (foydalanuvchi): "faqatgina keshdan uzatilsin, B2'ga
+    // ortiqcha so'rov yuborilmasin".
     //
-    // Ilgari birinchi so'rov BUTUN FAYL keshga ko'chirilguncha
-    // javobsiz turardi. Kichik (qayta kodlangan) videoda bu bir
-    // zum, telefon yoki Telegram'dan kelgan katta videoda esa
-    // o'nlab soniya. Kadr yasovchining vaqti (10-15 s) tugab
-    // qolardi — ayniqsa `moov` oxirida bo'lgan faylda, chunki u
-    // bir necha so'rov talab qiladi — va kadr umuman chiqmasdi;
-    // pleyer ham shuncha kutardi.
+    // B2'ga murojaat FAQAT bitta joyda — isitishda (`b2_warm`):
+    // fayl bir marta keshga ko'chiriladi, keyin hamma narsa
+    // keshdan. Boshqa birov allaqachon isitayotgan bo'lsa,
+    // `b2_warm` o'sha isitish tugashini KUTADI (B2'ga qayta
+    // chiqmaydi).
     //
-    // Endi so'ralgan oraliq B2'dan DARHOL beriladi, butun fayl
-    // esa fon'da keshga ko'chiriladi (keyingi so'rovlar keshdan).
-    // Boshqa birov allaqachon ko'chirayotgan bo'lsa (belgi bor)
-    // ikkinchi marta boshlanmaydi.
-    let marker_key = Request::new(&warm_marker_url(file_name, 0), Method::Get)?;
-    if Cache::default().get(&marker_key, false).await?.is_none() {
-        let env2 = env.clone();
-        let name = file_name.to_string();
-        ctx.wait_until(async move {
-            let _ = b2_warm(&env2, &name, 0, false).await;
-        });
+    // Katta faylda isitish uzoq davom etishi mumkin — shu sabab
+    // yadrodagi kadr yasovchi bu so'rovni uzoq kutadi
+    // (`THUMB_NET_TIMEOUT`), aks holda ulanish uzilib isitish
+    // ham to'xtardi.
+    let _ = b2_warm(env, file_name, 0, false).await;
+    if let Some(r) = media_from_cache(file_name, range.as_deref()).await? {
+        return Ok(r);
     }
-    b2_media_direct(env, file_name, range).await
+    // Keshga tushmadi — B2'dan to'g'ridan-to'g'ri BERILMAYDI.
+    // Mijoz keyinroq qayta urinadi.
+    let mut r = Response::error("Fayl keshga tayyorlanmoqda", 503)?;
+    set_cors(&mut r);
+    r.headers_mut().set("Retry-After", "5")?;
+    r.headers_mut().set("Cache-Control", "no-store")?;
+    Ok(r)
 }
 
 /// Kesh yozuvidan (butun fayl) so'ralgan qismni kesib beradi.
@@ -1628,64 +1626,6 @@ async fn media_from_cache(
         h.set("X-Cache", "HIT-MEDIA")?;
     }
     Ok(Some(resp))
-}
-
-/// Kesh ishlamagan holat uchun zaxira yo'l: B2'dan to'g'ridan,
-/// oraliq qisqartirilmasdan.
-async fn b2_media_direct(
-    env: &Env,
-    file_name: &str,
-    range: Option<String>,
-) -> Result<Response> {
-    let Some((start, end_opt)) = range.as_deref().and_then(parse_range) else {
-        return b2_proxy_full(env, file_name).await;
-    };
-    let end = match end_opt {
-        Some(e) => e,
-        // Oxiri berilmagan va boshi 0 — bu "butun faylni ber"
-        // degani.
-        None if start == 0 => return b2_proxy_full(env, file_name).await,
-        None => {
-            let (_probe, total) = b2_fetch_range(env, file_name, 0, 0).await?;
-            if total == 0 {
-                return b2_proxy_full(env, file_name).await;
-            }
-            total - 1
-        }
-    };
-    if end < start {
-        return b2_proxy_full(env, file_name).await;
-    }
-
-    let (mut b2, total) = b2_fetch_range(env, file_name, start, end).await?;
-    let ct = b2
-        .headers()
-        .get("Content-Type")?
-        .unwrap_or_else(|| "application/octet-stream".to_string());
-    let len = end - start + 1;
-    let total_str = if total > 0 {
-        total.to_string()
-    } else {
-        (end + 1).to_string()
-    };
-    let mut resp = match b2.body() {
-        ResponseBody::Stream(rs) => {
-            let readable = fixed_length_stream(&rs.clone(), len)?;
-            Response::from_body(ResponseBody::Stream(readable))?.with_status(206)
-        }
-        _ => Response::from_stream(b2.stream()?)?.with_status(206),
-    };
-    set_cors(&mut resp);
-    {
-        let h = resp.headers_mut();
-        h.set("Content-Type", &ct)?;
-        h.set("Accept-Ranges", "bytes")?;
-        h.set("Cache-Control", CLIENT_CACHE)?;
-        h.set("Content-Length", &len.to_string())?;
-        h.set("Content-Range", &format!("bytes {start}-{end}/{total_str}"))?;
-        h.set("X-Cache", "MISS-MEDIA")?;
-    }
-    Ok(resp)
 }
 
 fn cache_key_url(file_name: &str, suffix: &str) -> String {
@@ -9801,7 +9741,7 @@ async fn route(req: Request, env: Env, ctx: Context) -> Result<Response> {
         // Yozishmadagi rasm/video — oraliq qisqartirilmaydi
         // (`b2_media` izohiga qarang).
         if let Some(fname) = path.strip_prefix("/api/media/") {
-            return b2_media(&env, &ctx, fname, range_header).await;
+            return b2_media(&env, fname, range_header).await;
         }
         // Pleyer SHU manzildan oqim oladi (b2_play izohiga qarang).
         // Farqi: javob hech qachon sun'iy kesilmaydi va bo'laklab

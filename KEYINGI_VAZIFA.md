@@ -901,7 +901,7 @@ qo'lda ishlatiladigan test). Muammo tarmoqda edi:
 
 | Sabab | Tuzatish |
 |---|---|
-| Worker `/api/media` keshda yo'q faylga javob berishdan OLDIN butun faylni keshga ko'chirardi — katta (telefon/Telegram) videoda o'nlab soniya; kadr yasovchining 10-15 s vaqti tugardi, pleyer ham kutardi | So'ralgan oraliq B2'dan DARHOL beriladi, butun fayl fon'da (`wait_until`) keshga ko'chiriladi (`b2_media`) |
+| Worker `/api/media` keshda yo'q faylga javob berishdan OLDIN butun faylni keshga ko'chiradi — katta (telefon/Telegram) videoda o'nlab soniya; yadro 15 s da ulanishni uzardi va isitish ham to'xtab, kadr HECH QACHON chiqmasdi | **Foydalanuvchi talabi: FAQAT keshdan, B2'ga to'g'ridan-to'g'ri murojaat YO'Q** (keshga tushmasa 503). Yadro kadr so'rovlarini 180 s kutadi (`THUMB_NET_TIMEOUT`), tayyor bo'lak `THUMB_MEMO` da 10 daqiqa turadi (8 ta / 6 MB) |
 | Hajm uchun HEAD (worker'da doim 404) + `bytes=0-0` — ikkita ortiqcha so'rov | Hajm birinchi o'qishning `Content-Range` idan (`probe_head`) |
 | `ThumbReader` da bitta zaxira bo'lak: `moov` (oxiri) o'qilgach faylning boshi o'chib, kalit kadr uchun yana so'rov ketardi | Ikkita zaxira bo'lak, faylning boshi saqlanadi. `moov` oxirida: 2 so'rov (ilgari 5), boshida: 1. Test: `moov_oxirida_bolsa_ham_kadr_yasaladi` |
 
@@ -920,6 +920,9 @@ olinadi:
 
 Hammasi MAHALLIY ish: tarmoq kerak emas, har biri bir necha o'n
 millisekund.
+
+**Kesh muddati (foydalanuvchi talabi):** Cloudflare kesh yozuvlari
+`CHUNK_CACHE_SECONDS` = **1000 kun** (ilgari 400).
 
 ## PROFIL: XOTIRA VA TRAFIK
 

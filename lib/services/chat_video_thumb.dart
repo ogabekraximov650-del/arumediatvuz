@@ -111,7 +111,7 @@ class ChatVideoThumb extends ChangeNotifier {
   /// bitta sekin video orqasidagi hammasini ushlab turardi.
   /// So'rovlar 5 tadan 2 taga tushgach, ikkitasi xavfsiz.
   ///
-  /// Yadrodagi kadr xotirasi (`THUMB_MEMO`) 3 ta yozuv saqlaydi,
+  /// Yadrodagi kadr xotirasi (`THUMB_MEMO`) 8 ta yozuv saqlaydi,
   /// ya'ni ikkita parallel ish uchun yetadi.
   static const int _maxParallel = 2;
 

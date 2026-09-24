@@ -4486,7 +4486,8 @@ impl ThumbReader<'_> {
     /// qism baribir kelgan bo'lsa ish davom etadi.
     fn read_from_net(&self, start: u64, want: u64, need: u64) -> Option<Vec<u8>> {
         let end = start + want - 1;
-        let resp = signed(self.shared.agent.get(&self.url), "GET", &self.url)
+        let resp = signed(self.shared.warm_agent.get(&self.url), "GET", &self.url)
+            .timeout(THUMB_NET_TIMEOUT)
             .set("Range", &format!("bytes={start}-{end}"))
             .call()
             .ok()?;
@@ -4517,10 +4518,23 @@ impl ThumbReader<'_> {
 /// ustidan sakrab o'tiladi va uning birorta bayti ham olinmaydi.
 /// Shu sabab `moov` faylning oxirida turgan taqdirda ham (faststart
 /// qilinmagan fayllar) bu yo'l ishlaydi.
+/// Kadr uchun tarmoq so'rovining eng uzun kutishi.
+///
+/// Worker yozishmadagi faylni FAQAT keshdan beradi: fayl hali
+/// keshda bo'lmasa, birinchi so'rov butun fayl keshga
+/// ko'chirilguncha javobsiz turadi (katta videoda o'nlab soniya).
+/// Ulanish shu orada uzilsa, isitish ham to'xtab qolardi va kadr
+/// HECH QACHON chiqmasdi. Shu sabab bu yerda uzoq kutiladi —
+/// kadr ajratuvchi (Kotlin) vaqti tugab ketsa ham ish davom etadi
+/// va natija `THUMB_MEMO` da qoladi: keyingi urinish uni darhol
+/// oladi.
+const THUMB_NET_TIMEOUT: Duration = Duration::from_secs(180);
+
 /// Faylning boshini (`want` bayt) oladi va umumiy hajmni
 /// `Content-Range` dan o'qiydi: `(hajm, turi, baytlar)`.
 fn probe_head(shared: &Shared, url: &str, want: u64) -> Option<(u64, String, Vec<u8>)> {
-    let resp = signed(shared.agent.get(url), "GET", url)
+    let resp = signed(shared.warm_agent.get(url), "GET", url)
+        .timeout(THUMB_NET_TIMEOUT)
         .set("Range", &format!("bytes=0-{}", want.saturating_sub(1)))
         .call()
         .ok()?;
@@ -4627,20 +4641,22 @@ fn find_moov(reader: &ThumbReader) -> Option<Vec<u8>> {
 /// odatda 50-300 KB, lekin uzun kalit kadr oralig'ida bir necha
 /// megabayt bo'lishi mumkin (`MAX_SPAN`).
 static THUMB_MEMO: Mutex<Vec<(String, Vec<u8>, Instant)>> = Mutex::new(Vec::new());
-const THUMB_MEMO_SECS: u64 = 60;
+const THUMB_MEMO_SECS: u64 = 600;
 /// Eng ko'pi shuncha yozuv.
 ///
-/// Bir vaqtda ikkita kadr yasaladi (`_maxParallelThumbs`), uchinchi
-/// joy esa kadr ajratuvchi eskisiga qaytib kelgan holat uchun.
-/// Bundan ko'pi kerak emas: bu xotira ARZON emas — telefonda
-/// turadi va video ijrosi bilan bitta joyni bo'lishadi.
-const THUMB_MEMO_MAX: usize = 3;
+/// Kadr yasash endi uzoq davom etishi mumkin (fayl keshga
+/// ko'chirilguncha, `THUMB_NET_TIMEOUT`) va kadr ajratuvchi
+/// o'shangacha taslim bo'lgan bo'ladi. Tayyor bo'lak shu yerda
+/// kutib turadi — keyingi urinish (yoki yozishma qayta ochilganda)
+/// uni darhol oladi. Bir vaqtda bir necha video shunday kutishi
+/// mumkin, shu sabab 8 ta.
+const THUMB_MEMO_MAX: usize = 8;
 /// Va eng ko'pi shuncha bayt.
 ///
-/// Bo'lak odatda 50-300 KB; 3 MB uchta odatdagi bo'lakka bemalol
+/// Bo'lak odatda 50-300 KB; 6 MB sakkizta odatdagi bo'lakka
 /// yetadi. Ilgari bu yerda 12 MB turardi — arzon telefonda bu
 /// sezilarli va ijroga xalaqit berishi mumkin edi.
-const THUMB_MEMO_BYTES: usize = 3 * 1024 * 1024;
+const THUMB_MEMO_BYTES: usize = 6 * 1024 * 1024;
 
 // ── `moov` JADVALI XOTIRADA SAQLANADI ─────────────────────────
 //
