@@ -977,6 +977,31 @@ avtomatik dasturiy usulga o'tiladi (`cpufeatures`). **Bu faylni
 o'chirmang** — `Cargo.toml` dagi "avtomatik foydalaniladi" degan
 eski izoh noto'g'ri edi.
 
+### VIDEO BO'LAKLARI: AES-CBC → AES-128-GCM (2026-09-24)
+
+Foydalanuvchi: «CTR CBC dan yaxshi bo'lsa CBC ni butunlay olib tashla».
+CBC (FFmpeg uchun edi, FFmpeg endi ishlatilmaydi) va `cbc`/`aes`
+kutubxonalari OLIB TASHLANDI. Bo'laklar endi `ring` ning AES-128-GCM
+i bilan (CTR + 16 bayt teg): `[12 bayt tasodifiy nonce][shifr][teg]`.
+
+* NEGA GCM, toza CTR emas: `video_cache` shifrlangan va (kalit
+  kechikkanda yozilgan) OCHIQ bo'lakni HAJMIDAN ajratadi — toza CTR da
+  hajm o'zgarmaydi. Teg esa buzilgan bo'lakni aniqlaydi.
+* `ring` HTTPS uchun allaqachon bor: 64-bit da apparat AES, 32-bit da
+  NEON. O'lchov (server): CBC 1050 MB/s → GCM 5700 MB/s.
+* Fayl nomi `.bin` → `.c2`; eski `.bin` bo'laklar `scan_and_clean` da
+  o'chiriladi (eski yuklanmalar QAYTA yuklanadi).
+* Tezroq shifrlash vaqtlarni o'zgartirdi: ish o'g'irlash va yakuniy
+  takrorlash endi faqat haqiqatan sekin holatda (`STEAL_MIN_MS` 1,5 s,
+  takror — bo'lak kamida 1 s yuklanayotgan va 1 s yutuq bo'lsa).
+* Testlar `[profile.test] opt-level = 2` bilan (debug da sinov
+  serverlari sekin edi).
+
+**Worker keshi:** B2 dagi hamma fayl 1000 kun (`CHUNK_CACHE_SECONDS`);
+telefon sarlavhasi (`CLIENT_CACHE`) ham 1000 kun; 12 MiB dan katta
+faylni oraliqsiz so'raganda ham endi kesh oynasi orqali. Telegram
+avatarlari (B2 emas, `/api/avatar/`) 1 kun — rasm almashsa yangilansin.
+
 ## PROFIL: XOTIRA VA TRAFIK
 
 TALAB (foydalanuvchi): "profildagi Xotira va Trafik

@@ -722,12 +722,24 @@ fn write_meta(dir: &PathBuf, meta: &CacheMeta) -> bool {
     write_sealed(&dir.join("meta.json"), &meta_label(dir), json.as_bytes())
 }
 
+/// Bo'lak fayli. `.c2` — AES-128-GCM formati (`crypto.rs`).
+///
+/// Eski (AES-CBC) bo'laklar `.bin` edi. 1 MiB lik bo'lakda ikkala
+/// formatning hajmi deyarli bir xil bo'lgani uchun eski fayl
+/// "yuklangan" deb ko'rinib, ochilmay qolishi mumkin edi. Nom boshqa
+/// bo'lgani uchun eskilari umuman o'qilmaydi va `scan_and_clean`
+/// ularni o'chiradi (video qaytadan yuklanadi).
 fn chunk_name(index: u64) -> String {
-    format!("chunk_{index:07}.bin")
+    format!("chunk_{index:07}.c2")
 }
 
-/// Diskdagi kutilgan bo'lak hajmi: shifrlash yoqilgan bo'lsa PKCS7
-/// to'ldirish sabab asl (ochiq) hajmdan katta bo'ladi.
+/// Eski formatdagi bo'lak fayli (o'chirish uchun).
+fn is_legacy_chunk(name: &str) -> bool {
+    name.starts_with("chunk_") && name.ends_with(".bin")
+}
+
+/// Diskdagi kutilgan bo'lak hajmi: shifrlash yoqilgan bo'lsa nonce
+/// va teg sabab asl (ochiq) hajmdan katta bo'ladi.
 /// ── DISKDAGI BO'LAK TO'LIQMI (IKKALA KO'RINISHDA HAM) ─────────
 ///
 /// TOPILGAN XATO (foydalanuvchi: "10 soniya anime ko'rdim lekin
@@ -1318,6 +1330,11 @@ fn scan_and_clean(dir: &PathBuf, total: u64) -> (HashSet<u64>, u64) {
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
+            // Eski (AES-CBC) formatdagi bo'lak — endi o'qilmaydi.
+            if is_legacy_chunk(&name) {
+                let _ = fs::remove_file(entry.path());
+                continue;
+            }
             if !name.ends_with(".tmp") {
                 continue;
             }
@@ -2195,6 +2212,11 @@ struct Work {
 /// kamida 2 bo'lak qolishi kerak.
 const STEAL_MIN: u64 = 2;
 
+/// Egasi qolgan ishni shundan tezroq tugatadigan bo'lsa —
+/// o'g'irlanmaydi: yangi so'rov ochish (borib-kelish vaqti) o'zini
+/// oqlamaydi va faqat so'rovlar sonini ko'paytiradi.
+const STEAL_MIN_MS: f64 = 1500.0;
+
 /// Bo'lak odatdagidan shuncha barobar uzoq yuklanayotgan bo'lsa —
 /// "sekin" hisoblanadi va yakuniy takrorlashga loyiq.
 const DUP_SLOW_FACTOR: f64 = 2.0;
@@ -2204,6 +2226,12 @@ const DUP_SLOW_FACTOR: f64 = 2.0;
 /// yangi ulanish ANIQ tezroq tugatadigan holatda (`duplicate_locked`)
 /// va yutqazgan oqim darhol to'xtaydi.
 const DUP_MAX: u8 = 1;
+
+/// Takrorlash kamida shuncha vaqt (ms) yutuq bersagina qilinadi.
+/// Tez tarmoqda bo'lak millisekundlarda keladi va oqimning bir
+/// lahzalik kechikishi ham "sekin" ko'rinardi — takror esa faqat
+/// trafikni isrof qilardi.
+const DUP_MIN_GAIN_MS: f64 = 1000.0;
 
 /// Havodagi bitta ulush.
 struct Inflight {
@@ -2258,6 +2286,7 @@ fn steal_locked(w: &mut Work, lane: usize) -> Claim {
         .filter(|(l, _)| **l != lane)
         .filter(|(_, f)| f.last >= f.next && f.last - f.next + 1 >= STEAL_MIN)
         .map(|(l, f)| (*l, f.next, f.last, f.ms_per_chunk(fast)))
+        .filter(|(_, n, e, ms)| (*e - *n + 1) as f64 * *ms >= STEAL_MIN_MS)
         .max_by(|a, b| {
             let ta = (a.2 - a.1 + 1) as f64 * a.3;
             let tb = (b.2 - b.1 + 1) as f64 * b.3;
@@ -2296,6 +2325,12 @@ fn duplicate_locked(w: &mut Work, lane: usize) -> Claim {
             continue;
         }
         let el = f.since.elapsed().as_secs_f64() * 1000.0;
+        // Bo'lak hali 1 soniya ham yuklanmagan — takrorlashga erta.
+        // (Bo'lak boshida kelgan bir necha KB dan tezlikni to'g'ri
+        // baholab bo'lmaydi: unga so'rov ochilish vaqti ham kiradi.)
+        if el < DUP_MIN_GAIN_MS {
+            continue;
+        }
         let got = w
             .progress
             .get(*l)
@@ -2312,9 +2347,11 @@ fn duplicate_locked(w: &mut Work, lane: usize) -> Claim {
         // Egasi shu bo'lakni yana qancha tortadi (ms).
         let owner_left = if got > 0.0 {
             need / (got / el.max(1.0))
-        } else if el > fast * DUP_SLOW_FACTOR {
-            // Odatdagidan 2 barobar ko'p vaqt o'tdi, bitta bayt ham
-            // kelmadi — ulanish qotgan.
+        } else if el > (fast * DUP_SLOW_FACTOR).max(DUP_MIN_GAIN_MS) {
+            // Odatdagidan 2 barobar ko'p (va kamida 1 soniya) vaqt
+            // o'tdi, bitta bayt ham kelmadi — ulanish qotgan. (Tez
+            // tarmoqda "2 barobar" atigi bir necha millisekund —
+            // endigina yuborilgan so'rov ham "qotgan" ko'rinardi.)
             f64::INFINITY
         } else {
             continue;
@@ -2326,6 +2363,9 @@ fn duplicate_locked(w: &mut Work, lane: usize) -> Claim {
             continue;
         }
         let gain = owner_left - fresh;
+        if gain < DUP_MIN_GAIN_MS {
+            continue;
+        }
         if best.map(|(_, _, g)| gain > g).unwrap_or(true) {
             best = Some((*l, f.next, gain));
         }
@@ -4383,6 +4423,11 @@ fn write_full_chunk(dir: &PathBuf, key: &str, index: u64, plain: &[u8]) -> bool 
         Some((k, iv)) => crypto::encrypt_chunk(plain, &k, &iv),
         None => plain.to_vec(),
     };
+    // Shifrlash yiqildi (tasodifiy son olinmadi) — yozmaymiz, bo'lak
+    // keyinroq qaytadan olinadi.
+    if on_disk.is_empty() && !plain.is_empty() {
+        return false;
+    }
     let tmp = dir.join(format!("{}.{}.tmp", chunk_name(index), micros_now()));
     if fs::write(&tmp, &on_disk).is_err() {
         let _ = fs::remove_file(&tmp);
@@ -7297,6 +7342,26 @@ mod tests {
             let limit = if pad < 200 * 1024 { 1 } else { 3 };
             assert!(n <= limit, "moov boshida (pad={pad}): {n} ta so'rov");
         }
+    }
+
+    /// Eski (AES-CBC, `.bin`) bo'laklar o'qilmaydi va tozalanadi.
+    #[test]
+    fn eski_formatdagi_bolaklar_ochiriladi() {
+        let dir = std::env::temp_dir().join(format!(
+            "aru_eski_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let total = 2 * CHUNK_SIZE;
+        fs::write(dir.join("chunk_0000000.bin"), vec![0u8; CHUNK_SIZE as usize + 16]).unwrap();
+        assert!(!chunk_cached(&dir, 0, total), "eski fayl yangi bo'lak deb o'qildi");
+        let (have, _) = scan_and_clean(&dir, total);
+        assert!(have.is_empty());
+        assert!(!dir.join("chunk_0000000.bin").exists(), "eski fayl o'chirilmadi");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// NAVBAT: bosilish tartibi va bir vaqtda 3 ta (regressiya testi).

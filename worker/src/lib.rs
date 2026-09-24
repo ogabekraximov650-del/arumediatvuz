@@ -1416,7 +1416,10 @@ const CHUNK_CACHE_SECONDS: u64 = 1000 * 24 * 60 * 60; // 1000 kun
 /// bitta nom = bitta o'zgarmas mazmun. Shuning uchun `immutable`
 /// to'g'ri va xavfsiz: telefon faylni bir marta yuklab oladi va
 /// boshqa so'ramaydi.
-const CLIENT_CACHE: &str = "public, max-age=31536000, immutable";
+///
+/// Muddat — 1000 kun, Cloudflare keshidagi bilan bir xil
+/// (`CHUNK_CACHE_SECONDS`, foydalanuvchi talabi).
+const CLIENT_CACHE: &str = "public, max-age=86400000, immutable";
 
 /// "bytes=START-END?" ni (start, end_yoki_None) ga ajratadi.
 fn parse_range(range: &str) -> Option<(u64, Option<u64>)> {
@@ -2884,6 +2887,22 @@ async fn b2_proxy_full(env: &Env, file_name: &str) -> Result<Response> {
     }
 
     // Katta fayl Range'siz so'ralgan — oqim orqali o'tkazamiz.
+    // ── KATTA FAYL HAM KESH ORQALI ──────────────────────────────
+    //
+    // TALAB (foydalanuvchi): "B2'dagi barcha fayllar 1000 kunga
+    // keshlansin". 12 MiB dan katta faylni OraliQSIZ so'raganda u
+    // ilgari B2'dan to'g'ridan-to'g'ri uzatilar va keshlanmasdi.
+    // Endi fayl isitish oynasiga (1000 kun) ko'chiriladi va o'sha
+    // yerdan beriladi; keyingi so'rovlar B2'ga umuman bormaydi.
+    // Oynadan katta (480 MiB+) fayl oraliqsiz so'ralmaydi (pleyer ham,
+    // yuklab olish ham oraliq bilan ishlaydi) — u holda eski yo'l.
+    if total > 0 && total <= WARM_WINDOW {
+        let _ = b2_warm(env, file_name, 0, false).await;
+        if let Some(r) = media_from_cache(file_name, None).await? {
+            return Ok(r);
+        }
+    }
+
     let last = total.saturating_sub(1);
     let (mut b2, _) = b2_fetch_range(env, file_name, 0, last).await?;
     let mut resp = match (total, b2.body()) {

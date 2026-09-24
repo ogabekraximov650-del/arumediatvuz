@@ -13,21 +13,17 @@ serde_json = "1"
 ureq = "2"
 
 # ── Shifrlash ───────────────────────────────────────────────────────
-# Barchasi SOF RUST (C kutubxonasi yo'q) — Android uchun muammosiz
-# kross-kompilyatsiya qilinadi. ARM64 da AES uchun apparat buyruqlari
-# (ARMv8 Crypto Extensions) FAQAT `aes_armv8` bayrog'i bilan ishlaydi —
-# u `rust/.cargo/config.toml` da yoqilgan (izohiga qarang).
-#
-# aes + cbc  — video fayllar uchun AES-128-CBC. Aynan shu rejim,
-#              chunki shifrni FFmpeg'ning "crypto:" protokoli ochadi
-#              va u faqat CBC'ni biladi.
+# ring       — video bo'laklari uchun AES-128-GCM (CTR + yaxlitlik tegi).
+#              Ilovada HTTPS (ureq/rustls) uchun allaqachon bor; 64-bit
+#              da apparat AES, 32-bit da NEON bilan ishlaydi
+#              (`crypto.rs` dagi "NEGA CBC EMAS" izohi).
 # aes-gcm    — kichik fayllar (ro'yxat keshi, rasmlar) uchun
-#              AES-256-GCM: maxfiylik + butunlik tekshiruvi.
+#              AES-256-GCM. ARM64 da apparat AES `rust/.cargo/config.toml`
+#              dagi `aes_armv8` bayrog'i bilan yoqiladi.
 # hkdf+sha2  — bitta asosiy kalitdan har bir fayl uchun ALOHIDA kalit
 #              hosil qilish (kalitni qayta ishlatmaslik uchun).
 # getrandom  — kriptografik tasodifiy sonlar (asosiy kalit, nonce).
-aes = "0.8"
-cbc = { version = "0.1", features = ["alloc"] }
+ring = "0.17"
 aes-gcm = "0.10"
 hkdf = "0.12"
 sha2 = "0.10"
@@ -42,3 +38,11 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# Testlar optimallashgan holda yig'iladi: yuklab olish testlaridagi
+# sinov serverlari baytlarni birma-bir hosil qiladi va debug
+# rejimida "tez manba" amalda sekin bo'lib qolardi — natijada ish
+# o'g'irlash (haqli ravishda) ishga tushib, so'rovlar sonini
+# o'lchaydigan testlar noto'g'ri sharoitda tekshirilardi.
+[profile.test]
+opt-level = 2

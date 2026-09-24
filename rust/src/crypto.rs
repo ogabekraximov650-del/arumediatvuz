@@ -7,15 +7,9 @@
 // Ilova diskda ikki xil ma'lumot saqlaydi va ularning talablari
 // BUTUNLAY BOSHQACHA:
 //
-//   1) KATTA VIDEO FAYLLAR — pleyer ularning O'RTASIDAN o'qishi kerak
-//      (sek qilinganda). Ularni faqat butunlay ochib o'qib bo'lmaydi.
-//      Shu sabab: AES-128-CBC.
-//
-//      Nega aynan CBC va nega 128 bit? Chunki shifrni BIZ emas,
-//      FFmpeg'ning "crypto:" protokoli ochadi (pleyerning o'zida,
-//      HTTP qatlamisiz). U esa faqat AES-128-CBC'ni biladi. CBC'da
-//      fayl o'rtasidan o'qish mumkin: FFmpeg kerakli joydan oldingi
-//      bitta 16-baytlik blokni o'qib, uni IV sifatida ishlatadi.
+//   1) KATTA VIDEO FAYLLAR — 1 MiB lik mustaqil bo'laklar, har biri
+//      AES-128-GCM (CTR rejimi + 16 baytlik yaxlitlik tegi) bilan.
+//      Pastdagi "BO'LAK DARAJASIDA SHIFRLASH" izohiga qarang.
 //
 //   2) KICHIK FAYLLAR (epizod ro'yxati keshi, rasm keshi) — ular
 //      har doim BUTUNLAY o'qiladi. Bu yerda AES-256-GCM eng to'g'ri
@@ -42,7 +36,6 @@
 //   * IV/kalitni alohida saqlash shart emas — ular fayl nomidan
 //     har safar qayta hisoblanadi.
 
-use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use hkdf::Hkdf;
@@ -52,8 +45,6 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::ffi_utils::{cstr_to_str, string_to_cptr};
 
-type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
-type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
 
 /// Asovsiy kalit — FAQAT XOTIRADA. Diskka hech qachon yozilmaydi.
 static MASTER_KEY: OnceLock<Mutex<Option<[u8; 32]>>> = OnceLock::new();
@@ -126,46 +117,103 @@ fn derive_blob_key(label: &str) -> Option<[u8; 32]> {
     Some(out)
 }
 
-/// Shifrlangandan keyingi fayl hajmi (PKCS7 har doim to'ldirish
-/// qo'shgani uchun har doim asl hajmdan katta). Har bir bo'lak
-/// mustaqil PKCS7 bilan shifrlangani uchun ham shu formula amal
-/// qiladi (pastga, BO'LAK shifrlashga qarang).
+/// Bo'lak nonce'i (tasodifiy, fayl boshida saqlanadi).
+const CHUNK_NONCE_LEN: usize = 12;
+/// GCM yaxlitlik tegi (fayl oxirida).
+const CHUNK_TAG_LEN: usize = 16;
+
+/// Shifrlangan bo'lakning diskdagi hajmi: nonce + shifr + teg.
+///
+/// Hajm ASL hajmdan ANIQ farq qiladi — `video_cache` shifrlangan va
+/// (kalit kechikkanda yozilgan) ochiq bo'lakni aynan hajmidan
+/// ajratadi. Shu sabab toza CTR (hajmi o'zgarmaydi) yaramaydi.
 pub fn encrypted_size(plain_total: u64) -> u64 {
-    (plain_total / 16 + 1) * 16
+    plain_total + (CHUNK_NONCE_LEN + CHUNK_TAG_LEN) as u64
 }
 
 // ═══════════════════════════════════════════════════════════════════
-//  BO'LAK (chunk) DARAJASIDA SHIFRLASH
+//  BO'LAK (chunk) DARAJASIDA SHIFRLASH — AES-128-GCM
 // ═══════════════════════════════════════════════════════════════════
 //
-// Video diskda endi bitta uzluksiz CBC oqimi sifatida emas, balki
-// alohida (video_cache.rs'dagi CHUNK_SIZE hajmidagi) fayllar sifatida
-// keshlanadi — va ular foydalanuvchi sek qilganda TASODIFIY tartibda
-// yuklanishi/o'qilishi mumkin. Shu sabab har bir bo'lak boshqalaridan
-// MUSTAQIL, o'ziga xos kalit+IV bilan shifrlanadi (video darajasidagi
-// bitta umumiy CBC zanjiriga bog'liq emas) — istalgan bo'lakni, qolgan
-// bo'laklar hali yuklanmagan bo'lsa ham, mustaqil ochish mumkin.
+// Har bir bo'lak (video_cache.rs dagi CHUNK_SIZE) boshqalaridan
+// MUSTAQIL, o'z kaliti bilan shifrlanadi — istalgan bo'lakni qolganlari
+// hali yuklanmagan bo'lsa ham ochish mumkin.
+//
+// ── NEGA CBC EMAS (TOPILGAN XATO: yuklash tezligi) ─────────────────
+//
+// Ilgari AES-128-CBC edi (FFmpeg "crypto:" protokoli uchun; FFmpeg
+// endi ishlatilmaydi — bo'laklarni faqat shu yadro ochadi). CBC da har
+// bir blok OLDINGISINI kutadi, ya'ni protsessor bloklarni parallel
+// ishlay olmaydi; apparat AES bo'lmasa (32-bit Android) juda sekin.
+//
+// GCM — bu CTR rejimi (bloklar MUSTAQIL, parallel) + 16 baytlik
+// yaxlitlik tegi. `ring` (ilovada HTTPS uchun allaqachon bor) uni
+// 64-bit da apparat AES bilan, 32-bit da NEON bilan bajaradi.
+// Teg bonus beradi: buzilgan bo'lak aniqlanadi va qayta yuklanadi.
+//
+// Format: [12 bayt tasodifiy nonce][shifrlangan ma'lumot][16 bayt teg].
+// Nonce har yozishda yangi — bir xil kalit+nonce hech qachon qayta
+// ishlatilmaydi (bo'lak qayta yuklansa ham).
 
-/// Bitta bo'lak uchun kalit+IV — video darajasidagi kalitdan farqli
+/// Bitta bo'lak uchun kalit — video darajasidagi kalitdan farqli
 /// yorliq bilan (fayl nomi + bo'lak indeksi) hosil qilinadi.
+/// (Ikkinchi qiymat — eski format IV'si, endi ishlatilmaydi.)
 pub fn derive_chunk_key_iv(label: &str, index: u64) -> Option<([u8; 16], [u8; 16])> {
     derive_video_key_iv(&format!("{label}:chunk:{index}"))
 }
 
-/// Bitta bo'lakni mustaqil shifrlaydi (bir yo'la — bo'laklar kichik,
-/// odatda 100 KB, xotiraga muammosiz sig'adi).
-pub fn encrypt_chunk(plain: &[u8], key: &[u8; 16], iv: &[u8; 16]) -> Vec<u8> {
-    Aes128CbcEnc::new(key.into(), iv.into()).encrypt_padded_vec_mut::<Pkcs7>(plain)
+fn chunk_cipher(key: &[u8; 16]) -> Option<ring::aead::LessSafeKey> {
+    let k = ring::aead::UnboundKey::new(&ring::aead::AES_128_GCM, key).ok()?;
+    Some(ring::aead::LessSafeKey::new(k))
 }
 
-/// Mustaqil shifrlangan bo'lakni ochadi. Format noto'g'ri/buzilgan
-/// bo'lsa (masalan eski, boshqa o'lchamdagi qoldiq fayl) `None`
-/// qaytaradi — chaqiruvchi buni "keshda yo'q" deb talqin qilib,
-/// bo'lakni qaytadan yuklab oladi.
-pub fn decrypt_chunk(cipher: &[u8], key: &[u8; 16], iv: &[u8; 16]) -> Option<Vec<u8>> {
-    Aes128CbcDec::new(key.into(), iv.into())
-        .decrypt_padded_vec_mut::<Pkcs7>(cipher)
-        .ok()
+/// Bitta bo'lakni shifrlaydi. `_iv` e'tiborsiz — nonce tasodifiy.
+pub fn encrypt_chunk(plain: &[u8], key: &[u8; 16], _iv: &[u8; 16]) -> Vec<u8> {
+    let mut nonce = [0u8; CHUNK_NONCE_LEN];
+    let cipher = chunk_cipher(key);
+    if getrandom::getrandom(&mut nonce).is_err() || cipher.is_none() {
+        // Juda kam uchraydigan holat: bo'sh natija — chaqiruvchi
+        // bo'lakni yozmaydi va keyinroq qaytadan yuklaydi.
+        return Vec::new();
+    }
+    let cipher = cipher.unwrap();
+    let mut out = Vec::with_capacity(plain.len() + CHUNK_NONCE_LEN + CHUNK_TAG_LEN);
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(plain);
+    let tag = cipher.seal_in_place_separate_tag(
+        ring::aead::Nonce::assume_unique_for_key(nonce),
+        ring::aead::Aad::empty(),
+        &mut out[CHUNK_NONCE_LEN..],
+    );
+    match tag {
+        Ok(t) => {
+            out.extend_from_slice(t.as_ref());
+            out
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Shifrlangan bo'lakni ochadi. Buzilgan yoki boshqa formatdagi
+/// bo'lak uchun `None` — chaqiruvchi uni "keshda yo'q" deb bilib,
+/// qaytadan yuklaydi.
+pub fn decrypt_chunk(cipher: &[u8], key: &[u8; 16], _iv: &[u8; 16]) -> Option<Vec<u8>> {
+    if cipher.len() < CHUNK_NONCE_LEN + CHUNK_TAG_LEN {
+        return None;
+    }
+    let mut nonce = [0u8; CHUNK_NONCE_LEN];
+    nonce.copy_from_slice(&cipher[..CHUNK_NONCE_LEN]);
+    let mut buf = cipher[CHUNK_NONCE_LEN..].to_vec();
+    let n = chunk_cipher(key)?
+        .open_in_place(
+            ring::aead::Nonce::assume_unique_for_key(nonce),
+            ring::aead::Aad::empty(),
+            &mut buf,
+        )
+        .ok()?
+        .len();
+    buf.truncate(n);
+    Some(buf)
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -201,6 +249,26 @@ pub fn open_blob(label: &str, sealed: &[u8]) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    /// Bo'lak shifri: hajm, ochilish va buzilishni aniqlash.
+    #[test]
+    fn bolak_gcm_buzilganini_aniqlaydi() {
+        let key = [9u8; 16];
+        let plain = vec![5u8; 1024 * 1024];
+        let c = super::encrypt_chunk(&plain, &key, &[0u8; 16]);
+        assert_eq!(c.len() as u64, super::encrypted_size(plain.len() as u64));
+        assert_ne!(c.len(), plain.len(), "shifrlangan va ochiq bo'lak hajmi farq qilishi SHART");
+        assert_eq!(super::decrypt_chunk(&c, &key, &[0u8; 16]).as_deref(), Some(&plain[..]));
+        // Har yozishda yangi nonce — bir xil ma'lumot ham boshqacha shifr.
+        let c2 = super::encrypt_chunk(&plain, &key, &[0u8; 16]);
+        assert_ne!(c, c2);
+        // Bitta bayt buzilsa — ochilmaydi.
+        let mut bad = c.clone();
+        bad[500] ^= 1;
+        assert!(super::decrypt_chunk(&bad, &key, &[0u8; 16]).is_none());
+        // Boshqa kalit — ochilmaydi.
+        assert!(super::decrypt_chunk(&c, &[8u8; 16], &[0u8; 16]).is_none());
+    }
+
     /// Qo'lda o'lchov: `cargo test --release -- --ignored shifr_tezligi --nocapture`
     #[test]
     #[ignore]
@@ -220,7 +288,7 @@ mod tests {
             std::hint::black_box(super::decrypt_chunk(&c, &key, &iv));
         }
         let dec = n as f64 / t.elapsed().as_secs_f64();
-        eprintln!("AES-128-CBC: shifrlash {enc:.0} MB/s, ochish {dec:.0} MB/s");
+        eprintln!("bo'lak shifri: shifrlash {enc:.0} MB/s, ochish {dec:.0} MB/s");
     }
 
     use super::*;
@@ -327,8 +395,8 @@ mod tests {
 
         let plain: Vec<u8> = (0..100_000usize).map(|i| (i % 251) as u8).collect();
         let cipher = encrypt_chunk(&plain, &k0, &iv0);
-        assert_ne!(cipher.len(), plain.len(), "PKCS7 to'ldirish qo'shilmagan");
-        assert_eq!(cipher.len() % 16, 0);
+        assert_ne!(cipher.len(), plain.len(), "nonce va teg qo'shilmagan");
+        assert_eq!(cipher.len() as u64, encrypted_size(plain.len() as u64));
 
         let opened = decrypt_chunk(&cipher, &k0, &iv0).unwrap();
         assert_eq!(opened, plain);
