@@ -1773,6 +1773,59 @@ struct DownloadState {
     started: bool,
 }
 
+// ── BUTUN ILOVA BO'YICHA ULANISHLAR CHEGARASI ─────────────────
+//
+// TOPILGAN XATO (foydalanuvchi: "yangi tizimda battar sekin, tezlik
+// 2 MB/s dan o'tmayapti; avvalgisi yaxshiroq edi").
+//
+// Bir vaqtda 3 ta sifat yuklana boshlagach, har biri o'zining 16 ta
+// oqimini ochardi — jami 48 ta parallel HTTP ulanish. Mobil tarmoqda
+// bu foyda emas, zarar: ulanishlar bitta tor kanalni talashadi,
+// har biri TCP "sekin start"da qoladi va radio/operator NAT navbati
+// to'lib, umumiy tezlik pasayadi. Telegram ham butun fayl uchun
+// atigi 4-12 ta so'rovni havoda ushlaydi (`FileLoadOperation`).
+//
+// Endi havodagi so'rovlar soni BUTUN ILOVA uchun `DL_TOTAL_CONNS`
+// bilan cheklangan (ilgari bitta video 16 ta bilan 5,5 MB/s bergan
+// edi — xuddi shu son). Sifatlar ularni bo'lishadi: bittasi tugasa,
+// bo'shagan ulanishlarni qolganlari DARHOL oladi.
+const DL_TOTAL_CONNS: usize = 16;
+
+static DL_CONNS: Mutex<usize> = Mutex::new(0);
+static DL_CONNS_CV: std::sync::Condvar = std::sync::Condvar::new();
+
+/// Bitta havodagi so'rov uchun ruxsat (yo'qolganda bo'shaydi).
+struct DlPermit;
+
+impl DlPermit {
+    /// Ruxsat olinguncha kutadi. Yuklash to'xtatilsa — `None`.
+    fn acquire(key: &str) -> Option<DlPermit> {
+        let mut n = DL_CONNS.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if *n < DL_TOTAL_CONNS {
+                *n += 1;
+                return Some(DlPermit);
+            }
+            let (g, _) = DL_CONNS_CV
+                .wait_timeout(n, Duration::from_millis(200))
+                .unwrap_or_else(|e| e.into_inner());
+            n = g;
+            if !download_active(key) {
+                return None;
+            }
+        }
+    }
+}
+
+impl Drop for DlPermit {
+    fn drop(&mut self) {
+        let mut n = DL_CONNS.lock().unwrap_or_else(|e| e.into_inner());
+        *n = n.saturating_sub(1);
+        drop(n);
+        DL_CONNS_CV.notify_one();
+    }
+}
+
 /// Navbat raqami (`DownloadState::seq`).
 static DL_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -2467,6 +2520,18 @@ fn inflight_done(work: &Mutex<Work>, lane: usize, last: u64) -> u64 {
     w.inflight.remove(&lane).map(|f| f.last).unwrap_or(last)
 }
 
+/// So'rov haqiqatan boshlandi — vaqt hisobi shu lahzadan.
+fn inflight_restart(work: &Mutex<Work>, lane: usize) {
+    if let Ok(mut w) = work.lock() {
+        if let Some(f) = w.inflight.get_mut(&lane) {
+            let now = Instant::now();
+            f.since = now;
+            f.claim_at = now;
+            f.done = 0;
+        }
+    }
+}
+
 /// Qayta urinilayotgan ulushni havodagilar qatoriga qo'yadi.
 fn inflight_set(work: &Mutex<Work>, lane: usize, first: u64, last: u64) {
     if let Ok(mut w) = work.lock() {
@@ -2815,7 +2880,7 @@ fn run_download(key: &str, url: &str) -> Result<DlOutcome, String> {
                         // Shu so'rovda diskka tushgan OXIRGI bo'lak.
                         let mut got_upto: Option<u64> = None;
                         let t0 = Instant::now();
-                        let res = fetch_span(shared, &k, &d, &u, first, last, total, stop, &progress[lane], &mut |idx| {
+                        let res = fetch_span(shared, &k, &d, &u, first, last, total, stop, &progress[lane], &mut || inflight_restart(&work, lane), &mut |idx| {
                             stat_note_chunk(&k, idx, chunk_plain_len(idx, total));
                             got_upto = Some(idx);
                             // Qolgani o'g'irlangan bo'lsa — shu
@@ -4467,6 +4532,7 @@ fn fetch_span(
     total: u64,
     stop: &AtomicBool,
     cur_bytes: &AtomicU64,
+    on_start: &mut dyn FnMut(),
     on_chunk: &mut dyn FnMut(u64) -> bool,
 ) -> Result<(), String> {
     if total == 0 {
@@ -4508,6 +4574,17 @@ fn fetch_span(
         return Err("pauza".to_string());
     }
 
+    // ── HAVODAGI SO'ROVLAR CHEGARASI (`DL_TOTAL_CONNS`) ──
+    // Ruxsat AYNAN shu yerda — isitishni kutish tugagach, so'rov
+    // yuborilishidan oldin — olinadi va javob o'qib bo'lingach
+    // bo'shaydi. Ya'ni ruxsat faqat baytlar haqiqatan tortilayotganda
+    // band bo'ladi.
+    let Some(_permit) = DlPermit::acquire(key) else {
+        return Err("pauza".to_string());
+    };
+    // Kutish vaqti oqimning "sekinligi" hisobiga kirmasin (aks holda
+    // ruxsat kutgan oqimning ishi behuda o'g'irlanardi).
+    on_start();
     log(format!(
         "Bo'laklar {first}..={last} worker'dan olinmoqda ({range_start}-{range_end})..."
     ));
@@ -6114,8 +6191,9 @@ mod tests {
     /// qaytariladi.
     static TEST_SERVER: OnceLock<(u16, PathBuf)> = OnceLock::new();
 
-    /// VAQT o'lchaydigan yuklash testlari bir-biri bilan PARALLEL
-    /// ishlamasin: ular bitta yuklash havzasini (`DOWNLOAD_WORKERS`)
+    /// VAQT (yoki so'rovlar sonini) o'lchaydigan yuklash testlari
+    /// bir-biri bilan PARALLEL ishlamasin — ular umumiy ulanishlar
+    /// chegarasini (`DL_TOTAL_CONNS`) ham bo'lishadi: ular bitta yuklash havzasini (`DOWNLOAD_WORKERS`)
     /// va protsessorni (shifrlash) bo'lishadi va natija mashina
     /// yuklamasiga bog'liq bo'lib qolardi.
     fn vaqt_testi_qulfi() -> std::sync::MutexGuard<'static, ()> {
@@ -6601,6 +6679,7 @@ mod tests {
     /// olinardi.
     #[test]
     fn yuklab_olish_server_chegarasiga_moslashadi() {
+        let _navbat = vaqt_testi_qulfi();
         let (_port, root) = ensure_server();
         SERVER_SPAN_MAX.store(u64::MAX, Ordering::Relaxed);
 
@@ -7934,6 +8013,7 @@ mod tests {
     // qo'riqlaydi.
     #[test]
     fn yuklab_olish_yolaklar_bilan_takrorsiz_ketadi() {
+        let _navbat = vaqt_testi_qulfi();
         let (_port, root) = ensure_server();
         // 48 MiB — 6 ta yo'lakka 8 tadan bo'lak.
         let total: u64 = 48 * CHUNK_SIZE;
@@ -8406,6 +8486,51 @@ mod tests {
             }
         });
         port
+    }
+
+    /// 3 ta sifat bir vaqtda — havodagi so'rovlar jami `DL_TOTAL_CONNS`
+    /// dan oshmaydi (ilgari 3 x 16 = 48 ta ulanish ochilardi).
+    #[test]
+    fn uch_sifat_birga_ulanishlar_chegarasidan_oshmaydi() {
+        let _navbat = vaqt_testi_qulfi();
+        let (_port, root) = ensure_server();
+        let total: u64 = 24 * CHUNK_SIZE;
+        let (o_port, peak) = start_paced_origin(total);
+        let names = ["uch_a.mp4", "uch_b.mp4", "uch_c.mp4"];
+        let urls: Vec<String> = names
+            .iter()
+            .map(|n| format!("http://127.0.0.1:{o_port}/{n}"))
+            .collect();
+        for u in &urls {
+            let c = std::ffi::CString::new(u.clone()).unwrap();
+            assert_eq!(rust_video_cache_download(c.as_ptr()), 1);
+        }
+        let count = total.div_ceil(CHUNK_SIZE);
+        let dirs: Vec<PathBuf> = names
+            .iter()
+            .map(|n| root.join("video_byte_cache").join(n))
+            .collect();
+        let mut done = false;
+        for _ in 0..1200 {
+            if dirs
+                .iter()
+                .all(|d| (0..count).all(|i| chunk_cached(d, i, total)))
+            {
+                done = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(done, "uchala yuklash tugamadi");
+        let p = peak.load(Ordering::SeqCst);
+        // Sinov serveri ulanishni mijoz o'qishni tugatgandan (yoki
+        // to'xtatgandan) keyin ham bir zum sanab turadi — shu sabab
+        // bir nechta ulanishlik farqqa joy bor. Ilgari bu son 48 edi.
+        assert!(
+            p <= DL_TOTAL_CONNS + 4,
+            "havoda {p} ta so'rov bo'ldi (chegara {DL_TOTAL_CONNS})"
+        );
+        assert!(p >= DL_TOTAL_CONNS / 2, "ulanishlar to'liq ishlatilmadi: {p}");
     }
 
     #[test]

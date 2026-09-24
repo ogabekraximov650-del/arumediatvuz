@@ -811,7 +811,7 @@ buzmang:**
 |---|---|
 | 1. Ekran yopilganda ish to'xtasin | `ChatVideoThumb` **singleton EMAS**: uni ekran yaratadi va `dispose()` qiladi. `_disposed` har `await` dan keyin tekshiriladi. |
 | 2. Video ijro etilayotganda umuman ishlamasin | `VideoGate.busy` — har urinishdan oldin. Pleyer va media oynasi `initState`/`dispose` da `enter()`/`leave()` chaqiradi (`lib/services/video_gate.dart`). |
-| 3. Urinishlar soni VA vaqti chegaralangan | 2 urinish (10 s va 15 s, orasida 2 s) = bitta kadrga eng ko'pi ~27 s. Bir vaqtda 1 ta. Ekran uchun jami **8 ta tarmoq urinishi** (`_sessionBudget`), keyin TO'XTAYDI. Yiqilgan kalit shu ekran ochiq turganda qayta sinalmaydi. |
+| 3. Urinishlar soni VA vaqti chegaralangan | Lahzalar `_atMsList` = 100 ms, 1 s, 5 s, 15 s (bosh qismi buzilgan video uchun); har lahza bir urinish (15 s), faqat vaqt tugasa bir marta qayta (30 s). Ekran uchun jami **40 ta tarmoq urinishi** (`_sessionBudget`). Navbatda kutish urinish hisoblanmaydi (ilgari 8 s dan keyin sinalmay yiqilardi). |
 | 4. Sekin tarmoqda sinalsin | Shu sabab takror urinish yo'q darajada kam — sekin tarmoqda takror faqat zarar. |
 
 **Shuni ham buzmang:** kadr ro'yxat qurilayotgan kadrda
@@ -1026,6 +1026,20 @@ Eski ochiq kesh (`aru_images/*`, `databases/aru_images.db*`)
 `cd rust && cargo build --release`, keyin
 `LD_PRELOAD=$PWD/rust/target/release/librust_core.so flutter test test/image_cache_encryption_test.dart`.
 Oddiy `flutter test` da bu testlar o'tkazib yuboriladi.
+
+### BIR NECHTA SIFAT BIRGA: JAMI 16 TA ULANISH (2026-09-24)
+
+Foydalanuvchi: «yangi tizimda battar sekin, 2 MB/s dan o'tmayapti».
+3 ta sifat x 16 oqim = 48 ta parallel ulanish ochilardi. Endi havodagi
+so'rovlar BUTUN ilova uchun `DL_TOTAL_CONNS` = 16 (`DlPermit`, ruxsat
+`fetch_span` ichida — isitishni kutish tugagach — olinadi). Sifatlar
+ularni bo'lishadi; biri tugasa qolganlari darhol oladi. Ruxsat
+kutilgan vaqt oqimning "sekinligi"ga kirmaydi (`inflight_restart`).
+Test: `uch_sifat_birga_ulanishlar_chegarasidan_oshmaydi`.
+
+**Chat kadrlari:** buzilgan bosh qismli videolar uchun bir nechta lahza
+(`_atMsList`); navbatdagi 8 soniyalik chegara olib tashlandi (u
+sekin videolar orqasidagilarni sinamasdan "yiqildi" deb qo'yardi).
 
 ## PROFIL: XOTIRA VA TRAFIK
 

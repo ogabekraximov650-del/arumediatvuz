@@ -121,10 +121,26 @@ class ChatVideoThumb extends ChangeNotifier {
   /// ikkinchisi biroz uzunroq (sekinroq tarmoq uchun). Uchinchisi
   /// YO'Q: aynan urinishlar soni avvalgi safar ijroni
   /// sekinlashtirgan edi.
+  ///
+  /// Birinchi urinish vaqti tugasa (fayl hali keshga tushmagan —
+  /// yadro uni kutib, natijani `THUMB_MEMO` da saqlab qo'yadi), AYNAN
+  /// o'sha lahza uzunroq muddat bilan bir marta qayta so'raladi.
   static const List<Duration> _timeouts = [
-    Duration(seconds: 10),
     Duration(seconds: 15),
+    Duration(seconds: 30),
   ];
+
+  /// Kadr qaysi lahzalardan olinadi (ms) — birinchisi chiqmasa
+  /// keyingisi.
+  ///
+  /// TOPILGAN XATO (foydalanuvchi: "chatdagi thumbnaili yo'q video
+  /// aslida buzilgan, lekin tomosha tarixida kelib qolgan joydan
+  /// kadr olib thumbnail qo'yyapti"). Faylning BOSHI buzilgan
+  /// bo'lsa 100 ms dagi kadr hech qachon ochilmaydi, videoning
+  /// qolgani esa butun — tarix kadri aynan shu sabab chiqadi.
+  /// Endi bosh ochilmasa keyingi joylar sinaladi. Videodan uzun
+  /// lahza so'ralsa yadro oxirgi kadrni beradi.
+  static const List<int> _atMsList = [100, 1000, 5000, 15000];
 
   /// Urinishlar orasidagi tanaffus.
   static const Duration _pause = Duration(seconds: 2);
@@ -148,7 +164,7 @@ class ChatVideoThumb extends ChangeNotifier {
   /// Diskdan o'qish bu chegaraga KIRMAYDI — u tarmoqqa
   /// chiqmaydi va bepul, ya'ni BIR MARTA yasalgan kadr keyin
   /// har doim darhol chiqadi.
-  static const int _sessionBudget = 16;
+  static const int _sessionBudget = 40;
 
   /// Xotiradagi kadrlar soni (har biri ~20 KB).
   static const int _memoryLimit = 40;
@@ -198,8 +214,6 @@ class ChatVideoThumb extends ChangeNotifier {
   /// qanday kutish bo'lmaydi.
   Uint8List? peek(String url) => _memory[_keyOf(url)];
 
-  /// Kadr olinadigan lahza (ms) — yuqoridagi izohga qarang.
-  static const int _atMs = 100;
 
   /// Kadrni so'raydi. Tayyor bo'lgach `notifyListeners()` chaqiriladi
   /// va puffak o'zini qaytadan chizadi.
@@ -245,25 +259,32 @@ class ChatVideoThumb extends ChangeNotifier {
     // 2) TARMOQDAN. Chegara tugagan bo'lsa — umuman boshlanmaydi.
     if (_spent >= _sessionBudget) return null;
 
-    for (var i = 0; i < _timeouts.length; i++) {
-      // 2-SHART: pleyer ochiq bo'lsa kadr yasalmaydi.
-      if (_disposed || VideoGate.busy) return null;
-
-      final data = await _grab(url, _timeouts[i]);
-      if (_disposed) return null;
-      if (data != null) {
-        _remember(key, data);
-        // Shifrlab saqlaymiz — bu video uchun tarmoqqa boshqa
-        // hech qachon chiqilmaydi.
-        try {
-          RustCore.instance
-              .secureSave(path, 'chatthumb:$key', base64Encode(data));
-        } catch (_) {
-          // Saqlanmadi — kadr baribir xotirada va ekranda.
+    for (final atMs in _atMsList) {
+      for (var i = 0; i < _timeouts.length; i++) {
+        // 2-SHART: pleyer ochiq bo'lsa kadr yasalmaydi (kutamiz).
+        while (!_disposed && VideoGate.busy) {
+          await Future<void>.delayed(const Duration(milliseconds: 500));
         }
-        return data;
-      }
-      if (i + 1 < _timeouts.length) {
+        if (_disposed || _spent >= _sessionBudget) return null;
+
+        final r = await _grab(url, atMs, _timeouts[i]);
+        if (_disposed) return null;
+        final data = r.data;
+        if (data != null) {
+          _remember(key, data);
+          // Shifrlab saqlaymiz — bu video uchun tarmoqqa boshqa
+          // hech qachon chiqilmaydi.
+          try {
+            RustCore.instance
+                .secureSave(path, 'chatthumb:$key', base64Encode(data));
+          } catch (_) {
+            // Saqlanmadi — kadr baribir xotirada va ekranda.
+          }
+          return data;
+        }
+        // Vaqt tugadi — shu lahza uzunroq kutish bilan qayta.
+        // Kadr aniq chiqmadi (buzilgan joy) — keyingi lahza.
+        if (!r.timedOut) break;
         await Future<void>.delayed(_pause);
       }
     }
@@ -274,23 +295,26 @@ class ChatVideoThumb extends ChangeNotifier {
   }
 
   /// BITTA urinish.
-  Future<Uint8List?> _grab(String url, Duration timeout) async {
-    // Navbat: bir vaqtda bitta kadr. Kutish ham chegaralangan —
-    // navbat qotib qolsa urinish umuman qilinmaydi.
-    var waited = 0;
+  ///
+  /// ── NAVBATDA KUTISH URINISH EMAS (TOPILGAN XATO) ──────────
+  ///
+  /// Ilgari navbatda 8 soniyadan ko'p kutilsa urinish "yiqildi"
+  /// deb qaytardi — ya'ni video UMUMAN sinalmay qolardi. Sekin
+  /// (katta) videolar orqasidagilar har safar shu sabab kadrsiz
+  /// qolardi. Endi ekran ochiq turguncha navbat kutiladi.
+  Future<_GrabResult> _grab(String url, int atMs, Duration timeout) async {
     while (_running >= _maxParallel) {
-      if (_disposed || waited >= 8000) return null;
+      if (_disposed) return const _GrabResult();
       await Future<void>.delayed(const Duration(milliseconds: 120));
-      waited += 120;
     }
-    if (_disposed || VideoGate.busy) return null;
+    if (_disposed) return const _GrabResult();
 
     _running++;
     _spent++;
     try {
-      // Videoning eng boshi (`_atMs` izohiga qarang).
-      final uri = await VideoCacheServer.instance.thumbUri(url, _atMs);
-      if (_disposed) return null;
+      // Kerakli lahza (`_atMsList` izohiga qarang).
+      final uri = await VideoCacheServer.instance.thumbUri(url, atMs);
+      if (_disposed) return const _GrabResult();
       final data = await _channel.invokeMethod<Uint8List>('grab', {
         'url': uri.toString(),
         // Puffak eni ~220 px — 640 px yetarlidan ortiq, lekin
@@ -298,11 +322,13 @@ class ChatVideoThumb extends ChangeNotifier {
         'maxWidth': 640,
         'quality': 72,
       }).timeout(timeout);
-      if (data == null || data.isEmpty) return null;
-      return data;
+      if (data == null || data.isEmpty) return const _GrabResult();
+      return _GrabResult(data: data);
+    } on TimeoutException {
+      return const _GrabResult(timedOut: true);
     } catch (e) {
       if (kDebugMode) debugPrint('ChatVideoThumb: kadr olinmadi — $e');
-      return null;
+      return const _GrabResult();
     } finally {
       _running--;
     }
@@ -316,4 +342,14 @@ class ChatVideoThumb extends ChangeNotifier {
     _memory[key] = bytes;
     notifyListeners();
   }
+}
+
+/// Bitta urinish natijasi.
+class _GrabResult {
+  final Uint8List? data;
+
+  /// Vaqt tugadi (kadr "yo'q" emas — hali tayyor emas).
+  final bool timedOut;
+
+  const _GrabResult({this.data, this.timedOut = false});
 }
