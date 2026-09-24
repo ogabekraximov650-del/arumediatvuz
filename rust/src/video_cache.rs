@@ -2303,9 +2303,10 @@ fn duplicate_locked(w: &mut Work, lane: usize) -> Claim {
             .unwrap_or(0.0)
             .min(chunk_bytes);
         let need = chunk_bytes - got;
-        // Chorakdan kam qolgan — egasi o'zi tez tugatadi, takror
-        // faqat trafikni isrof qiladi.
-        if need < chunk_bytes / 4.0 {
+        // Yarmidan kam qolgan — egasi o'zi tez tugatadi, takror
+        // faqat trafikni isrof qiladi (yutqazgan oqimning olgani
+        // behuda ketadi).
+        if need < chunk_bytes / 2.0 {
             continue;
         }
         // Egasi shu bo'lakni yana qancha tortadi (ms).

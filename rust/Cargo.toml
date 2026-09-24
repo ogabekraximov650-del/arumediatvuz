@@ -14,8 +14,9 @@ ureq = "2"
 
 # ── Shifrlash ───────────────────────────────────────────────────────
 # Barchasi SOF RUST (C kutubxonasi yo'q) — Android uchun muammosiz
-# kross-kompilyatsiya qilinadi. ARM protsessorlarda AES uchun apparat
-# buyruqlaridan (ARMv8 Crypto Extensions) avtomatik foydalaniladi.
+# kross-kompilyatsiya qilinadi. ARM64 da AES uchun apparat buyruqlari
+# (ARMv8 Crypto Extensions) FAQAT `aes_armv8` bayrog'i bilan ishlaydi —
+# u `rust/.cargo/config.toml` da yoqilgan (izohiga qarang).
 #
 # aes + cbc  — video fayllar uchun AES-128-CBC. Aynan shu rejim,
 #              chunki shifrni FFmpeg'ning "crypto:" protokoli ochadi

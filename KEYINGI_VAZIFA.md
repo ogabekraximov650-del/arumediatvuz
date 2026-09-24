@@ -962,6 +962,21 @@ biri tugashi bilan keyingisi. Bizda: 1 MiB bo'lak, 16 oqim,
 moslashuvchan ulush + ish o'g'irlash + yakuniy takrorlash — xuddi
 shu tamoyil (havodagi so'rovlar soni oxirigacha kamaymaydi).
 
+### YUKLASH 5,5 MB/s DAN OSHMASDI — DASTURIY AES (2026-09-24)
+
+Foydalanuvchi interneti 8-10 MB/s, yuklash esa 5,5 MB/s. Sabab:
+`aes` 0.8 ARM64 da apparat AES'ni FAQAT `--cfg aes_armv8` bilan
+ishlatadi; CI'da bu bayroq yo'q edi, ya'ni har bir bo'lak DASTURIY
+AES-128-CBC bilan shifrlanardi. O'lchov (`crypto::tests::shifr_tezligi`,
+server protsessori): apparat ~1050 MB/s, dasturiy ~47 MB/s — telefonning
+kichik yadrolarida bundan bir necha barobar sekin.
+
+Tuzatish: `rust/.cargo/config.toml` — `aarch64-linux-android` uchun
+`aes_armv8` va `polyval_armv8`. AES yo'q protsessorda ishga tushishda
+avtomatik dasturiy usulga o'tiladi (`cpufeatures`). **Bu faylni
+o'chirmang** — `Cargo.toml` dagi "avtomatik foydalaniladi" degan
+eski izoh noto'g'ri edi.
+
 ## PROFIL: XOTIRA VA TRAFIK
 
 TALAB (foydalanuvchi): "profildagi Xotira va Trafik

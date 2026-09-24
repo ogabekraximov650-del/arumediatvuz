@@ -201,6 +201,28 @@ pub fn open_blob(label: &str, sealed: &[u8]) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    /// Qo'lda o'lchov: `cargo test --release -- --ignored shifr_tezligi --nocapture`
+    #[test]
+    #[ignore]
+    fn shifr_tezligi() {
+        let plain = vec![7u8; 1024 * 1024];
+        let key = [1u8; 16];
+        let iv = [2u8; 16];
+        let n = 64;
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            std::hint::black_box(super::encrypt_chunk(&plain, &key, &iv));
+        }
+        let enc = n as f64 / t.elapsed().as_secs_f64();
+        let c = super::encrypt_chunk(&plain, &key, &iv);
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            std::hint::black_box(super::decrypt_chunk(&c, &key, &iv));
+        }
+        let dec = n as f64 / t.elapsed().as_secs_f64();
+        eprintln!("AES-128-CBC: shifrlash {enc:.0} MB/s, ochish {dec:.0} MB/s");
+    }
+
     use super::*;
 
     /// DIQQAT: testlar bitta jarayonda PARALLEL ishlaydi, asosiy kalit
